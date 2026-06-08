@@ -1,0 +1,21 @@
+[package]
+name = "g2g-enterprise"
+description = "Multi-stream async ML batchers and tensor schedulers for glass2glass."
+license = "AGPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = ["g2g-core/std", "g2g-plugins/std", "g2g-ml/std"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+g2g-plugins = { path = "../g2g-plugins" }
+g2g-ml = { path = "../g2g-ml" }
+
+[lints]
+workspace = true

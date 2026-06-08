@@ -1,0 +1,27 @@
+[package]
+name = "g2g-plugins"
+description = "Standard source, sink, and transform elements for the glass2glass framework."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+std = ["g2g-core/std"]
+multi-thread = ["g2g-core/multi-thread"]
+# RTSP source element (wraps `retina`). Implies std + tokio. Implementation deferred to M5.
+rtsp = ["std"]
+# Embassy single-core executor support. Implementation deferred to a later milestone.
+embassy = []
+
+[dependencies]
+g2g-core = { path = "../g2g-core", features = ["runtime"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+
+[lints]
+workspace = true

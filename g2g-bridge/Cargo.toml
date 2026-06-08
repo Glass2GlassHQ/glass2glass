@@ -1,0 +1,23 @@
+[package]
+name = "g2g-bridge"
+description = "C-FFI bridge that embeds glass2glass sub-graphs inside legacy GStreamer pipelines."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# cdylib for `libgstglass2glass.so`; rlib so Rust integration tests can link.
+# crate-type added once the first FFI symbol is exported (deferred milestone).
+
+[features]
+default = ["std"]
+std = ["g2g-core/std", "g2g-plugins/std"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+g2g-plugins = { path = "../g2g-plugins" }
+
+[lints]
+workspace = true

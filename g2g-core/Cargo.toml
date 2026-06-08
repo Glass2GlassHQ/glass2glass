@@ -1,0 +1,23 @@
+[package]
+name = "g2g-core"
+description = "Core traits, frame types, caps, and clock model for the glass2glass multimedia framework."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+std = []
+multi-thread = []
+# Minimal async runtime: bounded channel + simple linear pipeline runner.
+# Sufficient for M1 smoke tests; will grow into a graph builder in M2.
+runtime = ["dep:spin"]
+
+[dependencies]
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
+
+[lints]
+workspace = true

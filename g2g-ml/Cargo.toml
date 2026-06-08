@@ -1,0 +1,23 @@
+[package]
+name = "g2g-ml"
+description = "ML inference elements for glass2glass: burn (embedded/Wasm) and ort (server) backends."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = ["g2g-core/std"]
+# Pure-Rust Burn backend with wgpu. Targets embedded / Wasm / RTOS.
+burn = ["std"]
+# ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
+ort = ["std"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+
+[lints]
+workspace = true
