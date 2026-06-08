@@ -103,10 +103,10 @@ impl SourceLoop for VideoTestSrc {
                     sequence: seq,
                 };
 
-                out.push(PipelinePacket::DataFrame(frame))?;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
             }
 
-            out.push(PipelinePacket::Eos)?;
+            out.push(PipelinePacket::Eos).await?;
             Ok(self.target_frames)
         })
     }

@@ -4,9 +4,10 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
+use alloc::boxed::Box;
 use spin::Mutex;
 
-use crate::element::OutputSink;
+use crate::element::{BoxFuture, OutputSink};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 
@@ -164,9 +165,8 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     }
 }
 
-/// Adapter from a `Sender<PipelinePacket>` to the synchronous `OutputSink`
-/// trait. Returns `PoolExhausted` on backpressure — elements that need to
-/// await capacity should hold a `Sender` directly and call `send().await`.
+/// Adapter from a `Sender<PipelinePacket>` to the async `OutputSink` trait.
+/// `push` awaits channel capacity rather than erroring on a full link.
 #[derive(Debug)]
 pub struct SenderSink {
     sender: Sender<PipelinePacket>,
@@ -179,11 +179,16 @@ impl SenderSink {
 }
 
 impl OutputSink for SenderSink {
-    fn push(&mut self, packet: PipelinePacket) -> Result<(), G2gError> {
-        match self.sender.try_send(packet) {
-            Ok(()) => Ok(()),
-            Err((_, SendError::Full)) => Err(G2gError::PoolExhausted),
-            Err((_, SendError::Closed)) => Err(G2gError::Shutdown),
-        }
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        Box::pin(async move {
+            match self.sender.send(packet).await {
+                Ok(()) => Ok(()),
+                Err(SendError::Closed) => Err(G2gError::Shutdown),
+                Err(SendError::Full) => unreachable!("send().await never returns Full"),
+            }
+        })
     }
 }

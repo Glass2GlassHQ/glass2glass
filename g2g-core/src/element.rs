@@ -1,4 +1,7 @@
 use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
 
 use crate::caps::Caps;
 use crate::error::G2gError;
@@ -14,8 +17,17 @@ pub trait ElementBound {}
 #[cfg(not(feature = "multi-thread"))]
 impl<T> ElementBound for T {}
 
+/// Boxed future alias for dyn-safe async methods in element / sink traits.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// Downstream output for elements. `push` is async so backpressure-aware
+/// implementations can await downstream capacity instead of erroring on a
+/// full link. The boxed future keeps the trait dyn-safe.
 pub trait OutputSink {
-    fn push(&mut self, packet: PipelinePacket) -> Result<(), G2gError>;
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<(), G2gError>>;
 }
 
 #[derive(Debug)]

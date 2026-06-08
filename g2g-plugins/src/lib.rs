@@ -10,4 +10,5 @@
 extern crate alloc;
 
 pub mod fakesink;
+pub mod identity;
 pub mod videotestsrc;

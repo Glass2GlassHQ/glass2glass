@@ -154,8 +154,8 @@ Because `g2g` enforces a Sans-IO and asynchronous execution model, capability ne
 
 **Phase 3 — Re-fixation (rare):** If an element's allocation fails (VRAM budget, driver limit), `configure_pipeline()` returns `ConfigureOutcome::ReFixate(Caps)` with a counter-proposal. The runner restarts Phase 2 from that element. This bounded backtrack avoids the GStreamer pattern of failing the entire pipeline on allocation pressure.
 
-### 4.3 The `AsyncElement` Trait
-Every element in the graph implements the core execution trait. Because it uses a Sans-IO design paradigm, elements accept packets and push outputs without managing network sockets natively. The element does not manage threads; it exposes an execution loop future driven by an external runner.
+### 4.3 The `AsyncElement` and `SourceLoop` Traits
+Transform and sink elements implement `AsyncElement` — packet in, 0..N packets out. Source elements have no input pad and instead implement `SourceLoop`, which is called once and iterates internally until EOS. The two traits share `intercept_caps` / `configure_pipeline` semantics.
 
 ```rust
 use core::future::Future;
@@ -185,13 +185,33 @@ pub trait AsyncElement: ElementBound {
     ) -> Self::ProcessFuture<'a>;
 }
 
+pub trait SourceLoop: ElementBound {
+    type RunFuture<'a>: Future<Output = Result<u64, G2gError>> + 'a
+    where Self: 'a;
+
+    fn intercept_caps(&self) -> Result<Caps, G2gError>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps)
+        -> Result<ConfigureOutcome, G2gError>;
+
+    /// Runs until EOS or error. Implementation MUST emit a final
+    /// `PipelinePacket::Eos` before returning. Returns the count of
+    /// `DataFrame` packets pushed (excluding `Eos`).
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a>;
+}
+
 pub enum ConfigureOutcome {
     Accepted,
     ReFixate(Caps),
 }
 
+/// Output sink for both transform and source elements. `push` is async
+/// so elements await downstream capacity rather than failing fast on a
+/// full bounded link. Dyn-safe via a boxed future.
 pub trait OutputSink {
-    fn push(&mut self, packet: PipelinePacket) -> Result<(), G2gError>;
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
 }
 ```
 
