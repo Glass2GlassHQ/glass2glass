@@ -87,11 +87,18 @@ impl OwnedDmaBuf {
 Vulkan and WebGPU handles follow the same RAII pattern, parameterised over a backend-specific allocator handle so the spec doesn't bake in a single binding crate.
 
 ### 3.3 Zero-Alloc Buffer Pools
-Inside real-time or `no_std` loops, dynamic allocation during steady-state streaming is prohibited. Element processing loops acquire pre-allocated slots from a bounded `BufferPool`.
+Inside real-time or `no_std` loops, dynamic allocation during steady-state streaming is prohibited. Elements acquire pre-allocated slots from a bounded `BufferPool` and dropping the resulting handle automatically returns the buffer.
 
-- **`std` environments:** frames use atomic reference counting (`Arc<Frame>`) and are recycled to the pool via a `Drop` impl on a `PooledFrame` newtype.
-- **`no_std + alloc` environments:** the pool issues `PooledFrame` handles backed by index-into-array semantics, avoiding `Arc` cost on single-threaded executors.
-- **Strict `no_std` (no heap) environments:** the pool is statically sized at construction (e.g. `BufferPool::<NV12, 8>::new()`) and yields bounded mutable references checked via compile-time lifetimes.
+```rust
+let pool = BufferPool::new_byte_pool(count, bytes);
+let buf = pool.acquire().await;  // awaits if exhausted; backpressure-friendly
+let mut frame = SystemSlice::from_pool(buf);
+```
+
+- **`no_std + alloc` environments (and `std`):** `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a `VecDeque<Waker>` of acquire waiters. `acquire().await` resolves the moment a `PooledBuffer` elsewhere is dropped. `try_acquire()` is the sync fast path for non-blocking contexts.
+- **Strict `no_std` (no heap) environments:** a future variant will be statically sized at construction (e.g. `StaticBufferPool::<NV12, 8>::new()`) and yield bounded mutable references checked via compile-time lifetimes. The `Arc + Mutex + Vec` variant is unsuitable here because it relies on `alloc`.
+
+The `SystemSlice` carrier transparently supports both ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>)` for recycled frames. Downstream elements treat the two identically.
 
 ---
 

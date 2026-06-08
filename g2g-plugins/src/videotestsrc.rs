@@ -11,7 +11,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    BufferPool, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
     PipelinePacket, Rate, VideoFormat,
 };
 
@@ -22,6 +22,7 @@ pub struct VideoTestSrc {
     framerate_q16: u32,
     target_frames: u64,
     configured: bool,
+    pool: Option<BufferPool<Box<[u8]>>>,
 }
 
 impl VideoTestSrc {
@@ -33,6 +34,28 @@ impl VideoTestSrc {
             framerate_q16: framerate << 16,
             target_frames,
             configured: false,
+            pool: None,
+        }
+    }
+
+    /// Pool-backed variant: every emitted frame draws its `width * height * 4`
+    /// bytes from the pool, and the buffer returns to the pool when the
+    /// downstream `Frame` is dropped. The pool's buffer size MUST be at
+    /// least `width * height * 4`; this is checked at run time.
+    pub fn with_pool(
+        width: u32,
+        height: u32,
+        framerate: u32,
+        target_frames: u64,
+        pool: BufferPool<Box<[u8]>>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            framerate_q16: framerate << 16,
+            target_frames,
+            configured: false,
+            pool: Some(pool),
         }
     }
 
@@ -85,14 +108,27 @@ impl SourceLoop for VideoTestSrc {
             let caps = self.caps();
 
             for seq in 0..self.target_frames {
-                let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
-                for (i, b) in buf.iter_mut().enumerate() {
-                    *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
-                }
+                let domain = if let Some(pool) = &self.pool {
+                    let mut buf = pool.acquire().await;
+                    if buf.len() < bytes_per_frame {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                    let slice = buf.as_mut();
+                    for (i, b) in slice.iter_mut().take(bytes_per_frame).enumerate() {
+                        *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
+                    }
+                    MemoryDomain::System(SystemSlice::from_pool(buf))
+                } else {
+                    let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
+                    for (i, b) in buf.iter_mut().enumerate() {
+                        *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
+                    }
+                    MemoryDomain::System(SystemSlice::from_boxed(buf))
+                };
 
                 let pts = seq * pts_step_ns;
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf)),
+                    domain,
                     caps: caps.clone(),
                     timing: FrameTiming {
                         pts_ns: pts,

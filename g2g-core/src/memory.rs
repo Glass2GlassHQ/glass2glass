@@ -1,5 +1,8 @@
 use alloc::boxed::Box;
 
+#[cfg(feature = "runtime")]
+use crate::pool::PooledBuffer;
+
 #[derive(Debug)]
 pub enum MemoryDomain {
     System(SystemSlice),
@@ -8,22 +11,46 @@ pub enum MemoryDomain {
     WebGPUBuffer(OwnedWebGPUBuffer),
 }
 
+/// CPU-memory slice. The backing buffer may be a freshly-allocated `Box<[u8]>`
+/// (`from_boxed`) or a pool-recycled buffer (`from_pool`). Dropping the
+/// `SystemSlice` releases the underlying storage — in the pooled case, the
+/// buffer returns to its pool automatically.
 #[derive(Debug)]
 pub struct SystemSlice {
-    bytes: Box<[u8]>,
+    inner: SystemSliceInner,
+}
+
+#[derive(Debug)]
+enum SystemSliceInner {
+    Owned(Box<[u8]>),
+    #[cfg(feature = "runtime")]
+    Pooled(PooledBuffer<Box<[u8]>>),
 }
 
 impl SystemSlice {
     pub fn from_boxed(bytes: Box<[u8]>) -> Self {
-        Self { bytes }
+        Self { inner: SystemSliceInner::Owned(bytes) }
+    }
+
+    #[cfg(feature = "runtime")]
+    pub fn from_pool(buffer: PooledBuffer<Box<[u8]>>) -> Self {
+        Self { inner: SystemSliceInner::Pooled(buffer) }
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        &self.bytes
+        match &self.inner {
+            SystemSliceInner::Owned(b) => b,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::Pooled(p) => p.as_ref(),
+        }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.bytes
+        match &mut self.inner {
+            SystemSliceInner::Owned(b) => b,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::Pooled(p) => p.as_mut(),
+        }
     }
 }
 
@@ -49,8 +76,20 @@ impl OwnedDmaBuf {
 
 impl Drop for OwnedDmaBuf {
     fn drop(&mut self) {
-        // M4: close the fd via libc on std targets or a registered close hook
-        // on no_std targets. Leaks the fd in M0 — acceptable for skeleton.
+        // DMABUF is Linux-only. On std+linux, close the fd. On other targets
+        // (Wasm, RTOS without libc) we leak; a custom close hook registered
+        // by the owning BufferPool is the planned no_std story.
+        #[cfg(all(target_os = "linux", feature = "std"))]
+        {
+            extern "C" {
+                fn close(fd: i32) -> i32;
+            }
+            // SAFETY: `from_raw` is the only constructor and is `unsafe`,
+            // requiring callers to certify sole ownership of the fd.
+            unsafe {
+                close(self.fd);
+            }
+        }
     }
 }
 
