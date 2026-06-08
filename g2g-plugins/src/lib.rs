@@ -20,3 +20,6 @@ extern crate std;
 pub mod clock;
 #[cfg(feature = "std")]
 pub mod syncsink;
+
+#[cfg(feature = "rtsp")]
+pub mod rtspsrc;

@@ -12,14 +12,18 @@ repository.workspace = true
 default = []
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
-# RTSP source element (wraps `retina`). Implies std + tokio. Implementation deferred to M5.
-rtsp = ["std"]
+# RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
+rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # Embassy single-core executor support. Implementation deferred to a later milestone.
 embassy = []
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
+retina = { version = "0.4", optional = true, default-features = false }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
+url = { version = "2", optional = true }
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
