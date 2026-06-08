@@ -270,9 +270,20 @@ pub struct FrameTiming {
 pub trait PipelineClock {
     fn now_ns(&self) -> u64;
 }
+
+/// Pipeline clock with async sleep. Sync sinks, paced sources, and jitter
+/// buffers take `AsyncClock` rather than `PipelineClock` so they can both
+/// observe and schedule against time. `sleep_until_ns(d)` resolves
+/// immediately if `d <= now_ns()`.
+pub trait AsyncClock: PipelineClock {
+    type SleepFuture<'a>: Future<Output = ()> + 'a where Self: 'a;
+    fn sleep_until_ns<'a>(&'a self, deadline_ns: u64) -> Self::SleepFuture<'a>;
+}
 ```
 
-The runner owns one `PipelineClock` per pipeline. Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and `capture_ns` against `now_ns()` to report true glass-to-glass latency without ambiguity about which clock domain a timestamp lives in.
+Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and `capture_ns` against `now_ns()` to report true glass-to-glass latency without ambiguity about which clock domain a timestamp lives in. Backends provide concrete implementations: a `WallClock` (`std::time::Instant` + `tokio::time::sleep`) for std targets, `embassy-time` for RTOS, performance.now() for Wasm.
+
+A free-running source feeding a sync sink is paced automatically by upstream backpressure (§4.5): the sink only consumes after `sleep_until_ns(pts)` resolves, which throttles the channel, which throttles the source. No explicit source-side pacing is required for sync playback.
 
 ### 4.5 Backpressure & Scheduling
 Every link between elements has an explicit `LinkPolicy`, configured at graph construction time. The choice is per-link because a single pipeline may have lossy preview branches and lossless recording branches sharing an upstream source.

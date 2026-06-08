@@ -25,7 +25,7 @@ pub mod pool;
 pub mod runtime;
 
 pub use caps::{AudioFormat, Caps, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoFormat};
-pub use clock::PipelineClock;
+pub use clock::{AsyncClock, PipelineClock};
 pub use element::{AsyncElement, ConfigureOutcome, ElementBound, OutputSink};
 pub use error::{G2gError, HardwareError};
 pub use frame::{Frame, FrameTiming, PipelinePacket};

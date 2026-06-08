@@ -12,3 +12,11 @@ extern crate alloc;
 pub mod fakesink;
 pub mod identity;
 pub mod videotestsrc;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(feature = "std")]
+pub mod clock;
+#[cfg(feature = "std")]
+pub mod syncsink;
