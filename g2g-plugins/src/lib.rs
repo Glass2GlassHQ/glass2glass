@@ -10,6 +10,7 @@
 extern crate alloc;
 
 pub mod fakesink;
+pub mod h264parse;
 pub mod identity;
 pub mod videotestsrc;
 

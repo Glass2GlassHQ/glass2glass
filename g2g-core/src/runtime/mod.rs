@@ -15,7 +15,8 @@ mod join;
 mod runner;
 
 pub use channel::{
-    bounded, Receiver, RecvFuture, SendError, SendFuture, Sender, SenderSink,
+    bounded, link, LinkReceiver, LinkSender, Receiver, ReconfigureSlot, RecvFuture, SendError,
+    SendFuture, Sender, SenderSink,
 };
 pub use join::Join2;
 pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, SourceLoop};

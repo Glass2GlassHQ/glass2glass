@@ -90,4 +90,22 @@ async fn rtspsrc_pulls_h264_from_live_server() {
     assert_eq!(stats.frames_consumed, 10);
     assert_eq!(snk.last_sequence(), Some(9));
     assert!(snk.eos_seen());
+
+    // M7: RtspSrc must emit a refined CapsChanged before the first frame
+    // (assuming the server's SDP carries an in-band SPS, which it should
+    // for any conformant H.264 RTSP source). The first caps change must
+    // arrive ahead of any DataFrame (`frames_before == 0`) and carry
+    // fixed pixel dimensions.
+    let changes = snk.caps_changes();
+    assert!(!changes.is_empty(), "RtspSrc must emit at least one CapsChanged");
+    let first = &changes[0];
+    assert_eq!(first.frames_before, 0, "CapsChanged must precede first frame");
+    match &first.caps {
+        Caps::Video { format, width, height, .. } => {
+            assert_eq!(*format, VideoFormat::H264);
+            assert!(matches!(width, Dim::Fixed(_)), "width should be Fixed, got {width:?}");
+            assert!(matches!(height, Dim::Fixed(_)), "height should be Fixed, got {height:?}");
+        }
+        other => panic!("expected Caps::Video, got {other:?}"),
+    }
 }

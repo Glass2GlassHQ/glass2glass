@@ -15,9 +15,13 @@ multi-thread = []
 # Minimal async runtime: bounded channel + simple linear pipeline runner.
 # Sufficient for M1 smoke tests; will grow into a graph builder in M2.
 runtime = ["dep:spin"]
+# Lock-free atomic-swap container for `Box<dyn DynAsyncElement>`. Powers
+# the dynamic graph layer (M8 piece 6); implies std + multi-thread + runtime.
+dyn-slot = ["std", "multi-thread", "runtime", "dep:arc-swap"]
 
 [dependencies]
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
+arc-swap = { version = "1", optional = true }
 
 [lints]
 workspace = true

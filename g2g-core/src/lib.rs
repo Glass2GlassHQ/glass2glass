@@ -24,9 +24,14 @@ pub mod pool;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 
+#[cfg(feature = "dyn-slot")]
+pub mod slot;
+
 pub use caps::{AudioFormat, Caps, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoFormat};
 pub use clock::{AsyncClock, PipelineClock};
-pub use element::{AsyncElement, ConfigureOutcome, ElementBound, OutputSink};
+pub use element::{
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+};
 pub use error::{G2gError, HardwareError};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use link::LinkPolicy;
@@ -34,3 +39,6 @@ pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffe
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};
+
+#[cfg(feature = "dyn-slot")]
+pub use slot::ElementSlot;

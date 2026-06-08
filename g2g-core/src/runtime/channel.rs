@@ -7,7 +7,7 @@ use core::task::{Context, Poll, Waker};
 use alloc::boxed::Box;
 use spin::Mutex;
 
-use crate::element::{BoxFuture, OutputSink};
+use crate::element::{BoxFuture, OutputSink, PushOutcome, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 
@@ -165,16 +165,83 @@ impl<'a, T> Future for RecvFuture<'a, T> {
     }
 }
 
-/// Adapter from a `Sender<PipelinePacket>` to the async `OutputSink` trait.
-/// `push` awaits channel capacity rather than erroring on a full link.
+/// Capacity-1 latest-wins slot carrying the upstream-traveling
+/// `Reconfigure` signal of a bidirectional link. Stores overwrite any
+/// pending value; takes consume it. Cheap: one `Arc<Mutex<Option<_>>>`.
+#[derive(Debug, Clone, Default)]
+pub struct ReconfigureSlot {
+    inner: Arc<Mutex<Option<Reconfigure>>>,
+}
+
+impl ReconfigureSlot {
+    pub fn store(&self, value: Reconfigure) {
+        *self.inner.lock() = Some(value);
+    }
+
+    pub fn take(&self) -> Option<Reconfigure> {
+        self.inner.lock().take()
+    }
+}
+
+/// Upstream end of a bidirectional inter-element link: forward
+/// `PipelinePacket` channel + reverse `Reconfigure` slot. Held by the
+/// producing element (wrapped in [`SenderSink`]).
+#[derive(Debug)]
+pub struct LinkSender {
+    pub(crate) data: Sender<PipelinePacket>,
+    pub(crate) reconfigure: ReconfigureSlot,
+}
+
+/// Downstream end of a bidirectional inter-element link. Held by the
+/// consuming element (or the runner loop driving it). `request_reconfigure`
+/// fires an upstream signal that the producer observes on its next
+/// [`OutputSink::push`].
+#[derive(Debug)]
+pub struct LinkReceiver {
+    pub(crate) data: Receiver<PipelinePacket>,
+    pub(crate) reconfigure: ReconfigureSlot,
+}
+
+impl LinkReceiver {
+    pub fn recv(&self) -> RecvFuture<'_, PipelinePacket> {
+        self.data.recv()
+    }
+
+    /// Latest-wins: overwrites any pending request that the producer
+    /// hasn't yet observed. Reconfigure is a control signal, not a
+    /// stream — older proposals are stale by definition.
+    pub fn request_reconfigure(&self, r: Reconfigure) {
+        self.reconfigure.store(r);
+    }
+}
+
+/// Build a bidirectional inter-element link with `capacity` forward
+/// slots and a capacity-1 reverse `Reconfigure` slot.
+pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
+    let (data_tx, data_rx) = bounded::<PipelinePacket>(capacity);
+    let slot = ReconfigureSlot::default();
+    (
+        LinkSender { data: data_tx, reconfigure: slot.clone() },
+        LinkReceiver { data: data_rx, reconfigure: slot },
+    )
+}
+
+/// Adapter from a [`LinkSender`] to the async `OutputSink` trait. The
+/// packet is *always enqueued* (so no in-flight data is lost mid-stream);
+/// then the reverse `Reconfigure` slot is checked. If downstream fired
+/// a request — either before this push or while the producer was
+/// awaiting capacity — the producer sees `PushOutcome::Reconfigure(...)`
+/// and must handle it before producing the next packet. The just-pushed
+/// packet continues downstream under the still-current caps, exactly as
+/// GStreamer's CAPS handshake allows.
 #[derive(Debug)]
 pub struct SenderSink {
-    sender: Sender<PipelinePacket>,
+    link: LinkSender,
 }
 
 impl SenderSink {
-    pub fn new(sender: Sender<PipelinePacket>) -> Self {
-        Self { sender }
+    pub fn new(link: LinkSender) -> Self {
+        Self { link }
     }
 }
 
@@ -182,13 +249,141 @@ impl OutputSink for SenderSink {
     fn push<'a>(
         &'a mut self,
         packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<(), G2gError>> {
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
-            match self.sender.send(packet).await {
-                Ok(()) => Ok(()),
+            match self.link.data.send(packet).await {
+                Ok(()) => match self.link.reconfigure.take() {
+                    Some(r) => Ok(PushOutcome::Reconfigure(r)),
+                    None => Ok(PushOutcome::Accepted),
+                },
                 Err(SendError::Closed) => Err(G2gError::Shutdown),
                 Err(SendError::Full) => unreachable!("send().await never returns Full"),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::caps::{Caps, Dim, Rate, VideoFormat};
+    use crate::frame::{Frame, FrameTiming};
+    use crate::memory::{MemoryDomain, SystemSlice};
+    use alloc::boxed::Box;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    // Hand-rolled noop waker so this test module has no extra dev-dep.
+    // The link's send/recv futures resolve in a single poll whenever
+    // capacity is non-zero, so we never need to actually re-wake.
+    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+
+    fn noop_waker() -> Waker {
+        // SAFETY: NOOP_VTABLE's functions are all no-ops and never
+        // dereference the data pointer; passing null is safe.
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
+    }
+
+    fn run_to_ready<F: core::future::Future>(mut fut: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // SAFETY: `fut` lives on the stack for the duration of this fn
+        // and we never move it after pinning.
+        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(v) => return v,
+                Poll::Pending => panic!("link_tests::run_to_ready saw Pending"),
+            }
+        }
+    }
+
+    fn dummy_frame() -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            caps: Caps::Video {
+                format: VideoFormat::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            },
+            timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0 },
+            sequence: 0,
+        })
+    }
+
+    fn proposed_caps() -> Caps {
+        Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Any,
+        }
+    }
+
+    #[test]
+    fn push_returns_accepted_when_no_reconfigure_pending() {
+        let (tx, _rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("send ok");
+        assert_eq!(outcome, PushOutcome::Accepted);
+    }
+
+    #[test]
+    fn request_reconfigure_surfaces_on_next_push() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+
+        // Downstream fires reconfigure before upstream pushes.
+        rx.request_reconfigure(Reconfigure::Propose(proposed_caps()));
+
+        // Packet is still enqueued (no data loss); reconfigure surfaces
+        // as the push outcome so the producer can react before the next.
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("send ok");
+        match outcome {
+            PushOutcome::Reconfigure(Reconfigure::Propose(c)) => {
+                assert_eq!(c, proposed_caps());
+            }
+            other => panic!("expected Reconfigure::Propose, got {other:?}"),
+        }
+
+        let received = run_to_ready(rx.recv());
+        assert!(matches!(received, Some(PipelinePacket::DataFrame(_))));
+    }
+
+    #[test]
+    fn second_push_returns_accepted_after_reconfigure_drained() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+
+        rx.request_reconfigure(Reconfigure::Renegotiate);
+        let first = run_to_ready(sink.push(dummy_frame())).unwrap();
+        assert!(matches!(first, PushOutcome::Reconfigure(_)));
+
+        let second = run_to_ready(sink.push(dummy_frame())).unwrap();
+        assert_eq!(second, PushOutcome::Accepted);
+    }
+
+    #[test]
+    fn latest_reconfigure_overwrites_older_pending() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+
+        // Stale: must be overwritten by the next request.
+        rx.request_reconfigure(Reconfigure::Renegotiate);
+        rx.request_reconfigure(Reconfigure::Propose(proposed_caps()));
+
+        let outcome = run_to_ready(sink.push(dummy_frame())).unwrap();
+        match outcome {
+            PushOutcome::Reconfigure(Reconfigure::Propose(c)) => {
+                assert_eq!(c, proposed_caps(), "newest proposal must win");
+            }
+            other => panic!("expected newest Propose, got {other:?}"),
+        }
     }
 }

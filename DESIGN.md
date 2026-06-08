@@ -338,6 +338,125 @@ pub enum G2gError {
 }
 ```
 
+### 4.7 Pad Model: Implicit by Trait Shape
+Pads are not a first-class type. An element's input and output endpoints are encoded by which trait it implements and by the `&mut dyn OutputSink` parameter shape; there is no `pub struct Pad`, no per-pad metadata, no runtime introspection.
+
+| Topology | Trait | Input pad | Output pad |
+| :--- | :--- | :--- | :--- |
+| Source (0→1) | `SourceLoop` | — | `&mut dyn OutputSink` arg to `run()` |
+| Transform / sink (1→0..N) | `AsyncElement` | `PipelinePacket` arg to `process()` | `&mut dyn OutputSink` arg to `process()` |
+| Terminal sink | `AsyncElement` whose `process()` ignores `out` | as above | `NullSink` sentinel |
+
+This is deliberate. GStreamer's `GstPad` is a runtime object because GStreamer composes graphs from string-keyed plugin factories loaded at runtime; `g2g` composes typed graphs at compile time, so pad metadata lives in the trait signatures. The cost is that fan-out (tee), fan-in (muxer), and demuxer-style dynamic pads require additional trait variants rather than runtime pad-list mutation — see §4.10.
+
+### 4.8 Dynamic Graph Reconfiguration
+
+#### 4.8.1 Two-Layer Graph API
+`g2g` exposes two graph APIs sharing the same element traits, the same negotiation lifecycle, the same `PipelinePacket` variants, and the same runner primitives. Only graph construction and slot mutation differ.
+
+- **Static typed graph** — compile-time topology via tuple types; no `dyn`; zero-cost. Right for embedded / RTOS / static cloud pipelines.
+- **Type-erased dynamic graph** — boxed elements (`Box<dyn DynAsyncElement>`) held in `ElementSlot`s and `BranchSlot`s, swappable at runtime. Right for cloud ingestion, desktop applications, and anything that needs runtime topology evolution.
+
+#### 4.8.2 `ElementSlot` — Lock-Free Single-Element Swap
+The dynamic graph holds elements in `arc_swap::ArcSwap<Box<dyn DynAsyncElement>>` cells:
+
+```rust
+let new_element = SomeTransform::new();
+new_element.configure_pipeline(&caps)?;
+slot.handle.store(Arc::new(Box::new(new_element)));
+```
+
+Frames mid-`process()` against the old element complete naturally; the next push observes the new element. Cost: one atomic store plus the new element's `configure_pipeline()` work. No drain, no pipeline stall.
+
+This is the primary response to a Phase 3 `ReFixate` or a mid-stream `Reconfigure` signal: replace the affected slot's contents, do not rebuild the graph.
+
+#### 4.8.3 `BranchSlot` — Multi-Element Sub-Graph Swap
+A branch with one logical input and one logical output is structurally an element. `BranchSlot` is the multi-element analog of `ElementSlot`, with the swap trade-off made explicit at the type level:
+
+```rust
+pub struct BranchHandle<I, O> {
+    input_tx: LinkSender<I>,
+    output_rx: LinkReceiver<O>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+pub struct BranchSlot<I, O> {
+    handle: arc_swap::ArcSwap<BranchHandle<I, O>>,
+    policy: SwapPolicy,
+}
+
+pub enum SwapPolicy {
+    /// Flip input routing; in-flight frames inside the old branch's
+    /// internal channels are discarded. Zero latency; bounded frame loss.
+    /// Right for stateless filters (color grade, debug overlay).
+    Immediate,
+
+    /// Flip input routing; wait for old branch to drain its in-flight
+    /// frames before exposing the new branch's output to the consumer.
+    /// Zero loss; pays the old branch's pipeline depth in latency.
+    DrainOld,
+
+    /// Both branches consume in parallel for a brief overlap window;
+    /// the merger cuts over at the named signal (next IDR, next segment
+    /// boundary, etc.). Zero loss, zero per-frame stall; brief duplicated
+    /// compute during the overlap.
+    ShadowWarm { cutover: CutoverSignal },
+}
+```
+
+Static-graph users at the embedded layer never instantiate `BranchSlot` and don't pay for any of this machinery.
+
+#### 4.8.4 Router, Gate, Merger Primitives
+A `Router` is a 1-to-N transform that reads an atomic discriminator per frame and pushes the frame to exactly one of its outputs. A `Gate` is a 1-to-1 transform that reads an atomic boolean and either forwards or discards each frame. A `Merger` is an N-to-1 transform that reads from one of its inputs, switching on a discriminator. Together they cover branch enable/disable, A/B switching, and the routing + cutover halves of `ShadowWarm`. These primitives form the foundation of the dynamic-graph layer.
+
+### 4.9 GStreamer Dynamic-Feature Mapping
+`g2g`'s dynamic surface is intended to be a superset of GStreamer's dynamic capabilities, achieved through a different set of primitives.
+
+| GStreamer feature | `g2g` mechanism |
+| :--- | :--- |
+| Element hot-swap | `ElementSlot::swap` (ArcSwap) |
+| Branch insertion / removal | `BranchSlot::swap` with `SwapPolicy::Immediate` |
+| Branch enable / disable, A/B switching | `Router` + `Gate` |
+| Bin nesting | `BranchSlot` is structurally a bin |
+| Mid-stream caps change | `PipelinePacket::CapsChanged` + runner cascade |
+| Allocation pressure backtrack | Phase 3 `ConfigureOutcome::ReFixate` |
+| Bitrate switching | `BranchSlot` + `ShadowWarm { cutover: NextSegment }` |
+| Codec change at keyframe | `BranchSlot` + `ShadowWarm { cutover: NextKeyframe }` |
+| Demuxer dynamic-pad (bounded N) | Pre-allocated dark slots, populated on discovery |
+| Live source push from app code | Direct `LinkSender::send` from external task |
+| Multi-pipeline isolation | One pipeline per task tree; no shared mutable state |
+| Async messages (bus) | Pipeline-level mpmc message channel (M11) |
+| Latency aggregation query | Upstream-traveling query primitive (M12) |
+| Allocation query | Downstream-proposed allocator handoff (M12) |
+| Probes (`pad_block`, `pad_idle`) | `LinkInterceptor` trait registered on a slot (M11) |
+| Seek with FLUSH | `PipelinePacket::Flush` + runner drain handling (M11) |
+| Live clock distribution | `AsyncClock` provider election (M12) |
+| EOS aggregation across N inputs | Fan-in / muxer (M10) |
+
+#### 4.9.1 Differences Forced by Rust Ownership
+GStreamer relies on parent ↔ child reference cycles via GObject reference counting plus signal callbacks. Rust's strict ownership doesn't allow that shape. Equivalent functionality lives in **message channels** instead of direct back-references: a child element that needs to notify its parent posts a bus message; the parent reads it. Functionally identical; structurally cleaner; no `unref` ordering hazards. Similarly, GStreamer's `gst_pad_link()` performs runtime pointer manipulation; the `g2g` equivalent — moving the receive end of a channel — requires explicit ownership transfer under a brief gate hold. Same outcome, more honest about what's happening.
+
+#### 4.9.2 Capabilities That Fall Out For Free
+- **No silent caps mismatch at runtime**: exhaustive typed `Caps` enum, `match` checked at compile time. GStreamer's string-keyed caps regularly fail at runtime with `not-negotiated`.
+- **Deterministic shutdown**: Rust drop order is a topological walk; no leaked refs holding pipelines alive forever.
+- **No GIL / no global state**: independent pipelines spawn on the same async runtime with zero coordination cost.
+- **Memory safety across hot-swap**: ArcSwap guarantees no use-after-free when an element is replaced while a frame is in flight. GStreamer's `pad_block` / `pad_unlink` choreography is famously bug-prone here.
+
+#### 4.9.3 The Single Architectural Trade-Off
+Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at-most-N tracks). If an application genuinely needs runtime-growable pad count without an upper bound — e.g., a session router that accepts new RTP streams indefinitely — the dynamic layer uses a `Slab<Slot>` instead of a fixed array. Per-push slot lookup becomes one extra indirection. Since this only matters inside the already-type-erased dynamic layer, the cost is in the noise.
+
+### 4.10 Negotiation & Dynamism Milestone Roadmap
+
+| Milestone | Scope |
+| :--- | :--- |
+| **M8** | Mid-stream `CapsChanged` runner cascade; upstream `Reconfigure` sideband channel; `OutputSink::push` returns `PushOutcome`; `SourceLoop::reconfigure`; Phase 3 `ReFixate` becomes a real runner path; `ElementSlot` + `ArcSwap` slot mutation. |
+| **M9** | Fan-out: `Router`, `Gate`, `Merger` primitives; `BranchSlot` with all three `SwapPolicy` variants; multi-output element trait variant. |
+| **M10** | Fan-in: muxer trait variant; EOS aggregation across N inputs; per-input caps negotiation. |
+| **M11** | Application control surface: pipeline `Bus` for async messages; `LinkInterceptor` probes; `PipelinePacket::Flush` for seek. |
+| **M12** | Live-source surface: latency aggregation query; allocation query (downstream-proposed pools); live clock distribution. |
+
+After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

@@ -1,14 +1,26 @@
 //! Inspecting sink. Counts frames, records the last sequence number,
-//! and tracks EOS. Used by tests and to validate runner plumbing.
+//! tracks EOS, and records mid-stream `CapsChanged` events alongside
+//! the frame count at which they arrived. Used by tests and to
+//! validate runner plumbing.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, HardwareError, OutputSink, PipelinePacket,
 };
+
+/// Position of a recorded `CapsChanged` packet inside the sink's input
+/// stream: `frames_before` is the number of `DataFrame` packets that
+/// arrived at the sink strictly before this `CapsChanged`.
+#[derive(Debug, Clone)]
+pub struct CapsChange {
+    pub caps: Caps,
+    pub frames_before: u64,
+}
 
 #[derive(Debug, Default)]
 pub struct FakeSink {
@@ -16,6 +28,7 @@ pub struct FakeSink {
     last_sequence: Option<u64>,
     eos_seen: bool,
     configured: bool,
+    caps_changes: Vec<CapsChange>,
 }
 
 impl FakeSink {
@@ -33,6 +46,10 @@ impl FakeSink {
 
     pub fn eos_seen(&self) -> bool {
         self.eos_seen
+    }
+
+    pub fn caps_changes(&self) -> &[CapsChange] {
+        &self.caps_changes
     }
 }
 
@@ -75,7 +92,12 @@ impl AsyncElement for FakeSink {
                 PipelinePacket::Eos => {
                     self.eos_seen = true;
                 }
-                PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::CapsChanged(caps) => {
+                    self.caps_changes.push(CapsChange {
+                        caps,
+                        frames_before: self.received,
+                    });
+                }
             }
             Ok(())
         })

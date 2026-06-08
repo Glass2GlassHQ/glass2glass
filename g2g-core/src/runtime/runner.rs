@@ -4,11 +4,19 @@ use alloc::boxed::Box;
 
 use crate::caps::Caps;
 use crate::clock::PipelineClock;
-use crate::element::{AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink};
+use crate::element::{
+    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
-use crate::runtime::channel::{bounded, SenderSink};
+use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
+
+/// Maximum number of Phase 1 + Phase 2 negotiation passes before a setup
+/// gives up with `FixationFailed`. Three is enough for any reasonable
+/// `ReFixate` chain (source → sink → source counter) while still being
+/// a hard backstop against pathologically-counter-proposing elements.
+const MAX_FIXATION_ATTEMPTS: u32 = 3;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
 /// packet-out shape of [`AsyncElement`] does not fit them. A `SourceLoop`
@@ -33,6 +41,19 @@ pub trait SourceLoop: ElementBound {
         &'a mut self,
         out: &'a mut dyn OutputSink,
     ) -> Self::RunFuture<'a>;
+
+    /// Handle a downstream-originated `Reconfigure` request observed via
+    /// `PushOutcome::Reconfigure` during `run`. Implementations that can
+    /// retarget (eg picking a sub-stream over a main stream from an IP
+    /// camera, or switching bitrate) return the new caps they will produce
+    /// next; the source's `run` loop is then responsible for emitting a
+    /// `CapsChanged` packet and resuming under those caps.
+    ///
+    /// Default: reject — most sources can't change their output shape and
+    /// `FixationFailed` propagates as a fatal pipeline error.
+    fn reconfigure(&mut self, _request: Reconfigure) -> Result<Caps, G2gError> {
+        Err(G2gError::FixationFailed)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +63,10 @@ pub struct RunStats {
 }
 
 /// Drives a `source → sink` pipeline over a single bounded link.
-/// Phase 1 + Phase 2 caps negotiation only; `ReFixate` is treated as an error.
+/// Initial Phase 1+2 negotiation runs with bounded `ReFixate` backtrack
+/// (M8 piece 5): if any element's `configure_pipeline()` returns a
+/// counter-proposal, the runner restarts negotiation with that counter
+/// as the new starting proposal, up to `MAX_FIXATION_ATTEMPTS` total.
 pub async fn run_simple_pipeline<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
@@ -54,21 +78,34 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    let proposed = source.intercept_caps()?;
-    let fixated = sink.intercept_caps(&proposed)?;
-    match source.configure_pipeline(&fixated)? {
-        ConfigureOutcome::Accepted => {}
-        ConfigureOutcome::ReFixate(_) => return Err(G2gError::FixationFailed),
-    }
-    match sink.configure_pipeline(&fixated)? {
-        ConfigureOutcome::Accepted => {}
-        ConfigureOutcome::ReFixate(_) => return Err(G2gError::FixationFailed),
+    let mut proposal = source.intercept_caps()?;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        if attempts > MAX_FIXATION_ATTEMPTS {
+            return Err(G2gError::FixationFailed);
+        }
+        let fixated = sink.intercept_caps(&proposal)?;
+        match source.configure_pipeline(&fixated)? {
+            ConfigureOutcome::Accepted => {}
+            ConfigureOutcome::ReFixate(counter) => {
+                proposal = counter;
+                continue;
+            }
+        }
+        match sink.configure_pipeline(&fixated)? {
+            ConfigureOutcome::Accepted => break,
+            ConfigureOutcome::ReFixate(counter) => {
+                proposal = counter;
+                continue;
+            }
+        }
     }
 
-    let (tx, rx) = bounded::<PipelinePacket>(link_capacity);
+    let (link_tx, link_rx) = link(link_capacity);
 
     let source_fut = async move {
-        let mut adapter = SenderSink::new(tx);
+        let mut adapter = SenderSink::new(link_tx);
         let emitted = source.run(&mut adapter).await?;
         Ok::<u64, G2gError>(emitted)
     };
@@ -77,10 +114,35 @@ where
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
-            match rx.recv().await {
+            match link_rx.recv().await {
                 Some(PipelinePacket::Eos) => {
                     sink.process(PipelinePacket::Eos, &mut null).await?;
                     return Ok::<u64, G2gError>(consumed);
+                }
+                Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    // M8 piece 1: runner cascades mid-stream caps changes
+                    // through configure_pipeline before the element sees
+                    // the notification packet. Guarantees DataFrames with
+                    // the new caps never reach a stale element.
+                    match sink.configure_pipeline(&new_caps)? {
+                        ConfigureOutcome::Accepted => {
+                            sink.process(
+                                PipelinePacket::CapsChanged(new_caps),
+                                &mut null,
+                            )
+                            .await?;
+                        }
+                        // M8 piece 5: a sink that rejects new caps fires
+                        // its counter-proposal upstream as a Reconfigure
+                        // signal. The source observes it on its next push
+                        // (piece 4 wires source-side handling). The
+                        // CapsChanged packet is dropped — caps were not
+                        // accepted — and we keep draining old-caps frames
+                        // until the source emits a fresh CapsChanged.
+                        ConfigureOutcome::ReFixate(counter) => {
+                            link_rx.request_reconfigure(Reconfigure::Propose(counter));
+                        }
+                    }
                 }
                 Some(packet) => {
                     if matches!(packet, PipelinePacket::DataFrame(_)) {
@@ -110,8 +172,8 @@ impl OutputSink for NullSink {
     fn push<'a>(
         &'a mut self,
         _packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<(), G2gError>> {
-        Box::pin(async { Ok(()) })
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+        Box::pin(async { Ok(PushOutcome::Accepted) })
     }
 }
 
@@ -133,37 +195,73 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    let src_proposal = source.intercept_caps()?;
-    let tx_proposal = transform.intercept_caps(&src_proposal)?;
-    let fixated = sink.intercept_caps(&tx_proposal)?;
+    // M8 piece 5: bounded ReFixate retry across all three elements.
+    // Any element's counter-proposal restarts Phase 1 from the source's
+    // intercept with that counter as the new starting proposal.
+    let mut start_proposal = source.intercept_caps()?;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        if attempts > MAX_FIXATION_ATTEMPTS {
+            return Err(G2gError::FixationFailed);
+        }
+        let tx_proposal = transform.intercept_caps(&start_proposal)?;
+        let fixated = sink.intercept_caps(&tx_proposal)?;
 
-    for outcome in [
-        source.configure_pipeline(&fixated)?,
-        transform.configure_pipeline(&fixated)?,
-        sink.configure_pipeline(&fixated)?,
-    ] {
-        match outcome {
-            ConfigureOutcome::Accepted => {}
-            ConfigureOutcome::ReFixate(_) => return Err(G2gError::FixationFailed),
+        let mut refixate: Option<Caps> = None;
+        for outcome in [
+            source.configure_pipeline(&fixated)?,
+            transform.configure_pipeline(&fixated)?,
+            sink.configure_pipeline(&fixated)?,
+        ] {
+            match outcome {
+                ConfigureOutcome::Accepted => {}
+                ConfigureOutcome::ReFixate(counter) => {
+                    refixate = Some(counter);
+                    break;
+                }
+            }
+        }
+        match refixate {
+            Some(counter) => start_proposal = counter,
+            None => break,
         }
     }
 
-    let (tx1, rx1) = bounded::<PipelinePacket>(link_capacity);
-    let (tx2, rx2) = bounded::<PipelinePacket>(link_capacity);
+    let (link1_tx, link1_rx) = link(link_capacity);
+    let (link2_tx, link2_rx) = link(link_capacity);
 
     let source_fut = async move {
-        let mut adapter = SenderSink::new(tx1);
+        let mut adapter = SenderSink::new(link1_tx);
         source.run(&mut adapter).await
     };
 
     let transform_fut = async move {
-        let mut adapter = SenderSink::new(tx2);
+        let mut adapter = SenderSink::new(link2_tx);
         loop {
-            match rx1.recv().await {
+            match link1_rx.recv().await {
                 Some(PipelinePacket::Eos) => {
                     transform.process(PipelinePacket::Eos, &mut adapter).await?;
                     adapter.push(PipelinePacket::Eos).await?;
                     return Ok::<(), G2gError>(());
+                }
+                Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    match transform.configure_pipeline(&new_caps)? {
+                        ConfigureOutcome::Accepted => {
+                            transform
+                                .process(
+                                    PipelinePacket::CapsChanged(new_caps),
+                                    &mut adapter,
+                                )
+                                .await?;
+                        }
+                        // Mid-stream ReFixate: fire upstream via this
+                        // element's input link, drop the rejected
+                        // CapsChanged. Piece 4 will source-side react.
+                        ConfigureOutcome::ReFixate(counter) => {
+                            link1_rx.request_reconfigure(Reconfigure::Propose(counter));
+                        }
+                    }
                 }
                 Some(packet) => {
                     transform.process(packet, &mut adapter).await?;
@@ -177,10 +275,24 @@ where
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
-            match rx2.recv().await {
+            match link2_rx.recv().await {
                 Some(PipelinePacket::Eos) => {
                     sink.process(PipelinePacket::Eos, &mut null).await?;
                     return Ok::<u64, G2gError>(consumed);
+                }
+                Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    match sink.configure_pipeline(&new_caps)? {
+                        ConfigureOutcome::Accepted => {
+                            sink.process(
+                                PipelinePacket::CapsChanged(new_caps),
+                                &mut null,
+                            )
+                            .await?;
+                        }
+                        ConfigureOutcome::ReFixate(counter) => {
+                            link2_rx.request_reconfigure(Reconfigure::Propose(counter));
+                        }
+                    }
                 }
                 Some(packet) => {
                     if matches!(packet, PipelinePacket::DataFrame(_)) {
