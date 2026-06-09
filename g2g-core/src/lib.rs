@@ -22,6 +22,9 @@ pub mod memory;
 pub mod pool;
 
 #[cfg(feature = "runtime")]
+pub mod fanout;
+
+#[cfg(feature = "runtime")]
 pub mod runtime;
 
 #[cfg(feature = "dyn-slot")]
@@ -39,6 +42,11 @@ pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffe
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};
+
+#[cfg(feature = "runtime")]
+pub use fanout::{
+    Gate, GateHandle, MultiOutputElement, MultiOutputSink, MultiSenderSink, Router, RouterHandle,
+};
 
 #[cfg(feature = "dyn-slot")]
 pub use slot::{ElementSlot, SwapHandle};

@@ -18,5 +18,8 @@ pub use channel::{
     bounded, link, LinkReceiver, LinkSender, Receiver, ReconfigureSlot, RecvFuture, SendError,
     SendFuture, Sender, SenderSink,
 };
-pub use join::Join2;
+pub use join::{join_all, Join2, JoinAll};
 pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, SourceLoop};
+
+#[cfg(feature = "std")]
+pub use runner::run_source_fanout;

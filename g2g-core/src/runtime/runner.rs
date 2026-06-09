@@ -12,6 +12,15 @@ use crate::frame::PipelinePacket;
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
 
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use crate::element::DynAsyncElement;
+#[cfg(feature = "std")]
+use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiSenderSink};
+#[cfg(feature = "std")]
+use crate::runtime::join::join_all;
+
 /// Maximum number of Phase 1 + Phase 2 negotiation passes before a setup
 /// gives up with `FixationFailed`. Three is enough for any reasonable
 /// `ReFixate` chain (source → sink → source counter) while still being
@@ -162,6 +171,138 @@ where
     let emitted = src_res?;
     let consumed = snk_res?;
 
+    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+}
+
+/// Drives a `source → fan-out element → N sinks` pipeline (M9 fan-out core).
+/// The fan-out element (a [`MultiOutputElement`], e.g. `Router`) sends each
+/// `DataFrame` to one branch and broadcasts `CapsChanged` to all; the runner
+/// broadcasts `Eos` to every branch on shutdown.
+///
+/// Heterogeneous branches arrive as `Box`-erased `&mut dyn DynAsyncElement`
+/// (std only). Negotiation fixates the source proposal once and configures
+/// every element with it (DESIGN.md §4.2); per-branch caps negotiation is
+/// M10, so a sink returning `ReFixate` here fails with `FixationFailed`.
+#[cfg(feature = "std")]
+pub async fn run_source_fanout<Src, Tx, Clk>(
+    source: &mut Src,
+    fanout: &mut Tx,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    _clock: &Clk,
+    link_capacity: usize,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: MultiOutputElement,
+    Clk: PipelineClock,
+{
+    let branch_count = sinks.len();
+    assert!(branch_count > 0, "fan-out needs at least one sink");
+
+    // Phase 1 + 2: fixate the source proposal through the fan-out element and
+    // configure every element with the single fixated caps.
+    let proposal = source.intercept_caps()?;
+    let routed = MultiOutputElement::intercept_caps(fanout, &proposal)?;
+    let fixated = routed.fixate()?;
+
+    if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
+        return Err(G2gError::FixationFailed);
+    }
+    if let ConfigureOutcome::ReFixate(_) =
+        MultiOutputElement::configure_pipeline(fanout, &fixated)?
+    {
+        return Err(G2gError::FixationFailed);
+    }
+    let mut sinks = sinks;
+    for sink in sinks.iter_mut() {
+        if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+
+    let (src_tx, src_rx) = link(link_capacity);
+    let mut branch_senders = Vec::with_capacity(branch_count);
+    let mut branch_receivers = Vec::with_capacity(branch_count);
+    for _ in 0..branch_count {
+        let (tx, rx) = link(link_capacity);
+        branch_senders.push(SenderSink::new(tx));
+        branch_receivers.push(rx);
+    }
+
+    let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut adapter = SenderSink::new(src_tx);
+        source.run(&mut adapter).await
+    });
+
+    let router_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut multi = MultiSenderSink::new(branch_senders);
+        loop {
+            match src_rx.recv().await {
+                Some(PipelinePacket::Eos) => {
+                    MultiOutputElement::process(fanout, PipelinePacket::Eos, &mut multi).await?;
+                    for port in 0..branch_count {
+                        multi.push_to(port, PipelinePacket::Eos).await?;
+                    }
+                    return Ok::<u64, G2gError>(0);
+                }
+                Some(packet) => {
+                    MultiOutputElement::process(fanout, packet, &mut multi).await?;
+                }
+                None => return Ok(0),
+            }
+        }
+    });
+
+    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
+        Vec::with_capacity(branch_count + 2);
+    arms.push(source_fut);
+    arms.push(router_fut);
+
+    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+        let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+            let mut null = NullSink;
+            let mut consumed: u64 = 0;
+            loop {
+                match rx.recv().await {
+                    Some(PipelinePacket::Eos) => {
+                        sink.process(PipelinePacket::Eos, &mut null).await?;
+                        return Ok::<u64, G2gError>(consumed);
+                    }
+                    Some(PipelinePacket::CapsChanged(new_caps)) => {
+                        match sink.configure_pipeline(&new_caps)? {
+                            ConfigureOutcome::Accepted => {
+                                sink.process(
+                                    PipelinePacket::CapsChanged(new_caps),
+                                    &mut null,
+                                )
+                                .await?;
+                            }
+                            ConfigureOutcome::ReFixate(counter) => {
+                                rx.request_reconfigure(Reconfigure::Propose(counter));
+                            }
+                        }
+                    }
+                    Some(packet) => {
+                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            consumed += 1;
+                        }
+                        sink.process(packet, &mut null).await?;
+                    }
+                    None => return Ok(consumed),
+                }
+            }
+        });
+        arms.push(sink_fut);
+    }
+
+    let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    // Arm order: [source, router, sink0, sink1, ...].
+    let emitted = counts[0];
+    let consumed: u64 = counts[2..].iter().copied().sum();
     Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
 }
 
