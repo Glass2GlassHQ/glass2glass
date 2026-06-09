@@ -138,6 +138,19 @@ impl<T> Receiver<T> {
     pub fn recv(&self) -> RecvFuture<'_, T> {
         RecvFuture { receiver: self }
     }
+
+    /// Non-blocking pop. Returns `None` when the queue is empty (whether or
+    /// not senders remain). Lets a consumer drain without awaiting.
+    pub fn try_recv(&self) -> Option<T> {
+        let mut g = self.inner.lock();
+        let v = g.queue.pop_front();
+        if v.is_some() {
+            if let Some(w) = g.send_waker.take() {
+                w.wake();
+            }
+        }
+        v
+    }
 }
 
 #[allow(missing_debug_implementations)]
@@ -369,6 +382,24 @@ mod link_tests {
 
         let second = run_to_ready(sink.push(dummy_frame())).unwrap();
         assert_eq!(second, PushOutcome::Accepted);
+    }
+
+    #[test]
+    fn try_recv_returns_value_then_none() {
+        let (tx, rx) = bounded::<u32>(2);
+        assert_eq!(rx.try_recv(), None, "empty queue");
+        tx.try_send(7).unwrap();
+        assert_eq!(rx.try_recv(), Some(7));
+        assert_eq!(rx.try_recv(), None, "drained");
+    }
+
+    #[test]
+    fn try_recv_drains_then_none_after_senders_drop() {
+        let (tx, rx) = bounded::<u32>(2);
+        tx.try_send(1).unwrap();
+        drop(tx);
+        assert_eq!(rx.try_recv(), Some(1), "remaining value still drains");
+        assert_eq!(rx.try_recv(), None, "empty and closed");
     }
 
     #[test]

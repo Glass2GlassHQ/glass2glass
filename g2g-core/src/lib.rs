@@ -22,6 +22,9 @@ pub mod memory;
 pub mod pool;
 
 #[cfg(feature = "runtime")]
+pub mod bus;
+
+#[cfg(feature = "runtime")]
 pub mod fanout;
 
 #[cfg(feature = "runtime")]
@@ -42,6 +45,9 @@ pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffe
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};
+
+#[cfg(feature = "runtime")]
+pub use bus::{Bus, BusHandle, BusMessage};
 
 #[cfg(feature = "runtime")]
 pub use fanout::{
