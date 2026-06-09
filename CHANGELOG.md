@@ -5,6 +5,22 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M13: Windows hardware decode (Media Foundation)
+- `MfDecode` element (`mf-decode` feature, Windows-only): wraps the Media
+  Foundation H.264 Decoder MFT (`CLSID_MSH264DecoderMFT`, an `IMFTransform`).
+  Consumes Annex-B H.264 `DataFrame`s and emits decoded NV12 frames as
+  `MemoryDomain::System`, with a `CapsChanged(Nv12)` before the first frame and
+  on each decoder stream change. Implements the canonical feed/drain MFT loop
+  (`ProcessInput`/`ProcessOutput`, `NEED_MORE_INPUT`/`STREAM_CHANGE`,
+  `COMMAND_DRAIN` on EOS, `COMMAND_FLUSH` on seek).
+- New optional, target-gated dependency: `windows` 0.62 under
+  `[target.'cfg(windows)'.dependencies]`; the `mf-decode` feature implies `std`.
+- `HardwareError::MediaFoundation(i32)` carries the failing `HRESULT`.
+- Constraint: COM is initialised MTA; the element is thread-affine and intended
+  for a single-thread executor (asserted `Send` under a documented contract).
+- Deferred: D3D11 zero-copy output (needs a new `MemoryDomain` variant), DXVA
+  hardware acceleration, and strided (`MF_MT_DEFAULT_STRIDE`) NV12 copy.
+
 ### M11: Application control surface
 - `Bus` + cloneable `BusHandle` + `BusMessage` (Eos/Error/Warning/Custom): mp-sc message channel so elements notify the app asynchronously without back-references. Non-blocking `try_post`; `try_recv`/`recv` on the app side.
 - `LinkInterceptor` probes: a `Pass`/`Drop` interceptor installed on a link's `SenderSink` via a runtime `ProbeSlot` (GStreamer pad-probe equivalent). Empty by default, so existing links are unaffected.

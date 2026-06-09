@@ -457,6 +457,13 @@ Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at
 
 After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all.
 
+The negotiation track (M8–M12) is orthogonal to the **platform-element track**, which adds concrete OS-coupled elements behind cargo features (each implying `std`):
+
+| Milestone | Scope |
+| :--- | :--- |
+| **M5** | `RtspSrc` (`rtsp` feature) wrapping `retina`. |
+| **M13** | `MfDecode` (`mf-decode` feature, Windows-only): Media Foundation H.264 Decoder MFT (`IMFTransform`) → NV12 `System` frames. Target-gated `windows` 0.62 dependency. Thread-affine (COM/MTA), single-thread executor. Deferred: D3D11 zero-copy, DXVA, strided NV12. |
+
 ---
 
 ## 5. First-Class Machine Learning Integration

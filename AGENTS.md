@@ -1,0 +1,84 @@
+# AGENTS.md
+
+Guidance for AI agents working in this repository. Read this before making changes.
+
+## What this is
+
+`glass2glass` (`g2g`) is a Rust multimedia pipeline framework, GStreamer-like but
+with a statically typed, `no_std + alloc` core. Graphs are composed from typed
+elements rather than runtime string-keyed factories. Full design: `DESIGN.md`.
+
+## Workspace
+
+Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
+
+| Crate | Role |
+| :--- | :--- |
+| `g2g-core` | Core traits, `Frame`/`PipelinePacket`, `Caps` algebra, clock, memory domains, runtime. `no_std + alloc` baseline. |
+| `g2g-plugins` | Standard source/sink/transform elements. OS-coupled ones gated behind features. |
+| `g2g-ml` | ML inference elements (Burn / ORT). |
+| `g2g-bridge` | Interop layer. |
+| `g2g-enterprise` | Multi-stream batching sink. |
+
+## Conventions
+
+- **`no_std + alloc` baseline.** `g2g-core` and `g2g-plugins` are `#![no_std]`
+  with `extern crate alloc`. Anything needing the OS (network, COM, GPU) lives
+  behind a cargo feature that implies `std`. Do not add `std` use to the
+  baseline path.
+- **Feature + target gating.** OS-coupled deps are `optional = true`, pulled in
+  by a named feature. Platform-specific deps go under
+  `[target.'cfg(...)'.dependencies]` (e.g. the Windows-only `windows` crate
+  under `cfg(windows)`), and the module is `#[cfg(all(target_os = "...", feature = "..."))]`.
+- **Elements** implement `AsyncElement` (transform/sink) or `SourceLoop`
+  (source) from `g2g-core`. Pattern: `intercept_caps` (negotiation),
+  `configure_pipeline` (accept absolute caps), `process`/`run` (async work).
+  Study `g2g-plugins/src/h264parse.rs` and `rtspsrc.rs` as references.
+- **Caps refinement** flows at runtime via `PipelinePacket::CapsChanged`, not
+  just at negotiation. Emit it before the first affected `DataFrame` and on any
+  mid-stream change; suppress re-emission when unchanged.
+- **Comments:** preserve existing comments; update them if the logic changes;
+  only delete when the whole block goes. Comment unusual code, not the obvious.
+  No em dash (`—`) in comments; use `,` `:` or `()`.
+- **Unsafe:** workspace lints set `unsafe_op_in_unsafe_fn = "deny"` and
+  `undocumented_unsafe_blocks = "warn"`. Every `unsafe { }` needs a `// SAFETY:`
+  comment. Types need `Debug` (`missing_debug_implementations = "warn"`).
+
+## Build & test (PowerShell)
+
+```powershell
+cargo check --workspace                              # default (no_std) build
+cargo test --workspace                               # default test suite
+cargo clippy --workspace --all-targets               # lints
+
+# Feature-gated elements:
+cargo test  -p g2g-plugins --features rtsp
+cargo test  -p g2g-plugins --features mf-decode      # Windows only
+cargo clippy -p g2g-plugins --features mf-decode --all-targets
+```
+
+Integration tests live in `g2g-plugins/tests/` and `g2g-core/tests/`, one file
+per milestone (e.g. `m10_muxer.rs`).
+
+## Testing policy
+
+Test important features, not coverage. A test must run the real unit (import and
+call it); mock only external boundaries (network, COM, GPU), never the code
+under test. Every test needs an assertion that fails if the feature breaks.
+
+## Milestones
+
+Work is tracked by milestone `Mn`. The roadmap is `DESIGN.md` §4.10 (negotiation
+track M8–M12, plus the platform-element track: M5 RTSP, M13 Windows decode).
+Record each milestone in `CHANGELOG.md` under `## Unreleased`. Everything is
+pre-release `0.1.0`; nothing is published.
+
+## Platform notes
+
+- **Windows decode (`mf-decode`):** `MfDecode` wraps the Media Foundation H.264
+  Decoder MFT (`IMFTransform`) via the `windows` crate. COM is MTA; the element
+  is thread-affine and intended for a single-thread executor (it asserts `Send`
+  under a documented contract so the `multi-thread` runner accepts it). To verify
+  the API surface, grep the fetched crate source under
+  `~/.cargo/registry/src/.../windows-0.62.*/src/Windows/Win32/Media/MediaFoundation/mod.rs`
+  rather than guessing signatures.

@@ -14,6 +14,9 @@ std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
 # RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
 rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
+# Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
+# MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
+mf-decode = ["std", "dep:windows"]
 # Embassy single-core executor support. Implementation deferred to a later milestone.
 embassy = []
 
@@ -24,6 +27,16 @@ retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
+
+# Media Foundation bindings are Windows-only; target-gate so other platforms
+# never attempt to resolve or build the windows crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }

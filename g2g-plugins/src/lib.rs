@@ -25,3 +25,9 @@ pub mod syncsink;
 
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
+
+// Media Foundation decode is Windows-only. The `windows` dependency is
+// target-gated, so the module only exists when building for Windows with the
+// `mf-decode` feature; enabling the feature on other platforms is a no-op.
+#[cfg(all(target_os = "windows", feature = "mf-decode"))]
+pub mod mfdecode;

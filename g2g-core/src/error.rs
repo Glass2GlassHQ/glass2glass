@@ -26,6 +26,8 @@ pub enum HardwareError {
     V4l2(i32),
     /// `wgpu` device or queue error.
     Wgpu,
+    /// `HRESULT` from a Windows Media Foundation / COM call.
+    MediaFoundation(i32),
     /// Other backend-specific failure.
     Other,
 }
