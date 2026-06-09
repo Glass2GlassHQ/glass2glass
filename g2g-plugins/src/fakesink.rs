@@ -27,6 +27,7 @@ pub struct FakeSink {
     received: u64,
     last_sequence: Option<u64>,
     eos_seen: bool,
+    flushes: u64,
     configured: bool,
     caps_changes: Vec<CapsChange>,
 }
@@ -46,6 +47,12 @@ impl FakeSink {
 
     pub fn eos_seen(&self) -> bool {
         self.eos_seen
+    }
+
+    /// Number of `Flush` packets seen. A flush resets `last_sequence` so the
+    /// stream may resume with a lower sequence after a seek.
+    pub fn flushes(&self) -> u64 {
+        self.flushes
     }
 
     pub fn caps_changes(&self) -> &[CapsChange] {
@@ -91,6 +98,12 @@ impl AsyncElement for FakeSink {
                 }
                 PipelinePacket::Eos => {
                     self.eos_seen = true;
+                }
+                PipelinePacket::Flush => {
+                    // Seek flush: reset position so a lower sequence is
+                    // accepted when the stream resumes.
+                    self.flushes += 1;
+                    self.last_sequence = None;
                 }
                 PipelinePacket::CapsChanged(caps) => {
                     self.caps_changes.push(CapsChange {

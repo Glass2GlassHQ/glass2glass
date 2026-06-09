@@ -105,7 +105,7 @@ impl AsyncElement for CollectingSink {
         match packet {
             PipelinePacket::DataFrame(f) => self.seqs.push(f.sequence),
             PipelinePacket::Eos => self.eos_count += 1,
-            PipelinePacket::CapsChanged(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => {}
         }
         Box::pin(async { Ok(()) })
     }

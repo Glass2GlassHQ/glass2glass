@@ -58,6 +58,9 @@ impl AsyncElement for BusTap {
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
                 PipelinePacket::Eos => {
                     self.bus.try_post(BusMessage::Eos);
                 }

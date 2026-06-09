@@ -6,6 +6,10 @@ pub enum PipelinePacket {
     CapsChanged(Caps),
     DataFrame(Frame),
     Eos,
+    /// Seek flush: discard in-flight and buffered data and reset position
+    /// state. Unlike `Eos`, the stream resumes after a flush, so elements
+    /// reset rather than terminate.
+    Flush,
 }
 
 #[derive(Debug)]

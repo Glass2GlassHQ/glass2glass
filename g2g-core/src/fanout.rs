@@ -202,6 +202,10 @@ impl AsyncElement for Gate {
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
+                // Flush is control: forward regardless of open state.
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
                 // Runner forwards Eos after process() returns.
                 PipelinePacket::Eos => {}
             }
@@ -288,6 +292,12 @@ impl MultiOutputElement for Router {
                 PipelinePacket::CapsChanged(c) => {
                     for port in 0..ports {
                         out.push_to(port, PipelinePacket::CapsChanged(c.clone())).await?;
+                    }
+                }
+                // Flush is broadcast to every branch, like CapsChanged.
+                PipelinePacket::Flush => {
+                    for port in 0..ports {
+                        out.push_to(port, PipelinePacket::Flush).await?;
                     }
                 }
                 // Runner broadcasts Eos to all ports after process() returns.
@@ -397,7 +407,7 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs[port].push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes[port] += 1,
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos | PipelinePacket::Flush => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }
@@ -422,7 +432,7 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs.push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes += 1,
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos | PipelinePacket::Flush => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }

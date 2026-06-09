@@ -98,6 +98,7 @@ enum Event {
     Configure { width: u32 },
     Data { seq: u64 },
     CapsChanged { width: u32 },
+    Flush,
     Eos,
 }
 
@@ -141,6 +142,7 @@ impl AsyncElement for OrderedRecordingSink {
                 Event::CapsChanged { width: *w }
             }
             PipelinePacket::CapsChanged(_) => Event::CapsChanged { width: 0 },
+            PipelinePacket::Flush => Event::Flush,
             PipelinePacket::Eos => Event::Eos,
         };
         self.push(event);

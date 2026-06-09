@@ -136,7 +136,7 @@ impl AsyncElement for SignalSink {
                 }
             }
             PipelinePacket::Eos => self.eos = true,
-            PipelinePacket::CapsChanged(_) => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => {}
         }
         Box::pin(async { Ok(()) })
     }

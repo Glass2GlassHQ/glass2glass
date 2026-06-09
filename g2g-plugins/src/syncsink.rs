@@ -113,6 +113,11 @@ where
                 PipelinePacket::Eos => {
                     self.eos_seen = true;
                 }
+                PipelinePacket::Flush => {
+                    // Seek flush: drop position so presentation resumes
+                    // cleanly at the post-seek timeline.
+                    self.last_sequence = None;
+                }
                 PipelinePacket::CapsChanged(_) => {}
             }
             Ok(())

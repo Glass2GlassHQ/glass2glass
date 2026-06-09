@@ -109,6 +109,11 @@ impl AsyncElement for H264Parse {
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
+                PipelinePacket::Flush => {
+                    // Reset SPS tracking so caps re-emit after the seek.
+                    self.last_emitted_caps = None;
+                    out.push(PipelinePacket::Flush).await?;
+                }
                 PipelinePacket::Eos => {}
             }
             Ok(())
