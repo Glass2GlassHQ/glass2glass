@@ -4,6 +4,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use crate::caps::Caps;
+use crate::clock::ClockCandidate;
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
@@ -103,6 +104,13 @@ pub trait AsyncElement: ElementBound {
     /// can allocate its output buffers from a compatible pool. Default:
     /// ignore and allocate however the element sees fit.
     fn configure_allocation(&mut self, _params: &AllocationParams) {}
+
+    /// Offer a clock to the pipeline's clock election (M12). Default: none.
+    /// Elements that pace to real hardware (an audio sink to its DAC) override
+    /// this; the runner elects the highest-priority offered clock.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        None
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.

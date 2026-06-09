@@ -5,7 +5,7 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
-### M12: Live-source surface (latency + allocation queries)
+### M12: Live-source surface (latency + allocation + clock election)
 - Latency query: `LatencyReport { live, min_ns, max_ns }` + `query` module,
   GStreamer-style latency triple with `combine`/`aggregate` (min and max sum
   along the path, unbounded `max_ns = None` is infectious, liveness sticky) and
@@ -20,11 +20,19 @@ Nothing is published yet; all versions are `0.1.0`.
   (zero-copy handoff). `AllocationParams::merge` folds an upstream element's own
   requirement into a downstream proposal (most-demanding size/count/alignment
   wins; consumer dictates domain).
+- Clock distribution: `ClockPriority` (`SystemFallback` < `Provider` <
+  `LiveSource`), `ClockCandidate` (priority + shared `Arc<dyn PipelineClock>`),
+  and `elect_clock` (highest priority wins, ties resolve to the most upstream).
+  `AsyncElement::provide_clock` / `SourceLoop::provide_clock` default methods
+  let a live source or sink offer its clock; the runner adopts the elected clock
+  over the supplied fallback.
 - Linear runners (`run_simple_pipeline`, `run_source_transform_sink`) fold the
-  configured chain into the new `RunStats::latency` and resolve the allocation
-  query into `RunStats::allocation` after negotiation. Fan-in / fan-out runners
-  report `ZERO` / `None` (topology aggregation deferred).
-- Remaining M12 piece: live clock distribution (`AsyncClock` provider election).
+  configured chain into `RunStats::latency`, resolve the allocation query into
+  `RunStats::allocation`, and elect the pipeline clock into
+  `RunStats::{clock_priority, base_time_ns}` after negotiation. Fan-in /
+  fan-out runners report neutral values (topology aggregation deferred).
+- M12 complete: with M8–M12 done, `g2g` reaches dynamic-pipeline feature parity
+  with GStreamer (per DESIGN.md §4.10) while keeping the static typed layer.
 
 ### M13: Windows hardware decode (Media Foundation)
 - `MfDecode` element (`mf-decode` feature, Windows-only): wraps the Media

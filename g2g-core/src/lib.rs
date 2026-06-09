@@ -35,7 +35,7 @@ pub mod runtime;
 pub mod slot;
 
 pub use caps::{AudioFormat, Caps, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoFormat};
-pub use clock::{AsyncClock, PipelineClock};
+pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, PipelineClock};
 pub use element::{
     AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };

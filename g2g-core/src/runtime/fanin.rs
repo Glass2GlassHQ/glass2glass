@@ -22,6 +22,7 @@ use crate::clock::PipelineClock;
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, Reconfigure,
 };
+use crate::clock::ClockPriority;
 use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
@@ -218,14 +219,16 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count];
-    // Fan-in latency / allocation aggregation across N inputs is deferred
-    // (M12 covers the linear path); report ZERO / None rather than a
-    // misleading partial value.
+    // Fan-in latency / allocation / clock election across N inputs is deferred
+    // (M12 covers the linear path); report neutral values rather than a
+    // misleading partial one.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
         allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
     })
 }
 
@@ -391,13 +394,15 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count + 1];
-    // Fan-in latency / allocation aggregation across N inputs is deferred
-    // (M12 covers the linear path); report ZERO / None rather than a
-    // misleading partial value.
+    // Fan-in latency / allocation / clock election across N inputs is deferred
+    // (M12 covers the linear path); report neutral values rather than a
+    // misleading partial one.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
         allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
     })
 }

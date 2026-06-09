@@ -3,7 +3,7 @@ use core::future::Future;
 use alloc::boxed::Box;
 
 use crate::caps::Caps;
-use crate::clock::PipelineClock;
+use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
@@ -79,6 +79,14 @@ pub trait SourceLoop: ElementBound {
     /// source's own way. The proposal is advisory; a source that cannot honor
     /// it (eg cannot produce the requested domain) falls back silently.
     fn configure_allocation(&mut self, _params: &AllocationParams) {}
+
+    /// Offer a clock to the pipeline's clock election (M12). Default: none.
+    /// Live capture sources override this to provide their hardware capture
+    /// clock at [`ClockPriority::LiveSource`](crate::ClockPriority::LiveSource)
+    /// so the pipeline paces to capture cadence.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        None
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +101,13 @@ pub struct RunStats {
     /// negotiated from downstream. `None` when no downstream element proposed
     /// one; always `None` for fan-in / fan-out runners (deferred).
     pub allocation: Option<AllocationParams>,
+    /// Priority of the clock the pipeline elected (M12). `SystemFallback` when
+    /// no element provided one (the supplied clock stands); always
+    /// `SystemFallback` for fan-in / fan-out runners (deferred).
+    pub clock_priority: ClockPriority,
+    /// `now_ns()` of the elected clock, read once after election — the
+    /// pipeline's base-time origin.
+    pub base_time_ns: u64,
 }
 
 /// Drives a `source → sink` pipeline over a single bounded link.
@@ -103,7 +118,7 @@ pub struct RunStats {
 pub async fn run_simple_pipeline<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
-    _clock: &Clk,
+    clock: &Clk,
     link_capacity: usize,
 ) -> Result<RunStats, G2gError>
 where
@@ -147,6 +162,13 @@ where
     if let Some(p) = &allocation {
         source.configure_allocation(p);
     }
+
+    // M12 clock distribution: elect the pipeline clock (source > sink > fallback).
+    let elected = elect_clock([source.provide_clock(), AsyncElement::provide_clock(sink)]);
+    let (clock_priority, base_time_ns) = match &elected {
+        Some(c) => (c.priority, c.clock.now_ns()),
+        None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
 
     let (link_tx, link_rx) = link(link_capacity);
 
@@ -205,7 +227,14 @@ where
     let emitted = src_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency, allocation })
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency,
+        allocation,
+        clock_priority,
+        base_time_ns,
+    })
 }
 
 /// Drives a `source → fan-out element → N sinks` pipeline (M9 fan-out core).
@@ -337,14 +366,16 @@ where
     // Arm order: [source, router, sink0, sink1, ...].
     let emitted = counts[0];
     let consumed: u64 = counts[2..].iter().copied().sum();
-    // Fan-out latency / allocation aggregation across N branches is deferred
-    // (M12 covers the linear path); report ZERO / None rather than a
-    // misleading partial value.
+    // Fan-out latency / allocation / clock election across N branches is
+    // deferred (M12 covers the linear path); report neutral values rather than
+    // a misleading partial one.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
         allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
     })
 }
 
@@ -372,7 +403,7 @@ pub async fn run_source_transform_sink<Src, Tx, Snk, Clk>(
     source: &mut Src,
     transform: &mut Tx,
     sink: &mut Snk,
-    _clock: &Clk,
+    clock: &Clk,
     link_capacity: usize,
 ) -> Result<RunStats, G2gError>
 where
@@ -434,6 +465,18 @@ where
     if let Some(p) = &allocation {
         source.configure_allocation(p);
     }
+
+    // M12 clock distribution: elect the pipeline clock from any element that
+    // offers one (live source > provider > system fallback) and read its epoch.
+    let elected = elect_clock([
+        source.provide_clock(),
+        AsyncElement::provide_clock(transform),
+        AsyncElement::provide_clock(sink),
+    ]);
+    let (clock_priority, base_time_ns) = match &elected {
+        Some(c) => (c.priority, c.clock.now_ns()),
+        None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
 
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
@@ -518,5 +561,12 @@ where
     tx_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency, allocation })
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency,
+        allocation,
+        clock_priority,
+        base_time_ns,
+    })
 }
