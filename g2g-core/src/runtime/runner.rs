@@ -85,7 +85,10 @@ where
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
         }
-        let fixated = sink.intercept_caps(&proposal)?;
+        // Phase 1 narrows; Phase 2 fixates every ranged field to a single
+        // value before any element allocates against it (DESIGN.md §4.2).
+        let negotiated = sink.intercept_caps(&proposal)?;
+        let fixated = negotiated.fixate()?;
         match source.configure_pipeline(&fixated)? {
             ConfigureOutcome::Accepted => {}
             ConfigureOutcome::ReFixate(counter) => {
@@ -205,8 +208,11 @@ where
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
         }
+        // Phase 1 narrows through the chain; Phase 2 fixates the result
+        // before any element allocates against it (DESIGN.md §4.2).
         let tx_proposal = transform.intercept_caps(&start_proposal)?;
-        let fixated = sink.intercept_caps(&tx_proposal)?;
+        let negotiated = sink.intercept_caps(&tx_proposal)?;
+        let fixated = negotiated.fixate()?;
 
         let mut refixate: Option<Caps> = None;
         for outcome in [

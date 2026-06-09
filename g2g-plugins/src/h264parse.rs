@@ -50,13 +50,15 @@ impl AsyncElement for H264Parse {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        match upstream_caps {
-            Caps::Video {
-                format: VideoFormat::H264,
-                ..
-            } => Ok(upstream_caps.clone()),
-            _ => Err(G2gError::CapsMismatch),
-        }
+        // H264Parse consumes H.264 at any geometry; intersecting against
+        // that narrows the proposal and rejects non-H.264 inputs.
+        let supported = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        upstream_caps.intersect(&supported)
     }
 
     fn configure_pipeline(

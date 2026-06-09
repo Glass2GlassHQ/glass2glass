@@ -41,4 +41,4 @@ pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffe
 pub use pool::{BufferPool, PooledBuffer};
 
 #[cfg(feature = "dyn-slot")]
-pub use slot::ElementSlot;
+pub use slot::{ElementSlot, SwapHandle};

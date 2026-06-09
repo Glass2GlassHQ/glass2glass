@@ -100,3 +100,30 @@ pub trait DynAsyncElement: ElementBound {
         alloc::boxed::Box<dyn Future<Output = Result<(), G2gError>> + 'a>,
     >;
 }
+
+/// Blanket adapter: every [`AsyncElement`] is usable as a
+/// [`DynAsyncElement`] by boxing its `process` future (DESIGN.md §4.3).
+/// This is what lets real plugin elements drop into a `Box<dyn
+/// DynAsyncElement>` slot without a hand-written impl. Method calls are
+/// disambiguated to `AsyncElement::` because the two traits share names.
+#[cfg(feature = "std")]
+impl<T: AsyncElement> DynAsyncElement for T {
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        AsyncElement::intercept_caps(self, upstream_caps)
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        AsyncElement::configure_pipeline(self, absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        Box::pin(AsyncElement::process(self, packet, out))
+    }
+}

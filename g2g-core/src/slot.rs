@@ -26,17 +26,22 @@ use arc_swap::ArcSwap;
 use spin::Mutex;
 
 use crate::caps::Caps;
-use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink, PushOutcome,
-};
+use crate::element::{AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
+
+/// Shared cell holding the slot's current element. The outer `Arc` lets a
+/// [`SwapHandle`] mutate the contents while the runner owns the
+/// [`ElementSlot`] by `&mut`: stores go through a cloned `Arc` and only need
+/// `&self`, the swapped-out element lives behind the inner `Arc` until its
+/// last reader drops it, so there is no aliasing with the wrapper's `&mut`.
+type SlotCell = Arc<ArcSwap<Mutex<Box<dyn DynAsyncElement + Send>>>>;
 
 /// Atomically swappable container for a `Box<dyn DynAsyncElement>`.
 /// Implements `AsyncElement` so it can sit inside a typed pipeline runner
 /// unchanged — the swap behavior is invisible to the runner.
 pub struct ElementSlot {
-    inner: ArcSwap<Mutex<Box<dyn DynAsyncElement + Send>>>,
+    inner: SlotCell,
 }
 
 impl core::fmt::Debug for ElementSlot {
@@ -47,7 +52,7 @@ impl core::fmt::Debug for ElementSlot {
 
 impl ElementSlot {
     pub fn new(element: Box<dyn DynAsyncElement + Send>) -> Self {
-        Self { inner: ArcSwap::new(Arc::new(Mutex::new(element))) }
+        Self { inner: Arc::new(ArcSwap::new(Arc::new(Mutex::new(element)))) }
     }
 
     /// Atomically install `element` as the slot's contents. Process calls
@@ -56,6 +61,38 @@ impl ElementSlot {
     /// having called `configure_pipeline` on `element` against the
     /// pipeline's current fixated caps before installing — the slot will
     /// not re-run negotiation.
+    pub fn swap(&self, element: Box<dyn DynAsyncElement + Send>) {
+        self.inner.store(Arc::new(Mutex::new(element)));
+    }
+
+    /// A cloneable handle that can swap this slot's element from another
+    /// task while the runner drives the slot. This is how a mid-stream
+    /// `Reconfigure` or codec switch replaces an element without stalling
+    /// or rebuilding the pipeline (DESIGN.md §4.8.2).
+    pub fn handle(&self) -> SwapHandle {
+        SwapHandle { inner: self.inner.clone() }
+    }
+}
+
+/// Detached handle to an [`ElementSlot`], obtained via
+/// [`ElementSlot::handle`]. Holds a clone of the slot's shared cell, so
+/// [`SwapHandle::swap`] installs a new element visible to the slot's next
+/// `process` call. Cheap to clone; multiple controllers may hold one.
+#[derive(Clone)]
+pub struct SwapHandle {
+    inner: SlotCell,
+}
+
+impl core::fmt::Debug for SwapHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SwapHandle").finish_non_exhaustive()
+    }
+}
+
+impl SwapHandle {
+    /// Install `element` as the target slot's contents. Same contract as
+    /// [`ElementSlot::swap`]: the caller must have configured `element`
+    /// against the pipeline's current fixated caps beforehand.
     pub fn swap(&self, element: Box<dyn DynAsyncElement + Send>) {
         self.inner.store(Arc::new(Mutex::new(element)));
     }
@@ -91,13 +128,7 @@ impl AsyncElement for ElementSlot {
             // through the new element on their next process call.
             let elem = self.inner.load_full();
             let mut guard = elem.lock();
-            let outcome = guard.process(packet, out).await;
-            // Propagate but make sure the explicit unit-Ok future doesn't
-            // accidentally consume the PushOutcome propagated from `out`.
-            // (The runner doesn't currently surface that to us, so this
-            // is purely defensive against future signature drift.)
-            let _: PushOutcome = PushOutcome::Accepted;
-            outcome
+            guard.process(packet, out).await
         })
     }
 }
@@ -106,7 +137,7 @@ impl AsyncElement for ElementSlot {
 mod tests {
     use super::*;
     use crate::caps::{Dim, Rate, VideoFormat};
-    use crate::element::{DynAsyncElement, OutputSink};
+    use crate::element::{DynAsyncElement, OutputSink, PushOutcome};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::sync::Arc as StdArc;
@@ -140,6 +171,43 @@ mod tests {
             _packet: PipelinePacket,
             _out: &'a mut dyn OutputSink,
         ) -> Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> {
+            let counter = self.counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    /// Implements only [`AsyncElement`] (a GAT element, no hand-written
+    /// `DynAsyncElement`). Boxing it relies on the blanket impl in
+    /// `element.rs`, the path real plugins take into the slot.
+    struct AsyncOnlyElement {
+        counter: StdArc<AtomicU64>,
+    }
+
+    impl AsyncElement for AsyncOnlyElement {
+        type ProcessFuture<'a>
+            = BoxFuture<'a, Result<(), G2gError>>
+        where
+            Self: 'a;
+
+        fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+            Ok(upstream_caps.clone())
+        }
+
+        fn configure_pipeline(
+            &mut self,
+            _absolute_caps: &Caps,
+        ) -> Result<ConfigureOutcome, G2gError> {
+            Ok(ConfigureOutcome::Accepted)
+        }
+
+        fn process<'a>(
+            &'a mut self,
+            _packet: PipelinePacket,
+            _out: &'a mut dyn OutputSink,
+        ) -> Self::ProcessFuture<'a> {
             let counter = self.counter.clone();
             Box::pin(async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -204,8 +272,8 @@ mod tests {
         }));
         let mut sink = NoopSink;
 
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(initial_counter.load(Ordering::SeqCst), 2);
     }
@@ -222,8 +290,8 @@ mod tests {
         let mut sink = NoopSink;
 
         // Two pushes to A.
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
 
         // Swap to B.
         slot.swap(Box::new(CountingElement {
@@ -232,12 +300,50 @@ mod tests {
         }));
 
         // Three pushes to B.
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
-        block_on(slot.process(dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
 
         assert_eq!(counter_a.load(Ordering::SeqCst), 2);
         assert_eq!(counter_b.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn blanket_impl_boxes_a_plain_async_element() {
+        let counter = StdArc::new(AtomicU64::new(0));
+        // A type that implements only AsyncElement still boxes into the slot
+        // via the DynAsyncElement blanket impl.
+        let boxed: Box<dyn DynAsyncElement + Send> =
+            Box::new(AsyncOnlyElement { counter: counter.clone() });
+        let mut slot = ElementSlot::new(boxed);
+        let mut sink = NoopSink;
+
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn swap_handle_routes_subsequent_pushes_to_new_element() {
+        let counter_a = StdArc::new(AtomicU64::new(0));
+        let counter_b = StdArc::new(AtomicU64::new(0));
+
+        let mut slot = ElementSlot::new(Box::new(CountingElement {
+            counter: counter_a.clone(),
+            configured: true,
+        }));
+        let handle = slot.handle();
+        let mut sink = NoopSink;
+
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+
+        // Swap via the detached handle rather than the slot itself.
+        handle.swap(Box::new(CountingElement { counter: counter_b.clone(), configured: true }));
+
+        block_on(AsyncElement::process(&mut slot,dummy_frame(), &mut sink)).unwrap();
+
+        assert_eq!(counter_a.load(Ordering::SeqCst), 1);
+        assert_eq!(counter_b.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -253,7 +359,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        let caps = slot.intercept_caps(&upstream).unwrap();
+        let caps = AsyncElement::intercept_caps(&slot, &upstream).unwrap();
         assert_eq!(caps, upstream);
     }
 }

@@ -467,6 +467,83 @@ async fn mid_stream_reconfigure_round_trip() {
     assert_eq!(snk.data_widths(), vec![640, 1280, 640]);
 }
 
+/// Sink that narrows incoming caps against its own supported `Range` in
+/// Phase 1 and records the absolute caps it receives in Phase 2, so the
+/// test can assert the runner fixated the negotiated range to a single value.
+struct IntersectingRecordingSink {
+    supported: Caps,
+    configured_caps: Mutex<Option<Caps>>,
+}
+
+impl IntersectingRecordingSink {
+    fn new(supported: Caps) -> Self {
+        Self { supported, configured_caps: Mutex::new(None) }
+    }
+
+    fn configured_caps(&self) -> Option<Caps> {
+        self.configured_caps.lock().unwrap().clone()
+    }
+}
+
+impl AsyncElement for IntersectingRecordingSink {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&self.supported)
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        *self.configured_caps.lock().unwrap() = Some(absolute_caps.clone());
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Source proposes width ∈ [640, 1920]; sink supports width ∈ [1280, 3840].
+/// Phase 1 intersects to [1280, 1920]; Phase 2 fixates to the minimum 1280.
+/// This is the first test exercising non-trivial `intersect` + `fixate`
+/// through the runner.
+#[tokio::test]
+async fn range_negotiation_intersects_then_fixates_to_minimum() {
+    let proposal = Caps::Video {
+        format: VideoFormat::Rgba8,
+        width: Dim::Range { min: 640, max: 1920 },
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+    };
+    let supported = Caps::Video {
+        format: VideoFormat::Rgba8,
+        width: Dim::Range { min: 1280, max: 3840 },
+        height: Dim::Any,
+        framerate: Rate::Any,
+    };
+    let mut src = StaticCapsSrc { proposal };
+    let mut snk = IntersectingRecordingSink::new(supported);
+    let clock = ZeroClock;
+
+    run_simple_pipeline(&mut src, &mut snk, &clock, 4)
+        .await
+        .expect("range negotiation must converge");
+
+    let got = snk.configured_caps().expect("sink must be configured");
+    assert!(got.is_fixed(), "Phase 2 must hand the sink fully-fixed caps: {got:?}");
+    assert_eq!(
+        got,
+        caps_at(1280, 480),
+        "width fixates to the intersected range minimum, height/framerate carried through"
+    );
+}
+
 #[tokio::test]
 async fn caps_changed_triggers_configure_before_next_frame() {
     let mut src = CapsChangingTestSrc {
