@@ -45,7 +45,8 @@ pub use pool::{BufferPool, PooledBuffer};
 
 #[cfg(feature = "runtime")]
 pub use fanout::{
-    Gate, GateHandle, MultiOutputElement, MultiOutputSink, MultiSenderSink, Router, RouterHandle,
+    Gate, GateHandle, Merger, MergerHandle, MultiOutputElement, MultiOutputSink, MultiSenderSink,
+    Router, RouterHandle,
 };
 
 #[cfg(feature = "dyn-slot")]

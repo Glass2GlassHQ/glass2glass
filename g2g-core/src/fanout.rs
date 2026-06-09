@@ -263,6 +263,55 @@ impl MultiOutputElement for Router {
     }
 }
 
+/// N→1 fan-in selector: the control-driven mirror of [`Router`]. An atomic
+/// discriminator names the single active input; the fan-in runner forwards
+/// that input's frames and drains/discards the rest. The merged stream ends
+/// only once every input has reached EOS (see `run_fanin_sink`). `Merger`
+/// holds just the selector; the forwarding lives in the runner.
+#[derive(Debug)]
+pub struct Merger {
+    selected: Arc<AtomicUsize>,
+    inputs: usize,
+}
+
+impl Merger {
+    pub fn new(inputs: usize) -> Self {
+        assert!(inputs > 0, "Merger needs at least one input");
+        Self { selected: Arc::new(AtomicUsize::new(0)), inputs }
+    }
+
+    /// Number of input ports. The fan-in runner allocates one branch link
+    /// per input.
+    pub fn input_count(&self) -> usize {
+        self.inputs
+    }
+
+    /// A cloneable handle that re-selects the active input from another task.
+    pub fn handle(&self) -> MergerHandle {
+        MergerHandle { selected: self.selected.clone(), inputs: self.inputs }
+    }
+}
+
+/// Detached control handle for a [`Merger`].
+#[derive(Debug, Clone)]
+pub struct MergerHandle {
+    selected: Arc<AtomicUsize>,
+    inputs: usize,
+}
+
+impl MergerHandle {
+    /// Select which input feeds the merged output. Panics if
+    /// `input >= input_count`.
+    pub fn select(&self, input: usize) {
+        assert!(input < self.inputs, "select: input out of range");
+        self.selected.store(input, Ordering::SeqCst);
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected.load(Ordering::SeqCst)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +464,21 @@ mod tests {
         block_on(gate.process(PipelinePacket::CapsChanged(caps()), &mut out)).unwrap();
 
         assert_eq!(out.caps_changes, 1, "CapsChanged forwarded even while closed");
+    }
+
+    #[test]
+    fn merger_handle_selects_active_input() {
+        let merger = Merger::new(3);
+        let handle = merger.handle();
+        assert_eq!(handle.selected(), 0, "defaults to input 0");
+        handle.select(2);
+        assert_eq!(handle.selected(), 2);
+        assert_eq!(merger.input_count(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "input out of range")]
+    fn merger_handle_rejects_out_of_range_input() {
+        Merger::new(2).handle().select(2);
     }
 }

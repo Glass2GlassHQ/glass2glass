@@ -14,6 +14,9 @@ mod channel;
 mod join;
 mod runner;
 
+#[cfg(feature = "std")]
+mod fanin;
+
 pub use channel::{
     bounded, link, LinkReceiver, LinkSender, Receiver, ReconfigureSlot, RecvFuture, SendError,
     SendFuture, Sender, SenderSink,
@@ -23,3 +26,6 @@ pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, Sourc
 
 #[cfg(feature = "std")]
 pub use runner::run_source_fanout;
+
+#[cfg(feature = "std")]
+pub use fanin::{run_fanin_sink, DynSourceLoop};

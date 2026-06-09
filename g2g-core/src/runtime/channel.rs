@@ -185,8 +185,10 @@ impl ReconfigureSlot {
 
 /// Upstream end of a bidirectional inter-element link: forward
 /// `PipelinePacket` channel + reverse `Reconfigure` slot. Held by the
-/// producing element (wrapped in [`SenderSink`]).
-#[derive(Debug)]
+/// producing element (wrapped in [`SenderSink`]). Cloneable so a fan-in
+/// merger can share one output link across N forwarders; the link closes
+/// when the last clone drops.
+#[derive(Debug, Clone)]
 pub struct LinkSender {
     pub(crate) data: Sender<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,

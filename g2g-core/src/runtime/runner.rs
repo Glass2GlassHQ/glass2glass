@@ -310,7 +310,7 @@ where
 /// Process implementations of true sinks should not emit, but the type
 /// system still requires an `&mut dyn OutputSink` parameter.
 #[derive(Debug)]
-struct NullSink;
+pub(crate) struct NullSink;
 
 impl OutputSink for NullSink {
     fn push<'a>(
