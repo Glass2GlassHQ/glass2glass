@@ -100,6 +100,41 @@ pub trait MultiOutputElement: ElementBound {
     ) -> Self::ProcessFuture<'a>;
 }
 
+/// Multi-input element trait variant: an N-input, 1-output element (a
+/// muxer). The mirror of [`MultiOutputElement`]. Negotiation is **per
+/// input** — each input pad narrows and fixates its own caps — and the
+/// element exposes a single merged `output_caps`. The fan-in runner
+/// (`run_muxer_sink`) aggregates EOS itself, so `process` is only ever
+/// handed `DataFrame`/`CapsChanged`, tagged with the originating `input`.
+pub trait MultiInputElement: ElementBound {
+    type ProcessFuture<'a>: core::future::Future<Output = Result<(), G2gError>> + 'a
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize;
+
+    /// Phase 1 for one input pad: narrow that input's proposed caps.
+    fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
+
+    /// Phase 2 for one input pad: fixate and configure that input.
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError>;
+
+    /// The merged-output caps, valid once every input has been configured.
+    fn output_caps(&self) -> Result<Caps, G2gError>;
+
+    /// Combine one packet from `input` into the merged output.
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a>;
+}
+
 /// 1→1 enable/disable element. Forwards `CapsChanged` unconditionally and
 /// `DataFrame` only while open; `Eos` is forwarded by the runner, never by
 /// the element (the transform contract). Drops dropped frames silently —

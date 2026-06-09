@@ -28,4 +28,4 @@ pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, Sourc
 pub use runner::run_source_fanout;
 
 #[cfg(feature = "std")]
-pub use fanin::{run_fanin_sink, DynSourceLoop};
+pub use fanin::{run_fanin_sink, run_muxer_sink, DynSourceLoop};

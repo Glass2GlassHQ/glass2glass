@@ -12,6 +12,7 @@ extern crate alloc;
 pub mod fakesink;
 pub mod h264parse;
 pub mod identity;
+pub mod mux;
 pub mod videotestsrc;
 
 #[cfg(feature = "std")]
