@@ -18,8 +18,8 @@ mod runner;
 mod fanin;
 
 pub use channel::{
-    bounded, link, LinkReceiver, LinkSender, Receiver, ReconfigureSlot, RecvFuture, SendError,
-    SendFuture, Sender, SenderSink,
+    bounded, link, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot, Receiver,
+    ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use join::{join_all, Join2, JoinAll};
 pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, SourceLoop};

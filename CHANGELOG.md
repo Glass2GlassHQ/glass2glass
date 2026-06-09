@@ -5,12 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
-### M9: Dynamic fan-out / fan-in (in progress)
+### M11: Application control surface
+- `Bus` + cloneable `BusHandle` + `BusMessage` (Eos/Error/Warning/Custom): mp-sc message channel so elements notify the app asynchronously without back-references. Non-blocking `try_post`; `try_recv`/`recv` on the app side.
+- `LinkInterceptor` probes: a `Pass`/`Drop` interceptor installed on a link's `SenderSink` via a runtime `ProbeSlot` (GStreamer pad-probe equivalent). Empty by default, so existing links are unaffected.
+- Deferred: `PipelinePacket::Flush` (seek/drain); blocking probe action.
+
+### M10: True muxer fan-in
+- `MultiInputElement` trait + `run_muxer_sink`: combine all N inputs into one output (vs the M9 Merger selector), with per-input caps negotiation and EOS aggregation (one `Eos` after every input ends).
+- `InterleaveMux` element; tagged-merge-channel runner so one `&mut` muxer task processes all inputs without a select primitive.
+
+### M9: Dynamic fan-out / fan-in
 - `Router` (1->N): routes each frame to an atomic-selected output port, broadcasts `CapsChanged` to all ports.
 - `Gate` (1->1): forwards or drops data by an atomic flag; a plain `AsyncElement`, so it needs no new runner.
 - `Merger` (N->1): selects one active input, drains the rest, emits one merged `Eos` after every input ends.
 - Multi-output / fan-in plumbing: `MultiOutputSink`, `MultiOutputElement`, `DynSourceLoop`, `join_all`, and the `run_source_fanout` / `run_fanin_sink` runners. Each primitive has a cloneable control handle (`RouterHandle` / `GateHandle` / `MergerHandle`).
-- Deferred: `BranchSlot` + `SwapPolicy` variants; per-branch caps negotiation (M10).
+- Deferred: `BranchSlot` + `SwapPolicy` variants (need a task spawner).
 
 ### M8: Caps negotiation + dynamic element swap
 - Caps algebra: `Dim`/`Rate`/`Caps` `intersect`, `is_fixed`, `fixate` (Phase 1 narrowing, Phase 2 fixation per §4.2).

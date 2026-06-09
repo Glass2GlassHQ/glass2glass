@@ -222,6 +222,11 @@ impl LinkReceiver {
         self.data.recv()
     }
 
+    /// Non-blocking drain of one packet; `None` when the link is empty.
+    pub fn try_recv(&self) -> Option<PipelinePacket> {
+        self.data.try_recv()
+    }
+
     /// Latest-wins: overwrites any pending request that the producer
     /// hasn't yet observed. Reconfigure is a control signal, not a
     /// stream — older proposals are stale by definition.
@@ -241,22 +246,80 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
     )
 }
 
+/// What a [`LinkInterceptor`] decides for a packet crossing a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeAction {
+    /// Forward the packet downstream as usual.
+    Pass,
+    /// Drop the packet; it never reaches the downstream element.
+    Drop,
+}
+
+/// A probe registered on a link. `on_packet` is called for every packet
+/// before it is sent, and returns whether to pass or drop it. The g2g
+/// equivalent of a GStreamer pad probe (DESIGN.md §4.9).
+pub trait LinkInterceptor {
+    fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction;
+}
+
+/// Cloneable slot holding the optional [`LinkInterceptor`] of a link's
+/// [`SenderSink`]. Same latest-wins shape as [`ReconfigureSlot`]; clones
+/// share the inner cell, so the application installs/removes a probe at
+/// runtime while the runner drives the link.
+#[derive(Clone, Default)]
+pub struct ProbeSlot {
+    inner: Arc<Mutex<Option<Arc<dyn LinkInterceptor + Send + Sync>>>>,
+}
+
+impl core::fmt::Debug for ProbeSlot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ProbeSlot").finish_non_exhaustive()
+    }
+}
+
+impl ProbeSlot {
+    /// Install (or replace) the probe consulted on every push.
+    pub fn install(&self, probe: Arc<dyn LinkInterceptor + Send + Sync>) {
+        *self.inner.lock() = Some(probe);
+    }
+
+    /// Remove the probe; subsequent packets pass unconditionally.
+    pub fn remove(&self) {
+        *self.inner.lock() = None;
+    }
+
+    fn action(&self, packet: &PipelinePacket) -> ProbeAction {
+        match self.inner.lock().as_ref() {
+            Some(probe) => probe.on_packet(packet),
+            None => ProbeAction::Pass,
+        }
+    }
+}
+
 /// Adapter from a [`LinkSender`] to the async `OutputSink` trait. The
-/// packet is *always enqueued* (so no in-flight data is lost mid-stream);
-/// then the reverse `Reconfigure` slot is checked. If downstream fired
-/// a request — either before this push or while the producer was
-/// awaiting capacity — the producer sees `PushOutcome::Reconfigure(...)`
-/// and must handle it before producing the next packet. The just-pushed
-/// packet continues downstream under the still-current caps, exactly as
-/// GStreamer's CAPS handshake allows.
+/// packet is first shown to the link's [`ProbeSlot`]; a `Drop` action
+/// discards it. Otherwise the packet is *always enqueued* (so no in-flight
+/// data is lost mid-stream); then the reverse `Reconfigure` slot is checked.
+/// If downstream fired a request — either before this push or while the
+/// producer was awaiting capacity — the producer sees
+/// `PushOutcome::Reconfigure(...)` and must handle it before producing the
+/// next packet. The just-pushed packet continues downstream under the
+/// still-current caps, exactly as GStreamer's CAPS handshake allows.
 #[derive(Debug)]
 pub struct SenderSink {
     link: LinkSender,
+    probe: ProbeSlot,
 }
 
 impl SenderSink {
     pub fn new(link: LinkSender) -> Self {
-        Self { link }
+        Self { link, probe: ProbeSlot::default() }
+    }
+
+    /// A handle to this link's probe slot, for installing/removing a
+    /// [`LinkInterceptor`] at runtime.
+    pub fn probe(&self) -> ProbeSlot {
+        self.probe.clone()
     }
 }
 
@@ -266,6 +329,10 @@ impl OutputSink for SenderSink {
         packet: PipelinePacket,
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move {
+            // A probe may drop the packet before it ever enters the link.
+            if self.probe.action(&packet) == ProbeAction::Drop {
+                return Ok(PushOutcome::Accepted);
+            }
             match self.link.data.send(packet).await {
                 Ok(()) => match self.link.reconfigure.take() {
                     Some(r) => Ok(PushOutcome::Reconfigure(r)),
@@ -285,6 +352,7 @@ mod link_tests {
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::boxed::Box;
+    use alloc::vec::Vec;
     use core::pin::Pin;
     use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
@@ -418,5 +486,65 @@ mod link_tests {
             }
             other => panic!("expected newest Propose, got {other:?}"),
         }
+    }
+
+    fn frame_seq(seq: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            caps: Caps::Video {
+                format: VideoFormat::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            },
+            timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0 },
+            sequence: seq,
+        })
+    }
+
+    /// Drops `DataFrame`s with an odd sequence number; passes everything else.
+    struct DropOdd;
+    impl LinkInterceptor for DropOdd {
+        fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction {
+            match packet {
+                PipelinePacket::DataFrame(f) if f.sequence % 2 == 1 => ProbeAction::Drop,
+                _ => ProbeAction::Pass,
+            }
+        }
+    }
+
+    #[test]
+    fn installed_probe_drops_selected_packets() {
+        let (tx, rx) = link(8);
+        let mut sink = SenderSink::new(tx);
+        sink.probe().install(Arc::new(DropOdd));
+
+        for seq in 0..4 {
+            run_to_ready(sink.push(frame_seq(seq))).unwrap();
+        }
+
+        let mut got = Vec::new();
+        while let Some(PipelinePacket::DataFrame(f)) = rx.try_recv() {
+            got.push(f.sequence);
+        }
+        assert_eq!(got, [0, 2], "odd-sequence frames dropped by the probe");
+    }
+
+    #[test]
+    fn removed_probe_lets_packets_pass_again() {
+        let (tx, rx) = link(8);
+        let mut sink = SenderSink::new(tx);
+        let probe = sink.probe();
+
+        probe.install(Arc::new(DropOdd));
+        run_to_ready(sink.push(frame_seq(1))).unwrap(); // dropped
+        probe.remove();
+        run_to_ready(sink.push(frame_seq(3))).unwrap(); // passes now
+
+        let mut got = Vec::new();
+        while let Some(PipelinePacket::DataFrame(f)) = rx.try_recv() {
+            got.push(f.sequence);
+        }
+        assert_eq!(got, [3], "after remove(), the odd frame passes");
     }
 }
