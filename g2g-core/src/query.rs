@@ -8,6 +8,65 @@
 //! a runtime query object travelling along pads. The linear runners compute it
 //! once after negotiation and expose it on `RunStats`.
 
+use crate::memory::MemoryDomainKind;
+
+/// Downstream-proposed buffer allocation parameters (M12 ALLOCATION query).
+///
+/// A consumer answers its producer's allocation query with the buffer size,
+/// count, alignment, and memory domain it needs, so the producer can allocate
+/// directly into a compatible pool and hand buffers over without a copy. This
+/// mirrors GStreamer's `ALLOCATION` query, where downstream proposes pools and
+/// allocation parameters that upstream then honours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocationParams {
+    /// Minimum buffer size in bytes the producer must allocate.
+    pub size_bytes: usize,
+    /// Minimum number of buffers the pool should hold so the consumer can
+    /// retain references without starving the producer.
+    pub min_buffers: usize,
+    /// Required byte alignment of each buffer (`1` = no constraint). Hardware
+    /// consumers (DMA, GPU upload) commonly need 64- or 256-byte alignment.
+    pub align: usize,
+    /// Memory domain the consumer wants the buffers allocated in.
+    pub domain: MemoryDomainKind,
+}
+
+impl Default for AllocationParams {
+    fn default() -> Self {
+        Self {
+            size_bytes: 0,
+            min_buffers: 1,
+            align: 1,
+            domain: MemoryDomainKind::System,
+        }
+    }
+}
+
+impl AllocationParams {
+    /// A System-memory proposal of `size_bytes` × `min_buffers`, no alignment
+    /// constraint.
+    pub const fn system(size_bytes: usize, min_buffers: usize) -> Self {
+        Self {
+            size_bytes,
+            min_buffers,
+            align: 1,
+            domain: MemoryDomainKind::System,
+        }
+    }
+
+    /// Fold an upstream element's own requirement into this (downstream)
+    /// proposal: the larger size, buffer count, and alignment win. `self` is
+    /// the consumer-most proposal and dictates the memory `domain`.
+    pub fn merge(self, upstream: Self) -> Self {
+        Self {
+            size_bytes: self.size_bytes.max(upstream.size_bytes),
+            min_buffers: self.min_buffers.max(upstream.min_buffers),
+            align: self.align.max(upstream.align),
+            domain: self.domain,
+        }
+    }
+}
+
 /// One element's contribution to a path's latency, plus the aggregate of a
 /// whole path. Mirrors GStreamer's `(live, min, max)` latency triple.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +192,30 @@ mod tests {
             LatencyReport::buffered(3, None),
         ]);
         assert!(agg.live);
+    }
+
+    #[test]
+    fn alloc_merge_takes_most_demanding() {
+        let downstream = AllocationParams {
+            size_bytes: 1024,
+            min_buffers: 4,
+            align: 64,
+            domain: MemoryDomainKind::DmaBuf,
+        };
+        let upstream = AllocationParams::system(4096, 2);
+        let merged = downstream.merge(upstream);
+        assert_eq!(merged.size_bytes, 4096, "larger size wins");
+        assert_eq!(merged.min_buffers, 4, "larger buffer count wins");
+        assert_eq!(merged.align, 64, "stricter alignment wins");
+        assert_eq!(merged.domain, MemoryDomainKind::DmaBuf, "consumer domain dictates");
+    }
+
+    #[test]
+    fn alloc_system_constructor_defaults() {
+        let p = AllocationParams::system(512, 3);
+        assert_eq!(p.align, 1);
+        assert_eq!(p.domain, MemoryDomainKind::System);
+        assert_eq!((p.size_bytes, p.min_buffers), (512, 3));
     }
 
     #[test]

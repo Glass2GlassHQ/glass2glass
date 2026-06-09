@@ -11,6 +11,30 @@ pub enum MemoryDomain {
     WebGPUBuffer(OwnedWebGPUBuffer),
 }
 
+/// The memory domain of a [`MemoryDomain`] without its payload. Used by the
+/// allocation query (M12) so a consumer can name the kind of memory it wants
+/// allocated without holding a buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MemoryDomainKind {
+    #[default]
+    System,
+    DmaBuf,
+    VulkanTexture,
+    WebGPUBuffer,
+}
+
+impl MemoryDomain {
+    /// The payload-free discriminant of this domain.
+    pub fn kind(&self) -> MemoryDomainKind {
+        match self {
+            MemoryDomain::System(_) => MemoryDomainKind::System,
+            MemoryDomain::DmaBuf(_) => MemoryDomainKind::DmaBuf,
+            MemoryDomain::VulkanTexture(_) => MemoryDomainKind::VulkanTexture,
+            MemoryDomain::WebGPUBuffer(_) => MemoryDomainKind::WebGPUBuffer,
+        }
+    }
+}
+
 /// CPU-memory slice. The backing buffer may be a freshly-allocated `Box<[u8]>`
 /// (`from_boxed`) or a pool-recycled buffer (`from_pool`). Dropping the
 /// `SystemSlice` releases the underlying storage — in the pooled case, the

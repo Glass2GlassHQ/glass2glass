@@ -42,8 +42,10 @@ pub use element::{
 pub use error::{G2gError, HardwareError};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use link::LinkPolicy;
-pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice};
-pub use query::LatencyReport;
+pub use memory::{
+    MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice,
+};
+pub use query::{AllocationParams, LatencyReport};
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};

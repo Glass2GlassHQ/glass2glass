@@ -218,12 +218,14 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count];
-    // Fan-in latency aggregation across N inputs is deferred (M12 covers the
-    // linear path); report ZERO rather than a misleading partial value.
+    // Fan-in latency / allocation aggregation across N inputs is deferred
+    // (M12 covers the linear path); report ZERO / None rather than a
+    // misleading partial value.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
+        allocation: None,
     })
 }
 
@@ -389,11 +391,13 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count + 1];
-    // Fan-in latency aggregation across N inputs is deferred (M12 covers the
-    // linear path); report ZERO rather than a misleading partial value.
+    // Fan-in latency / allocation aggregation across N inputs is deferred
+    // (M12 covers the linear path); report ZERO / None rather than a
+    // misleading partial value.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
+        allocation: None,
     })
 }

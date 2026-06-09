@@ -5,19 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
-### M12: Live-source surface (latency query)
-- `LatencyReport { live, min_ns, max_ns }` + `query` module: GStreamer-style
-  latency triple with `combine`/`aggregate` (min and max sum along the path,
-  unbounded `max_ns = None` is infectious, liveness sticky) and
+### M12: Live-source surface (latency + allocation queries)
+- Latency query: `LatencyReport { live, min_ns, max_ns }` + `query` module,
+  GStreamer-style latency triple with `combine`/`aggregate` (min and max sum
+  along the path, unbounded `max_ns = None` is infectious, liveness sticky) and
   `is_unsatisfiable`. `ZERO` contributes `max_ns = Some(0)` (non-buffering),
-  distinct from `None` (unbounded buffering).
-- `AsyncElement::latency()` / `SourceLoop::latency()` default methods (return
-  `ZERO`); live sources and buffering transforms override.
+  distinct from `None` (unbounded buffering). `AsyncElement::latency()` /
+  `SourceLoop::latency()` default methods (return `ZERO`); live sources and
+  buffering transforms override.
+- Allocation query: `AllocationParams { size_bytes, min_buffers, align, domain }`
+  + `MemoryDomainKind` (and `MemoryDomain::kind()`). `AsyncElement::propose_allocation`
+  / `configure_allocation` and `SourceLoop::configure_allocation` default
+  methods let a consumer propose a buffer pool that its producer allocates into
+  (zero-copy handoff). `AllocationParams::merge` folds an upstream element's own
+  requirement into a downstream proposal (most-demanding size/count/alignment
+  wins; consumer dictates domain).
 - Linear runners (`run_simple_pipeline`, `run_source_transform_sink`) fold the
-  configured chain into the new `RunStats::latency` after negotiation. Fan-in /
-  fan-out runners report `ZERO` (topology aggregation deferred).
-- Remaining M12 pieces: allocation query (downstream-proposed pools) and live
-  clock distribution (`AsyncClock` provider election).
+  configured chain into the new `RunStats::latency` and resolve the allocation
+  query into `RunStats::allocation` after negotiation. Fan-in / fan-out runners
+  report `ZERO` / `None` (topology aggregation deferred).
+- Remaining M12 piece: live clock distribution (`AsyncClock` provider election).
 
 ### M13: Windows hardware decode (Media Foundation)
 - `MfDecode` element (`mf-decode` feature, Windows-only): wraps the Media

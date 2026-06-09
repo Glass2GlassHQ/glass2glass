@@ -9,7 +9,7 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
-use crate::query::LatencyReport;
+use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
 
@@ -72,6 +72,13 @@ pub trait SourceLoop: ElementBound {
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
     }
+
+    /// Receive the downstream peer's allocation proposal (M12) so the source
+    /// can allocate its output `BufferPool` from compatible parameters
+    /// (size, count, alignment, domain). Default: ignore and allocate the
+    /// source's own way. The proposal is advisory; a source that cannot honor
+    /// it (eg cannot produce the requested domain) falls back silently.
+    fn configure_allocation(&mut self, _params: &AllocationParams) {}
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +89,10 @@ pub struct RunStats {
     /// negotiation. Linear runners fold every element's `latency()`; fan-in /
     /// fan-out runners leave this at `ZERO` (topology aggregation deferred).
     pub latency: LatencyReport,
+    /// The allocation proposal (M12) handed to the head producer (the source),
+    /// negotiated from downstream. `None` when no downstream element proposed
+    /// one; always `None` for fan-in / fan-out runners (deferred).
+    pub allocation: Option<AllocationParams>,
 }
 
 /// Drives a `source → sink` pipeline over a single bounded link.
@@ -102,7 +113,7 @@ where
 {
     let mut proposal = source.intercept_caps()?;
     let mut attempts = 0u32;
-    loop {
+    let negotiated_caps = loop {
         attempts += 1;
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
@@ -119,16 +130,23 @@ where
             }
         }
         match sink.configure_pipeline(&fixated)? {
-            ConfigureOutcome::Accepted => break,
+            ConfigureOutcome::Accepted => break fixated,
             ConfigureOutcome::ReFixate(counter) => {
                 proposal = counter;
                 continue;
             }
         }
-    }
+    };
 
     // M12 latency query: fold the configured chain source → sink.
     let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
+
+    // M12 allocation query: the sink proposes buffers; the source allocates
+    // its output pool to match (zero-copy handoff when it can honor them).
+    let allocation = sink.propose_allocation(&negotiated_caps);
+    if let Some(p) = &allocation {
+        source.configure_allocation(p);
+    }
 
     let (link_tx, link_rx) = link(link_capacity);
 
@@ -187,7 +205,7 @@ where
     let emitted = src_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency })
+    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency, allocation })
 }
 
 /// Drives a `source → fan-out element → N sinks` pipeline (M9 fan-out core).
@@ -319,12 +337,14 @@ where
     // Arm order: [source, router, sink0, sink1, ...].
     let emitted = counts[0];
     let consumed: u64 = counts[2..].iter().copied().sum();
-    // Fan-out latency aggregation across N branches is deferred (M12 covers
-    // the linear path); report ZERO rather than a misleading partial value.
+    // Fan-out latency / allocation aggregation across N branches is deferred
+    // (M12 covers the linear path); report ZERO / None rather than a
+    // misleading partial value.
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
         latency: LatencyReport::ZERO,
+        allocation: None,
     })
 }
 
@@ -366,7 +386,7 @@ where
     // intercept with that counter as the new starting proposal.
     let mut start_proposal = source.intercept_caps()?;
     let mut attempts = 0u32;
-    loop {
+    let negotiated_caps = loop {
         attempts += 1;
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
@@ -393,9 +413,9 @@ where
         }
         match refixate {
             Some(counter) => start_proposal = counter,
-            None => break,
+            None => break fixated,
         }
-    }
+    };
 
     // M12 latency query: fold the configured chain source → transform → sink.
     let latency = LatencyReport::aggregate([
@@ -403,6 +423,17 @@ where
         AsyncElement::latency(transform),
         AsyncElement::latency(sink),
     ]);
+
+    // M12 allocation query: each producer asks its downstream peer what
+    // buffers to allocate. Resolve sink → transform first so the transform can
+    // fold the sink's requirement into the proposal it answers to the source.
+    if let Some(p) = sink.propose_allocation(&negotiated_caps) {
+        AsyncElement::configure_allocation(transform, &p);
+    }
+    let allocation = transform.propose_allocation(&negotiated_caps);
+    if let Some(p) = &allocation {
+        source.configure_allocation(p);
+    }
 
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
@@ -487,5 +518,5 @@ where
     tx_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency })
+    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency, allocation })
 }

@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use crate::caps::Caps;
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
-use crate::query::LatencyReport;
+use crate::query::{AllocationParams, LatencyReport};
 
 #[cfg(feature = "multi-thread")]
 pub trait ElementBound: Send {}
@@ -88,6 +88,21 @@ pub trait AsyncElement: ElementBound {
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
     }
+
+    /// Answer the upstream peer's allocation query (M12): the buffer size,
+    /// count, alignment, and memory domain this element needs allocated so a
+    /// pool can be handed over without a copy. Default: no preference
+    /// (`None`). A transform that has already received its own downstream
+    /// proposal via [`configure_allocation`](Self::configure_allocation) can
+    /// fold it in with [`AllocationParams::merge`].
+    fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+        None
+    }
+
+    /// Receive the downstream peer's allocation proposal (M12) so this element
+    /// can allocate its output buffers from a compatible pool. Default:
+    /// ignore and allocate however the element sees fit.
+    fn configure_allocation(&mut self, _params: &AllocationParams) {}
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.
