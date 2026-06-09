@@ -453,7 +453,7 @@ Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at
 | **M9** | Fan-out: `Router`, `Gate`, `Merger` primitives; `BranchSlot` with all three `SwapPolicy` variants; multi-output element trait variant. |
 | **M10** | Fan-in: muxer trait variant; EOS aggregation across N inputs; per-input caps negotiation. |
 | **M11** | Application control surface: pipeline `Bus` for async messages; `LinkInterceptor` probes; `PipelinePacket::Flush` for seek. |
-| **M12** | Live-source surface: latency aggregation query; allocation query (downstream-proposed pools); live clock distribution. |
+| **M12** | Live-source surface: latency aggregation query (done — `LatencyReport`, folded into `RunStats::latency`); allocation query (downstream-proposed pools, pending); live clock distribution (pending). |
 
 After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all.
 

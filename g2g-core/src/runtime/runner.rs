@@ -9,6 +9,7 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
+use crate::query::LatencyReport;
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
 
@@ -63,12 +64,24 @@ pub trait SourceLoop: ElementBound {
     fn reconfigure(&mut self, _request: Reconfigure) -> Result<Caps, G2gError> {
         Err(G2gError::FixationFailed)
     }
+
+    /// This source's latency contribution to the pipeline latency query (M12).
+    /// Live capture sources (cameras, RTSP) override this to report `live`
+    /// with their capture interval as `min_ns`; the default is zero, non-live
+    /// (eg a file or test-pattern source that can produce data on demand).
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::ZERO
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RunStats {
     pub frames_emitted: u64,
     pub frames_consumed: u64,
+    /// Aggregated source-to-sink latency (M12), computed once after
+    /// negotiation. Linear runners fold every element's `latency()`; fan-in /
+    /// fan-out runners leave this at `ZERO` (topology aggregation deferred).
+    pub latency: LatencyReport,
 }
 
 /// Drives a `source → sink` pipeline over a single bounded link.
@@ -113,6 +126,9 @@ where
             }
         }
     }
+
+    // M12 latency query: fold the configured chain source → sink.
+    let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
 
     let (link_tx, link_rx) = link(link_capacity);
 
@@ -171,7 +187,7 @@ where
     let emitted = src_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency })
 }
 
 /// Drives a `source → fan-out element → N sinks` pipeline (M9 fan-out core).
@@ -303,7 +319,13 @@ where
     // Arm order: [source, router, sink0, sink1, ...].
     let emitted = counts[0];
     let consumed: u64 = counts[2..].iter().copied().sum();
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+    // Fan-out latency aggregation across N branches is deferred (M12 covers
+    // the linear path); report ZERO rather than a misleading partial value.
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency: LatencyReport::ZERO,
+    })
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.
@@ -374,6 +396,13 @@ where
             None => break,
         }
     }
+
+    // M12 latency query: fold the configured chain source → transform → sink.
+    let latency = LatencyReport::aggregate([
+        source.latency(),
+        AsyncElement::latency(transform),
+        AsyncElement::latency(sink),
+    ]);
 
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
@@ -458,5 +487,5 @@ where
     tx_res?;
     let consumed = snk_res?;
 
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed, latency })
 }

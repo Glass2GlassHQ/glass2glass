@@ -20,6 +20,7 @@ pub mod frame;
 pub mod link;
 pub mod memory;
 pub mod pool;
+pub mod query;
 
 #[cfg(feature = "runtime")]
 pub mod bus;
@@ -42,6 +43,7 @@ pub use error::{G2gError, HardwareError};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use link::LinkPolicy;
 pub use memory::{MemoryDomain, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice};
+pub use query::LatencyReport;
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};

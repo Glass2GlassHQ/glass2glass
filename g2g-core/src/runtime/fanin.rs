@@ -25,6 +25,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
+use crate::query::LatencyReport;
 use crate::runtime::channel::{bounded, link, SenderSink};
 use crate::runtime::join::join_all;
 use crate::runtime::runner::{NullSink, RunStats, SourceLoop};
@@ -217,7 +218,13 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count];
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+    // Fan-in latency aggregation across N inputs is deferred (M12 covers the
+    // linear path); report ZERO rather than a misleading partial value.
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency: LatencyReport::ZERO,
+    })
 }
 
 /// Drives `N sources → muxer → 1 sink` (M10 true fan-in). Unlike
@@ -382,5 +389,11 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[2 * input_count + 1];
-    Ok(RunStats { frames_emitted: emitted, frames_consumed: consumed })
+    // Fan-in latency aggregation across N inputs is deferred (M12 covers the
+    // linear path); report ZERO rather than a misleading partial value.
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency: LatencyReport::ZERO,
+    })
 }

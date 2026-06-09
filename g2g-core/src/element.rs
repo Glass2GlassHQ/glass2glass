@@ -6,6 +6,7 @@ use alloc::boxed::Box;
 use crate::caps::Caps;
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
+use crate::query::LatencyReport;
 
 #[cfg(feature = "multi-thread")]
 pub trait ElementBound: Send {}
@@ -79,6 +80,14 @@ pub trait AsyncElement: ElementBound {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a>;
+
+    /// This element's contribution to the pipeline latency query (M12).
+    /// Default: zero, non-live. Transforms that buffer (jitter buffers,
+    /// reorder queues) and live sources override this; the linear runners
+    /// fold the chain into `RunStats::latency`.
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::ZERO
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.
