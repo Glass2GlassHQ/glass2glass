@@ -13,7 +13,8 @@ use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
-    coordinator, negotiate_source_transform_sink, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+    coordinator, negotiate_source_transform_sink, realloc_local, CoordinatorEvent,
+    MAX_FIXATION_ATTEMPTS,
 };
 use crate::runtime::join::Join2;
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
@@ -277,6 +278,9 @@ where
                     // the new caps never reach a stale element.
                     match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
+                            // M18 α: element-local re-allocation under the
+                            // new caps before the sink sees the packet.
+                            realloc_local(sink, &sink_caps);
                             sink.process(
                                 PipelinePacket::CapsChanged(sink_caps),
                                 &mut null,
@@ -583,6 +587,9 @@ where
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
                     match transform.configure_pipeline(&new_caps)? {
                         ConfigureOutcome::Accepted => {
+                            // M18 α: element-local re-allocation under the
+                            // new caps before forwarding the notification.
+                            realloc_local(transform, &new_caps);
                             transform
                                 .process(
                                     PipelinePacket::CapsChanged(new_caps),
@@ -637,6 +644,9 @@ where
                     };
                     match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
+                            // M18 α: element-local re-allocation under the
+                            // new caps before the sink sees the packet.
+                            realloc_local(sink, &sink_caps);
                             // M18 β: report the applied mid-stream caps
                             // change to the coordinator before forwarding
                             // it into the sink. Observe-only today.

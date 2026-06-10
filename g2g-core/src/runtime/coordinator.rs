@@ -185,3 +185,27 @@ where
     };
     Ok(LinearNegotiation { source_link, sink_link })
 }
+
+/// M18 α — element-local re-allocation on a mid-stream caps change.
+///
+/// When a `CapsChanged` is applied to an element mid-stream, the element
+/// re-derives its own allocation params from the new caps
+/// (`propose_allocation`) and stores them for its next-frame allocation
+/// (`configure_allocation`). This is the cheap, element-local phase of
+/// the re-cascade (DESIGN-M16-workaround3-reconfigure.md §9.4 α): a sink
+/// resizes its own pool, a decoder re-derives its scratch buffer. There
+/// is deliberately **no** cross-element propagation here, that is β; the
+/// element both proposes and configures itself rather than answering a
+/// peer.
+///
+/// Safe against double allocation by the per-`Frame.caps` invariant
+/// (§5): in-flight old-caps frames already hold old-pool buffers; only
+/// frames after this point key the new params.
+pub(crate) fn realloc_local<E>(element: &mut E, caps: &Caps)
+where
+    E: AsyncElement,
+{
+    if let Some(params) = element.propose_allocation(caps) {
+        element.configure_allocation(&params);
+    }
+}

@@ -7,6 +7,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 1 (Session D): α element-local re-allocation.** First
+  observable M18 behavior change. New `coordinator::realloc_local`: when
+  a mid-stream `CapsChanged` is applied to an element, the runner
+  re-derives that element's own allocation params from the new caps
+  (`propose_allocation`) and stores them (`configure_allocation`) before
+  the element processes the notification. Wired at the three
+  statically-typed mid-stream apply sites: `run_simple_pipeline` (sink),
+  `run_source_transform_sink` (transform and sink). No cross-element
+  cascade, that is β (Session E). Element-local only, so safe under the
+  per-`Frame.caps` invariant: in-flight old-caps frames keep their
+  old-pool buffers. Previously M12 allocation ran solely at startup, and
+  in a 3-element chain the sink's `configure_allocation` was never called
+  at all (its proposal feeds the transform); now a mid-stream geometry
+  change re-allocates it. Fan-out branch sinks are excluded for now:
+  `DynAsyncElement` does not expose the allocation hooks, so per-branch α
+  lands with the FO-2 dyn-trait extension. New integration test
+  `m18_alpha_realloc.rs` (one re-allocation sized from the new caps on a
+  mid-stream change; none without). no_std core build, core suite, and
+  the std plugins suite all green.
+
 - **Item 1 (Session C): startup negotiation relocated to the
   coordinator.** Pure refactor, no behavior change. The
   `source → transform → sink` startup negotiation (the `solve_linear` +
