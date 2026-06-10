@@ -311,7 +311,29 @@ solver actively in use, (6) is opportunistic add.
 
 Code starts at step 1 of §8 in a fresh session.
 
-## 11. Adjacent design debt: codec vs raw format split
+## 11. Implementation status (2026-06-10)
+
+§8 migration plan is mostly executed. Map of intent vs reality:
+
+| §8 step | Status | Notes |
+|---|---|---|
+| 1. `CapsSet` algebra | ✅ done | `g2g-core::caps`. `one`, `from_alternatives`, `intersect` (preserves self's order, dedupes), `union`, `fixate` (picks first fixable alt). |
+| 2. `FormatElement` + `CapsConstraint` | ✅ done | `g2g-core::format_element`. Plus three migration-bridge variants: `LegacySource`, `LegacyTransform`, `LegacySink`. Plus two wildcards added during migration: `AcceptsAny` (sink), `IdentityAny` (transform). `FormatElement::configure_link` defined but unused by the runner — runner still calls `AsyncElement::configure_pipeline` with per-link caps. |
+| 3. Linear solver | ✅ done | `g2g-core::runtime::solver::solve_linear`. Three dispatch paths: all-native arc consistency (forward + backward sweep to fixed point), all-legacy intercept-only forward cascade (bit-compatible with pre-M16), mixed forward cascade. `NegotiationFailure` enum reports `EmptyLink` / `EndpointShapeMismatch` / `Unfixable` / `Degenerate` / `Cyclic` (reserved). |
+| 4. Runner refactor | ✅ done | `run_simple_pipeline`, `run_source_transform_sink`, `run_source_fanout` all call `solve_linear`. `run_muxer_sink` solves each source↔mux-input pair. `run_fanin_sink` left direct (per-source self-fixation, no chain). Per-link configure: `run_source_transform_sink` extracts `src_caps = links[0]` / `sink_caps = links[1]` and passes each element its side. `ReFixate` retry preserved with `LegacySource(counter)` fallback. |
+| 5. Migrate elements | partial | Migrated: `FakeSink`/`syncsink` (`AcceptsAny`), `VideoTestSrc` (`Produces`), `H264Parse` (`Identity(H264)`), `IdentityTransform` (`IdentityAny`), `FfmpegH264Dec` (`DerivedOutput`). Still legacy: `RtspSrc`, `mfdecode`, `vaapidec`, `WaylandSink`, `KmsSink`, `mux`. Workaround #2 (deferred-configure on sinks) is no longer load-bearing for chains containing a native decoder; `WaylandSink`/`KmsSink` also now tolerate mid-stream dim changes (5j) by rebuilding instead of refusing. Workarounds #1 (RtspSrc placeholder dims) and #3 (decoder swallows input CapsChanged) still in place. |
+| 6. `CapsFilter` + `ACCEPT_CAPS` | not started | Trivial after migration completes. |
+
+**Deviations from the §8 plan:**
+- `FormatElement::configure_link(input, output)` is unused. The runner instead calls `AsyncElement::configure_pipeline` with the appropriate per-link `Caps` (input side for source/transform, sink-input side for sink). This avoids forcing every migrated element to implement a new trait method — they inherit `configure_pipeline` from `AsyncElement`. If a future boundary transform needs *explicit* per-side setup (e.g. allocating input and output pools differently), `configure_link` becomes the natural escape hatch.
+- The §5 design assumed every native chain hits arc consistency. In practice, partially-migrated chains hit the mixed-cascade path which is forward-only (no backward propagation). Arc consistency only activates when every element is native. This is fine for migration — the cost is that arc-consistency benefits (e.g. an `Identity` middle filtering against the downstream sink) don't apply until the whole chain migrates.
+- `Cyclic` failure variant is on `NegotiationFailure` but never produced by `solve_linear`. Reserved for the eventual non-linear graph solver.
+- Migration revealed two wildcards the §3-4 design didn't anticipate: `AcceptsAny` (debug/probe sinks like `FakeSink`) and `IdentityAny` (pass-through transforms like `IdentityTransform`). These accept "anything upstream produces" without a concrete `CapsSet` — they're a natural shape that `Accepts(CapsSet)` / `Identity(CapsSet)` can't express because `CapsSet` requires concrete alternatives, not a wildcard.
+- §8 step 5b implies `AsyncElement` gets a default `FormatElement` impl deriving constraints from `intercept_caps`. In practice this would be a blanket impl, which then prevents elements from overriding `FormatElement` (Rust orphan rules). What landed: `AsyncElement` gains `caps_constraint_as_sink` / `caps_constraint_as_transform` default methods returning the legacy bridge; migrated elements override these directly. `FormatElement` the trait is documented as the future direction but isn't on the runner's hot path.
+
+**Visual verification still owed.** CI can't exercise `rtsp → ffmpegdec → wayland/kms` (sandbox blocks RTSP, no Wayland session in the test env). The mixed-chain per-link path is structurally verified by `format_changing_transform_receives_input_side_caps` in `pipeline_smoke.rs`, but the production visual chain — including the new "16×16 placeholder surface → real-dim rebuild" sequence — needs a manual e2e run.
+
+## 12. Adjacent design debt: codec vs raw format split
 
 Acknowledged 2026-06-10 during step 5g. M16 builds on top of an
 existing model smell: `VideoFormat` in `g2g-core/src/caps.rs` mixes
