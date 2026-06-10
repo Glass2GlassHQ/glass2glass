@@ -190,6 +190,11 @@ pub trait DynAsyncElement: ElementBound {
     ) -> core::pin::Pin<
         alloc::boxed::Box<dyn Future<Output = Result<(), G2gError>> + 'a>,
     >;
+
+    /// Dyn-safe mirror of [`AsyncElement::caps_constraint_as_sink`], so a
+    /// `Box`-erased branch sink (fan-out Phase C FO-2) can be re-solved
+    /// against its declared constraint on a mid-stream `CapsChanged`.
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_>;
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
@@ -216,5 +221,9 @@ impl<T: AsyncElement> DynAsyncElement for T {
         out: &'a mut dyn OutputSink,
     ) -> BoxFuture<'a, Result<(), G2gError>> {
         Box::pin(AsyncElement::process(self, packet, out))
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        AsyncElement::caps_constraint_as_sink(self)
     }
 }

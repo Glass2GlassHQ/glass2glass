@@ -98,11 +98,14 @@ pub fn coordinator(capacity: usize) -> (Coordinator, CoordinatorHandle) {
 /// returns two links; this names them so the per-link structure the β
 /// re-cascade will reconfigure is explicit at the call site.
 #[derive(Debug, Clone)]
-pub struct LinearNegotiation {
-    /// Caps on the source-output / transform-input link.
-    pub source_link: Caps,
+pub(crate) struct LinearNegotiation {
+    /// Caps on the source-output / transform-input link. Read by β's
+    /// re-cascade (Session E); retained now to name the per-link
+    /// structure the negotiation produces.
+    #[allow(dead_code)]
+    pub(crate) source_link: Caps,
     /// Caps on the transform-output / sink-input link.
-    pub sink_link: Caps,
+    pub(crate) sink_link: Caps,
 }
 
 /// M18 Session C: startup negotiation for a `source → transform → sink`
@@ -119,7 +122,7 @@ pub struct LinearNegotiation {
 /// cascade and fixates the final caps. `ReFixate` retry stays here (the
 /// solver doesn't model counter-proposals): on each retry the source's
 /// `LegacySource` seed is replaced by the counter and the solver is re-run.
-pub fn negotiate_source_transform_sink<Src, Tx, Snk>(
+pub(crate) fn negotiate_source_transform_sink<Src, Tx, Snk>(
     source: &mut Src,
     transform: &mut Tx,
     sink: &mut Snk,

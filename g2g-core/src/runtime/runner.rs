@@ -156,13 +156,34 @@ fn re_solve_downstream_sink<S>(new_caps: &Caps, sink: &S) -> Result<Caps, Negoti
 where
     S: AsyncElement + ?Sized,
 {
+    re_solve_against_sink_constraint(new_caps, &sink.caps_constraint_as_sink())
+}
+
+/// Shared core of the downstream re-solve: solve `LegacySource(new_caps)`
+/// against the sink's already-evaluated constraint. Factored out so the
+/// generic ([`re_solve_downstream_sink`]) and `Box`-erased
+/// ([`re_solve_downstream_dyn_sink`]) callers don't duplicate the
+/// `Unfixable`-is-not-a-failure handling.
+fn re_solve_against_sink_constraint(
+    new_caps: &Caps,
+    sink_c: &CapsConstraint<'_>,
+) -> Result<Caps, NegotiationFailure> {
     let src_c = CapsConstraint::LegacySource(new_caps.clone());
-    let sink_c = sink.caps_constraint_as_sink();
-    match solve_linear(&[&src_c, &sink_c]) {
+    match solve_linear(&[&src_c, sink_c]) {
         Ok(links) => links.into_iter().last().ok_or(NegotiationFailure::Degenerate),
         Err(NegotiationFailure::Unfixable { .. }) => Ok(new_caps.clone()),
         Err(other) => Err(other),
     }
+}
+
+/// Fan-out Phase C FO-2: the [`DynAsyncElement`] counterpart of
+/// [`re_solve_downstream_sink`], for `Box`-erased branch sinks.
+#[cfg(feature = "std")]
+fn re_solve_downstream_dyn_sink(
+    new_caps: &Caps,
+    sink: &dyn DynAsyncElement,
+) -> Result<Caps, NegotiationFailure> {
+    re_solve_against_sink_constraint(new_caps, &sink.caps_constraint_as_sink())
 }
 
 /// Drives a `source → sink` pipeline over a single bounded link.
@@ -432,10 +453,22 @@ where
                         return Ok::<u64, G2gError>(consumed);
                     }
                     Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        match sink.configure_pipeline(&new_caps)? {
+                        // M18 Phase C FO-2: per-branch downstream re-solve
+                        // (Phase B applied per branch). Each branch runs in
+                        // its own arm, so the broadcast `CapsChanged` is
+                        // re-solved on every branch concurrently. FO-1
+                        // strict default: a branch whose declared
+                        // `caps_constraint_as_sink()` rejects the new caps
+                        // fails the fan-out loud (matches GStreamer's
+                        // `tee`-with-rejecting-downstream). `AllowBranchDrop`
+                        // graceful degradation is a future opt-in.
+                        let branch_caps =
+                            re_solve_downstream_dyn_sink(&new_caps, &*sink)
+                                .map_err(|_| G2gError::CapsMismatch)?;
+                        match sink.configure_pipeline(&branch_caps)? {
                             ConfigureOutcome::Accepted => {
                                 sink.process(
-                                    PipelinePacket::CapsChanged(new_caps),
+                                    PipelinePacket::CapsChanged(branch_caps),
                                     &mut null,
                                 )
                                 .await?;

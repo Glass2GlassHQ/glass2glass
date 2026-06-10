@@ -7,6 +7,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 3 (Phase C): fan-out per-branch re-solve (FO-2) with FO-1
+  strict default.** A mid-stream `CapsChanged` broadcast across the
+  fan-out is now re-solved per branch against that branch's declared
+  `caps_constraint_as_sink()` before `configure_pipeline` (Phase B applied
+  per branch), closing the gap where the fan-out runner skipped the solver
+  gate. Because each branch runs in its own arm, the re-solves are
+  concurrent for free. FO-1 strict default: a branch whose constraint
+  rejects the new caps fails the whole fan-out loud (`CapsMismatch`),
+  matching GStreamer's `tee`-with-rejecting-downstream; the
+  `AllowBranchDrop` graceful-degradation policy stays a future opt-in.
+  `DynAsyncElement` gains a dyn-safe `caps_constraint_as_sink` (blanket
+  impl forwards to `AsyncElement`) so `Box`-erased branch sinks can be
+  re-solved; `re_solve_downstream_sink` is refactored to share a
+  `re_solve_against_sink_constraint` core with the new
+  `re_solve_downstream_dyn_sink`. New integration test
+  `m18_fanout_phase_c.rs`: FO-2 accept (a geometry change every branch
+  admits reaches each branch's `process`) and FO-1 strict reject (one
+  RGBA-only branch fails the fan-out on an NV12 switch, and never sees the
+  rejected caps). Fan-out branch α (element-local re-allocation) still
+  pending: it needs the allocation hooks on `DynAsyncElement` too. no_std
+  core build, core suite, and the std plugins suite all green.
+
 - **Item 2 (Phase C): muxer per-input re-solve (MX-1) + input-derived
   output re-emit (MX-2).** A per-input mid-stream `CapsChanged` is now
   re-solved against the muxer's per-input constraint and applied to that
