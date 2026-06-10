@@ -28,6 +28,12 @@ vaapi = ["std", "dep:cros-codecs"]
 ffmpeg = ["std", "dep:ffmpeg-next"]
 # Embassy single-core executor support. Implementation deferred to a later milestone.
 embassy = []
+# KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
+# active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
+# implies std. Requires DRM master (drop to tty or run with a DRM lease);
+# usually conflicts with a running Wayland/X11 compositor. NV12 input only —
+# pair with `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`.
+kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -51,6 +57,8 @@ windows = { version = "0.62", optional = true, features = [
 # to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).
 [target.'cfg(target_os = "linux")'.dependencies]
 cros-codecs = { version = "0.0.6", optional = true, default-features = false, features = ["vaapi"] }
+drm = { version = "0.15", optional = true }
+drm-fourcc = { version = "2", optional = true }
 # ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
 # Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
 # it (the underlying pkg-config probe doesn't fit those targets).

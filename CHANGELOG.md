@@ -34,6 +34,27 @@ Nothing is published yet; all versions are `0.1.0`.
 - M12 complete: with M8–M12 done, `g2g` reaches dynamic-pipeline feature parity
   with GStreamer (per DESIGN.md §4.10) while keeping the static typed layer.
 
+### M14: KMS/DRM display sink (Linux, NV12)
+- `KmsSink` element (`kms-sink` feature, Linux-only): primary-plane scanout
+  of NV12 `DataFrame`s on the first connected connector + CRTC of the
+  configured DRM device (defaults to `/dev/dri/card0`). Two-buffer dumb-
+  buffer pool; first frame goes through `set_crtc`, subsequent frames page-
+  flip and the next submission blocks on the prior flip's `PageFlip` event
+  so the buffer being overwritten is off scanout (tearing-free).
+- `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)` (M14 prerequisite,
+  separate commit) interleaves the U/V planes after decode without swscale;
+  same total byte length as I420. I420 remains the default.
+- New optional, target-gated deps: `drm` 0.15 + `drm-fourcc` 2 under
+  `[target.'cfg(target_os = "linux")'.dependencies]`; `kms-sink` implies
+  `std`. No `unsafe` and no GBM dependency — pure dumb-buffer path.
+- Constraints (v1): NV12 only, fixed input dims (mid-stream geometry change
+  not supported), no letterboxing/scaling (buffer scans out at native dims;
+  smaller-than-mode video shows at origin with stale framebuffer around it),
+  requires DRM master (tty or DRM lease; a running compositor will block).
+- Deferred (v2): overlay-plane path with src/dst rectangles for proper
+  letterboxing; async page flips for lower latency; Wayland sink as a
+  desktop-dev convenience using the same NV12 input contract.
+
 ### M13: End-to-end RTSP → ffmpeg decode (Linux software path)
 - `RtspSrc::intercept_caps` now advertises fixate-friendly `Dim::Range` /
   `Rate::Range` instead of `Any`. `Caps::fixate()` rejects `Any` and aborted

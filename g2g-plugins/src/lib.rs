@@ -42,3 +42,8 @@ pub mod vaapidec;
 // stays inside this module and does not change the public AsyncElement shape.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegdec;
+
+// KMS/DRM display sink for NV12 frames. Linux-only (drm + drm-fourcc deps are
+// target-gated). Requires DRM master at runtime; see module docs.
+#[cfg(all(target_os = "linux", feature = "kms-sink"))]
+pub mod kmssink;
