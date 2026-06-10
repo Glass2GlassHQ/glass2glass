@@ -7,6 +7,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 1 (Session C): startup negotiation relocated to the
+  coordinator.** Pure refactor, no behavior change. The
+  `source → transform → sink` startup negotiation (the `solve_linear` +
+  per-link `configure_pipeline` cascade with bounded `ReFixate` retry)
+  moves verbatim out of `run_source_transform_sink` into
+  `coordinator::negotiate_source_transform_sink`, returning a
+  `LinearNegotiation { source_link, sink_link }` that names the per-link
+  caps the β re-cascade will reconfigure. `MAX_FIXATION_ATTEMPTS` moves
+  with it (still used by `run_simple_pipeline` via import). The runner now
+  calls the routine and uses `sink_link` exactly where the loop produced
+  `negotiated_caps`. Verified by the unchanged M8/M16/M18/pipeline_smoke
+  integration suites (all green) plus the no_std core build; the next
+  session (D) adds α element-local re-allocation hooks, the first
+  observable M18 behavior change.
+
 - **Item 1 (Session B): coordinator control-channel scaffolding.** First
   step of the allocation re-cascade β restructure
   (DESIGN-M16-workaround3-reconfigure.md §9.4 β; R2 single-task

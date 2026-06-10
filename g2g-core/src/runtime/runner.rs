@@ -12,7 +12,9 @@ use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
-use crate::runtime::coordinator::{coordinator, CoordinatorEvent};
+use crate::runtime::coordinator::{
+    coordinator, negotiate_source_transform_sink, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+};
 use crate::runtime::join::Join2;
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
@@ -24,12 +26,6 @@ use crate::element::DynAsyncElement;
 use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiSenderSink};
 #[cfg(feature = "std")]
 use crate::runtime::join::join_all;
-
-/// Maximum number of Phase 1 + Phase 2 negotiation passes before a setup
-/// gives up with `FixationFailed`. Three is enough for any reasonable
-/// `ReFixate` chain (source → sink → source counter) while still being
-/// a hard backstop against pathologically-counter-proposing elements.
-const MAX_FIXATION_ATTEMPTS: u32 = 3;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
 /// packet-out shape of [`AsyncElement`] does not fit them. A `SourceLoop`
@@ -519,73 +515,13 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    // M16 step 4b: startup negotiation routes through `solve_linear`
-    // via the legacy bridge. The bridge wraps today's `intercept_caps`
-    // / `propose_output_caps` callbacks as `LegacyTransform` /
-    // `LegacySink` constraints; the solver's legacy cascade runs the
-    // forward chain identically to the pre-M16 inline cascade and
-    // fixates the final caps. `ReFixate` retry stays in the runner
-    // (the solver doesn't model counter-proposals) — on each retry the
-    // source's `LegacySource` seed is replaced by the counter and the
-    // solver is re-run.
-    let mut refix_counter: Option<Caps> = None;
-    let mut attempts = 0u32;
-    let negotiated_caps = loop {
-        attempts += 1;
-        if attempts > MAX_FIXATION_ATTEMPTS {
-            return Err(G2gError::FixationFailed);
-        }
-        // Build the constraint chain in a scope so the immutable
-        // borrows of `transform` / `sink` are released before the
-        // `configure_pipeline` calls below take mutable access.
-        let (src_caps, sink_caps) = {
-            // M16 step 5f: honor `SourceLoop::caps_constraint` on the
-            // first attempt; refixate retries fall back to
-            // `LegacySource(counter)` since counter-proposals are a
-            // legacy concept.
-            let src_c = match &refix_counter {
-                Some(c) => CapsConstraint::LegacySource(c.clone()),
-                None => source.caps_constraint()?,
-            };
-            let tx_c = transform.caps_constraint_as_transform();
-            let sink_c = sink.caps_constraint_as_sink();
-            let links = solve_linear(&[&src_c, &tx_c, &sink_c])
-                .map_err(|_| G2gError::CapsMismatch)?;
-            // M16 step 5d: per-link configure. For a 3-element chain
-            // links has length 2: [source-output / transform-input,
-            // transform-output / sink-input]. The transform's
-            // `configure_pipeline` historically receives one caps; we
-            // pass its *input* side, which is what existing decoders
-            // (e.g. `FfmpegH264Dec`) expect.
-            if links.len() != 2 {
-                return Err(G2gError::CapsMismatch);
-            }
-            (links[0].clone(), links[1].clone())
-        };
-
-        let mut refixate: Option<Caps> = None;
-        for outcome in [
-            source.configure_pipeline(&src_caps)?,
-            transform.configure_pipeline(&src_caps)?,
-            sink.configure_pipeline(&sink_caps)?,
-        ] {
-            match outcome {
-                ConfigureOutcome::Accepted => {}
-                ConfigureOutcome::ReFixate(counter) => {
-                    refixate = Some(counter);
-                    break;
-                }
-            }
-        }
-        match refixate {
-            Some(counter) => refix_counter = Some(counter),
-            // M12 allocation flows along the downstream-facing side
-            // (the transform's output = the sink's input), so we
-            // break with `sink_caps` for the propose_allocation calls
-            // below.
-            None => break sink_caps,
-        }
-    };
+    // M18 Session C: the startup negotiation loop (solver + per-link
+    // configure cascade with bounded `ReFixate` retry) is owned by the
+    // coordinator module now, since β reuses the same machinery for the
+    // mid-stream re-cascade. `sink_link` is the downstream-facing caps
+    // (transform output = sink input) that M12 allocation flows along,
+    // so it stands in for the loop's former `negotiated_caps`.
+    let negotiated_caps = negotiate_source_transform_sink(source, transform, sink)?.sink_link;
 
     // M12 latency query: fold the configured chain source → transform → sink.
     let latency = LatencyReport::aggregate([
