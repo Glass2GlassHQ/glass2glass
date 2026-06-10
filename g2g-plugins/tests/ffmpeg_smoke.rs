@@ -22,7 +22,7 @@ use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoFormat};
-use g2g_plugins::ffmpegdec::FfmpegH264Dec;
+use g2g_plugins::ffmpegdec::{FfmpegH264Dec, OutputFormat};
 
 #[derive(Default)]
 struct Collect {
@@ -44,6 +44,16 @@ impl OutputSink for Collect {
 #[tokio::test]
 #[ignore = "requires libav* and a G2G_H264_FIXTURE path"]
 async fn ffmpeg_h264_decodes_fixture() {
+    decode_once(OutputFormat::I420).await;
+}
+
+#[tokio::test]
+#[ignore = "requires libav* and a G2G_H264_FIXTURE path"]
+async fn ffmpeg_h264_decodes_fixture_nv12() {
+    decode_once(OutputFormat::Nv12).await;
+}
+
+async fn decode_once(output: OutputFormat) {
     let Some(path) = std::env::var_os("G2G_H264_FIXTURE") else {
         eprintln!("skipping: set G2G_H264_FIXTURE=/path/to/clip.h264 to run");
         return;
@@ -51,7 +61,7 @@ async fn ffmpeg_h264_decodes_fixture() {
     let bitstream = std::fs::read(&path).expect("read H.264 fixture");
     assert!(!bitstream.is_empty(), "fixture is empty");
 
-    let mut dec = FfmpegH264Dec::new();
+    let mut dec = FfmpegH264Dec::new().with_output_format(output);
     let upstream = Caps::Video {
         format: VideoFormat::H264,
         width: Dim::Any,
@@ -113,32 +123,41 @@ async fn ffmpeg_h264_decodes_fixture() {
         data_frames.len(),
         caps_changes.len()
     );
-    assert!(!caps_changes.is_empty(), "expected at least one I420 CapsChanged");
+    assert!(!caps_changes.is_empty(), "expected at least one CapsChanged");
     assert!(!data_frames.is_empty(), "expected at least one decoded frame");
 
+    // I420 and NV12 have identical byte length (w*h*3/2 for even dims); only
+    // the chroma layout differs. The runner checks length + format tag.
+    let expected_format = match output {
+        OutputFormat::I420 => VideoFormat::I420,
+        OutputFormat::Nv12 => VideoFormat::Nv12,
+    };
     let first = caps_changes.first().unwrap();
     match first {
         Caps::Video {
-            format: VideoFormat::I420,
+            format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             ..
-        } => {
-            eprintln!("first I420 caps: {}x{}", w, h);
+        } if *format == expected_format => {
+            eprintln!("first {:?} caps: {}x{}", expected_format, w, h);
             let f = data_frames.first().unwrap();
-            // I420 byte length = Y(w*h) + U(w*h/4) + V(w*h/4) = w*h*3/2 for
-            // even dimensions. ceil() chroma dims for odd-sized streams.
             let cw = ((*w + 1) / 2) as usize;
             let ch = ((*h + 1) / 2) as usize;
             let expected = (*w as usize) * (*h as usize) + 2 * cw * ch;
             match &f.domain {
                 MemoryDomain::System(slice) => {
-                    assert_eq!(slice.as_slice().len(), expected, "I420 byte length mismatch");
+                    assert_eq!(
+                        slice.as_slice().len(),
+                        expected,
+                        "{:?} byte length mismatch",
+                        expected_format,
+                    );
                 }
-                _ => panic!("decoder must emit System-domain I420 frames"),
+                _ => panic!("decoder must emit System-domain frames"),
             }
         }
-        other => panic!("expected I420 fixed caps, got {:?}", other),
+        other => panic!("expected fixed {expected_format:?} caps, got {other:?}"),
     }
 }
 

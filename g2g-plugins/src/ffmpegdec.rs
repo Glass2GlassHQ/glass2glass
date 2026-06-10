@@ -29,10 +29,12 @@
 //! grounds as `MfDecode` and `VaapiH264Dec`: ownership transfer, never
 //! aliasing.
 //!
+//! Output format: I420 by default; NV12 selectable via
+//! [`FfmpegH264Dec::with_output_format`]. NV12 is what KMS overlay planes
+//! prefer, so the `KmsSink` path opts into it. The conversion is a direct
+//! interleave of the U/V planes after the YUV420P decode (no swscale).
+//!
 //! Deferred:
-//! - NV12 output (currently I420). H.264 decodes natively to YUV420P/I420;
-//!   downstream consumers that prefer NV12 can use a `ColorConvert` element
-//!   (planned) or swscale within this module behind a `nv12-output` knob.
 //! - VAAPI hwaccel: open `h264_vaapi` codec with an attached
 //!   `AVHWDeviceContext(VAAPI)`, register `get_format` to claim
 //!   `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface
@@ -61,8 +63,28 @@ use g2g_core::{
     OutputSink, PipelinePacket, Rate, VideoFormat,
 };
 
-/// One decoded picture, pixels already copied out of the libavcodec frame.
-struct DecodedI420 {
+/// Pixel layout emitted on the decoder's output side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Planar Y / U / V (default). Byte length = `w*h + 2 * ceil(w/2) * ceil(h/2)`.
+    I420,
+    /// Y plane followed by interleaved U/V (NV12). Same total byte length
+    /// as I420; what KMS overlay planes (and many GPU samplers) prefer.
+    Nv12,
+}
+
+impl OutputFormat {
+    fn video_format(self) -> VideoFormat {
+        match self {
+            OutputFormat::I420 => VideoFormat::I420,
+            OutputFormat::Nv12 => VideoFormat::Nv12,
+        }
+    }
+}
+
+/// One decoded picture, pixels already copied out of the libavcodec frame
+/// in the configured `OutputFormat` layout.
+struct DecodedPicture {
     bytes: Box<[u8]>,
     width: u32,
     height: u32,
@@ -74,6 +96,7 @@ pub struct FfmpegH264Dec {
     last_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
+    output_format: OutputFormat,
 }
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
@@ -105,7 +128,20 @@ impl FfmpegH264Dec {
             last_caps: None,
             configured: false,
             emitted: 0,
+            output_format: OutputFormat::I420,
         }
+    }
+
+    /// Switch the output layout. NV12 is required by `KmsSink` and most GPU
+    /// samplers; I420 is the default for backwards compatibility with
+    /// existing tests and the documented Linux ML path.
+    pub fn with_output_format(mut self, format: OutputFormat) -> Self {
+        self.output_format = format;
+        self
+    }
+
+    pub fn output_format(&self) -> OutputFormat {
+        self.output_format
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -120,7 +156,7 @@ impl FfmpegH264Dec {
         &mut self,
         bitstream: &[u8],
         pts_ns: u64,
-        decoded: &mut Vec<DecodedI420>,
+        decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let mut packet = Packet::copy(bitstream);
         // libavcodec uses the packet's PTS verbatim; the unit is opaque to
@@ -136,13 +172,14 @@ impl FfmpegH264Dec {
         self.drain_frames(decoded)
     }
 
-    fn drain_frames(&mut self, decoded: &mut Vec<DecodedI420>) -> Result<(), G2gError> {
+    fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
+        let format = self.output_format;
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
         let mut frame = FfVideo::empty();
         loop {
             match decoder.receive_frame(&mut frame) {
                 Ok(()) => {
-                    let bytes = copy_i420(&frame)?;
+                    let bytes = copy_yuv420(&frame, format)?;
                     // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
                     // = INT64_MIN if it could not propagate one); treat the
                     // sentinel as zero so we don't return a wild timestamp.
@@ -150,7 +187,7 @@ impl FfmpegH264Dec {
                         Some(p) if p >= 0 => p as u64,
                         _ => 0,
                     };
-                    decoded.push(DecodedI420 {
+                    decoded.push(DecodedPicture {
                         bytes,
                         width: frame.width(),
                         height: frame.height(),
@@ -167,7 +204,7 @@ impl FfmpegH264Dec {
         }
     }
 
-    fn drain_eos(&mut self, decoded: &mut Vec<DecodedI420>) -> Result<(), G2gError> {
+    fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         if let Some(d) = self.decoder.as_mut() {
             d.send_eof()
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -250,8 +287,9 @@ impl AsyncElement for FfmpegH264Dec {
                 }
             }
 
+            let out_format = self.output_format;
             for d in decoded {
-                let new_caps = i420_caps(d.width, d.height);
+                let new_caps = yuv420_caps(out_format, d.width, d.height);
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps.clone());
@@ -275,24 +313,29 @@ impl AsyncElement for FfmpegH264Dec {
     }
 }
 
-fn i420_caps(w: u32, h: u32) -> Caps {
+fn yuv420_caps(format: OutputFormat, w: u32, h: u32) -> Caps {
     Caps::Video {
-        format: VideoFormat::I420,
+        format: format.video_format(),
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
     }
 }
 
-/// Copy YUV420P / I420 pixels out of a libavcodec frame into a packed
-/// `width * height * 3 / 2` buffer: Y plane (w*h), then U plane (w*h/4),
-/// then V plane (w*h/4). Each source plane's pitch may exceed its visible
-/// width due to alignment, so rows are copied individually.
+/// Copy 8-bit 4:2:0 YUV pixels out of a libavcodec frame into a packed
+/// `width * height * 3 / 2` buffer in either I420 or NV12 layout.
+///
+/// - **I420**: Y (w*h), then U (cw*ch), then V (cw*ch).
+/// - **NV12**: Y (w*h), then interleaved UV pairs (2*cw*ch).
+///
+/// where `cw = ceil(w/2)` and `ch = ceil(h/2)`. Source plane pitches may
+/// exceed the visible width due to libavcodec's alignment, so rows are
+/// copied individually.
 ///
 /// Rejects any pixel format the H.264 decoder may emit that isn't an
 /// 8-bit 4:2:0 YUV layout — those streams need a `ColorConvert` element
-/// upstream of any I420 consumer.
-fn copy_i420(frame: &FfVideo) -> Result<Box<[u8]>, G2gError> {
+/// upstream of any I420/NV12 consumer.
+fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
     match frame.format() {
         // YUVJ420P is YUV420P with JPEG (full) range. Same plane layout, so
         // accept it; range fidelity is preserved in the pixel values and can
@@ -321,21 +364,37 @@ fn copy_i420(frame: &FfVideo) -> Result<Box<[u8]>, G2gError> {
         let dst_off = row * w;
         out[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
     }
-    // U plane (half resolution).
     let u_src = frame.data(1);
     let u_pitch = frame.stride(1);
-    for row in 0..ch {
-        let src_off = row * u_pitch;
-        let dst_off = y_size + row * cw;
-        out[dst_off..dst_off + cw].copy_from_slice(&u_src[src_off..src_off + cw]);
-    }
-    // V plane (half resolution).
     let v_src = frame.data(2);
     let v_pitch = frame.stride(2);
-    for row in 0..ch {
-        let src_off = row * v_pitch;
-        let dst_off = y_size + c_size + row * cw;
-        out[dst_off..dst_off + cw].copy_from_slice(&v_src[src_off..src_off + cw]);
+    match format {
+        OutputFormat::I420 => {
+            // U plane then V plane, each half-res.
+            for row in 0..ch {
+                let dst_off = y_size + row * cw;
+                out[dst_off..dst_off + cw]
+                    .copy_from_slice(&u_src[row * u_pitch..row * u_pitch + cw]);
+            }
+            for row in 0..ch {
+                let dst_off = y_size + c_size + row * cw;
+                out[dst_off..dst_off + cw]
+                    .copy_from_slice(&v_src[row * v_pitch..row * v_pitch + cw]);
+            }
+        }
+        OutputFormat::Nv12 => {
+            // Interleave U and V: dst[y_size + 2*i] = U, dst[y_size + 2*i + 1] = V.
+            // 2*c_size bytes total, same as I420.
+            for row in 0..ch {
+                let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
+                let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
+                let dst_base = y_size + row * 2 * cw;
+                for col in 0..cw {
+                    out[dst_base + 2 * col] = u_row[col];
+                    out[dst_base + 2 * col + 1] = v_row[col];
+                }
+            }
+        }
     }
 
     Ok(out.into_boxed_slice())
@@ -348,7 +407,7 @@ mod tests {
     #[test]
     fn i420_caps_are_fixed() {
         assert_eq!(
-            i420_caps(640, 480),
+            yuv420_caps(OutputFormat::I420, 640, 480),
             Caps::Video {
                 format: VideoFormat::I420,
                 width: Dim::Fixed(640),
@@ -356,6 +415,30 @@ mod tests {
                 framerate: Rate::Any,
             }
         );
+    }
+
+    #[test]
+    fn nv12_caps_advertise_nv12_format() {
+        assert_eq!(
+            yuv420_caps(OutputFormat::Nv12, 1280, 720),
+            Caps::Video {
+                format: VideoFormat::Nv12,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Any,
+            }
+        );
+    }
+
+    #[test]
+    fn default_output_format_is_i420() {
+        assert_eq!(FfmpegH264Dec::new().output_format(), OutputFormat::I420);
+    }
+
+    #[test]
+    fn with_output_format_overrides_default() {
+        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        assert_eq!(dec.output_format(), OutputFormat::Nv12);
     }
 
     #[test]
