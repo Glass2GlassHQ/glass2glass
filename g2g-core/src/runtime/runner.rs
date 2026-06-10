@@ -399,6 +399,12 @@ impl OutputSink for NullSink {
 /// Transform contract: `process(Eos)` may flush buffered state as
 /// `DataFrame` packets but MUST NOT emit `Eos` itself — the runner forwards
 /// the EOS sentinel downstream after `process(Eos)` returns.
+///
+/// `link_capacity` is the primary glass-to-glass latency knob. Under
+/// steady-state backpressure each link sits full, so the latency floor is
+/// roughly `2 * link_capacity * consumer_period`. For live video pipelines
+/// (RTSP -> decode -> display) prefer **2**; for batch / throughput-oriented
+/// workloads larger values are fine.
 pub async fn run_source_transform_sink<Src, Tx, Snk, Clk>(
     source: &mut Src,
     transform: &mut Tx,

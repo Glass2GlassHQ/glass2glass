@@ -169,7 +169,7 @@ async fn rtsp_ffmpeg_soak_keeps_pts_monotonic_for_duration() {
 
     let result = tokio::time::timeout(
         deadline,
-        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 8),
+        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 2),
     )
     .await;
 

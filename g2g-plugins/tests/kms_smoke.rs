@@ -62,7 +62,7 @@ async fn kms_sink_displays_rtsp_h264() {
 
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 8),
+        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 2),
     )
     .await
     .expect("pipeline should complete within 60s")

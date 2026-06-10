@@ -100,8 +100,8 @@ use smithay_client_toolkit::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, VideoFormat,
+    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoFormat,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -123,6 +123,29 @@ enum WorkerCmd {
     Shutdown,
 }
 
+/// How the sink reacts when the producer pushes faster than the
+/// compositor refreshes.
+///
+/// - `Block` (default): `process()` waits for the matching `frame`
+///   callback before returning. Producer is throttled to refresh.
+///   No drops, but backpressure propagates upstream.
+/// - `DropOldest`: `process()` returns as soon as the worker accepts
+///   the frame. If a previous frame is still awaiting its `frame`
+///   callback, the worker overwrites it — the older frame never paints.
+///   Use for live sources that prefer freshness over completeness
+///   (security cameras, monitoring) and can't tolerate backpressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacingPolicy {
+    Block,
+    DropOldest,
+}
+
+impl Default for PacingPolicy {
+    fn default() -> Self {
+        Self::Block
+    }
+}
+
 /// What the sink-side struct holds between `process()` calls. We keep
 /// only `Send + Sync` handles here so the multi-thread runner can move
 /// us between executor tasks.
@@ -135,6 +158,8 @@ pub struct WaylandSink {
     height: u32,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
+    frames_dropped: Arc<AtomicU64>,
+    pacing: PacingPolicy,
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -169,7 +194,18 @@ impl WaylandSink {
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
+            frames_dropped: Arc::new(AtomicU64::new(0)),
+            pacing: PacingPolicy::default(),
         }
+    }
+
+    pub fn with_pacing(mut self, pacing: PacingPolicy) -> Self {
+        self.pacing = pacing;
+        self
+    }
+
+    pub fn frames_dropped(&self) -> u64 {
+        self.frames_dropped.load(Ordering::Relaxed)
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -212,10 +248,35 @@ impl Drop for WaylandSink {
     }
 }
 
+/// Monotonic wall-clock the sink offers as a pipeline clock. Wraps
+/// `metrics::monotonic_ns()` so the sink's timeline matches the
+/// source-side `arrival_ns` stamps used by the latency histogram.
+///
+/// We register at `Provider` priority so a `LiveSource` (RTSP, camera)
+/// still wins election when present, but in absence of one the sink
+/// becomes the reference clock — the right answer for an audio-less
+/// video-only pipeline once A/V sync arrives. Not yet vsync-predicting:
+/// `now_ns()` is straight monotonic, no frame-callback feedback. That's
+/// the upgrade needed before audio sync; tracked as Plan-1 Step 3+.
+#[derive(Debug)]
+struct WaylandClock;
+impl PipelineClock for WaylandClock {
+    fn now_ns(&self) -> u64 {
+        monotonic_ns()
+    }
+}
+
 impl AsyncElement for WaylandSink {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(WaylandClock),
+        ))
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Pass-through. The format flowing at Phase-1 negotiation time
@@ -257,6 +318,7 @@ impl AsyncElement for WaylandSink {
 
         let (tx, rx) = channel::<WorkerCmd>();
         let presented = Arc::clone(&self.frames_presented);
+        let dropped = Arc::clone(&self.frames_dropped);
         let latency = Arc::clone(&self.latency);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
@@ -270,9 +332,9 @@ impl AsyncElement for WaylandSink {
         let join = thread::Builder::new()
             .name(String::from("g2g-waylandsink"))
             .spawn(move || {
-                if let Err(e) =
-                    worker_main(w, h, title, app_id, rx, presented, latency, ready_for_worker)
-                {
+                if let Err(e) = worker_main(
+                    w, h, title, app_id, rx, presented, dropped, latency, ready_for_worker,
+                ) {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
                 }
             })
@@ -317,13 +379,24 @@ impl AsyncElement for WaylandSink {
                         ack: ack_tx,
                     })
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-                    // Block until the compositor's `frame` callback for
-                    // this commit arrives. RecvError means the worker
-                    // dropped the ack (shutdown / crash) — treat as a
-                    // hardware fault so the runner can react.
-                    ack_rx
-                        .await
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    match self.pacing {
+                        PacingPolicy::Block => {
+                            // Wait for the compositor's `frame` callback
+                            // for this commit. RecvError means the
+                            // worker dropped the ack (shutdown / crash)
+                            // — treat as a hardware fault.
+                            ack_rx
+                                .await
+                                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                        }
+                        PacingPolicy::DropOldest => {
+                            // Fire-and-forget: producer keeps moving.
+                            // If the previous frame's ack is still
+                            // outstanding when this one is drawn, the
+                            // worker drops it and bumps frames_dropped.
+                            drop(ack_rx);
+                        }
+                    }
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
@@ -354,6 +427,7 @@ struct WorkerState {
     exit: bool,
     ready: Option<Arc<parking_handshake::Handshake>>,
     presented: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     /// Frame queued before the surface is mappable. Once `configure`
     /// lands we drain this into the first draw. With blocking pacing the
@@ -373,6 +447,7 @@ fn worker_main(
     app_id: String,
     rx: Channel<WorkerCmd>,
     presented: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     ready: Arc<parking_handshake::Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -413,6 +488,7 @@ fn worker_main(
         exit: false,
         ready: Some(ready),
         presented,
+        dropped,
         latency,
         pending: None,
         pending_ack: None,
@@ -492,11 +568,12 @@ impl WorkerState {
         self.window.commit();
         self.presented.fetch_add(1, Ordering::Relaxed);
 
-        // If a prior ack is still outstanding (the compositor never sent
-        // us a frame callback for it before we drew again), release it
-        // now to keep the pipeline moving. Under steady blocking pacing
-        // this branch should be unreachable.
+        // If a prior ack is still outstanding the compositor never sent
+        // us a frame callback for it before we drew over it. Release the
+        // ack (under Block this is unreachable; under DropOldest it's
+        // expected and counted).
         if let Some((_, stale)) = self.pending_ack.take() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             let _ = stale.send(());
         }
         self.pending_ack = Some((arrival_ns, ack));

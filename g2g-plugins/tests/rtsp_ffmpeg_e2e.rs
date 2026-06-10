@@ -87,7 +87,7 @@ async fn rtsp_to_ffmpeg_decode_emits_i420_frames() {
 
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 8),
+        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 2),
     )
     .await
     .expect("pipeline should complete within 120s")

@@ -60,9 +60,10 @@ use drm::control::{
 use drm::Device;
 
 use g2g_core::frame::Frame;
+use g2g_core::metrics::monotonic_ns;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, VideoFormat,
+    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -394,10 +395,31 @@ impl Drop for KmsSink {
     }
 }
 
+/// Monotonic wall-clock the sink offers as a pipeline clock. See
+/// `WaylandClock` in `waylandsink.rs` for the rationale. KmsSink already
+/// paces to hardware vblank via `wait_for_flip`, so a vsync-predicting
+/// `AsyncClock` impl here is the more natural eventual home — but until
+/// audio sync demands it, a monotonic `now_ns` at `Provider` priority is
+/// enough to keep the election story coherent.
+#[derive(Debug)]
+struct KmsClock;
+impl PipelineClock for KmsClock {
+    fn now_ns(&self) -> u64 {
+        monotonic_ns()
+    }
+}
+
 impl AsyncElement for KmsSink {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(KmsClock),
+        ))
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Pass-through. See WaylandSink for the same rationale: Phase-1
