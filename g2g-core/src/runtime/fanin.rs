@@ -270,6 +270,11 @@ where
     // as a `LegacySink` constraint for that pair. The downstream sink
     // negotiation (against the muxer's aggregated output) is a separate
     // 2-element solve.
+    // Note: `DynSourceLoop` doesn't expose `caps_constraint` (added in
+    // 5f only on the concrete `SourceLoop` trait), so muxer sources
+    // always go through the legacy bridge here. No muxer sources are
+    // migrated yet, so this is a no-op gap; expose the method on
+    // `DynSourceLoop` when a migrated source needs to feed a muxer.
     let mut sources = sources;
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps()?;

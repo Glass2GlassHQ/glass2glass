@@ -11,8 +11,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    BufferPool, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, Rate, VideoFormat,
+    BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
 };
 
 #[derive(Debug)]
@@ -76,6 +76,14 @@ impl SourceLoop for VideoTestSrc {
 
     fn intercept_caps(&self) -> Result<Caps, G2gError> {
         Ok(self.caps())
+    }
+
+    /// M16 step 5f: native `Produces` constraint. The chain is now
+    /// fully-native when paired with `AcceptsAny`-migrated sinks
+    /// (e.g. `FakeSink`, `syncsink`), exercising the all-native
+    /// arc-consistency solver path instead of the mixed cascade.
+    fn caps_constraint(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        Ok(CapsConstraint::Produces(CapsSet::one(self.caps())))
     }
 
     fn configure_pipeline(

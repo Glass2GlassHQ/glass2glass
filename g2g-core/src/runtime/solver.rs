@@ -845,6 +845,18 @@ mod tests {
     }
 
     #[test]
+    fn all_native_produces_to_accepts_any_passes_through() {
+        // 5f-style chain: native source (Produces) → AcceptsAny.
+        // Confirms the all-native arc-consistency path passes Produces's
+        // caps through and the chain returns the source's fixed caps.
+        let caps = fixed_video(VideoFormat::Rgba8, 1280, 720, 30);
+        let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &sink]).unwrap();
+        assert_eq!(links, vec![caps]);
+    }
+
+    #[test]
     fn mapping_no_surviving_pair_returns_empty_link() {
         let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::Av1, 1280, 720, 30)));
         let map = CapsConstraint::Mapping(vec![(

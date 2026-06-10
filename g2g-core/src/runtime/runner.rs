@@ -89,6 +89,16 @@ pub trait SourceLoop: ElementBound {
     fn provide_clock(&self) -> Option<ClockCandidate> {
         None
     }
+
+    /// M16 step 5f: declare this source's negotiation-time constraint.
+    /// Default: eagerly evaluate `intercept_caps()` and wrap as a
+    /// `LegacySource(Caps)` for the solver. Migrated sources override
+    /// to return `Produces(CapsSet)` (or another native variant) and
+    /// the chain takes the native arc-consistency path when every
+    /// other element is also native.
+    fn caps_constraint(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        Ok(CapsConstraint::LegacySource(self.intercept_caps()?))
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -128,8 +138,12 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    // M16 step 4c: startup negotiation via `solve_linear` + legacy bridge.
-    let mut proposal = source.intercept_caps()?;
+    // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
+    // so migrated native sources (e.g. `VideoTestSrc::Produces(...)`)
+    // take the native solver path. `ReFixate` retry falls back to
+    // `LegacySource(counter)` because counter-proposals are a legacy
+    // model concept and native sources don't accept them.
+    let mut refix_counter: Option<Caps> = None;
     let mut attempts = 0u32;
     let negotiated_caps = loop {
         attempts += 1;
@@ -137,7 +151,10 @@ where
             return Err(G2gError::FixationFailed);
         }
         let fixated = {
-            let src_c = CapsConstraint::LegacySource(proposal.clone());
+            let src_c = match &refix_counter {
+                Some(c) => CapsConstraint::LegacySource(c.clone()),
+                None => source.caps_constraint()?,
+            };
             let sink_c = sink.caps_constraint_as_sink();
             let links = solve_linear(&[&src_c, &sink_c])
                 .map_err(|_| G2gError::CapsMismatch)?;
@@ -146,14 +163,14 @@ where
         match source.configure_pipeline(&fixated)? {
             ConfigureOutcome::Accepted => {}
             ConfigureOutcome::ReFixate(counter) => {
-                proposal = counter;
+                refix_counter = Some(counter);
                 continue;
             }
         }
         match sink.configure_pipeline(&fixated)? {
             ConfigureOutcome::Accepted => break fixated,
             ConfigureOutcome::ReFixate(counter) => {
-                proposal = counter;
+                refix_counter = Some(counter);
                 continue;
             }
         }
@@ -272,9 +289,8 @@ where
     // acts as the linear "sink" of the negotiation chain; the real
     // sinks downstream of it broadcast-receive the same fixated caps
     // and don't participate in narrowing.
-    let proposal = source.intercept_caps()?;
     let fixated = {
-        let src_c = CapsConstraint::LegacySource(proposal);
+        let src_c = source.caps_constraint()?;
         let fanout_ref = &*fanout;
         let fanout_c = CapsConstraint::LegacySink(Box::new(move |c: &Caps| {
             MultiOutputElement::intercept_caps(fanout_ref, c)
@@ -443,7 +459,7 @@ where
     // (the solver doesn't model counter-proposals) — on each retry the
     // source's `LegacySource` seed is replaced by the counter and the
     // solver is re-run.
-    let mut start_proposal = source.intercept_caps()?;
+    let mut refix_counter: Option<Caps> = None;
     let mut attempts = 0u32;
     let negotiated_caps = loop {
         attempts += 1;
@@ -454,7 +470,14 @@ where
         // borrows of `transform` / `sink` are released before the
         // `configure_pipeline` calls below take mutable access.
         let (src_caps, sink_caps) = {
-            let src_c = CapsConstraint::LegacySource(start_proposal.clone());
+            // M16 step 5f: honor `SourceLoop::caps_constraint` on the
+            // first attempt; refixate retries fall back to
+            // `LegacySource(counter)` since counter-proposals are a
+            // legacy concept.
+            let src_c = match &refix_counter {
+                Some(c) => CapsConstraint::LegacySource(c.clone()),
+                None => source.caps_constraint()?,
+            };
             let tx_c = transform.caps_constraint_as_transform();
             let sink_c = sink.caps_constraint_as_sink();
             let links = solve_linear(&[&src_c, &tx_c, &sink_c])
@@ -486,7 +509,7 @@ where
             }
         }
         match refixate {
-            Some(counter) => start_proposal = counter,
+            Some(counter) => refix_counter = Some(counter),
             // M12 allocation flows along the downstream-facing side
             // (the transform's output = the sink's input), so we
             // break with `sink_caps` for the propose_allocation calls

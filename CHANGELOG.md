@@ -16,6 +16,28 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Step 5f (revised): first native source + `SourceLoop` trait
+  integration. Original 5f scope (workaround #1 placeholder dims)
+  bumped — properly fixing it needs async `intercept_caps` (SDP
+  DESCRIBE), and it's symbiotic with #2 so fixing alone unblocks
+  nothing visible.
+  - `SourceLoop` gains `caps_constraint(&self) -> Result<CapsConstraint<'_>, G2gError>`
+    default method returning `LegacySource(intercept_caps()?)`.
+  - `run_simple_pipeline`, `run_source_transform_sink`, and
+    `run_source_fanout` call `source.caps_constraint()` instead of
+    constructing `LegacySource` inline. `ReFixate` retry uses
+    `LegacySource(counter)` fallback (counter-proposals are a legacy
+    concept). `run_muxer_sink` stays on `intercept_caps` because
+    `DynSourceLoop` doesn't yet expose `caps_constraint` — no
+    migrated muxer sources exist, so adding it is deferred until
+    needed.
+  - `VideoTestSrc` overrides `caps_constraint` to return
+    `Produces(CapsSet::one(self.caps()))`. Production chain
+    `videotestsrc → FakeSink` (both native) now exercises the
+    all-native arc-consistency solver path with backward
+    propagation, instead of the mixed cascade. Behavior unchanged.
+  - 1 new solver test (`all_native_produces_to_accepts_any_passes_through`).
+    96 g2g-core tests + every integration suite green.
 - Step 5e: correctness fix — `solve_legacy_cascade` reverts to
   intercept-only (bit-compatible with the pre-M16 cascade). Step 4b
   had incorrectly called the format-boundary's `propose_output_caps`
