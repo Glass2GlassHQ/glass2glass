@@ -99,6 +99,29 @@ pub trait MultiOutputElement: ElementBound {
         packet: PipelinePacket,
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::ProcessFuture<'a>;
+
+    /// M18 step 1: declare the fan-out's input-side negotiation
+    /// constraint. Default wraps `intercept_caps(...)` as a
+    /// `LegacySink` (the fan-out narrows what it accepts from the
+    /// upstream source; downstream branches all receive the narrowed
+    /// caps via broadcast). Migrated fan-outs override to return
+    /// native variants (typically `AcceptsAny` for pass-through fan-
+    /// outs like `Router` whose output broadcasts the input verbatim,
+    /// or `Accepts(set)` for fan-outs that filter format on the input
+    /// side).
+    ///
+    /// Phase C FO-2 (per-branch downstream re-solve) will sit on top
+    /// of this: once the runner has the fan-out's negotiated input
+    /// caps, it broadcasts to each branch and runs Phase B's
+    /// `re_solve_downstream_sink` per branch sink.
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_>
+    where
+        Self: Sized,
+    {
+        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
+            <Self as MultiOutputElement>::intercept_caps(self, c)
+        }))
+    }
 }
 
 /// Multi-input element trait variant: an N-input, 1-output element (a
@@ -309,6 +332,15 @@ impl MultiOutputElement for Router {
         Ok(upstream_caps.clone())
     }
 
+    /// M18 step 1: pass-through wildcard. `Router` broadcasts the
+    /// upstream caps verbatim to every active branch and has no
+    /// per-branch format restriction. `AcceptsAny` is the native
+    /// shape; skips the dynamic intercept callback on the solver
+    /// path.
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
     }
@@ -494,6 +526,20 @@ mod tests {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("fanout::tests::block_on saw Pending"),
         }
+    }
+
+    #[test]
+    fn router_input_constraint_is_wildcard() {
+        // M18 step 1: Router broadcasts upstream caps verbatim, no
+        // per-branch format restriction. AcceptsAny is the native
+        // shape; skips the dynamic intercept callback on the solver
+        // path.
+        let r = Router::new(3);
+        let c = r.caps_constraint_as_input();
+        assert!(
+            matches!(c, CapsConstraint::AcceptsAny),
+            "Router input should be AcceptsAny, got {c:?}"
+        );
     }
 
     #[test]

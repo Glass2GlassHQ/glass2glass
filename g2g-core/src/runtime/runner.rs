@@ -341,16 +341,19 @@ where
     let branch_count = sinks.len();
     assert!(branch_count > 0, "fan-out needs at least one sink");
 
-    // M16 step 4c: solve source → fanout via the solver. The fan-out
-    // acts as the linear "sink" of the negotiation chain; the real
-    // sinks downstream of it broadcast-receive the same fixated caps
-    // and don't participate in narrowing.
+    // M18 step 1: solve source → fanout via the solver using the new
+    // `MultiOutputElement::caps_constraint_as_input()` trait method
+    // (M16 step 4c had this constructing `LegacySink` inline). The
+    // fan-out acts as the linear "sink" of the negotiation chain;
+    // the real sinks downstream of it broadcast-receive the same
+    // fixated caps and don't participate in narrowing. Phase C FO-2
+    // (per-branch downstream re-solve once a mid-stream `CapsChanged`
+    // crosses the fan-out boundary) lands once β (the coordinator
+    // restructure) does — it slots in here via per-branch calls to
+    // `re_solve_downstream_sink`.
     let fixated = {
         let src_c = source.caps_constraint()?;
-        let fanout_ref = &*fanout;
-        let fanout_c = CapsConstraint::LegacySink(Box::new(move |c: &Caps| {
-            MultiOutputElement::intercept_caps(fanout_ref, c)
-        }));
+        let fanout_c = fanout.caps_constraint_as_input();
         let links = solve_linear(&[&src_c, &fanout_c])
             .map_err(|_| G2gError::CapsMismatch)?;
         links.last().cloned().ok_or(G2gError::CapsMismatch)?

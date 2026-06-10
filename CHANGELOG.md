@@ -7,6 +7,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 3 (partial): fan-out constraint migration.** Symmetric move
+  to item 2 on the `MultiOutputElement` side. Adds
+  `MultiOutputElement::caps_constraint_as_input(&self) ->
+  CapsConstraint<'_>` default method to the trait (wraps
+  `intercept_caps(...)` as a `LegacySink` per the existing legacy
+  bridge pattern). `Router` (g2g-core) overrides to return
+  `AcceptsAny` — it broadcasts upstream caps verbatim with no per-
+  branch format restriction. `run_source_fanout` calls the new
+  method instead of constructing an inline `LegacySink`. Closes the
+  structural prerequisite for Phase C FO-2 (per-branch downstream
+  re-solve once a mid-stream `CapsChanged` crosses the fan-out
+  boundary); the runtime execution still needs the coordinator
+  restructure (workaround3 §9 β). New unit test
+  `router_input_constraint_is_wildcard` in `fanout.rs`. Existing
+  M9 router/gate/merger integration tests unchanged; full workspace
+  + Linux feature matrix + no_std build all green.
+
 - **Item 2 (partial): muxer constraint migration.** Adds
   `MultiInputElement::caps_constraint_as_input(idx) -> CapsConstraint<'_>`
   and `MultiInputElement::caps_constraint_for_output() ->
