@@ -454,8 +454,110 @@ Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at
 | **M10** | Fan-in: muxer trait variant; EOS aggregation across N inputs; per-input caps negotiation. |
 | **M11** | Application control surface: pipeline `Bus` for async messages; `LinkInterceptor` probes; `PipelinePacket::Flush` for seek. |
 | **M12** | Live-source surface (done): latency aggregation query (`LatencyReport` → `RunStats::latency`); allocation query (`AllocationParams` / `MemoryDomainKind` → `RunStats::allocation`); live clock distribution (`ClockPriority` / `ClockCandidate` / `elect_clock` → `RunStats::{clock_priority, base_time_ns}`). |
+| **M13** | Decoder elements: `MfDecode` (Windows MFT, NV12 `System`); `FfmpegH264Dec` (Linux libavcodec, I420 `System`, validated end-to-end on AMD radeonsi); `VaapiH264Dec` (Linux cros-codecs/VAAPI, Intel-only until cros-codecs grows a non-GBM surface backend); first end-to-end RTSP → decoded-pixel pipeline. |
 
-After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all.
+After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all. After M13, the first fully-live glass-to-glass pipeline from network source to decoded pixels is operational.
+
+### 4.11 Hardware Decoder Elements (M13)
+
+The layers `RtspSrc → H264Parse` are fully functional for encoded-bitstream processing (mux, re-stream, record) after M11. Decoded-pixel output — required for ML inference, display, and colour-space conversion — needs a decoder `AsyncElement` that accepts `Caps::Video { format: H264 | H265, .. }` and emits `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::DmaBuf` (Linux) or `MemoryDomain::DxgiTexture` (Windows).
+
+#### 4.11.1 cros-codecs (Linux VAAPI) — **Implemented**
+
+`VaapiH264Dec` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is implemented on top of `cros-codecs` 0.0.6 (`vaapi` backend). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses H.264 bitstreams and manages the DPB; the actual decode runs on the GPU through libva.
+
+- **Input caps:** `Caps::Video { format: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else
+- **Output caps:** `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface; see "Deferred" below)
+- **Frame allocation:** uses `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) to allocate `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture
+- **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL
+- **Flush:** forwards `decoder.flush()` and propagates `PipelinePacket::Flush` downstream
+- **EOS:** flushes the decoder, drains the DPB, emits `Eos`
+- **Thread safety:** `libva::Display` is `Rc<Display>` and therefore `!Send`; `unsafe impl Send` is justified by the runner's ownership model (move-not-share), matching the `MfDecode` pattern
+
+```text
+H.264 Annex-B  (MemoryDomain::System)
+       │
+       ▼
+┌───────────────────────────────┐
+│  VaapiH264Dec                 │
+│   cros-codecs StatelessDecoder│
+│   <H264, VaapiBackend<...>>   │
+│   DPB + B-frame reorder       │
+└───────────┬───────────────────┘
+            │  NV12 row-copied out of GBM surface
+            ▼
+    downstream AsyncElement
+```
+
+**Deferred:**
+- Zero-copy `MemoryDomain::DmaBuf` output. The GBM-allocated surface is already a DMA-buf; exposing its fd via `OwnedDmaBuf` is a follow-up requiring a refcount story to keep the surface alive until downstream releases it.
+- H.265 decode. The same stateless framework supports it; a sibling element keyed on `VideoFormat::H265` is straightforward.
+- Mid-stream resolution change is observed (`DecoderEvent::FormatChanged` → fresh `CapsChanged` downstream), but resolution-driven `Reconfigure` upstream is not yet plumbed.
+
+**Hardware coverage status (cros-codecs 0.0.6):** validated on a Mesa-25.3 / `radeonsi` AMD Rembrandt iGPU, the element initialises libva successfully and the cros-codecs bitstream parser ingests the SPS/PPS and reports correct stream geometry — but cros-codecs's `GbmDevice::new_frame(NV12, ...)` then fails to allocate the decoder's output surface. Two distinct cros-codecs assumptions are at fault, neither of which we can paper over from the consumer side:
+
+1. **Hard-coded 16×16 initial VAContext.** `VaapiBackend::new` creates the VA context with `Resolution::from((16, 16))` before any bitstream is fed; AMD `radeonsi` rejects that with `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED` and the `.expect` panics. A larger placeholder (e.g. 1920×1088) is accepted by every libva driver in the field and is later resized by `new_sequence()` once the SPS lands.
+2. **ChromeOS-specific GBM flag for NV12.** Even past (1), `gbm_bo_create(NV12, ..., GBM_BO_USE_HW_VIDEO_DECODER)` returns NULL on radeonsi — that flag is a ChromeOS GBM extension. Mesa's `radeonsi` GBM provider does not expose `NV12` contiguous allocations at all (the `GBM_BO_USE_LINEAR` fallback also fails), because there is no GBM↔VAAPI surface-import path on AMD desktop the way there is on ChromeOS hardware.
+
+The cleanest fix is upstream: a cros-codecs surface backend that allocates VAAPI surfaces directly through libva (`vaCreateSurfaces`) instead of routing through GBM. On Intel iGPUs with the iHD VAAPI driver the current GBM path is expected to work end-to-end with only fix (1). Until cros-codecs grows a non-GBM surface backend, the Linux production path is **ffmpeg `h264_vaapi`** behind a separate `ffmpeg-vaapi` feature (not yet wired up); the `vaapi` feature here is the right abstraction and stays in place to take the upstream fix transparently.
+
+#### 4.11.2 Windows Media Foundation Transform (MFT) — **Implemented**
+
+`MfDecode` (`g2g-plugins/src/mfdecode.rs`, feature `mf-decode`, `cfg(target_os = "windows")`) is fully implemented. It wraps `CLSID_MSH264DecoderMFT` via `windows-rs` using an MTA COM apartment and the Microsoft software H.264 decoder path.
+
+- **Input caps:** `Caps::Video { format: H264, .. }` — rejects anything else at `intercept_caps`
+- **Output caps:** `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the MFT output buffer)
+- **Flush:** forwards `MFT_MESSAGE_COMMAND_FLUSH` and propagates `PipelinePacket::Flush` downstream
+- **EOS:** sends `MFT_MESSAGE_COMMAND_DRAIN` to flush B-frame reorder buffer before emitting `Eos`
+- **Thread safety:** `!Send` by default (COM); `unsafe impl Send` justified by MTA free-threading — the MS H.264 decoder MFT is callable from any MTA thread without marshaling
+
+**Deferred** (documented in the module header):
+- D3D11 zero-copy output via a new `MemoryDomain::DxgiTexture` variant
+- DXVA hardware acceleration (`MF_SA_D3D11_AWARE`)
+- Strided NV12 output (currently assumes stride == width, true for the software decoder)
+
+#### 4.11.3 ffmpeg / libavcodec (Linux production path) — **Implemented**
+
+`FfmpegH264Dec` (`g2g-plugins/src/ffmpegdec.rs`, feature `ffmpeg`, `cfg(target_os = "linux")`) is implemented on top of `ffmpeg-next` 8.1 against system libavcodec. This is the production-ready Linux decode path that works on every libav-equipped host (validated end-to-end on AMD radeonsi + Mesa 25.3 where `VaapiH264Dec` cannot allocate surfaces).
+
+- **Input caps:** `Caps::Video { format: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else
+- **Output caps:** `Caps::Video { format: I420, .. }` backed by `MemoryDomain::System` (CPU copy out of libavcodec's frame buffer). I420 is what `libavcodec`'s `h264` decoder emits natively for 8-bit 4:2:0 streams; `YUVJ420P` (full-range JPEG variant) is accepted with the same plane layout. Other pixel formats are rejected loudly with `CapsMismatch`.
+- **Codec construction:** `ffmpeg::init()` → `codec::decoder::find(Id::H264)` → `open_as().video()`. No hwaccel attached — software decode.
+- **Feed loop:** one access unit per `Packet::copy`, PTS forwarded verbatim (libavcodec treats it opaquely and echoes it back on the decoded frame); `send_packet()` then `receive_frame()` drained until `EAGAIN`.
+- **Flush:** `decoder.flush()`; `PipelinePacket::Flush` propagates downstream.
+- **EOS:** `send_eof()` then final drain to flush the B-frame reorder buffer before forwarding `Eos`.
+- **Thread safety:** `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is `!Send` by default; `unsafe impl Send` is justified by the same ownership-transfer argument as `MfDecode` and `VaapiH264Dec`.
+
+**System dependencies:**
+
+| Distro | Packages |
+| :--- | :--- |
+| Fedora | `ffmpeg-free-devel` (or `ffmpeg-devel` from RPM Fusion) |
+| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` |
+| Arch | `ffmpeg` |
+
+**Deferred:**
+- NV12 output (currently I420). Mainline g2g decoders emit NV12; adding swscale conversion behind an `nv12-output` knob is a one-element follow-up — `software-scaling` is already enabled in the `ffmpeg-next` feature set so no new deps.
+- VAAPI hwaccel: open the `h264_vaapi` codec with an attached `AVHWDeviceContext(VAAPI)`, register a `get_format` callback that claims `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface into System memory. Stays inside this module — the public `AsyncElement` shape doesn't change. Useful on Intel iGPUs and AMD desktop (radeonsi VAAPI works fine; it's only the cros-codecs GBM/NV12 assumption that breaks).
+- YUV444P / 10-bit pixel formats.
+
+#### 4.11.4 End-to-End RTSP Pipeline
+
+After M12 + M13 the first complete glass-to-glass receive pipeline is:
+
+```
+RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode]
+(System/H264)               (DmaBuf or System / NV12)
+```
+
+| Platform | Decoder element | Feature | Output | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| Linux any | `FfmpegH264Dec` | `ffmpeg` | `System` / I420 | **working** (validated AMD Mesa 25.3) |
+| Linux Intel (iHD) | `VaapiH264Dec` | `vaapi` | `System` / NV12 | expected-working past cros-codecs init-size patch |
+| Linux AMD (radeonsi) | `VaapiH264Dec` | `vaapi` | `System` / NV12 | blocked on cros-codecs GBM/NV12 — use `ffmpeg` |
+| Windows | `MfDecode` | `mf-decode` | `System` / NV12 | working |
+
+**Why the bitstream is already Wowza-ready:** `RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE`, and emits Annex-B access units. It will connect to any public Wowza server on port 554 once a decoder element is wired downstream and M12's live clock is in place for proper A/V timing. Port 554 is blocked in the development sandbox; live-streaming validation must be performed by the user.
 
 The negotiation track (M8–M12) is orthogonal to the **platform-element track**, which adds concrete OS-coupled elements behind cargo features (each implying `std`):
 
@@ -463,6 +565,8 @@ The negotiation track (M8–M12) is orthogonal to the **platform-element track**
 | :--- | :--- |
 | **M5** | `RtspSrc` (`rtsp` feature) wrapping `retina`. |
 | **M13** | `MfDecode` (`mf-decode` feature, Windows-only): Media Foundation H.264 Decoder MFT (`IMFTransform`) → NV12 `System` frames. Target-gated `windows` 0.62 dependency. Thread-affine (COM/MTA), single-thread executor. Deferred: D3D11 zero-copy, DXVA, strided NV12. |
+| **M13** | `FfmpegH264Dec` (`ffmpeg` feature, Linux-only): `ffmpeg-next` 8.1 against system libavcodec, software H.264 decode → I420 `System` frames. Production-ready baseline; validated end-to-end on AMD radeonsi. Deferred: VAAPI hwaccel via `h264_vaapi` + `AVHWDeviceContext`, NV12 conversion via swscale, 10-bit / 4:4:4. |
+| **M13** | `VaapiH264Dec` (`vaapi` feature, Linux-only): cros-codecs 0.0.6 stateless H.264 decoder on a VAAPI backend, GBM-allocated NV12 surfaces row-copied into `System` frames. Target-gated `cros-codecs` 0.0.6 + libva + GBM. Blocked on AMD desktop by cros-codecs GBM/NV12 surface assumption (see §4.11.1); `FfmpegH264Dec` covers Linux until that is fixed upstream. Deferred: zero-copy `DmaBuf` export, H.265, upstream `Reconfigure`. |
 
 ---
 

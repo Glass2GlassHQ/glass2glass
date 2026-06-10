@@ -31,3 +31,14 @@ pub mod rtspsrc;
 // `mf-decode` feature; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "windows", feature = "mf-decode"))]
 pub mod mfdecode;
+
+// VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
+// target-gated; enabling the feature on other platforms is a no-op.
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+pub mod vaapidec;
+
+// ffmpeg/libavcodec H.264 decode is Linux-only here (the ffmpeg-next dep is
+// target-gated). Currently software decode; VAAPI hwaccel is a follow-up that
+// stays inside this module and does not change the public AsyncElement shape.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+pub mod ffmpegdec;
