@@ -9,10 +9,14 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, OutputSink,
     PipelinePacket,
 };
+
+#[cfg(feature = "std")]
+use g2g_core::metrics::monotonic_ns;
 
 /// Position of a recorded `CapsChanged` packet inside the sink's input
 /// stream: `frames_before` is the number of `DataFrame` packets that
@@ -31,6 +35,13 @@ pub struct FakeSink {
     flushes: u64,
     configured: bool,
     caps_changes: Vec<CapsChange>,
+    /// Glass-to-glass latency distribution recorded as
+    /// `monotonic_ns() - arrival_ns` on every received `DataFrame`
+    /// whose `FrameTiming::arrival_ns` is non-zero. Frames without a
+    /// source-side stamp (synthesized by transforms, or sources that
+    /// don't stamp) are skipped silently. Test code can pull a
+    /// snapshot via [`FakeSink::latency_snapshot`] and assert bounds.
+    latency: LatencyHistogram,
 }
 
 impl FakeSink {
@@ -58,6 +69,13 @@ impl FakeSink {
 
     pub fn caps_changes(&self) -> &[CapsChange] {
         &self.caps_changes
+    }
+
+    /// Snapshot of the glass-to-glass latency histogram. Count of zero
+    /// means no `arrival_ns`-stamped frames have been received (either
+    /// the source doesn't stamp, or no frames have arrived yet).
+    pub fn latency_snapshot(&self) -> LatencySnapshot {
+        self.latency.snapshot()
     }
 }
 
@@ -105,6 +123,21 @@ impl AsyncElement for FakeSink {
                     }
                     self.last_sequence = Some(f.sequence);
                     self.received += 1;
+                    // Record glass-to-glass latency if the source stamped
+                    // arrival_ns. Sub-monotonic stamps (zero, or future
+                    // values) are skipped silently — they're either
+                    // unstamped frames or a clock-domain mismatch the
+                    // sink shouldn't paper over.
+                    #[cfg(feature = "std")]
+                    {
+                        let arrival = f.timing.arrival_ns;
+                        if arrival != 0 {
+                            let now = monotonic_ns();
+                            if now >= arrival {
+                                self.latency.record(now - arrival);
+                            }
+                        }
+                    }
                 }
                 PipelinePacket::Eos => {
                     self.eos_seen = true;

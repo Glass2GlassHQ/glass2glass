@@ -32,6 +32,45 @@ async fn videotestsrc_to_fakesink_30_frames_round_trip() {
     assert!(snk.eos_seen(), "sink must observe EOS");
 }
 
+/// Glass-to-glass latency regression guard. `VideoTestSrc` stamps
+/// `arrival_ns` at frame emission, `FakeSink` records
+/// `monotonic_ns() - arrival_ns` per frame into a `LatencyHistogram`.
+/// For an all-in-memory pipeline through the M16 solver the bound is
+/// trivially small — single-digit ms on any machine that isn't
+/// overloaded. A regression to >25ms would point to a real
+/// degradation (lock contention, blocking I/O, runner serialization).
+/// Gated on `std` because the wall-clock stamps live behind g2g-core's
+/// `std` feature (`monotonic_ns`).
+#[cfg(feature = "std")]
+#[tokio::test]
+async fn videotestsrc_to_fakesink_latency_under_25ms() {
+    let mut src = VideoTestSrc::new(64, 64, 240, 30);
+    let mut snk = FakeSink::new();
+    let clock = ZeroClock;
+
+    run_simple_pipeline(&mut src, &mut snk, &clock, 32)
+        .await
+        .expect("pipeline should complete");
+
+    let snap = snk.latency_snapshot();
+    assert_eq!(snap.count, 30, "every frame must be timed");
+    // Histogram buckets are factor-of-2; pin to a coarse bound that
+    // catches order-of-magnitude regressions while tolerating shared
+    // CI hardware.
+    assert!(
+        snap.max_ns < 25_000_000,
+        "max latency {}ns exceeded 25ms regression threshold (mean={}, p99={})",
+        snap.max_ns,
+        snap.mean_ns,
+        snap.p99_ns,
+    );
+    assert!(
+        snap.p99_ns < 25_000_000,
+        "p99 latency {}ns exceeded 25ms regression threshold",
+        snap.p99_ns
+    );
+}
+
 #[tokio::test]
 async fn small_pipeline_with_eos_marker() {
     // Capacity must accommodate `target_frames + 1` (EOS occupies one slot).

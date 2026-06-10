@@ -135,6 +135,17 @@ impl SourceLoop for VideoTestSrc {
                 };
 
                 let pts = seq * pts_step_ns;
+                // Source-side wall-clock stamp so downstream sinks can
+                // record glass-to-glass latency via
+                // `monotonic_ns() - arrival_ns`. Matches the convention
+                // used by RtspSrc for production sources. Std-gated
+                // because `monotonic_ns` lives behind g2g-core's `std`
+                // feature; in no_std builds `arrival_ns` stays zero
+                // and downstream sinks silently skip latency recording.
+                #[cfg(feature = "std")]
+                let arrival_ns = g2g_core::metrics::monotonic_ns();
+                #[cfg(not(feature = "std"))]
+                let arrival_ns: u64 = 0;
                 let frame = Frame {
                     domain,
                     caps: caps.clone(),
@@ -143,7 +154,7 @@ impl SourceLoop for VideoTestSrc {
                         dts_ns: pts,
                         duration_ns: pts_step_ns,
                         capture_ns: pts,
-                        ..FrameTiming::default()
+                        arrival_ns,
                     },
                     sequence: seq,
                 };

@@ -25,6 +25,26 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Latency observability: `VideoTestSrc` now stamps
+  `FrameTiming::arrival_ns` at frame emission (std-gated, falls back
+  to 0 in no_std), matching `RtspSrc`'s convention. `FakeSink` holds
+  a `LatencyHistogram` and records `monotonic_ns() - arrival_ns` per
+  received `DataFrame` whose `arrival_ns` is non-zero (std-gated),
+  with a `latency_snapshot()` accessor returning a `LatencySnapshot`
+  (count/mean/max/p50/p95/p99 nanoseconds, log2 buckets). `KmsSink`
+  gets the same treatment: per-frame recording after page-flip
+  submission, with a `latency_snapshot()` accessor; the timing point
+  is page-flip submission rather than vblank completion, which
+  under-reports true scanout latency by up to one refresh interval
+  but is good enough as a regression guard. New regression test
+  `videotestsrc_to_fakesink_latency_under_25ms` in
+  `pipeline_smoke.rs` asserts max + p99 latency stay under 25ms for
+  the all-in-memory `videotestsrc → fakesink` chain through the M16
+  solver — catches order-of-magnitude regressions (lock contention,
+  blocking I/O, runner serialization) while tolerating shared-CI
+  variance. WaylandSink's existing histogram is unchanged. Tested
+  across base, ffmpeg, rtsp, wayland-sink, kms-sink, std, and
+  no-default-features builds.
 - Workaround #3 Phase B (sink-side downstream subgraph re-solve):
   `run_simple_pipeline` and `run_source_transform_sink` now route every
   mid-stream forward `CapsChanged` arriving at the sink through a new

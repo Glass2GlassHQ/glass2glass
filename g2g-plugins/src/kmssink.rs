@@ -60,7 +60,7 @@ use drm::control::{
 use drm::Device;
 
 use g2g_core::frame::Frame;
-use g2g_core::metrics::monotonic_ns;
+use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
     HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoFormat,
@@ -170,6 +170,16 @@ pub struct KmsSink {
     width: u32,
     height: u32,
     frames_presented: u64,
+    /// Glass-to-glass latency distribution. Recorded once per
+    /// successful `present()` as `monotonic_ns() - frame.arrival_ns`,
+    /// measured at page-flip *submission* (not at vblank completion).
+    /// That's an approximation: it includes copy + flip submission
+    /// time but excludes the wait for the next vblank, so it under-
+    /// reports true scanout latency by up to one refresh interval.
+    /// Good enough for regression guarding; a future refinement could
+    /// correlate per-frame `arrival_ns` with the PageFlip completion
+    /// event to recover true present time.
+    latency: LatencyHistogram,
 }
 
 impl core::fmt::Debug for KmsSink {
@@ -207,7 +217,16 @@ impl KmsSink {
             width: 0,
             height: 0,
             frames_presented: 0,
+            latency: LatencyHistogram::new(),
         }
+    }
+
+    /// Snapshot of the glass-to-glass latency histogram. Counts only
+    /// frames that arrived with a non-zero `FrameTiming::arrival_ns`
+    /// stamp (synthetic or unstamped frames are skipped). See the
+    /// `latency` field doc for the measurement-time caveat.
+    pub fn latency_snapshot(&self) -> LatencySnapshot {
+        self.latency.snapshot()
     }
 
     pub fn with_device<P: Into<PathBuf>>(mut self, path: P) -> Self {
@@ -478,11 +497,20 @@ impl AsyncElement for KmsSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, .. }) => {
+                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
                     let MemoryDomain::System(slice) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.present(slice.as_slice())?;
+                    // Record glass-to-glass latency after page-flip
+                    // submission. Stamped frames only; unstamped
+                    // (synthetic or arrival_ns=0) are skipped silently.
+                    if timing.arrival_ns != 0 {
+                        let now = monotonic_ns();
+                        if now >= timing.arrival_ns {
+                            self.latency.record(now - timing.arrival_ns);
+                        }
+                    }
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
