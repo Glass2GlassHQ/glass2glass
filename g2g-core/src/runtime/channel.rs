@@ -296,15 +296,26 @@ impl ProbeSlot {
     }
 }
 
-/// Adapter from a [`LinkSender`] to the async `OutputSink` trait. The
-/// packet is first shown to the link's [`ProbeSlot`]; a `Drop` action
-/// discards it. Otherwise the packet is *always enqueued* (so no in-flight
-/// data is lost mid-stream); then the reverse `Reconfigure` slot is checked.
-/// If downstream fired a request — either before this push or while the
-/// producer was awaiting capacity — the producer sees
-/// `PushOutcome::Reconfigure(...)` and must handle it before producing the
-/// next packet. The just-pushed packet continues downstream under the
-/// still-current caps, exactly as GStreamer's CAPS handshake allows.
+/// Adapter from a [`LinkSender`] to the async `OutputSink` trait. Push
+/// flow per packet:
+///
+/// 1. A `ProbeSlot` may drop the packet outright.
+/// 2. The reverse `Reconfigure` slot is checked **before** send. If
+///    downstream already requested reconfigure, the packet is *not*
+///    enqueued and the producer sees `PushOutcome::Reconfigure(...)`.
+///    The caller is expected to handle the request — typically by
+///    calling `reconfigure()`, emitting a fresh `CapsChanged`, and
+///    composing the next frame under the agreed caps — before pushing
+///    again. The unsent packet is the caller's responsibility: resend
+///    it under the new caps, drop it, or skip ahead. This pre-send
+///    interception is the in-band ordering fix: rejected packets that
+///    the producer had not yet committed never cross the link under
+///    stale caps.
+/// 3. Otherwise the packet is enqueued. The slot is checked again
+///    afterwards: a request that fired *while* the producer was
+///    awaiting capacity still surfaces, but the just-enqueued packet
+///    has already crossed under old caps. That window is irreducible —
+///    the producer was already committed before the request was made.
 #[derive(Debug)]
 pub struct SenderSink {
     link: LinkSender,
@@ -333,8 +344,18 @@ impl OutputSink for SenderSink {
             if self.probe.action(&packet) == ProbeAction::Drop {
                 return Ok(PushOutcome::Accepted);
             }
+            // Pre-send check: if downstream already requested a
+            // reconfigure, surface it before this packet enters the
+            // link. Caller renegotiates and decides what to do with
+            // `packet` (resend under agreed caps, drop, etc.).
+            if let Some(r) = self.link.reconfigure.take() {
+                return Ok(PushOutcome::Reconfigure(r));
+            }
             match self.link.data.send(packet).await {
                 Ok(()) => match self.link.reconfigure.take() {
+                    // Post-send check covers the "request fired while
+                    // we were awaiting capacity" window; the packet is
+                    // already in the link under old caps.
                     Some(r) => Ok(PushOutcome::Reconfigure(r)),
                     None => Ok(PushOutcome::Accepted),
                 },
@@ -425,9 +446,11 @@ mod link_tests {
         // Downstream fires reconfigure before upstream pushes.
         rx.request_reconfigure(Reconfigure::Propose(proposed_caps()));
 
-        // Packet is still enqueued (no data loss); reconfigure surfaces
-        // as the push outcome so the producer can react before the next.
-        let outcome = run_to_ready(sink.push(dummy_frame())).expect("send ok");
+        // Pre-send check intercepts: the packet is NOT enqueued, and
+        // the producer sees Reconfigure so it can renegotiate before
+        // any frame crosses under stale caps. Caller decides whether
+        // to resend `packet` under agreed caps, drop it, or skip.
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
         match outcome {
             PushOutcome::Reconfigure(Reconfigure::Propose(c)) => {
                 assert_eq!(c, proposed_caps());
@@ -435,8 +458,8 @@ mod link_tests {
             other => panic!("expected Reconfigure::Propose, got {other:?}"),
         }
 
-        let received = run_to_ready(rx.recv());
-        assert!(matches!(received, Some(PipelinePacket::DataFrame(_))));
+        // Channel is empty — the rejected-caps packet was held back.
+        assert!(rx.try_recv().is_none(), "packet must not enqueue when reconfigure pending");
     }
 
     #[test]
