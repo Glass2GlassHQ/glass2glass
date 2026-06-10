@@ -177,6 +177,19 @@ mod tests {
                 Ok(())
             })
         }
+
+        fn caps_constraint_as_sink(&self) -> crate::format_element::CapsConstraint<'_> {
+            crate::format_element::CapsConstraint::AcceptsAny
+        }
+
+        fn propose_allocation(
+            &self,
+            _caps: &Caps,
+        ) -> Option<crate::query::AllocationParams> {
+            None
+        }
+
+        fn configure_allocation(&mut self, _params: &crate::query::AllocationParams) {}
     }
 
     /// Implements only [`AsyncElement`] (a GAT element, no hand-written
