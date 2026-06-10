@@ -96,6 +96,10 @@ pub struct VaapiH264Dec {
     decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>>,
     info: Option<StreamInfo>,
     last_caps: Option<Caps>,
+    /// M16 workaround #3 Phase A: most recent input caps received via
+    /// `PipelinePacket::CapsChanged`. See `ffmpegdec.rs` for the full
+    /// notes; same shape across all three decoders.
+    input_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
 }
@@ -137,6 +141,7 @@ impl VaapiH264Dec {
             decoder: None,
             info: None,
             last_caps: None,
+            input_caps: None,
             configured: false,
             emitted: 0,
         }
@@ -287,20 +292,7 @@ impl AsyncElement for VaapiH264Dec {
     /// sink. Mirrors `FfmpegH264Dec` (step 5k); the VAAPI backend only ever
     /// emits NV12, so there is no output-format choice.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Video {
-                format: VideoFormat::H264,
-                width,
-                height,
-                framerate,
-            } => CapsSet::one(Caps::Video {
-                format: VideoFormat::Nv12,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            }),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps(input)))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -341,11 +333,21 @@ impl AsyncElement for VaapiH264Dec {
                     };
                     self.feed_access_unit(slice.as_slice(), frame.timing.pts_ns, &mut decoded)?;
                 }
-                PipelinePacket::CapsChanged(_) => {
-                    // Upstream H.264 caps are swallowed; we emit our own NV12
-                    // CapsChanged from the decoder's stream info before each
-                    // decoded frame whose geometry differs from the last one
-                    // we advertised.
+                PipelinePacket::CapsChanged(c) => {
+                    // M16 workaround #3 Phase A: validate + record.
+                    // Reject an incompatible mid-stream format change
+                    // (e.g. H.264 -> VP9) loud; previously dropped
+                    // silently. Output `CapsChanged` is still emitted
+                    // from decoded stream info at the decode boundary
+                    // so the ordering invariant from §3 is preserved.
+                    match &c {
+                        Caps::Video {
+                            format: VideoFormat::H264,
+                            ..
+                        } => {}
+                        _ => return Err(G2gError::CapsMismatch),
+                    }
+                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(d) = self.decoder.as_mut() {
@@ -364,6 +366,18 @@ impl AsyncElement for VaapiH264Dec {
             for d in decoded {
                 let new_caps = nv12_caps(d.width, d.height);
                 if self.last_caps.as_ref() != Some(&new_caps) {
+                    // M16 workaround #3 Phase A debug assertion. See
+                    // `ffmpegdec.rs` for the full rationale.
+                    #[cfg(debug_assertions)]
+                    if let Some(input) = self.input_caps.as_ref() {
+                        let expected = derive_output_caps(input);
+                        debug_assert!(
+                            !expected
+                                .intersect(&CapsSet::one(new_caps.clone()))
+                                .is_empty(),
+                            "vaapidec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                        );
+                    }
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps.clone());
                 }
@@ -384,6 +398,27 @@ impl AsyncElement for VaapiH264Dec {
             }
             Ok(())
         })
+    }
+}
+
+/// Single source of truth for the decoder's output-side caps derivation.
+/// Shared by the `DerivedOutput` constraint closure and the
+/// workaround-#3 Phase A debug assertion. VAAPI only emits NV12, so
+/// there's no output-format choice.
+fn derive_output_caps(input: &Caps) -> CapsSet {
+    match input {
+        Caps::Video {
+            format: VideoFormat::H264,
+            width,
+            height,
+            framerate,
+        } => CapsSet::one(Caps::Video {
+            format: VideoFormat::Nv12,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
+        _ => CapsSet::from_alternatives(Vec::new()),
     }
 }
 

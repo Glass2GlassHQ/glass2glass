@@ -101,6 +101,13 @@ pub struct FfmpegH264Dec {
     configured: bool,
     emitted: u64,
     output_format: OutputFormat,
+    /// M16 workaround #3 Phase A: most recent input caps received via
+    /// `PipelinePacket::CapsChanged`. Used to validate the format on
+    /// mid-stream changes and to debug-assert that the decode-time
+    /// output geometry agrees with the declared `DerivedOutput`
+    /// closure. Phase B will use this as the input to a runner-side
+    /// downstream subgraph re-solve.
+    input_caps: Option<Caps>,
     /// Map input pts -> input arrival_ns. Survives the B-frame
     /// reordering libavcodec does internally because we key on pts,
     /// which the codec layer echoes verbatim.
@@ -137,6 +144,7 @@ impl FfmpegH264Dec {
             configured: false,
             emitted: 0,
             output_format: OutputFormat::I420,
+            input_caps: None,
             pts_to_arrival: alloc::collections::BTreeMap::new(),
         }
     }
@@ -257,19 +265,8 @@ impl AsyncElement for FfmpegH264Dec {
     /// regression.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let out_fmt = self.output_format.video_format();
-        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| match input {
-            Caps::Video {
-                format: VideoFormat::H264,
-                width,
-                height,
-                framerate,
-            } => CapsSet::one(Caps::Video {
-                format: out_fmt,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            }),
-            _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
+        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
+            derive_output_caps(input, out_fmt)
         }))
     }
 
@@ -319,10 +316,22 @@ impl AsyncElement for FfmpegH264Dec {
                         &mut decoded,
                     )?;
                 }
-                PipelinePacket::CapsChanged(_) => {
-                    // Upstream H.264 caps are swallowed; we emit I420
-                    // CapsChanged from the decoder's first decoded frame and
-                    // again on geometry changes.
+                PipelinePacket::CapsChanged(c) => {
+                    // M16 workaround #3 Phase A: validate the format
+                    // (loud-reject an incompatible mid-stream switch like
+                    // H.264 -> VP9, which previously was silently dropped)
+                    // and record `c` as the current input caps. The
+                    // ordering invariant (§3) is preserved: we still emit
+                    // our own output `CapsChanged` at the decode boundary
+                    // from decoded-frame geometry, not eagerly here.
+                    match &c {
+                        Caps::Video {
+                            format: VideoFormat::H264,
+                            ..
+                        } => {}
+                        _ => return Err(G2gError::CapsMismatch),
+                    }
+                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(d) = self.decoder.as_mut() {
@@ -341,6 +350,25 @@ impl AsyncElement for FfmpegH264Dec {
             for d in decoded {
                 let new_caps = yuv420_caps(out_format, d.width, d.height);
                 if self.last_caps.as_ref() != Some(&new_caps) {
+                    // M16 workaround #3 Phase A debug assertion: the
+                    // decode-time output caps must be consistent with
+                    // the declared `DerivedOutput` closure applied to
+                    // the most recently recorded input caps. They need
+                    // not be equal (decode-time leaves framerate `Any`,
+                    // closure may carry a `Fixed`); they must overlap
+                    // under `Caps::intersect`. Disagreement here means
+                    // the closure is buggy or the upstream caps are
+                    // stale.
+                    #[cfg(debug_assertions)]
+                    if let Some(input) = self.input_caps.as_ref() {
+                        let expected = derive_output_caps(input, out_format.video_format());
+                        debug_assert!(
+                            !expected
+                                .intersect(&CapsSet::one(new_caps.clone()))
+                                .is_empty(),
+                            "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                        );
+                    }
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps.clone());
                 }
@@ -361,6 +389,31 @@ impl AsyncElement for FfmpegH264Dec {
             }
             Ok(())
         })
+    }
+}
+
+/// Single source of truth for the decoder's output-side caps derivation.
+/// Called by the `DerivedOutput` constraint closure (startup negotiation)
+/// and the workaround-#3 Phase A debug assertion (mid-stream consistency
+/// check between recorded input caps and decode-time output geometry).
+///
+/// Non-H.264 input yields an empty `CapsSet`: the solver treats that as a
+/// negotiation failure; the runtime mid-stream check refuses
+/// `CapsMismatch` before it ever reaches here.
+fn derive_output_caps(input: &Caps, out_fmt: VideoFormat) -> CapsSet {
+    match input {
+        Caps::Video {
+            format: VideoFormat::H264,
+            width,
+            height,
+            framerate,
+        } => CapsSet::one(Caps::Video {
+            format: out_fmt,
+            width: width.clone(),
+            height: height.clone(),
+            framerate: framerate.clone(),
+        }),
+        _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
     }
 }
 
