@@ -87,6 +87,13 @@ pub enum CapsConstraint<'a> {
     /// treats this as a no-op narrowing on the link: the upstream's
     /// produced caps flow through unchanged.
     AcceptsAny,
+
+    /// Transform-shape wildcard: forwards whatever upstream produces.
+    /// Input == output, both unconstrained. Models pass-through
+    /// transforms like `IdentityTransform` (probe / tee / metering
+    /// without format constraints). The solver couples the input and
+    /// output links to be equal but doesn't narrow either by a set.
+    IdentityAny,
 }
 
 impl core::fmt::Debug for CapsConstraint<'_> {
@@ -103,6 +110,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
             }
             Self::LegacySink(_) => f.debug_tuple("LegacySink").field(&"<fn>").finish(),
             Self::AcceptsAny => f.write_str("AcceptsAny"),
+            Self::IdentityAny => f.write_str("IdentityAny"),
         }
     }
 }

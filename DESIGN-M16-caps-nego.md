@@ -310,3 +310,40 @@ solver actively in use, (6) is opportunistic add.
   computation over heap allocations).
 
 Code starts at step 1 of §8 in a fresh session.
+
+## 11. Adjacent design debt: codec vs raw format split
+
+Acknowledged 2026-06-10 during step 5g. M16 builds on top of an
+existing model smell: `VideoFormat` in `g2g-core/src/caps.rs` mixes
+compressed codecs (H264, H265, Av1, Vp9) and raw pixel layouts (Nv12,
+I420, Rgba8, Bgra8) in one enum, all shoehorned into
+`Caps::Video { format, width, height, framerate }`.
+
+GStreamer keeps these as separate media types:
+- `video/x-h264, stream-format=byte-stream, alignment=au, profile=...`
+  (no `format` field)
+- `video/x-raw, format=NV12, width=1920, height=1080, framerate=30/1`
+
+The proper shape is two variants:
+
+```rust
+pub enum Caps {
+    CompressedVideo { codec: VideoCodec, extras: ... },
+    RawVideo { format: RawFormat, width: Dim, height: Dim, framerate: Rate },
+    Audio { ... },
+    Tensor { ... },
+}
+```
+
+Why M16 doesn't tackle it: M17-sized refactor. Every element's caps
+logic, every test, every `CapsSet` and `AcceptsAny` site touches it.
+Several M16 workarounds (#1 placeholder dims in `RtspSrc`, #2
+deferred sink configure on `WaylandSink`/`KmsSink`) would dissolve
+naturally with the split because the structural impossibilities
+become type-level — a raw-only sink simply can't match compressed
+caps. Combined refactor will be smaller than M16 + M17 separately if
+ever attempted as one piece.
+
+See `architecture_codec_vs_raw_format.md` in auto-memory for the full
+analysis and `architecture_caps_nego_debt.md` for the workarounds
+this would interact with.

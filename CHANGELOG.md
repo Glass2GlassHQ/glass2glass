@@ -16,6 +16,31 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Adjacent design debt acknowledged (no code change): `VideoFormat`
+  conflates compressed codecs (H264, H265, Av1, Vp9) and raw pixel
+  layouts (Nv12, I420, Rgba8, Bgra8) in a single enum, shoehorned
+  into `Caps::Video { format, ... }`. GStreamer keeps these as
+  separate media types (`video/x-h264` vs `video/x-raw, format=...`).
+  Documented in `DESIGN-M16-caps-nego.md §11` and memory
+  (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
+  M16 continues on the current shape.
+
+- Step 5h: `CapsConstraint::IdentityAny` wildcard transform variant
+  for pass-through transforms (probe / metering / tee) whose
+  `intercept_caps` is `Ok(upstream.clone())`. Native solver couples
+  input and output links to be equal without narrowing either by a
+  set; surrounding endpoints determine the actual caps.
+  `IdentityTransform` (g2g-plugins) overrides
+  `caps_constraint_as_transform` to return `IdentityAny`.
+  Existing 3-element pipeline_smoke test
+  `source_identity_sink_3_element_pipeline` now exercises the
+  all-native arc-consistency path
+  (`VideoTestSrc Produces → IdentityTransform IdentityAny →
+  FakeSink AcceptsAny`). 3 new solver tests cover the coupling, a
+  mixed-chain pass-through, and rejection of `IdentityAny` in
+  endpoint positions. 99 g2g-core tests + 11 plugin lib +
+  every integration suite green.
+
 - Step 5g: first native transform. `H264Parse` overrides
   `caps_constraint_as_transform` to return
   `Identity(CapsSet::one(Caps::Video { format: H264, dims: Any }))`.

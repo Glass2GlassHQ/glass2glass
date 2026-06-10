@@ -383,6 +383,10 @@ fn forward_propagate(
             })?;
             Ok(CapsSet::one(propose_output(&input)))
         }
+        CapsConstraint::IdentityAny => {
+            // Wildcard transform: pass upstream through unchanged.
+            Ok(upstream.clone())
+        }
         CapsConstraint::Produces(_)
         | CapsConstraint::Accepts(_)
         | CapsConstraint::AcceptsAny
@@ -497,6 +501,30 @@ fn apply_constraint(
             // takes whatever shape upstream produces. The endpoint
             // check enforces that this only appears at the chain's
             // tail, so no further work is needed here.
+        }
+        CapsConstraint::IdentityAny => {
+            // Wildcard transform: don't narrow either side by a set
+            // (there is no set), just couple input and output to be
+            // equal. Either side's current value determines both.
+            if let (Some(ii), Some(oi)) = (in_idx, out_idx) {
+                let (a, b) = (links[ii].clone(), links[oi].clone());
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        let coupled = a.intersect(&b);
+                        if coupled.is_empty() {
+                            return Err(NegotiationFailure::EmptyLink {
+                                upstream: i - 1,
+                                downstream: i + 1,
+                            });
+                        }
+                        links[ii] = Some(coupled.clone());
+                        links[oi] = Some(coupled);
+                    }
+                    (Some(a), None) => links[oi] = Some(a),
+                    (None, Some(b)) => links[ii] = Some(b),
+                    (None, None) => {}
+                }
+            }
         }
         CapsConstraint::LegacySource(_)
         | CapsConstraint::LegacyTransform { .. }
@@ -842,6 +870,43 @@ mod tests {
         let sink = CapsConstraint::Accepts(CapsSet::one(caps.clone()));
         let links = solve_linear(&[&src, &mid, &sink]).unwrap();
         assert_eq!(links, vec![caps.clone(), caps]);
+    }
+
+    #[test]
+    fn identity_any_couples_native_links() {
+        // Fully-native: Produces → IdentityAny → AcceptsAny.
+        // The wildcard transform doesn't constrain by any set; it just
+        // forces input = output, so both links carry the source's
+        // produced caps.
+        let caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
+        let mid = CapsConstraint::IdentityAny;
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &mid, &sink]).unwrap();
+        assert_eq!(links, vec![caps.clone(), caps]);
+    }
+
+    #[test]
+    fn identity_any_in_mixed_chain_passes_legacy_source_through() {
+        let caps = fixed_video(VideoFormat::H264, 1920, 1080, 60);
+        let src = CapsConstraint::LegacySource(caps.clone());
+        let mid = CapsConstraint::IdentityAny;
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &mid, &sink]).unwrap();
+        assert_eq!(links, vec![caps.clone(), caps]);
+    }
+
+    #[test]
+    fn identity_any_endpoint_position_rejected_in_mixed() {
+        // IdentityAny is interior-only; using it as a source or sink
+        // should fail the endpoint shape check.
+        let caps = fixed_video(VideoFormat::Nv12, 1, 1, 1);
+        let bad_src = CapsConstraint::IdentityAny;
+        let sink = CapsConstraint::Accepts(CapsSet::one(caps));
+        assert!(matches!(
+            solve_linear(&[&bad_src, &sink]),
+            Err(NegotiationFailure::EndpointShapeMismatch { index: 0 })
+        ));
     }
 
     #[test]

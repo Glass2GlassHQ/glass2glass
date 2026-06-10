@@ -12,7 +12,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
 };
 
 #[derive(Debug, Default)]
@@ -38,6 +38,15 @@ impl AsyncElement for IdentityTransform {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5h: wildcard pass-through transform. The native
+    /// `IdentityAny` variant couples input and output links without
+    /// constraining either by a set — exactly what a probe / metering /
+    /// tee element wants. Native chains containing this element pin
+    /// the in/out caps to whatever the surrounding endpoints settle on.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::IdentityAny
     }
 
     fn configure_pipeline(
