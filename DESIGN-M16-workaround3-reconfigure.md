@@ -220,6 +220,41 @@ can't cover the next concrete case.
 | **α (cheap)** | Element-local re-allocation. `configure_pipeline(new_caps)` invokes the element's own `propose_allocation` and stores the new params for the element's next-frame allocation. No cross-element cascade. | "Sink resizes its own pool." "Decoder re-derives its scratch buffer size." Common allocator-internal cases. | When the first allocator-internal pool ships. Probably alongside vaapidec NV12 surface pool or kmssink dmabuf pool. |
 | **β (correct)** | Runner restructure: a single coordinator task owns refs to source/transform/sink. The futures coordinate via channels; the coordinator runs the cascade. Mid-stream caps change at the boundary triggers a coordinator `Recascade { caps }` event. | Cross-element cascades: "source must allocate sink-shaped buffers." Also: mid-stream clock changes, latency budget tightening. | When the first element advertises that it *consumes* a downstream allocator's pool proposal across a mid-stream caps change. Concrete first candidates: a zero-copy DMABUF path source → decoder → sink chain; a VAAPI surface chain. |
 
+### 9.4.1 Implementation status (M18 sessions B–D)
+
+The scaffolding β builds on is landed; β's own cascade is not, and is
+still trigger-gated per R1.
+
+- **Coordinator control channel (Session B).** `runtime::coordinator`:
+  `CoordinatorEvent`, `CoordinatorHandle` (cloneable producer over the
+  in-house mpsc), `Coordinator` task, `coordinator(capacity)`.
+  `run_source_transform_sink` spawns the coordinator as a fourth join
+  arm; the sink arm reports an observe-only `CoordinatorEvent::CapsChanged`
+  per applied mid-stream caps change. R3 (out-of-band channel, not in-band
+  packets) honored. Surfaced as `RunStats.coordinator_events`.
+- **Negotiation relocated (Session C).** The startup solver +
+  per-link configure cascade moved verbatim into
+  `coordinator::negotiate_source_transform_sink ->
+  LinearNegotiation { source_link, sink_link }`, naming the per-link caps
+  the β re-cascade will reconfigure. No behavior change.
+- **α (Session D).** `coordinator::realloc_local` re-derives an
+  element's own pool from the new caps (`propose_allocation` then
+  `configure_allocation`) at each statically-typed mid-stream apply site
+  (`run_simple_pipeline` sink; `run_source_transform_sink` transform and
+  sink). Element-local only. Fan-out branch sinks excluded:
+  `DynAsyncElement` does not expose the allocation hooks (lands with the
+  FO-2 dyn-trait extension).
+
+**What β still needs, beyond a real cross-element consumer (R1):** the
+upstream allocation cascade requires the upstream arms to be
+*interruptible* at their `recv().await` points so a `Recascade` directive
+can reach `transform`/`source` `configure_allocation` mid-stream. The
+no_std runtime has `Join2`/`join_all` but no `select`; β needs either a
+select-style combinator plus per-arm control channels, or the ownership
+move (coordinator owns the elements). R2 (single-task coordinator, no
+`Arc<Mutex>` per element) rules out the shortcut. Build this when the
+first DMABUF/VAAPI pool consumer forces it, not before.
+
 ### 9.5 Why β is the long-term shape, not just a bigger α
 
 The coordinator restructure is the same machinery Phase C (§10) needs

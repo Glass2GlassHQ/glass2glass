@@ -464,6 +464,12 @@ Documented in `DESIGN-M16-workaround3-reconfigure.md` §9 and §10:
    cleanly enables items 3 and 4 (Phase C, multi-element re-solve)
    and a future mid-stream clock-change mechanism. The restructure
    pays off across many capabilities; it's a foundation, not a feature.
+   *Status (M18 B–D):* scaffolding landed (coordinator control channel,
+   negotiation relocated to the coordinator, α element-local
+   re-allocation); the β cascade itself is deferred, trigger-gated per
+   `DESIGN-M16-workaround3-reconfigure.md` §9.4 R1 and §9.4.1. It needs a
+   real cross-element pool consumer and a no_std `select` primitive (or
+   the element-ownership move) before it's worth building.
 2. **`mux` migration + Phase C muxer.** Real audio/video mux chains
    need this. Trait surface change (`MultiInputElement::caps_constraint_as_input(idx)`)
    noted in workaround3 §10 MX-3.
