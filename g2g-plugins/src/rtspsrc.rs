@@ -14,9 +14,11 @@
 //! `VideoFrame::has_new_parameters`) trigger a fresh `CapsChanged`.
 //!
 //! Remaining limitations:
-//! - `intercept_caps()` still returns `Dim::Any` / `Rate::Any` because the
-//!   network handshake happens inside `run`. A pre-play caps probe would
-//!   require extending `SourceLoop`.
+//! - `intercept_caps()` returns a wide placeholder Range by default
+//!   because the network handshake (and the real SDP dims) happen inside
+//!   `run`. [`RtspSrc::with_expected_dims`] is the opt-in fix for callers
+//!   who know the resolution; a pre-play caps probe (real auto-detection)
+//!   would require extending `SourceLoop` with an async `intercept_caps`.
 //! - Each frame still copies retina's `Vec<u8>` into a `Box<[u8]>`. A
 //!   `Bytes`-aware `SystemSlice` variant (zero-copy) is deferred.
 
@@ -67,6 +69,12 @@ pub struct RtspSrc {
     user_agent: String,
     target_frames: Option<u64>,
     reconnect: ReconnectPolicy,
+    /// Caller-supplied expected geometry. When set, `intercept_caps`
+    /// advertises these as fixed dims instead of the wide placeholder
+    /// Range (workaround #1), so a downstream sink negotiates the real
+    /// geometry at startup. The SDP's actual dims still arrive as a
+    /// mid-stream `CapsChanged`; if they differ, downstream rebuilds.
+    expected_dims: Option<(u32, u32)>,
     configured: bool,
 }
 
@@ -77,6 +85,7 @@ impl RtspSrc {
             user_agent: "glass2glass/0.1".to_string(),
             target_frames: None,
             reconnect: ReconnectPolicy::DISABLED,
+            expected_dims: None,
             configured: false,
         }
     }
@@ -90,6 +99,21 @@ impl RtspSrc {
 
     pub fn with_user_agent<S: Into<String>>(mut self, ua: S) -> Self {
         self.user_agent = ua.into();
+        self
+    }
+
+    /// Declare the stream's expected pixel geometry. Opt-in fix for
+    /// workaround #1: the RTSP handshake (and thus the real SDP dims)
+    /// only completes inside `run`, so by default `intercept_caps`
+    /// advertises a wide placeholder Range and the real geometry lands
+    /// later via `CapsChanged`. When you already know the camera
+    /// resolution, set it here so the chain negotiates fixed dims at
+    /// startup (a downstream sink sizes its surface once, instead of
+    /// building at the placeholder min and rebuilding on the first
+    /// `CapsChanged`). If the actual SDP dims differ, the mid-stream
+    /// `CapsChanged` still corrects them.
+    pub fn with_expected_dims(mut self, width: u32, height: u32) -> Self {
+        self.expected_dims = Some((width, height));
         self
     }
 
@@ -136,10 +160,21 @@ impl SourceLoop for RtspSrc {
         // `CapsChanged` we push once the session connects; downstream
         // elements that care about geometry (e.g. allocators) only act on
         // the cascaded refinement, not on this placeholder.
+        //
+        // `with_expected_dims` overrides the placeholder with fixed dims so
+        // the chain negotiates the real geometry at startup; a later
+        // `CapsChanged` still corrects them if the SDP disagrees.
+        let (width, height) = match self.expected_dims {
+            Some((w, h)) => (Dim::Fixed(w), Dim::Fixed(h)),
+            None => (
+                Dim::Range { min: 16, max: 8192 },
+                Dim::Range { min: 16, max: 8192 },
+            ),
+        };
         Ok(Caps::Video {
             format: VideoFormat::H264,
-            width: Dim::Range { min: 16, max: 8192 },
-            height: Dim::Range { min: 16, max: 8192 },
+            width,
+            height,
             framerate: Rate::Range {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
@@ -455,6 +490,40 @@ mod tests {
     #[test]
     fn frame_rate_unset_yields_rate_any() {
         assert_eq!(rate_from_frame_rate(None), Rate::Any);
+    }
+
+    #[test]
+    fn intercept_caps_defaults_to_placeholder_range() {
+        // Workaround #1: without expected dims, advertise a fixable Range.
+        let src = RtspSrc::new("rtsp://example/stream");
+        assert_eq!(
+            src.intercept_caps(),
+            Ok(Caps::Video {
+                format: VideoFormat::H264,
+                width: Dim::Range { min: 16, max: 8192 },
+                height: Dim::Range { min: 16, max: 8192 },
+                framerate: Rate::Range {
+                    min_q16: 1 << 16,
+                    max_q16: 240 << 16,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn with_expected_dims_advertises_fixed_geometry() {
+        // Opt-in fix: expected dims surface as fixed caps at negotiation,
+        // so a downstream sink sizes its surface once at startup.
+        let src = RtspSrc::new("rtsp://example/stream").with_expected_dims(1920, 1080);
+        let caps = src.intercept_caps().expect("caps");
+        match caps {
+            Caps::Video { format, width, height, .. } => {
+                assert_eq!(format, VideoFormat::H264);
+                assert_eq!(width, Dim::Fixed(1920));
+                assert_eq!(height, Dim::Fixed(1080));
+            }
+            other => panic!("expected video caps, got {other:?}"),
+        }
     }
 
     #[test]

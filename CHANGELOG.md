@@ -25,6 +25,21 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Workaround #1 (partial, opt-in): `RtspSrc::with_expected_dims(w, h)`.
+  The RTSP handshake (and the real SDP geometry) only completes inside
+  `run`, so `intercept_caps` defaults to a wide placeholder `Dim::Range`
+  that survives fixation, with the real dims arriving later via
+  `CapsChanged`. Callers who know the camera resolution can now declare
+  it up front: `intercept_caps` then advertises fixed dims, so the
+  chain negotiates the real geometry at startup and a downstream sink
+  sizes its surface once instead of building at the placeholder min and
+  rebuilding on the first `CapsChanged`. If the SDP disagrees, the
+  mid-stream `CapsChanged` still corrects it. The placeholder remains
+  the default; full auto-detection still needs an async
+  `SourceLoop::intercept_caps` (the "big" redesign, deferred). New unit
+  tests `intercept_caps_defaults_to_placeholder_range` and
+  `with_expected_dims_advertises_fixed_geometry`; verified with
+  `cargo test/clippy -p g2g-plugins --features rtsp`.
 - Cleanup (post-5m): removed `FfmpegH264Dec`'s now-dead
   `is_format_boundary` and `propose_output_caps` overrides (and their
   two unit tests). The decoder is native (`DerivedOutput` since 5k), so
