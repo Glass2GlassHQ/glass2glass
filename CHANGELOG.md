@@ -25,6 +25,17 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Step 5l: `MfDecode` (Windows Media Foundation) overrides
+  `caps_constraint_as_transform` to return
+  `CapsConstraint::DerivedOutput(closure)`, mirroring step 5k. The
+  closure validates H.264 input and emits NV12 at the same
+  dims/framerate; non-H.264 input yields an empty `CapsSet` so the
+  solver rejects at negotiation time. The MFT only emits NV12, so the
+  closure has no output-format choice. Mixed chains get real per-link
+  caps from the solver: H.264 to the decoder, NV12 to the sink. New
+  unit test `caps_constraint_is_derived_output_h264_to_nv12` covers
+  the H.264→NV12 derivation and the non-H.264 rejection. Verified with
+  `cargo clippy/test -p g2g-plugins --features mf-decode` (Windows).
 - Step 5k: `FfmpegH264Dec` overrides `caps_constraint_as_transform`
   to return `CapsConstraint::DerivedOutput(closure)`. The closure
   validates H.264 input and emits the chosen output format
