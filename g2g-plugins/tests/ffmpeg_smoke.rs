@@ -86,12 +86,7 @@ async fn decode_once(output: OutputFormat) {
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),
         caps: narrowed,
-        timing: FrameTiming {
-            pts_ns: 0,
-            dts_ns: 0,
-            duration_ns: 0,
-            capture_ns: 0,
-        },
+        timing: FrameTiming::default(),
         sequence: 0,
     };
     dec.process(PipelinePacket::DataFrame(frame), &mut sink)

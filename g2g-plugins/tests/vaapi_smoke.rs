@@ -87,12 +87,7 @@ async fn vaapi_h264_decodes_fixture() {
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),
         caps: narrowed,
-        timing: FrameTiming {
-            pts_ns: 0,
-            dts_ns: 0,
-            duration_ns: 0,
-            capture_ns: 0,
-        },
+        timing: FrameTiming::default(),
         sequence: 0,
     };
 

@@ -394,6 +394,7 @@ async fn run_session(
                 dts_ns: pts_ns,
                 duration_ns: 0,
                 capture_ns: pts_ns,
+                arrival_ns: g2g_core::metrics::monotonic_ns(),
             },
             sequence: *total_emitted,
         };

@@ -98,6 +98,7 @@ use smithay_client_toolkit::{
 };
 
 use g2g_core::frame::Frame;
+use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink,
     PipelinePacket, VideoFormat,
@@ -112,6 +113,11 @@ use g2g_core::{
 enum WorkerCmd {
     Frame {
         bytes: Vec<u8>,
+        /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
+        /// The worker records `monotonic_ns() - arrival_ns` into the
+        /// latency histogram when the matching `frame` callback fires.
+        /// Zero means the frame was untimed; latency is not recorded.
+        arrival_ns: u64,
         ack: tokio::sync::oneshot::Sender<()>,
     },
     Shutdown,
@@ -128,6 +134,7 @@ pub struct WaylandSink {
     width: u32,
     height: u32,
     frames_presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -161,6 +168,7 @@ impl WaylandSink {
             width: 0,
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
+            latency: Arc::new(LatencyHistogram::new()),
         }
     }
 
@@ -176,6 +184,14 @@ impl WaylandSink {
 
     pub fn frames_presented(&self) -> u64 {
         self.frames_presented.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot of glass-to-glass latency: source-side
+    /// `FrameTiming::arrival_ns` to the compositor's `frame` callback
+    /// that confirms our commit. Only frames whose timing was stamped
+    /// upstream contribute; an untimed pipeline reports `count = 0`.
+    pub fn latency_snapshot(&self) -> LatencySnapshot {
+        self.latency.snapshot()
     }
 
     fn shutdown(&mut self) {
@@ -241,6 +257,7 @@ impl AsyncElement for WaylandSink {
 
         let (tx, rx) = channel::<WorkerCmd>();
         let presented = Arc::clone(&self.frames_presented);
+        let latency = Arc::clone(&self.latency);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
 
@@ -253,7 +270,9 @@ impl AsyncElement for WaylandSink {
         let join = thread::Builder::new()
             .name(String::from("g2g-waylandsink"))
             .spawn(move || {
-                if let Err(e) = worker_main(w, h, title, app_id, rx, presented, ready_for_worker) {
+                if let Err(e) =
+                    worker_main(w, h, title, app_id, rx, presented, latency, ready_for_worker)
+                {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
                 }
             })
@@ -282,7 +301,7 @@ impl AsyncElement for WaylandSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, .. }) => {
+                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
                     let MemoryDomain::System(slice) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -292,8 +311,12 @@ impl AsyncElement for WaylandSink {
                         .as_ref()
                         .ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    tx.send(WorkerCmd::Frame { bytes: xrgb, ack: ack_tx })
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    tx.send(WorkerCmd::Frame {
+                        bytes: xrgb,
+                        arrival_ns: timing.arrival_ns,
+                        ack: ack_tx,
+                    })
+                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     // Block until the compositor's `frame` callback for
                     // this commit arrives. RecvError means the worker
                     // dropped the ack (shutdown / crash) — treat as a
@@ -331,15 +354,16 @@ struct WorkerState {
     exit: bool,
     ready: Option<Arc<parking_handshake::Handshake>>,
     presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
     /// Frame queued before the surface is mappable. Once `configure`
     /// lands we drain this into the first draw. With blocking pacing the
     /// producer is throttled to one in-flight frame, so under steady
     /// state this is None.
-    pending: Option<(Vec<u8>, tokio::sync::oneshot::Sender<()>)>,
-    /// Ack for the most recently committed frame. Signalled when the
-    /// compositor's matching `frame` callback fires, releasing the
-    /// blocked producer to push the next frame.
-    pending_ack: Option<tokio::sync::oneshot::Sender<()>>,
+    pending: Option<(Vec<u8>, u64, tokio::sync::oneshot::Sender<()>)>,
+    /// Ack for the most recently committed frame plus its source-side
+    /// arrival timestamp. Signalled when the compositor's matching
+    /// `frame` callback fires, at which point we record the latency.
+    pending_ack: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
 }
 
 fn worker_main(
@@ -349,6 +373,7 @@ fn worker_main(
     app_id: String,
     rx: Channel<WorkerCmd>,
     presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
     ready: Arc<parking_handshake::Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;
@@ -388,20 +413,21 @@ fn worker_main(
         exit: false,
         ready: Some(ready),
         presented,
+        latency,
         pending: None,
         pending_ack: None,
     };
 
     // Wire the cmd channel into calloop so we wake on frame arrival.
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame { bytes, ack }) => {
+        ChanEvent::Msg(WorkerCmd::Frame { bytes, arrival_ns, ack }) => {
             // Producer is blocked on `ack` until our `frame` callback
             // fires, so we should only ever see one in flight. If the
             // surface isn't mappable yet, stash it; otherwise draw now.
             if state.configured {
-                state.draw(bytes, ack);
+                state.draw(bytes, arrival_ns, ack);
             } else {
-                state.pending = Some((bytes, ack));
+                state.pending = Some((bytes, arrival_ns, ack));
             }
         }
         ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
@@ -421,7 +447,7 @@ impl WorkerState {
     /// and commit. The producer's `ack` is stashed in `pending_ack`; we
     /// signal it when the matching `frame` callback fires in
     /// `CompositorHandler::frame`.
-    fn draw(&mut self, bytes: Vec<u8>, ack: tokio::sync::oneshot::Sender<()>) {
+    fn draw(&mut self, bytes: Vec<u8>, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
         let width = self.width as i32;
         let height = self.height as i32;
         let stride = self.width as i32 * 4;
@@ -470,10 +496,10 @@ impl WorkerState {
         // us a frame callback for it before we drew again), release it
         // now to keep the pipeline moving. Under steady blocking pacing
         // this branch should be unreachable.
-        if let Some(stale) = self.pending_ack.take() {
+        if let Some((_, stale)) = self.pending_ack.take() {
             let _ = stale.send(());
         }
-        self.pending_ack = Some(ack);
+        self.pending_ack = Some((arrival_ns, ack));
     }
 }
 
@@ -501,9 +527,16 @@ impl CompositorHandler for WorkerState {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
-        // The compositor is ready for the next frame. Release the
-        // producer blocked on this commit's ack so it can push another.
-        if let Some(ack) = self.pending_ack.take() {
+        // The compositor is ready for the next frame. Record the
+        // glass-to-glass delta (source ingest -> on-screen), then
+        // release the producer blocked on this commit's ack.
+        if let Some((arrival_ns, ack)) = self.pending_ack.take() {
+            if arrival_ns != 0 {
+                let now = monotonic_ns();
+                if now >= arrival_ns {
+                    self.latency.record(now - arrival_ns);
+                }
+            }
             let _ = ack.send(());
         }
     }
@@ -548,8 +581,8 @@ impl WindowHandler for WorkerState {
                 ready.notify();
             }
             // Drain any frame that arrived before we were mappable.
-            if let Some((bytes, ack)) = self.pending.take() {
-                self.draw(bytes, ack);
+            if let Some((bytes, arrival_ns, ack)) = self.pending.take() {
+                self.draw(bytes, arrival_ns, ack);
             }
         }
     }

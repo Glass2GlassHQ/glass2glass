@@ -70,6 +70,7 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     let elapsed = start.elapsed();
 
     let fps = stats.frames_emitted as f64 / elapsed.as_secs_f64();
+    let lat = snk.latency_snapshot();
     eprintln!(
         "stats: emitted={} decoded={} presented={} elapsed={:.2}s effective_fps={:.1}",
         stats.frames_emitted,
@@ -78,6 +79,16 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
         elapsed.as_secs_f64(),
         fps,
     );
+    eprintln!(
+        "glass-to-glass latency: n={} mean={:.1}ms p50={:.1}ms p95={:.1}ms p99={:.1}ms max={:.1}ms",
+        lat.count,
+        lat.mean_ns as f64 / 1e6,
+        lat.p50_ns as f64 / 1e6,
+        lat.p95_ns as f64 / 1e6,
+        lat.p99_ns as f64 / 1e6,
+        lat.max_ns as f64 / 1e6,
+    );
+    assert!(lat.count > 0, "no latency samples — arrival_ns not threaded through");
 
     assert!(dec.decoded_count() > 0, "decoder produced no NV12 frames");
     // We don't assert `presented > 0` because the compositor's frame-

@@ -350,6 +350,7 @@ impl AsyncElement for VaapiH264Dec {
                         dts_ns: d.pts_ns,
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
+                        ..FrameTiming::default()
                     },
                     sequence: self.emitted,
                 };

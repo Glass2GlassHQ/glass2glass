@@ -235,7 +235,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
             },
-            timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0 },
+            timing: FrameTiming::default(),
             sequence: 0,
         })
     }

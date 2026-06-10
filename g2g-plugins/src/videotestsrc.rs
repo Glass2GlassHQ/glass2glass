@@ -135,6 +135,7 @@ impl SourceLoop for VideoTestSrc {
                         dts_ns: pts,
                         duration_ns: pts_step_ns,
                         capture_ns: pts,
+                        ..FrameTiming::default()
                     },
                     sequence: seq,
                 };

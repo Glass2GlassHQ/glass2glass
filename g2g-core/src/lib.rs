@@ -19,6 +19,7 @@ pub mod error;
 pub mod frame;
 pub mod link;
 pub mod memory;
+pub mod metrics;
 pub mod pool;
 pub mod query;
 
@@ -45,6 +46,7 @@ pub use link::LinkPolicy;
 pub use memory::{
     MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice,
 };
+pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
 
 #[cfg(feature = "runtime")]

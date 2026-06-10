@@ -49,7 +49,7 @@ fn make_frame(seq: u64, caps: Caps) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
         caps,
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0 },
+        timing: FrameTiming::default(),
         sequence: seq,
     }
 }

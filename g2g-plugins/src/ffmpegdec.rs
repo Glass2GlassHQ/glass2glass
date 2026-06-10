@@ -89,6 +89,10 @@ struct DecodedPicture {
     width: u32,
     height: u32,
     pts_ns: u64,
+    /// Source-side wall-clock stamp threaded through from the input
+    /// frame so glass-to-glass latency survives decode. Looked up in
+    /// `pts_to_arrival` after libavcodec echoes the input pts back.
+    arrival_ns: u64,
 }
 
 pub struct FfmpegH264Dec {
@@ -97,6 +101,10 @@ pub struct FfmpegH264Dec {
     configured: bool,
     emitted: u64,
     output_format: OutputFormat,
+    /// Map input pts -> input arrival_ns. Survives the B-frame
+    /// reordering libavcodec does internally because we key on pts,
+    /// which the codec layer echoes verbatim.
+    pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
 }
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
@@ -129,6 +137,7 @@ impl FfmpegH264Dec {
             configured: false,
             emitted: 0,
             output_format: OutputFormat::I420,
+            pts_to_arrival: alloc::collections::BTreeMap::new(),
         }
     }
 
@@ -156,6 +165,7 @@ impl FfmpegH264Dec {
         &mut self,
         bitstream: &[u8],
         pts_ns: u64,
+        arrival_ns: u64,
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let mut packet = Packet::copy(bitstream);
@@ -164,6 +174,9 @@ impl FfmpegH264Dec {
         // nanoseconds straight through.
         packet.set_pts(Some(pts_ns as i64));
         packet.set_dts(Some(pts_ns as i64));
+        if arrival_ns != 0 {
+            self.pts_to_arrival.insert(pts_ns, arrival_ns);
+        }
 
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
         decoder
@@ -187,11 +200,13 @@ impl FfmpegH264Dec {
                         Some(p) if p >= 0 => p as u64,
                         _ => 0,
                     };
+                    let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
                         bytes,
                         width: frame.width(),
                         height: frame.height(),
                         pts_ns,
+                        arrival_ns,
                     });
                 }
                 Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
@@ -267,7 +282,12 @@ impl AsyncElement for FfmpegH264Dec {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    self.feed_access_unit(slice.as_slice(), frame.timing.pts_ns, &mut decoded)?;
+                    self.feed_access_unit(
+                        slice.as_slice(),
+                        frame.timing.pts_ns,
+                        frame.timing.arrival_ns,
+                        &mut decoded,
+                    )?;
                 }
                 PipelinePacket::CapsChanged(_) => {
                     // Upstream H.264 caps are swallowed; we emit I420
@@ -302,6 +322,7 @@ impl AsyncElement for FfmpegH264Dec {
                         dts_ns: d.pts_ns,
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
+                        arrival_ns: d.arrival_ns,
                     },
                     sequence: self.emitted,
                 };
