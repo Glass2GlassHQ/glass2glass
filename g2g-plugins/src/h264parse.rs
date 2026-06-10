@@ -20,8 +20,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelinePacket, Rate,
-    VideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
+    PipelinePacket, Rate, VideoFormat,
 };
 
 #[derive(Debug, Default)]
@@ -59,6 +59,21 @@ impl AsyncElement for H264Parse {
             framerate: Rate::Any,
         };
         upstream_caps.intersect(&supported)
+    }
+
+    /// M16 step 5g: pass-through identity over H.264 of any geometry.
+    /// `Identity(CapsSet::one(...))` is the native shape for transforms
+    /// that accept and emit the same caps. With a fully-native chain
+    /// the solver couples input and output links and rejects non-H.264
+    /// upstream at negotiation time instead of via the dynamic
+    /// `intercept_caps` callback.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Identity(CapsSet::one(Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))
     }
 
     fn configure_pipeline(
@@ -625,5 +640,29 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn caps_constraint_is_identity_h264_any() {
+        // M16 step 5g: native shape is `Identity` over H.264 with any
+        // geometry. With a fully-native chain the solver enforces the
+        // input/output coupling and the format requirement during
+        // arc-consistency, not via the dynamic `intercept_caps`.
+        let parse = H264Parse::new();
+        let c = parse.caps_constraint_as_transform();
+        match c {
+            CapsConstraint::Identity(set) => {
+                assert_eq!(
+                    set.alternatives(),
+                    &[Caps::Video {
+                        format: VideoFormat::H264,
+                        width: Dim::Any,
+                        height: Dim::Any,
+                        framerate: Rate::Any,
+                    }]
+                );
+            }
+            _ => panic!("expected Identity"),
+        }
     }
 }

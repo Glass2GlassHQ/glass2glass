@@ -16,6 +16,21 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Step 5g: first native transform. `H264Parse` overrides
+  `caps_constraint_as_transform` to return
+  `Identity(CapsSet::one(Caps::Video { format: H264, dims: Any }))`.
+  The native solver couples its input and output links and enforces
+  the H.264 format requirement during arc consistency instead of via
+  the dynamic `intercept_caps` callback. New tests:
+  - `h264parse::caps_constraint_is_identity_h264_any` (unit).
+  - `pipeline_smoke::h264parse_identity_negotiates_in_mixed_chain`
+    drives a real `run_source_transform_sink` chain
+    `LegacySource(H264) → H264Parse Identity → AcceptsAny FakeSink`
+    and verifies negotiation + EOS propagation through the mixed
+    cascade. The source is an inline EOS-only stub (no real H.264
+    bytes needed — `H264Parse::process` for `Eos` is pass-through).
+  96 g2g-core tests + 6 pipeline_smoke + every integration suite
+  green.
 - Step 5f (revised): first native source + `SourceLoop` trait
   integration. Original 5f scope (workaround #1 placeholder dims)
   bumped — properly fixing it needs async `intercept_caps` (SDP

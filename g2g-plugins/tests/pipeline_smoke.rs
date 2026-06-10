@@ -82,6 +82,64 @@ async fn pipeline_tight_link_uses_backpressure() {
     assert!(snk.eos_seen());
 }
 
+/// M16 step 5g: chain `LegacySource(H264) → H264Parse (Identity native)
+/// → FakeSink (AcceptsAny)` exercises the mixed cascade with a native
+/// `Identity` transform in the middle. The parse element doesn't see
+/// real H.264 bytes here (no NAL data), it just needs to negotiate and
+/// pass through `Eos`.
+#[tokio::test]
+async fn h264parse_identity_negotiates_in_mixed_chain() {
+    use core::future::Future;
+    use core::pin::Pin;
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::{Dim, Rate};
+    use g2g_plugins::h264parse::H264Parse;
+    use std::boxed::Box;
+
+    // Minimal H.264-advertising source that emits just an EOS — enough
+    // to drive negotiation through the chain without crafting valid
+    // SPS bytes. H264Parse's `process` for `Eos` is a pass-through.
+    struct H264EosSource {
+        configured: bool,
+    }
+    impl SourceLoop for H264EosSource {
+        type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+        fn intercept_caps(&self) -> Result<Caps, G2gError> {
+            Ok(Caps::Video {
+                format: VideoFormat::H264,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Fixed(30 << 16),
+            })
+        }
+        fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+            self.configured = true;
+            Ok(ConfigureOutcome::Accepted)
+        }
+        fn run<'a>(
+            &'a mut self,
+            out: &'a mut dyn OutputSink,
+        ) -> Self::RunFuture<'a> {
+            Box::pin(async move {
+                out.push(PipelinePacket::Eos).await?;
+                Ok(0)
+            })
+        }
+    }
+
+    let mut src = H264EosSource { configured: false };
+    let mut parse = H264Parse::new();
+    let mut snk = FakeSink::new();
+    let clock = ZeroClock;
+
+    let stats = run_source_transform_sink(&mut src, &mut parse, &mut snk, &clock, 4)
+        .await
+        .expect("negotiation through H264Parse Identity must succeed");
+
+    assert_eq!(stats.frames_consumed, 0);
+    assert!(snk.eos_seen());
+}
+
 /// M16 step 5d regression: a chain `source → format-changing transform
 /// → AcceptsAny sink` must pass each element its *per-link* caps. The
 /// transform is a boundary that intercepts the source's format and
