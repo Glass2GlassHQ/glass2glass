@@ -233,29 +233,6 @@ impl AsyncElement for FfmpegH264Dec {
     where
         Self: 'a;
 
-    fn is_format_boundary(&self) -> bool {
-        true
-    }
-
-    fn propose_output_caps(&self, input: &Caps) -> Caps {
-        // H.264 input dims pass through unchanged; only the format
-        // domain shifts. For RTSP / file containers the dims are
-        // already concrete in the input caps (from SPS / SDP), so the
-        // downstream segment negotiates against fixed caps and the
-        // sink doesn't need the old pass-through workaround.
-        match input {
-            Caps::Video { width, height, framerate, .. } => Caps::Video {
-                format: self.output_format.video_format(),
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-            },
-            // Non-video input would have been rejected by intercept_caps;
-            // pass through here is unreachable in practice but safe.
-            other => other.clone(),
-        }
-    }
-
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         let supported = Caps::Video {
             format: VideoFormat::H264,
@@ -479,27 +456,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn propose_output_caps_shifts_format_keeps_dims() {
-        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
-            width: Dim::Fixed(1280),
-            height: Dim::Fixed(720),
-            framerate: Rate::Fixed(30 << 16),
-        };
-        let out = dec.propose_output_caps(&h264);
-        assert_eq!(
-            out,
-            Caps::Video {
-                format: VideoFormat::Nv12,
-                width: Dim::Fixed(1280),
-                height: Dim::Fixed(720),
-                framerate: Rate::Fixed(30 << 16),
-            }
-        );
-    }
-
-    #[test]
     fn caps_constraint_is_derived_output_h264_to_chosen_format() {
         // M16 step 5k: DerivedOutput closure validates H.264 input and
         // emits the configured output format at the same dims/rate.
@@ -533,14 +489,6 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
         };
         assert!(f(&vp9).is_empty());
-    }
-
-    #[test]
-    fn decoder_declares_format_boundary() {
-        // Forward declaration for Plan 2 caps redesign. If this ever
-        // flips to false the redesign will silently fail to recognise
-        // the decoder as a domain switch.
-        assert!(FfmpegH264Dec::new().is_format_boundary());
     }
 
     #[test]

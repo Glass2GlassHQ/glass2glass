@@ -25,6 +25,21 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Cleanup (post-5m): removed `FfmpegH264Dec`'s now-dead
+  `is_format_boundary` and `propose_output_caps` overrides (and their
+  two unit tests). The decoder is native (`DerivedOutput` since 5k), so
+  the runner dispatches through `caps_constraint_as_transform` and never
+  consults these forward-half hooks; `is_format_boundary` has no runtime
+  consumer at all (it was a forward-declaration for a redesign that
+  ended up keying on the constraint surface instead). The `AsyncElement`
+  trait methods themselves stay: `propose_output_caps` is still live for
+  *unmigrated* legacy transforms via the solver's mixed-cascade path
+  (`solver.rs` `LegacyTransform { propose_output }`). Pure deletion; not
+  compiled on the Windows dev host (`ffmpeg` is Linux-gated).
+  `WaylandSink`/`KmsSink` non-NV12 branches were left in place: the
+  in-code note from steps 5e/5j marks them still load-bearing for
+  all-legacy chains, contradicting the "no longer load-bearing"
+  expectation, so they need a separate decision before removal.
 - Step 5m: `VaapiH264Dec` (Linux cros-codecs VAAPI) overrides
   `caps_constraint_as_transform` to return
   `CapsConstraint::DerivedOutput(closure)`, identical in shape to steps
