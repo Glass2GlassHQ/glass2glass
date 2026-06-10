@@ -16,6 +16,20 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Step 5c: `CapsConstraint::AcceptsAny` wildcard sink variant for
+  debug / probe / passthrough sinks whose `intercept_caps` is
+  `Ok(upstream.clone())`. Solver treats it as no-op narrowing on
+  the link (upstream's produced caps flow through unchanged) and
+  enforces it at the chain's tail; in a native chain a middle
+  `AcceptsAny` is silently invisible, in mixed/legacy forward
+  cascade an interior `AcceptsAny` returns `EndpointShapeMismatch`.
+  `FakeSink` and `syncsink` (g2g-plugins) override
+  `caps_constraint_as_sink` to return `AcceptsAny`; chains
+  containing them now exercise the mixed-cascade path. `identity`
+  (transform-shape pass-through) stays on the legacy bridge —
+  needs an `Identity`-with-wildcard variant which is a separate
+  gap. 3 new solver tests; all 95 g2g-core tests + integration
+  suites green.
 - Step 5b: trait integration so individual elements can migrate.
   `AsyncElement` gains two default methods —
   `caps_constraint_as_sink()` and `caps_constraint_as_transform()` —

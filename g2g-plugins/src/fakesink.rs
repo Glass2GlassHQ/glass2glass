@@ -10,7 +10,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, G2gError, HardwareError, OutputSink, PipelinePacket,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, OutputSink,
+    PipelinePacket,
 };
 
 /// Position of a recorded `CapsChanged` packet inside the sink's input
@@ -67,6 +68,15 @@ impl AsyncElement for FakeSink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5c: declare wildcard sink to the solver. `FakeSink`
+    /// accepts whatever upstream produces (its `intercept_caps` is a
+    /// pass-through), which is exactly what `CapsConstraint::AcceptsAny`
+    /// models. Skips the dynamic intercept callback and lets the
+    /// solver propagate upstream caps unchanged.
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
     }
 
     fn configure_pipeline(

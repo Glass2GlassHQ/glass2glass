@@ -92,7 +92,7 @@ pub fn solve_linear<'a>(
         _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 }),
     }
     match constraints[n - 1] {
-        CapsConstraint::Accepts(_) => {}
+        CapsConstraint::Accepts(_) | CapsConstraint::AcceptsAny => {}
         _ => return Err(NegotiationFailure::EndpointShapeMismatch { index: n - 1 }),
     }
 
@@ -273,7 +273,7 @@ fn solve_mixed_cascade(
     );
     let ends_with_sink = matches!(
         constraints[n - 1],
-        CapsConstraint::Accepts(_) | CapsConstraint::LegacySink(_)
+        CapsConstraint::Accepts(_) | CapsConstraint::LegacySink(_) | CapsConstraint::AcceptsAny
     );
     if !starts_with_source {
         return Err(NegotiationFailure::EndpointShapeMismatch { index: 0 });
@@ -305,6 +305,7 @@ fn solve_mixed_cascade(
     let upstream = link_sets[final_idx].clone();
     let narrowed = match constraints[n - 1] {
         CapsConstraint::Accepts(s) => upstream.intersect(s),
+        CapsConstraint::AcceptsAny => upstream,
         CapsConstraint::LegacySink(intercept) => {
             let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
                 upstream: n - 2,
@@ -385,6 +386,7 @@ fn forward_propagate(
         }
         CapsConstraint::Produces(_)
         | CapsConstraint::Accepts(_)
+        | CapsConstraint::AcceptsAny
         | CapsConstraint::LegacySource(_)
         | CapsConstraint::LegacySink(_) => {
             Err(NegotiationFailure::EndpointShapeMismatch { index: i })
@@ -490,6 +492,12 @@ fn apply_constraint(
                     }
                 }
             }
+        }
+        CapsConstraint::AcceptsAny => {
+            // Wildcard sink: no narrowing. The link feeding this sink
+            // takes whatever shape upstream produces. The endpoint
+            // check enforces that this only appears at the chain's
+            // tail, so no further work is needed here.
         }
         CapsConstraint::LegacySource(_)
         | CapsConstraint::LegacyTransform { .. }
@@ -793,6 +801,42 @@ mod tests {
             solve_linear(&[&src, &sink]),
             Err(NegotiationFailure::EmptyLink { .. })
         ));
+    }
+
+    #[test]
+    fn accepts_any_native_chain_passes_source_caps_through() {
+        let caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &sink]).unwrap();
+        assert_eq!(links, vec![caps]);
+    }
+
+    #[test]
+    fn accepts_any_mixed_chain_passes_legacy_source_through() {
+        // Migration shape: legacy source still on the bridge, sink
+        // migrated to AcceptsAny.
+        let caps = fixed_video(VideoFormat::H264, 1920, 1080, 60);
+        let src = CapsConstraint::LegacySource(caps.clone());
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &sink]).unwrap();
+        assert_eq!(links, vec![caps]);
+    }
+
+    #[test]
+    fn accepts_any_in_middle_position_is_silently_a_no_op() {
+        // `AcceptsAny` in the middle of a native chain neither narrows
+        // its input link nor its output link. The surrounding source
+        // and sink fully determine the link assignments — the middle
+        // element is invisible to the solver. Forward-cascade paths
+        // (mixed/legacy) do reject this via `forward_propagate` because
+        // they need an explicit output rule.
+        let caps = fixed_video(VideoFormat::Nv12, 1, 1, 1);
+        let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
+        let mid = CapsConstraint::AcceptsAny;
+        let sink = CapsConstraint::Accepts(CapsSet::one(caps.clone()));
+        let links = solve_linear(&[&src, &mid, &sink]).unwrap();
+        assert_eq!(links, vec![caps.clone(), caps]);
     }
 
     #[test]

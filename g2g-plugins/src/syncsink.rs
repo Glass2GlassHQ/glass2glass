@@ -13,8 +13,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    AsyncClock, AsyncElement, Caps, ConfigureOutcome, ElementBound, G2gError, OutputSink,
-    PipelinePacket,
+    AsyncClock, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementBound, G2gError,
+    OutputSink, PipelinePacket,
 };
 
 #[derive(Debug)]
@@ -81,6 +81,11 @@ where
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5c: wildcard sink. Same rationale as `FakeSink`.
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
     }
 
     fn configure_pipeline(

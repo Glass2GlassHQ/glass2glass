@@ -79,6 +79,14 @@ pub enum CapsConstraint<'a> {
     /// `intercept_caps(upstream) -> Caps` callback. Deleted at the end
     /// of the migration.
     LegacySink(Box<dyn Fn(&Caps) -> Result<Caps, G2gError> + 'a>),
+
+    /// Sink-shape wildcard: accepts whatever upstream produces, of any
+    /// media type, format, dims, or rate. Models debug / probe /
+    /// passthrough sinks (`FakeSink`, `syncsink`, `identity`-as-sink)
+    /// whose `intercept_caps` is `Ok(upstream.clone())`. The solver
+    /// treats this as a no-op narrowing on the link: the upstream's
+    /// produced caps flow through unchanged.
+    AcceptsAny,
 }
 
 impl core::fmt::Debug for CapsConstraint<'_> {
@@ -94,6 +102,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
                 f.debug_struct("LegacyTransform").field("intercept", &"<fn>").finish_non_exhaustive()
             }
             Self::LegacySink(_) => f.debug_tuple("LegacySink").field(&"<fn>").finish(),
+            Self::AcceptsAny => f.write_str("AcceptsAny"),
         }
     }
 }
