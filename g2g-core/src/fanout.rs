@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::caps::Caps;
+use crate::format_element::CapsConstraint;
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome,
 };
@@ -133,6 +134,43 @@ pub trait MultiInputElement: ElementBound {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a>;
+
+    /// M18 step 1: declare this input pad's negotiation-time
+    /// constraint. Default wraps `intercept_caps(input, ...)` as a
+    /// `LegacySink` (per-pad legacy bridge). Migrated muxers override
+    /// to return native variants (typically `AcceptsAny` for
+    /// per-frame-tagged interleave muxers, or `Accepts(set)` for
+    /// per-input format-restricted muxers).
+    ///
+    /// The runner calls this per-input during startup negotiation
+    /// (replacing the inline `LegacySink` construction in
+    /// `run_muxer_sink`) and during per-input mid-stream re-solve
+    /// once Phase C MX-1 lands.
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>
+    where
+        Self: Sized,
+    {
+        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
+            <Self as MultiInputElement>::intercept_caps(self, input, c)
+        }))
+    }
+
+    /// M18 step 1: declare the merged output's negotiation-time
+    /// constraint, evaluated against the muxer's current configured
+    /// inputs. Default eagerly calls `output_caps()` and wraps as
+    /// `LegacySource`. Migrated muxers with static or input-derived
+    /// output may override with `Produces(set)` or `DerivedOutput(fn)`.
+    ///
+    /// The runner uses this in place of `output_caps()?.fixate()` so
+    /// the downstream sink sees a uniformly-shaped constraint and the
+    /// Phase B-style re-solve (workaround #3 §4) extends naturally to
+    /// the muxer-output boundary.
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>
+    where
+        Self: Sized,
+    {
+        Ok(CapsConstraint::LegacySource(self.output_caps()?))
+    }
 }
 
 /// 1→1 enable/disable element. Forwards `CapsChanged` unconditionally and

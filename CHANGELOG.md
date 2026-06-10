@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
+
+- **Item 2 (partial): muxer constraint migration.** Adds
+  `MultiInputElement::caps_constraint_as_input(idx) -> CapsConstraint<'_>`
+  and `MultiInputElement::caps_constraint_for_output() ->
+  Result<CapsConstraint<'_>, G2gError>` default methods to the trait.
+  Default `caps_constraint_as_input` wraps `intercept_caps(idx, ...)`
+  as a `LegacySink` per-pad legacy bridge; default
+  `caps_constraint_for_output` eagerly evaluates `output_caps()` and
+  wraps as `LegacySource`. `InterleaveMux` (g2g-plugins) overrides
+  both: per-input returns `AcceptsAny` (the muxer forwards
+  per-frame-tagged caps straight through), output returns
+  `Produces(CapsSet::one(self.output.clone()))` (static at
+  construction). `run_muxer_sink` now calls these trait methods
+  instead of constructing the inline `LegacySink` for each input pair
+  and using a direct `output_caps().fixate()` for the downstream sink
+  hop; the muxer→sink edge goes through `solve_linear` with an
+  `AcceptsAny` sink-side constraint to preserve the contract that
+  the sink's `intercept_caps` is not consulted for this hop. This
+  closes the structural prerequisite for Phase C MX-1 (per-input
+  mid-stream re-solve) and MX-2 (eager output `CapsChanged` on
+  per-input change); the runtime execution of those still requires
+  the coordinator restructure (workaround3 §9 β) and lands later.
+  New unit tests `mux::tests::per_input_constraint_is_wildcard` and
+  `mux::tests::output_constraint_is_produces_with_configured_output`.
+  Existing `m10_muxer` integration tests and full workspace +
+  Linux-feature matrix unchanged.
+
 ### M16: Caps negotiation redesign (CSP framing)
 - Design doc `DESIGN-M16-caps-nego.md` (§§1-10) recasts negotiation as a
   constraint-satisfaction problem with a solver, and documents the

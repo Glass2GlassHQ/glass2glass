@@ -265,25 +265,23 @@ where
         "muxer input count must match the number of sources"
     );
 
-    // M16 step 4c: solve each source ↔ muxer-input pair via
-    // `solve_linear`. The muxer's per-input `intercept_caps` is wrapped
-    // as a `LegacySink` constraint for that pair. The downstream sink
-    // negotiation (against the muxer's aggregated output) is a separate
-    // 2-element solve.
-    // Note: `DynSourceLoop` doesn't expose `caps_constraint` (added in
-    // 5f only on the concrete `SourceLoop` trait), so muxer sources
-    // always go through the legacy bridge here. No muxer sources are
-    // migrated yet, so this is a no-op gap; expose the method on
-    // `DynSourceLoop` when a migrated source needs to feed a muxer.
+    // M18 step 1: solve each source ↔ muxer-input pair via
+    // `solve_linear`. The muxer's per-input constraint comes from the
+    // new `MultiInputElement::caps_constraint_as_input(idx)` trait
+    // method; migrated muxers (e.g. `InterleaveMux` with `AcceptsAny`)
+    // hit the all-native solver path, unmigrated ones still use the
+    // default `LegacySink` bridge.
+    // Note: `DynSourceLoop` doesn't expose `caps_constraint` (M16 5f
+    // only added it to the concrete `SourceLoop` trait), so muxer
+    // sources always go through the legacy bridge here. No muxer
+    // sources are migrated yet; expose the method on `DynSourceLoop`
+    // when a migrated source needs to feed a muxer.
     let mut sources = sources;
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps()?;
         let fixated = {
             let src_c = CapsConstraint::LegacySource(proposal);
-            let mux_ref = &*mux;
-            let mux_c = CapsConstraint::LegacySink(Box::new(move |c: &Caps| {
-                MultiInputElement::intercept_caps(mux_ref, i, c)
-            }));
+            let mux_c = mux.caps_constraint_as_input(i);
             let links = solve_linear(&[&src_c, &mux_c])
                 .map_err(|_| G2gError::CapsMismatch)?;
             links.last().cloned().ok_or(G2gError::CapsMismatch)?
@@ -297,11 +295,23 @@ where
             return Err(G2gError::FixationFailed);
         }
     }
-    // The sink negotiation against the muxer's output caps stays as a
-    // direct `fixate` — today's code intentionally does not call
-    // `sink.intercept_caps` here (the muxer's aggregated output is the
-    // canonical merged caps and is not narrowed further by the sink).
-    let output = mux.output_caps()?.fixate()?;
+    // M18 step 1: muxer output negotiation goes through the new
+    // `caps_constraint_for_output()` trait method. For a static
+    // muxer (`InterleaveMux` returns `Produces(set)`) this is
+    // equivalent to today's direct `fixate`; for a future muxer with
+    // input-derived output (`DerivedOutput` over the per-input caps)
+    // the same solver call would re-derive on a per-input mid-stream
+    // change (Phase C MX-2, deferred). The sink-side negotiation
+    // intentionally does NOT call `sink.intercept_caps` here — the
+    // muxer's aggregated output is the canonical merged caps and is
+    // not narrowed further by the sink.
+    let output = {
+        let mux_c = mux.caps_constraint_for_output()?;
+        let sink_c = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&mux_c, &sink_c])
+            .map_err(|_| G2gError::CapsMismatch)?;
+        links.last().cloned().ok_or(G2gError::CapsMismatch)?
+    };
     if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&output)? {
         return Err(G2gError::FixationFailed);
     }
