@@ -1,0 +1,312 @@
+# M16 — Caps negotiation v2 (CSP framing)
+
+> **Status:** design, not implementation. The runner still does the
+> single-cascade Phase 1+2 negotiation described in `DESIGN.md` §4.2.
+> This doc locks the shape of the replacement before code lands.
+
+## 1. Why a redesign
+
+`DESIGN.md` §4.2 cascades one `Caps` value through `source.intercept →
+transform.intercept → sink.intercept → fixate`, then calls
+`configure_pipeline(same_fixated)` on all three. Three workarounds have
+accumulated to keep this working for the RTSP → ffmpeg → sink pipeline:
+
+1. **Fixate-friendly placeholder dims** in `RtspSrc::intercept_caps` —
+   returns `Dim::Range { 16, 8192 }` because `Caps::fixate()` rejects
+   `Any`. Real dims arrive mid-stream via `CapsChanged`.
+2. **Pass-through `intercept_caps` on sinks** — `KmsSink` and
+   `WaylandSink` accept the decoder's *input* (H.264) caps at startup
+   and only configure real resources when the post-decode NV12
+   `CapsChanged` cascades back. A sink that wanted to advertise its
+   real input domain (NV12 only) couldn't, because the trait only lets
+   it narrow what upstream offered.
+3. **In-band `CapsChanged` swallow on decoders** —
+   `FfmpegH264Dec::process(CapsChanged(_))` is a no-op because its job
+   is to *replace* the upstream H.264 caps with downstream NV12 caps.
+
+Each is fine in isolation. Together they collapse the model: any
+*second* format-changing transform, or any downstream allocator that
+trusts the negotiated caps to size pools, breaks the cascade.
+
+The right framing is **distributed constraint satisfaction**: each
+element declares its constraint over (input, output) caps; the solver
+finds an assignment over every link satisfying all constraints, ranked
+by preferences. GStreamer's negotiation *is* this, named differently.
+Naming it explicitly buys structure for the non-linear topologies (M9
+fan-out, M10 muxer, future ML branches) and for non-format constraints
+later (latency budget, hardware affinity, ML device placement).
+
+## 2. CSP framing
+
+**Variables.** One per link in the graph: the caps assigned to that
+link. The forward `PipelinePacket` stream on every link carries data
+under exactly that caps assignment.
+
+**Domain.** All representable caps (a `CapsSet` — see §3).
+
+**Constraints.** Per element. Source: only its output link constrained.
+Sink: only its input link. Transform: both, with a relation between
+them.
+
+**Solution.** An assignment to every link such that every element's
+constraint is satisfied. When multiple solutions exist, the
+*preferences* declared by each element rank them; the solver picks the
+highest-ranked.
+
+**Failure.** No assignment exists. The solver returns *which* element's
+constraint conflicted with which neighbor — a structured replacement
+for today's opaque `FixationFailed`.
+
+**Reconfiguration.** A mid-stream constraint change (sink's
+`accepted_input_caps` tightens, source picks a new sub-stream, a
+transform's parameters change) re-runs the solver over the affected
+subgraph. Frames in flight under the old assignment continue to drain;
+new frames flow under the new assignment.
+
+## 3. CapsSet — caps with alternatives and preferences
+
+Today's `Caps` carries one description: one `VideoFormat`, one `Dim`,
+one `Rate`. It cannot express "I prefer NV12 over I420 over YV12" or
+"either an audio stream of any sample rate, or a video stream up to 4K"
+— both of which are routine in real pipelines.
+
+```rust
+/// A set of acceptable caps descriptions, ordered by preference.
+/// The first element is highest preference; later elements are
+/// fallbacks the element will accept if no peer agrees on the first.
+#[derive(Clone, Debug)]
+pub struct CapsSet {
+    alternatives: Vec<Caps>,
+}
+
+impl CapsSet {
+    /// Build from a single concrete description (equivalent to today's
+    /// Caps for static call sites).
+    pub fn one(caps: Caps) -> Self { ... }
+
+    /// Intersection: the caps both sets agree on, preserving the
+    /// preference order of `self`. Empty result = no assignment exists
+    /// for a link between elements with these two sets.
+    pub fn intersect(&self, other: &Self) -> Self { ... }
+
+    /// Fixate the highest-preference alternative to a single concrete
+    /// Caps. None if every alternative still has ranged / Any fields.
+    pub fn fixate(&self) -> Option<Caps> { ... }
+}
+```
+
+`Caps` itself stays as the *fixed* description used at runtime
+(`DataFrame.caps`, `configure_*` callbacks). `CapsSet` is the
+negotiation-time vocabulary.
+
+This is the structural upgrade GStreamer's `GstCaps` provides via "list
+of structures with priority." Without it, **preference ordering is
+unrepresentable** and every element is locked into one preferred format.
+
+## 4. Element constraint surface
+
+```rust
+trait FormatElement {
+    /// Declare the constraint this element imposes on its surrounding
+    /// links. See [`CapsConstraint`]. Read by the solver during
+    /// negotiation.
+    fn caps_constraint(&self) -> CapsConstraint;
+
+    /// Optional preferences for tie-breaking. Defaults to None,
+    /// meaning the solver uses the constraint's own preference order.
+    fn caps_preferences(&self) -> Option<CapsPreferences> { None }
+
+    /// Called by the runner once the solver has assigned caps to
+    /// every link. Boundary elements receive distinct input / output
+    /// values; non-boundary elements receive equal ones.
+    fn configure_link(
+        &mut self,
+        input: Option<&Caps>,
+        output: Option<&Caps>,
+    ) -> Result<(), G2gError>;
+}
+
+enum CapsConstraint {
+    /// Sink-shape: only the input side is constrained. Output is
+    /// unused (sink has no downstream).
+    Accepts(CapsSet),
+
+    /// Source-shape: only the output side is constrained. Input is
+    /// unused.
+    Produces(CapsSet),
+
+    /// Pass-through transform: input == output, both drawn from this
+    /// set. Format converters with a single supported format land
+    /// here, as do identity / probe / metering elements.
+    Identity(CapsSet),
+
+    /// Format-changing transform with an explicit (input, output)
+    /// relation. The set enumerates all legal pairs; the solver picks
+    /// one. Most decoders and encoders use this.
+    Mapping(Vec<(CapsSet, CapsSet)>),
+
+    /// Programmatic mapping: the output set is a function of the
+    /// (already-narrowed) input caps. Used when output depends on the
+    /// input in a way that can't be precomputed (e.g. a decoder
+    /// reading SPS to fix output dims). The function is consulted by
+    /// the solver during forward propagation.
+    DerivedOutput(Box<dyn Fn(&Caps) -> CapsSet + Send + Sync>),
+}
+```
+
+This replaces today's `intercept_caps`, `configure_pipeline`, and the
+forward-half `propose_output_caps` hook that just landed. Migration is
+mechanical for each element:
+
+| Today | Tomorrow |
+|---|---|
+| Source: `intercept_caps()` returns its produced caps | `caps_constraint() = Produces(set)` |
+| Sink: `intercept_caps(upstream)` narrows | `caps_constraint() = Accepts(set)` |
+| Identity transform | `caps_constraint() = Identity(set)` |
+| Decoder: `intercept_caps` accepts H.264, swallows in process | `caps_constraint() = DerivedOutput(\|h264\| nv12_from_dims(h264))` |
+| `configure_pipeline(caps)` | `configure_link(Some(in), Some(out))` |
+
+## 5. Solver
+
+**Linear pipeline (source → transform → sink):**
+
+1. Collect each element's constraint.
+2. Walk forward from the source: compute each link's candidate set as
+   the intersection of upstream-produced ∩ downstream-accepted.
+   `DerivedOutput` is evaluated using upstream's fixated caps once that
+   link has narrowed to a fixed value.
+3. Walk backward to propagate any narrowing that downstream
+   constraints imply for upstream's eventual fixation.
+4. Repeat until convergence (the candidate set on each link stops
+   changing — fixed point).
+5. Fixate each link to its highest-preference concrete caps.
+6. Call `configure_link` on every element with its assigned (input,
+   output).
+
+Steps 2–4 are vanilla arc consistency on a chain — at most O(n²)
+intersections for n elements. Linear pipelines converge in one
+forward+backward sweep.
+
+**Non-linear (M9 fan-out, M10 muxer, future ML branches):**
+
+Same algorithm; the graph structure means the propagation order needs
+a topological sort. Cycles (rare; usually a configuration error)
+become a known failure case.
+
+**Preferences.** When a link's candidate set fixates with multiple
+viable concrete caps, pick the one that ranks highest under the
+preference function aggregated from the link's two endpoints. Default
+aggregation: sum of preference indices (lower wins). Custom
+aggregations can be added later.
+
+**Failure path.** If any link's candidate set becomes empty, the
+solver returns
+
+```rust
+enum NegotiationFailure {
+    EmptyLink { upstream: ElementId, downstream: ElementId, missed: CapsSet },
+    Cyclic { ... },
+}
+```
+
+so the caller can report which pair couldn't agree on what.
+
+## 6. Reconfiguration as constraint update
+
+Mid-stream, an element's constraint may change:
+
+- A source picks a new sub-stream from an IP camera → its `Produces`
+  set updates.
+- A downstream allocator gets reshaped (e.g. a new GPU pool) → the
+  sink's `Accepts` set updates.
+- A decoder learns its output dims from SPS → its `DerivedOutput`
+  function reduces a previously-ranged output to a fixed value.
+
+The element emits a `ReconfigureRequest` upstream the same way today's
+N-1-lag-aware mechanism works (see commit `31339b6` for the pre-send
+check). The runner re-runs the solver over the affected subgraph and
+re-issues `configure_link` to every element whose link assignment
+changed. Frames in flight under the old assignment continue to drain
+(they're tagged with their caps so a downstream element knows which
+configuration to use for each frame, regardless of what the runner has
+since reconfigured).
+
+The "in-band" part of this — flowing the reconfigure request as an
+ordered packet rather than a side-channel flag — is the remaining lag
+fix. The CSP framing doesn't change that mechanism; it just gives a
+clean trigger semantic ("constraint X tightened") rather than the
+specific "downstream rejected proposal Y."
+
+## 7. ACCEPT_CAPS and Capsfilter
+
+Fall out of the constraint surface for free:
+
+- **ACCEPT_CAPS query:** `constraint.accepts(&caps)` — a pure check
+  against the constraint's set. No runtime back-and-forth; the
+  element's constraint already describes everything it would accept.
+- **Capsfilter element:** a pass-through whose constraint is
+  `Identity(specific_set)`. Inserted anywhere in a pipeline to force a
+  narrowing. ~30 lines once the constraint surface exists.
+
+## 8. Migration plan
+
+This is M16, sized as 4–5 focused sessions:
+
+1. **`CapsSet` type + intersect / fixate algebra.** Mechanical. Every
+   element keeps using `Caps` at runtime; `CapsSet` is the
+   negotiation-time wrapper. Tests for the algebra.
+
+2. **`FormatElement` trait + `CapsConstraint` enum.** New trait,
+   coexists with `AsyncElement` during migration. `AsyncElement` gets
+   a default `FormatElement` impl that derives constraints from
+   today's `intercept_caps` so unmigrated elements still work.
+
+3. **Solver in `g2g-core::runtime::solver`.** Linear-pipeline arc
+   consistency, returning per-link assignments. Tests for empty link,
+   cyclic graph, preference tie-break.
+
+4. **Runner refactor.** `run_source_transform_sink` etc. call the
+   solver instead of the cascaded negotiation. Existing tests must
+   pass.
+
+5. **Migrate sources / sinks / decoders to `FormatElement` directly.**
+   Delete the three workarounds (placeholder dims, pass-through
+   intercept, deferred configure). Existing tests adapt.
+
+6. **CapsFilter element + ACCEPT_CAPS surface.** Trivial after (5).
+
+The order ensures each step is verifiable on its own: (1) ships an
+algebra, (2) ships a trait, (3) ships a solver, (4) wires solver into
+runner without changing behavior, (5) removes workarounds with the
+solver actively in use, (6) is opportunistic add.
+
+## 9. Open questions
+
+- **`CapsSet` shape vs `GstCaps` shape exactly.** GStreamer's
+  `GstCaps` is a `GArray<GstStructure>`. We could mirror that
+  precisely or keep our enum-based `Caps` and just make `CapsSet`
+  hold ordered alternatives. Choosing now to keep `Caps` as the enum
+  — simpler, type-safe, no string-keyed structure lookup.
+- **Memory-domain constraints.** A sink may accept only `DmaBuf`
+  while upstream produces only `System`. Today that's a domain
+  mismatch reported by `propose_allocation`. In CSP framing it's
+  another constraint dimension; should it live in `CapsConstraint` or
+  in a parallel `AllocationConstraint`? Defer to M17.
+- **Latency / clock-budget constraints.** Same question. Out of scope
+  for M16; the framing scales naturally if added later.
+- **Cost of the solver at startup.** Linear pipeline = O(n²)
+  intersections, n small. Real-world overhead measured in
+  microseconds. Mid-stream re-solve is also cheap because only the
+  affected subgraph is touched. Worth confirming with a benchmark
+  once (1)–(4) land.
+
+## 10. What this doc does NOT decide
+
+- Whether the eventual `FormatElement` trait fully replaces
+  `AsyncElement` or coexists. Bet on coexists at first, decide once
+  the migration is well-understood.
+- Concrete preference algebra (sum-of-indices is a placeholder).
+- Whether the solver runs in `no_std` (probably yes — it's pure
+  computation over heap allocations).
+
+Code starts at step 1 of §8 in a fresh session.
