@@ -233,6 +233,13 @@ impl AsyncElement for FfmpegH264Dec {
     where
         Self: 'a;
 
+    fn is_format_boundary(&self) -> bool {
+        // H.264 bitstream in, raw NV12/I420 out — the canonical caps-domain
+        // switch. Declaring this today changes nothing; the planned caps
+        // redesign will use it to scope per-segment negotiation.
+        true
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         let supported = Caps::Video {
             format: VideoFormat::H264,
@@ -424,6 +431,14 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_declares_format_boundary() {
+        // Forward declaration for Plan 2 caps redesign. If this ever
+        // flips to false the redesign will silently fail to recognise
+        // the decoder as a domain switch.
+        assert!(FfmpegH264Dec::new().is_format_boundary());
+    }
 
     #[test]
     fn i420_caps_are_fixed() {

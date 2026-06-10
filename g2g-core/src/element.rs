@@ -111,6 +111,26 @@ pub trait AsyncElement: ElementBound {
     fn provide_clock(&self) -> Option<ClockCandidate> {
         None
     }
+
+    /// Declares that this element changes the caps "domain" between its
+    /// input and output: a decoder turns compressed bitstream into raw
+    /// pixels, an encoder turns raw pixels into compressed bitstream, a
+    /// format converter shifts color space, etc. Default: false.
+    ///
+    /// Currently informational. The runner uses a single linear caps
+    /// cascade and the three workarounds documented in
+    /// `architecture_caps_nego_debt` apply on its behalf. The planned
+    /// caps redesign (Plan 2) will use this hint to split the pipeline
+    /// into per-domain negotiation segments, eliminating the
+    /// pass-through `intercept_caps` and deferred-configure dance that
+    /// sinks downstream of a boundary currently rely on.
+    ///
+    /// Declaring this true today changes no behavior — it's a forward
+    /// declaration so the redesign can roll out without simultaneously
+    /// migrating every decoder.
+    fn is_format_boundary(&self) -> bool {
+        false
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.
