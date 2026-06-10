@@ -3,6 +3,7 @@ use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelineClock, PipelinePacket,
     VideoFormat,
 };
+use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::identity::IdentityTransform;
 use g2g_plugins::videotestsrc::VideoTestSrc;
@@ -220,4 +221,59 @@ async fn format_changing_transform_receives_input_side_caps() {
         Some(VideoFormat::Rgba8),
         "transform should be configured with its input-side caps"
     );
+}
+
+/// M16 step 6: `CapsFilter` (native `Identity`) in a real solver chain.
+/// `VideoTestSrc` (Produces Rgba8) → `CapsFilter` (Identity, Rgba8/any
+/// dims) → `FakeSink` (AcceptsAny) is all-native, so it runs the
+/// arc-consistency path. The filter narrows the link to Rgba8 and every
+/// frame flows through.
+#[tokio::test]
+async fn capsfilter_passes_matching_format_in_native_chain() {
+    use g2g_core::{Caps, Dim, Rate};
+
+    let mut src = VideoTestSrc::new(32, 32, 30, 12);
+    let mut filter = CapsFilter::new(Caps::Video {
+        format: VideoFormat::Rgba8,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    });
+    let mut snk = FakeSink::new();
+    let clock = ZeroClock;
+
+    let stats = run_source_transform_sink(&mut src, &mut filter, &mut snk, &clock, 8)
+        .await
+        .expect("native chain with matching CapsFilter must negotiate");
+
+    assert_eq!(stats.frames_consumed, 12);
+    assert_eq!(filter.forwarded(), 12, "filter must forward every frame");
+    assert_eq!(snk.last_sequence(), Some(11));
+    assert!(snk.eos_seen());
+}
+
+/// M16 step 6: a `CapsFilter` whose set is disjoint from the source's
+/// produced format makes the link empty, so negotiation fails before any
+/// frame flows.
+#[tokio::test]
+async fn capsfilter_rejects_incompatible_format() {
+    use g2g_core::{Caps, Dim, Rate};
+
+    let mut src = VideoTestSrc::new(32, 32, 30, 12);
+    let mut filter = CapsFilter::new(Caps::Video {
+        format: VideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    });
+    let mut snk = FakeSink::new();
+    let clock = ZeroClock;
+
+    let result = run_source_transform_sink(&mut src, &mut filter, &mut snk, &clock, 8).await;
+
+    assert!(
+        result.is_err(),
+        "CapsFilter disjoint from the source format must fail negotiation"
+    );
+    assert_eq!(filter.forwarded(), 0, "no frames should reach a rejected filter");
 }
