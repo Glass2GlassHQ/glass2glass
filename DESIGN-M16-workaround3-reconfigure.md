@@ -427,26 +427,34 @@ eager emit (MX-2 recommendation) and shave one frame of latency.
 
 ### 10.6 Trigger conditions
 
-Phase C lands when:
-
-- A real production chain uses fan-out with a possibility of mid-
-  stream caps change. Concrete first candidate: a `tee` between a
-  decoder and two parallel sinks (display + recording).
-- Or: a real production chain uses muxer with a source whose caps
-  change mid-stream (e.g., adaptive bitrate audio + video mux).
-
-Neither exists in g2g today; tests use static caps. Until then,
-Phase C is design-locked, not implemented. The decisions FO-1, MX-2,
-and MX-3 are the structural ones — pin them now so the implementer
-isn't blocked.
+Phase C originally deferred until a real production chain needed it (a
+`tee` to display + recording, or an adaptive-bitrate mux). The M18 parity
+push implemented it ahead of that trigger because the per-input /
+per-branch re-solve fits entirely inside each runner's existing
+single-owner task (the muxer task already owns `&mut mux`; each fan-out
+branch has its own arm), so no β coordinator restructure was needed
+(§10.4). **Status: landed.**
 
 ### 10.7 Decisions for sign-off (Phase C summary)
 
-- **FO-1.** Strict failure mode default; `FanOutPolicy::AllowBranchDrop`
-  as a future opt-in. Aligns with GStreamer.
-- **FO-2.** Per-branch re-solve via Phase B's helper, executed in
-  parallel.
-- **MX-2.** Eager emit of muxer output `CapsChanged` on per-input
-  re-solve (lower latency than GStreamer's lazy default).
-- **MX-3.** Add `MultiInputElement::caps_constraint_as_input(idx)`
-  trait method when MX-1 lands.
+- **FO-1.** *Implemented.* Strict failure mode default: a branch whose
+  `caps_constraint_as_sink()` rejects the mid-stream caps fails the
+  fan-out loud (`CapsMismatch`). `FanOutPolicy::AllowBranchDrop` remains a
+  future opt-in.
+- **FO-2.** *Implemented.* Per-branch re-solve via
+  `re_solve_downstream_dyn_sink` (the `DynAsyncElement` mirror of Phase
+  B's helper). Branches run in independent arms, so the re-solves are
+  concurrent. Plus per-branch element-local α re-allocation.
+- **MX-1.** *Implemented.* Per-input re-solve in the muxer task via the
+  shared `solve_mux_input` helper; strict loud failure (the β-clean
+  reverse-`Renegotiate`-per-input variant is still β-gated).
+- **MX-2.** *Implemented.* Eager emit of the muxer output `CapsChanged`
+  when the re-derived output changes (via `solve_mux_output`).
+- **MX-3.** *Implemented.* `MultiInputElement::caps_constraint_as_input(idx)`
+  and `caps_constraint_for_output()` landed with the item 2 trait
+  migration.
+
+What remains β-gated (not Phase C): the structured per-input/per-branch
+reverse-`Renegotiate` on a rejecting peer (the runner task can't reach an
+upstream reconfigure slot without the coordinator), and the cross-element
+allocation cascade (β proper, §9.4.1).

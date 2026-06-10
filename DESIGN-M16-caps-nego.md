@@ -410,22 +410,23 @@ explicitly deferred. Honest rating: ~70-75% capability parity.
   drain cleanly past a mid-stream reconfigure. This is the foundation
   for the no-double-allocation latency win.
 
-### 13.2 What M16 explicitly defers (specified, no code)
+### 13.2 What M16 deferred (since closed by the M18 push)
 
-Documented in `DESIGN-M16-workaround3-reconfigure.md` §9 and §10:
+Documented in `DESIGN-M16-workaround3-reconfigure.md` §9 and §10. The M18
+parity push implemented the Phase C and α items below; only β proper
+remains.
 
-- **Allocation re-cascade (§9).** M12 `propose_allocation` runs only
-  at startup. GStreamer re-runs `GstQuery::Allocation` on every caps
-  change; GPU pools and DMABUF surfaces *require* this. Phased plan:
-  α (element-local) → β (coordinator restructure). β is the same
-  machinery several other items need.
-- **Phase C fan-out (§10).** Per-branch downstream subgraph re-solve
-  with strict failure policy (`FanOutPolicy::Strict`). Parallel
-  per-branch solver calls beat GStreamer's sequential pattern on
-  latency.
-- **Phase C muxer (§10).** Per-input re-solve plus eager output
-  `CapsChanged` emission. Eager emit shaves one frame vs. GStreamer's
-  lazy default.
+- **Allocation re-cascade (§9).** M12 `propose_allocation` ran only at
+  startup. Phased plan α (element-local) → β (coordinator restructure).
+  *α landed* (mid-stream element-local re-allocation in the linear and
+  fan-out runners). *β (cross-element cascade) remains* trigger-gated
+  (§9.4.1): it needs a real downstream-pool consumer and a no_std
+  `select` primitive.
+- **Phase C fan-out (§10).** *Landed.* Per-branch re-solve (FO-2) with
+  strict failure default (FO-1), branches re-solved concurrently in their
+  own arms, plus per-branch α.
+- **Phase C muxer (§10).** *Landed.* Per-input re-solve (MX-1) plus eager
+  output `CapsChanged` emission (MX-2) inside the muxer task.
 
 ### 13.3 What M16 doesn't specify or cover
 
@@ -470,11 +471,12 @@ Documented in `DESIGN-M16-workaround3-reconfigure.md` §9 and §10:
    `DESIGN-M16-workaround3-reconfigure.md` §9.4 R1 and §9.4.1. It needs a
    real cross-element pool consumer and a no_std `select` primitive (or
    the element-ownership move) before it's worth building.
-2. **`mux` migration + Phase C muxer.** Real audio/video mux chains
-   need this. Trait surface change (`MultiInputElement::caps_constraint_as_input(idx)`)
-   noted in workaround3 §10 MX-3.
-3. **Fan-out Phase C with FO-1 strict default.** `tee` to display +
-   recording. Parallel per-branch solver calls is the latency win.
+2. **`mux` migration + Phase C muxer.** *Done (M18).* Trait migration
+   (MX-3) plus per-input re-solve (MX-1) and eager output re-emit (MX-2)
+   inside the muxer task; no β needed (workaround3 §10.4, §10.7).
+3. **Fan-out Phase C with FO-1 strict default.** *Done (M18).* Per-branch
+   re-solve (FO-2) concurrent across branch arms, strict failure (FO-1),
+   plus per-branch α. `tee` to display + recording is now supported.
 4. **Multi-element runner.** Once chains exceed 3 elements, mid-
    stream re-solve must cover the full downstream subgraph. Couples
    to item 1 cleanly.
