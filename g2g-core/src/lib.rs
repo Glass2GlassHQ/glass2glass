@@ -13,6 +13,7 @@
 extern crate alloc;
 
 pub mod caps;
+pub mod format_element;
 pub mod clock;
 pub mod element;
 pub mod error;
@@ -35,12 +36,18 @@ pub mod runtime;
 #[cfg(feature = "dyn-slot")]
 pub mod slot;
 
-pub use caps::{AudioFormat, Caps, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoFormat};
+pub use caps::{
+    AudioFormat, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoFormat,
+};
 pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, PipelineClock};
 pub use element::{
     AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 pub use error::{G2gError, HardwareError};
+pub use format_element::{
+    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
+    FormatElement,
+};
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use link::LinkPolicy;
 pub use memory::{

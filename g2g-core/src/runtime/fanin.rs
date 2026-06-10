@@ -23,6 +23,8 @@ use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, Reconfigure,
 };
 use crate::clock::ClockPriority;
+use crate::format_element::CapsConstraint;
+use crate::runtime::solver::solve_linear;
 use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
@@ -106,6 +108,8 @@ where
 
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
     // configured against input 0's fixated caps (the merged-output caps).
+    // This is not routed through `solve_linear` because each source
+    // self-fixates with no peer narrowing — there's no chain to solve.
     let mut sources = sources;
     let mut merged_caps: Option<Caps> = None;
     for (i, source) in sources.iter_mut().enumerate() {
@@ -261,12 +265,24 @@ where
         "muxer input count must match the number of sources"
     );
 
-    // Phase 1 + 2, per input: each source ↔ its muxer pad fixate independently.
+    // M16 step 4c: solve each source ↔ muxer-input pair via
+    // `solve_linear`. The muxer's per-input `intercept_caps` is wrapped
+    // as a `LegacySink` constraint for that pair. The downstream sink
+    // negotiation (against the muxer's aggregated output) is a separate
+    // 2-element solve.
     let mut sources = sources;
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps()?;
-        let narrowed = MultiInputElement::intercept_caps(mux, i, &proposal)?;
-        let fixated = narrowed.fixate()?;
+        let fixated = {
+            let src_c = CapsConstraint::LegacySource(proposal);
+            let mux_ref = &*mux;
+            let mux_c = CapsConstraint::LegacySink(Box::new(move |c: &Caps| {
+                MultiInputElement::intercept_caps(mux_ref, i, c)
+            }));
+            let links = solve_linear(&[&src_c, &mux_c])
+                .map_err(|_| G2gError::CapsMismatch)?;
+            links.last().cloned().ok_or(G2gError::CapsMismatch)?
+        };
         if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
             return Err(G2gError::FixationFailed);
         }
@@ -276,6 +292,10 @@ where
             return Err(G2gError::FixationFailed);
         }
     }
+    // The sink negotiation against the muxer's output caps stays as a
+    // direct `fixate` — today's code intentionally does not call
+    // `sink.intercept_caps` here (the muxer's aggregated output is the
+    // canonical merged caps and is not narrowed further by the sink).
     let output = mux.output_caps()?.fixate()?;
     if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&output)? {
         return Err(G2gError::FixationFailed);

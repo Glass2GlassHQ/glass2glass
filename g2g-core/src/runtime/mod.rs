@@ -13,6 +13,7 @@
 mod channel;
 mod join;
 mod runner;
+pub mod solver;
 
 #[cfg(feature = "std")]
 mod fanin;

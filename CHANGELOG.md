@@ -5,6 +5,112 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M16: Caps negotiation redesign (CSP framing)
+- Design doc `DESIGN-M16-caps-nego.md` (§§1-10) recasts negotiation as a
+  constraint-satisfaction problem with a solver, and documents the
+  6-step migration plan (§8).
+- Step 1: `CapsSet` algebra in `g2g-core::caps`. Preference-ordered
+  alternatives over `Caps`; `one`, `from_alternatives`, `intersect`
+  (preserves self's outer order, dedupes equal results), `fixate`
+  (picks the highest-preference fixable alternative). `Caps` remains
+  the *fixed* runtime description; `CapsSet` is the negotiation-time
+  vocabulary. Re-exported from the crate root. Unit-tested for empty
+  intersection, preference preservation, dedup, and fixate fallback.
+- Step 5b: trait integration so individual elements can migrate.
+  `AsyncElement` gains two default methods —
+  `caps_constraint_as_sink()` and `caps_constraint_as_transform()` —
+  each returning the legacy bridge (`LegacySink` / `LegacyTransform`)
+  for today's `intercept_caps` + `propose_output_caps`. The runner
+  (`run_simple_pipeline` and `run_source_transform_sink`) now calls
+  these methods instead of constructing the bridge inline; migrated
+  elements override to return a native `CapsConstraint` and chains
+  containing them hit the mixed-cascade solver path. Behavior is
+  identical for every existing element (all defaults). Bridge helpers
+  `legacy_sink_constraint` / `legacy_transform_constraint` relaxed
+  to `?Sized` so they can be called from the trait's default methods
+  on `&Self`.
+- Step 5a: mixed-chain support in the solver. Chains that mix
+  legacy and native `CapsConstraint` variants now route to a new
+  `solve_mixed_cascade` (single forward pass that handles every
+  variant). Legacy variants and `DerivedOutput` require upstream to
+  fixate to one concrete `Caps`, which migration chains satisfy
+  because the source is typically single-alternative. Backward
+  arc-consistency (Identity / Mapping filtering against downstream
+  sinks) is not applied in the mixed path; once a chain becomes
+  fully native, dispatch routes it back to the arc-consistency
+  solver and backward propagation is restored.
+  `NegotiationFailure::MixedLegacyAndNative` is no longer returned
+  (kept as a variant in case future mixed shapes need it).
+  4 new tests cover legacy-source/native-sink, native-source/legacy-sink,
+  native-source/legacy-decoder/native-sink, and sink rejection in a
+  mixed chain.
+- Step 4c: roll the solver-via-legacy-bridge pattern out to the
+  remaining linear runner entry points. `run_simple_pipeline`
+  (source → sink) and `run_source_fanout` (source → fanout, with the
+  fanout as the linear "sink" of the chain — downstream sinks
+  broadcast-receive the fixated caps and don't participate in
+  narrowing). `run_muxer_sink` solves each source ↔ muxer-input pair
+  via the solver, wrapping the muxer's per-input `intercept_caps`
+  as a `LegacySink`. `run_fanin_sink` stays direct: each source
+  self-fixates with no peer narrowing, so there's no chain to solve.
+  The muxer's aggregated-output → sink half stays as direct
+  `fixate()` because today's runner intentionally does *not* call
+  `sink.intercept_caps` for that hop (the muxer output is the
+  canonical merged caps).
+- Step 4b: `run_source_transform_sink` startup negotiation routes
+  through `solve_linear` via the legacy bridge. The pre-M16 inline
+  cascade (`source.intercept_caps` → `transform.intercept_caps` →
+  `sink.intercept_caps` → `fixate`) is replaced by building
+  `LegacySource` / `LegacyTransform` / `LegacySink` constraints and
+  calling the solver; the cascade output is bit-compatible with what
+  the inline path produced. `ReFixate` retry stays in the runner (the
+  solver doesn't model counter-proposals); on each retry the
+  `LegacySource` seed becomes the counter and the solver re-runs.
+  Mid-stream `CapsChanged` paths are untouched. All existing tests
+  pass (89 g2g-core, 14 g2g-plugins rtsp lib, all integration
+  suites).
+- Step 4a: legacy bridge into the solver. `CapsConstraint` gains a
+  `'a` lifetime parameter and three transitional variants —
+  `LegacySource(Caps)`, `LegacyTransform { intercept, propose_output }`,
+  `LegacySink(intercept)` — that capture today's `AsyncElement`
+  callbacks. `legacy_transform_constraint(&T)` / `legacy_sink_constraint(&T)`
+  helpers wrap a borrowed element. The solver dispatches: all-native
+  chains take arc consistency, all-legacy chains take
+  `solve_legacy_cascade` (forward cascade that mirrors today's runner,
+  then fixates the final caps and propagates to upstream link slots
+  the same way `configure_pipeline` is called today). Mixed chains
+  return `NegotiationFailure::MixedLegacyAndNative` until step 5
+  migrates individual elements. 6 new tests cover the cascade,
+  pass-through and boundary transforms, intercept failure, mixed
+  chain rejection, and the AsyncElement → LegacyTransform bridge.
+- Step 3: linear-pipeline caps solver in
+  `g2g-core::runtime::solver` (feature `runtime`).
+  `solve_linear(&[&CapsConstraint]) -> Result<Vec<Caps>, NegotiationFailure>`
+  walks a source → transform* → sink chain with arc consistency:
+  seed endpoint links from `Produces` / `Accepts`, forward+backward
+  sweep until fixed point, fixate each link to one concrete `Caps`.
+  Handles all four interior constraint shapes — `Identity` couples
+  input and output, `Mapping` filters pre-enumerated (in, out) pairs
+  to the surviving set, `DerivedOutput` fires once its input link
+  fixates. `NegotiationFailure` reports `EmptyLink` /
+  `EndpointShapeMismatch` / `Unfixable` / `Degenerate`; `Cyclic` is
+  reserved for the non-linear solver. `CapsSet::union` added to
+  support the `Mapping` path. 10 unit tests cover the minimal chain,
+  empty/disjoint links, degenerate input, endpoint-shape errors,
+  preference tie-break, identity coupling and mismatch, derived
+  output, and mapping pair selection.
+- Step 2: `FormatElement` trait + `CapsConstraint` enum in new
+  `g2g-core::format_element` module. `CapsConstraint` variants:
+  `Accepts` (sinks), `Produces` (sources), `Identity` (pass-through
+  transforms), `Mapping(Vec<(in, out)>)` (pre-enumerated codecs),
+  `DerivedOutput(Fn(&Caps) -> CapsSet)` (decoders reading SPS).
+  `configure_link(input, output)` replaces `configure_pipeline`;
+  boundary elements see distinct sides, sources/sinks see `None` on
+  the unused side. `CapsPreferences` is a placeholder for the
+  tie-break algebra (DESIGN-M16 §10). Coexists with `AsyncElement`;
+  the legacy-bridge blanket impl lands with the solver in step 3,
+  because its shape is dictated by what the solver consumes.
+
 ### M12: Live-source surface (latency + allocation + clock election)
 - Latency query: `LatencyReport { live, min_ns, max_ns }` + `query` module,
   GStreamer-style latency triple with `combine`/`aggregate` (min and max sum

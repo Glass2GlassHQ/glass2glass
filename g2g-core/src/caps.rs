@@ -184,6 +184,87 @@ fn intersect_range((amin, amax): (u32, u32), (bmin, bmax): (u32, u32)) -> Option
     (lo <= hi).then_some((lo, hi))
 }
 
+/// A preference-ordered set of acceptable `Caps` descriptions.
+///
+/// `Caps` itself remains the *fixed* description used at runtime
+/// (`DataFrame.caps`, `configure_*`). `CapsSet` is the negotiation-time
+/// vocabulary: it carries alternatives and preference, neither of which
+/// fits in a single `Caps`. See DESIGN-M16-caps-nego.md §3.
+///
+/// The first alternative is highest preference; later ones are
+/// fallbacks the element will accept if no peer agrees on the first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapsSet {
+    alternatives: Vec<Caps>,
+}
+
+impl CapsSet {
+    /// Build from a single concrete description (equivalent to today's
+    /// `Caps` for static call sites that don't express alternatives).
+    pub fn one(caps: Caps) -> Self {
+        Self { alternatives: alloc::vec![caps] }
+    }
+
+    /// Build directly from an ordered list of alternatives. The first
+    /// element is highest preference. Empty input is allowed and yields
+    /// the empty set (no agreement possible with any peer).
+    pub fn from_alternatives(alternatives: Vec<Caps>) -> Self {
+        Self { alternatives }
+    }
+
+    /// Return the ordered alternatives.
+    pub fn alternatives(&self) -> &[Caps] {
+        &self.alternatives
+    }
+
+    /// True when no alternatives remain. An empty `CapsSet` on a link
+    /// means the two peers' constraints do not intersect.
+    pub fn is_empty(&self) -> bool {
+        self.alternatives.is_empty()
+    }
+
+    /// Intersection: the caps both sets agree on, preserving `self`'s
+    /// outer preference order, then `other`'s within each row.
+    /// Empty result = no assignment exists for a link between elements
+    /// with these two sets.
+    pub fn intersect(&self, other: &Self) -> Self {
+        let mut out = Vec::new();
+        for a in &self.alternatives {
+            for b in &other.alternatives {
+                if let Ok(c) = a.intersect(b) {
+                    if !out.contains(&c) {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        Self { alternatives: out }
+    }
+
+    /// Union: every alternative in `self` followed by every alternative
+    /// in `other` not already present. Preserves `self`'s preference
+    /// order and dedupes structurally-equal entries. Used by the
+    /// `Mapping` solver path to combine the surviving (input, output)
+    /// pair sides.
+    pub fn union(&self, other: &Self) -> Self {
+        let mut out = self.alternatives.clone();
+        for c in &other.alternatives {
+            if !out.contains(c) {
+                out.push(c.clone());
+            }
+        }
+        Self { alternatives: out }
+    }
+
+    /// Fixate the highest-preference alternative that can collapse to a
+    /// single concrete `Caps`. Returns `None` if the set is empty or
+    /// every alternative still has `Any` fields after attempting
+    /// fixation.
+    pub fn fixate(&self) -> Option<Caps> {
+        self.alternatives.iter().find_map(|c| c.fixate().ok())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VideoFormat {
     H264,
@@ -348,6 +429,92 @@ mod tests {
         assert!(!video(Dim::Any, Dim::Fixed(1), Rate::Fixed(1)).is_fixed());
         assert!(!video(Dim::Fixed(1), Dim::Range { min: 1, max: 2 }, Rate::Fixed(1)).is_fixed());
         assert!(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 44_100 }.is_fixed());
+    }
+
+    #[test]
+    fn capsset_one_wraps_single_caps() {
+        let c = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let set = CapsSet::one(c.clone());
+        assert_eq!(set.alternatives(), &[c]);
+        assert!(!set.is_empty());
+    }
+
+    #[test]
+    fn capsset_intersect_single_pair() {
+        let a = CapsSet::one(video(Dim::Range { min: 640, max: 1920 }, Dim::Any, Rate::Any));
+        let b = CapsSet::one(video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16)));
+        let i = a.intersect(&b);
+        assert_eq!(i.alternatives(), &[video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16))]);
+    }
+
+    #[test]
+    fn capsset_intersect_empty_when_no_overlap() {
+        let a = CapsSet::one(video(Dim::Fixed(640), Dim::Any, Rate::Any));
+        let b = CapsSet::one(video(Dim::Fixed(1280), Dim::Any, Rate::Any));
+        assert!(a.intersect(&b).is_empty());
+    }
+
+    #[test]
+    fn capsset_intersect_preserves_self_preference_order() {
+        // self: prefers Rgba8 then H264; other: accepts both with any dims.
+        let rgba = |w| Caps::Video {
+            format: VideoFormat::Rgba8,
+            width: w,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let h264 = |w| Caps::Video {
+            format: VideoFormat::H264,
+            width: w,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let a = CapsSet::from_alternatives(alloc::vec![rgba(Dim::Any), h264(Dim::Any)]);
+        let b = CapsSet::from_alternatives(alloc::vec![h264(Dim::Fixed(1280)), rgba(Dim::Fixed(640))]);
+        let i = a.intersect(&b);
+        // self's outer order wins: Rgba8 first even though other lists H264 first.
+        assert_eq!(i.alternatives(), &[rgba(Dim::Fixed(640)), h264(Dim::Fixed(1280))]);
+    }
+
+    #[test]
+    fn capsset_intersect_dedupes_equal_results() {
+        // Two self-alternatives that both intersect `other` to the same Caps.
+        let any = video(Dim::Any, Dim::Any, Rate::Any);
+        let fixed = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let a = CapsSet::from_alternatives(alloc::vec![any.clone(), any.clone()]);
+        let b = CapsSet::one(fixed.clone());
+        let i = a.intersect(&b);
+        assert_eq!(i.alternatives(), &[fixed]);
+    }
+
+    #[test]
+    fn capsset_union_preserves_self_order_and_dedupes() {
+        let a = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let b = video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let c = video(Dim::Fixed(1920), Dim::Fixed(1080), Rate::Fixed(30 << 16));
+        let lhs = CapsSet::from_alternatives(alloc::vec![a.clone(), b.clone()]);
+        let rhs = CapsSet::from_alternatives(alloc::vec![b.clone(), c.clone()]);
+        let u = lhs.union(&rhs);
+        assert_eq!(u.alternatives(), &[a, b, c]);
+    }
+
+    #[test]
+    fn capsset_fixate_picks_first_fixable_alternative() {
+        // First alt has framerate Any (not fixable); second is fully fixable.
+        let unfixable = video(Dim::Fixed(640), Dim::Fixed(480), Rate::Any);
+        let fixable = video(Dim::Range { min: 800, max: 1920 }, Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let set = CapsSet::from_alternatives(alloc::vec![unfixable, fixable]);
+        assert_eq!(
+            set.fixate(),
+            Some(video(Dim::Fixed(800), Dim::Fixed(720), Rate::Fixed(30 << 16)))
+        );
+    }
+
+    #[test]
+    fn capsset_fixate_empty_or_all_unfixable_yields_none() {
+        assert!(CapsSet::from_alternatives(Vec::new()).fixate().is_none());
+        let only_any = video(Dim::Any, Dim::Any, Rate::Any);
+        assert!(CapsSet::one(only_any).fixate().is_none());
     }
 
     #[test]

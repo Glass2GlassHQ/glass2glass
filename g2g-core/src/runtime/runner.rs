@@ -8,10 +8,12 @@ use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
+use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
+use crate::runtime::solver::solve_linear;
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -126,6 +128,7 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    // M16 step 4c: startup negotiation via `solve_linear` + legacy bridge.
     let mut proposal = source.intercept_caps()?;
     let mut attempts = 0u32;
     let negotiated_caps = loop {
@@ -133,10 +136,13 @@ where
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
         }
-        // Phase 1 narrows; Phase 2 fixates every ranged field to a single
-        // value before any element allocates against it (DESIGN.md §4.2).
-        let negotiated = sink.intercept_caps(&proposal)?;
-        let fixated = negotiated.fixate()?;
+        let fixated = {
+            let src_c = CapsConstraint::LegacySource(proposal.clone());
+            let sink_c = sink.caps_constraint_as_sink();
+            let links = solve_linear(&[&src_c, &sink_c])
+                .map_err(|_| G2gError::CapsMismatch)?;
+            links.last().cloned().ok_or(G2gError::CapsMismatch)?
+        };
         match source.configure_pipeline(&fixated)? {
             ConfigureOutcome::Accepted => {}
             ConfigureOutcome::ReFixate(counter) => {
@@ -262,11 +268,21 @@ where
     let branch_count = sinks.len();
     assert!(branch_count > 0, "fan-out needs at least one sink");
 
-    // Phase 1 + 2: fixate the source proposal through the fan-out element and
-    // configure every element with the single fixated caps.
+    // M16 step 4c: solve source → fanout via the solver. The fan-out
+    // acts as the linear "sink" of the negotiation chain; the real
+    // sinks downstream of it broadcast-receive the same fixated caps
+    // and don't participate in narrowing.
     let proposal = source.intercept_caps()?;
-    let routed = MultiOutputElement::intercept_caps(fanout, &proposal)?;
-    let fixated = routed.fixate()?;
+    let fixated = {
+        let src_c = CapsConstraint::LegacySource(proposal);
+        let fanout_ref = &*fanout;
+        let fanout_c = CapsConstraint::LegacySink(Box::new(move |c: &Caps| {
+            MultiOutputElement::intercept_caps(fanout_ref, c)
+        }));
+        let links = solve_linear(&[&src_c, &fanout_c])
+            .map_err(|_| G2gError::CapsMismatch)?;
+        links.last().cloned().ok_or(G2gError::CapsMismatch)?
+    };
 
     if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
         return Err(G2gError::FixationFailed);
@@ -418,9 +434,15 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    // M8 piece 5: bounded ReFixate retry across all three elements.
-    // Any element's counter-proposal restarts Phase 1 from the source's
-    // intercept with that counter as the new starting proposal.
+    // M16 step 4b: startup negotiation routes through `solve_linear`
+    // via the legacy bridge. The bridge wraps today's `intercept_caps`
+    // / `propose_output_caps` callbacks as `LegacyTransform` /
+    // `LegacySink` constraints; the solver's legacy cascade runs the
+    // forward chain identically to the pre-M16 inline cascade and
+    // fixates the final caps. `ReFixate` retry stays in the runner
+    // (the solver doesn't model counter-proposals) — on each retry the
+    // source's `LegacySource` seed is replaced by the counter and the
+    // solver is re-run.
     let mut start_proposal = source.intercept_caps()?;
     let mut attempts = 0u32;
     let negotiated_caps = loop {
@@ -428,11 +450,20 @@ where
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
         }
-        // Phase 1 narrows through the chain; Phase 2 fixates the result
-        // before any element allocates against it (DESIGN.md §4.2).
-        let tx_proposal = transform.intercept_caps(&start_proposal)?;
-        let negotiated = sink.intercept_caps(&tx_proposal)?;
-        let fixated = negotiated.fixate()?;
+        // Build the constraint chain in a scope so the immutable
+        // borrows of `transform` / `sink` are released before the
+        // `configure_pipeline` calls below take mutable access.
+        let fixated = {
+            let src_c = CapsConstraint::LegacySource(start_proposal.clone());
+            let tx_c = transform.caps_constraint_as_transform();
+            let sink_c = sink.caps_constraint_as_sink();
+            let links = solve_linear(&[&src_c, &tx_c, &sink_c])
+                .map_err(|_| G2gError::CapsMismatch)?;
+            // The legacy cascade fixates the final link; upstream link
+            // slots carry the same fixated caps that today's runner
+            // hands to every `configure_pipeline` call.
+            links.last().cloned().ok_or(G2gError::CapsMismatch)?
+        };
 
         let mut refixate: Option<Caps> = None;
         for outcome in [
