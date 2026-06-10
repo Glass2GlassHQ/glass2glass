@@ -25,6 +25,25 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Step 5k: `FfmpegH264Dec` overrides `caps_constraint_as_transform`
+  to return `CapsConstraint::DerivedOutput(closure)`. The closure
+  validates H.264 input and emits the chosen output format
+  (`Nv12`/`I420`) at the same dims/framerate; non-H.264 input
+  yields an empty `CapsSet` so the solver rejects at negotiation
+  time. With the decoder native, the production chain
+  `rtsp → ffmpegdec → sink` becomes mixed: the solver returns
+  `[H264, Nv12]` per-link, the runner feeds the decoder H.264
+  (what its `configure_pipeline` requires) and the sink Nv12.
+  Coupled with 5j (NV12 sinks tolerate mid-stream dim changes),
+  the placeholder-dim NV12 at startup → real-dim mid-stream
+  `CapsChanged` transition rebuilds the surface cleanly instead of
+  refusing. New unit test
+  `caps_constraint_is_derived_output_h264_to_chosen_format` covers
+  the H.264→NV12 derivation and the non-H.264 rejection. All 99
+  g2g-core + 10 ffmpegdec lib tests + every integration suite green
+  across base / rtsp / ffmpeg feature sets. Visual verification of
+  the manual `rtsp → ffmpegdec → wayland/kms` chain is on the user.
+
 - Step 5j (reordered): NV12 display sinks (`WaylandSink`, `KmsSink`)
   tolerate mid-stream geometry changes. Previously `configure_pipeline`
   with new dims after the worker / framebuffer pool was up returned

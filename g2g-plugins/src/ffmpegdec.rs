@@ -59,8 +59,8 @@ use ffmpeg::Error as FfError;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PipelinePacket, Rate, VideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -266,6 +266,36 @@ impl AsyncElement for FfmpegH264Dec {
         upstream_caps.intersect(&supported)
     }
 
+    /// M16 step 5k: native `DerivedOutput` — accepts H.264 with any
+    /// geometry and produces NV12 or I420 (chosen at construction) at
+    /// the same dims and framerate. The closure validates the input
+    /// format and returns an empty set on mismatch, so the solver
+    /// rejects non-H.264 upstream at negotiation time instead of via
+    /// the dynamic `intercept_caps` callback. Mixed chains containing
+    /// this decoder now get real per-link caps from the solver: H.264
+    /// to the decoder, NV12/I420 to the sink. Coupled with 5j (NV12
+    /// sinks tolerate mid-stream dim changes), the production
+    /// `rtsp → ffmpegdec → wayland/kms` chain switches from the
+    /// legacy single-fixated cascade to the per-link path without
+    /// regression.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let out_fmt = self.output_format.video_format();
+        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| match input {
+            Caps::Video {
+                format: VideoFormat::H264,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::Video {
+                format: out_fmt,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
+            _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
+        }))
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
             Caps::Video {
@@ -467,6 +497,42 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
             }
         );
+    }
+
+    #[test]
+    fn caps_constraint_is_derived_output_h264_to_chosen_format() {
+        // M16 step 5k: DerivedOutput closure validates H.264 input and
+        // emits the configured output format at the same dims/rate.
+        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let c = dec.caps_constraint_as_transform();
+        let CapsConstraint::DerivedOutput(f) = c else {
+            panic!("expected DerivedOutput");
+        };
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let out = f(&h264);
+        assert_eq!(
+            out.alternatives(),
+            &[Caps::Video {
+                format: VideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
+
+        // Non-H.264 input → empty CapsSet (solver rejects with EmptyLink).
+        let vp9 = Caps::Video {
+            format: VideoFormat::Vp9,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert!(f(&vp9).is_empty());
     }
 
     #[test]
