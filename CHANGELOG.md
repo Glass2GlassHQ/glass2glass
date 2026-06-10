@@ -34,6 +34,28 @@ Nothing is published yet; all versions are `0.1.0`.
 - M12 complete: with M8–M12 done, `g2g` reaches dynamic-pipeline feature parity
   with GStreamer (per DESIGN.md §4.10) while keeping the static typed layer.
 
+### M14: Wayland display sink (Linux, NV12, desktop-dev convenience)
+- `WaylandSink` element (`wayland-sink` feature, Linux-only): opens an
+  `xdg_toplevel` window on the running compositor and presents NV12 frames
+  via `wl_shm` after software conversion to XRGB8888 (BT.601 limited range).
+  Designed as the desktop-dev companion to `KmsSink` — same NV12 input
+  contract so the upstream pipeline stays identical.
+- Threading: a dedicated worker thread owns all Wayland state (Connection,
+  EventQueue, SlotPool); the sink struct holds only a calloop channel and
+  an `Arc<AtomicU64>` counter, both `Send + Sync`. SCTK's
+  `calloop_wayland_source` multiplexes Wayland events and frame arrivals
+  in a single event loop. A one-shot Mutex/Condvar handshake gates the
+  sink-side `configure_pipeline` on the first compositor `configure`.
+- Pulls `smithay-client-toolkit` 0.20 (transitively bringing the
+  `wayland-*` family) under `[target.'cfg(target_os = "linux")'.dependencies]`.
+- Constraints (v1): NV12 only, fixed input dims, no scaling (compositor
+  letterboxes/clips if its configure suggests a different size), no PTS
+  pacing, software conversion only (zero-copy via `zwp_linux_dmabuf_v1` is
+  deferred).
+- `KmsSink` is the production low-latency sink; `WaylandSink` is for
+  iterating on the pipeline inside your desktop session without dropping
+  to a tty.
+
 ### M14: KMS/DRM display sink (Linux, NV12)
 - `KmsSink` element (`kms-sink` feature, Linux-only): primary-plane scanout
   of NV12 `DataFrame`s on the first connected connector + CRTC of the

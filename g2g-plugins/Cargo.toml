@@ -34,6 +34,12 @@ embassy = []
 # usually conflicts with a running Wayland/X11 compositor. NV12 input only —
 # pair with `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`.
 kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
+# Wayland display sink: NV12 in, software-converted to XRGB8888 in a
+# `wl_shm` pool, attached to an `xdg_toplevel` window. Linux-only, implies
+# std. Pulls smithay-client-toolkit (which transitively brings wayland-*).
+# This is the desktop-dev convenience sink; KmsSink is the production
+# low-latency path.
+wayland-sink = ["std", "dep:smithay-client-toolkit"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -63,6 +69,7 @@ drm-fourcc = { version = "2", optional = true }
 # Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
 # it (the underlying pkg-config probe doesn't fit those targets).
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
+smithay-client-toolkit = { version = "0.20", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
