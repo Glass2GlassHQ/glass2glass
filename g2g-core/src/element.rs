@@ -131,6 +131,25 @@ pub trait AsyncElement: ElementBound {
     fn is_format_boundary(&self) -> bool {
         false
     }
+
+    /// Derive the element's *output* caps from its negotiated input
+    /// caps. Only consulted by the runner when `is_format_boundary()`
+    /// is true. Default: pass input through (correct for non-boundary
+    /// elements that don't change format).
+    ///
+    /// Boundary elements (decoders, encoders, format converters)
+    /// override this to advertise their post-transform caps so the
+    /// downstream segment can negotiate honestly. A decoder typically
+    /// reads dims from the input caps (already populated from the
+    /// stream's SPS / container header) and returns raw video caps at
+    /// matching geometry.
+    ///
+    /// If the output caps genuinely can't be known until first decoded
+    /// frame (rare for modern stream containers), return ranged caps
+    /// here and emit a fixing `CapsChanged` mid-stream.
+    fn propose_output_caps(&self, input: &Caps) -> Caps {
+        input.clone()
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.

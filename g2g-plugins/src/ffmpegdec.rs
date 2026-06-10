@@ -234,10 +234,26 @@ impl AsyncElement for FfmpegH264Dec {
         Self: 'a;
 
     fn is_format_boundary(&self) -> bool {
-        // H.264 bitstream in, raw NV12/I420 out — the canonical caps-domain
-        // switch. Declaring this today changes nothing; the planned caps
-        // redesign will use it to scope per-segment negotiation.
         true
+    }
+
+    fn propose_output_caps(&self, input: &Caps) -> Caps {
+        // H.264 input dims pass through unchanged; only the format
+        // domain shifts. For RTSP / file containers the dims are
+        // already concrete in the input caps (from SPS / SDP), so the
+        // downstream segment negotiates against fixed caps and the
+        // sink doesn't need the old pass-through workaround.
+        match input {
+            Caps::Video { width, height, framerate, .. } => Caps::Video {
+                format: self.output_format.video_format(),
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            },
+            // Non-video input would have been rejected by intercept_caps;
+            // pass through here is unreachable in practice but safe.
+            other => other.clone(),
+        }
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -431,6 +447,27 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn propose_output_caps_shifts_format_keeps_dims() {
+        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let out = dec.propose_output_caps(&h264);
+        assert_eq!(
+            out,
+            Caps::Video {
+                format: VideoFormat::Nv12,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Fixed(30 << 16),
+            }
+        );
+    }
 
     #[test]
     fn decoder_declares_format_boundary() {
