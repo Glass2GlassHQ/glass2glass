@@ -7,6 +7,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 2 (Phase C): muxer per-input re-solve (MX-1) + input-derived
+  output re-emit (MX-2).** A per-input mid-stream `CapsChanged` is now
+  re-solved against the muxer's per-input constraint and applied to that
+  pad (`MultiInputElement::configure_pipeline(i, ..)`), then consumed,
+  instead of being forwarded raw to the output as the previous
+  `process`-everything path did (which leaked input-side caps as the
+  merged output). After the per-input reconfigure the runner re-derives
+  the merged output and, only when it changed, eagerly emits one
+  downstream `CapsChanged` (MX-2). Both run inside the existing single
+  muxer task, which already owns `&mut mux` and serializes all inputs, so
+  no β coordinator restructure is needed (workaround3 §10.4). Strict
+  failure: a per-input caps the muxer can't accept fails loud
+  (`CapsMismatch`); the structured reverse-`Renegotiate`-per-input variant
+  is β-gated (the muxer task can't reach an input's reconfigure slot
+  pre-β). The startup per-input and output negotiation are refactored into
+  shared `solve_mux_input` / `solve_mux_output` helpers that the mid-stream
+  paths reuse (no duplicated solver call). New integration test
+  `m18_mux_phase_c.rs`: MX-1 (input pad re-solved, input `CapsChanged` not
+  leaked, static `InterleaveMux` output unchanged) and MX-2 (a
+  derived-output muxer emits exactly one downstream `CapsChanged` with the
+  re-derived output). Closes the runtime half of item 2 (MX-3 trait
+  surface already landed); no_std core build, core suite, and the std
+  plugins suite all green.
+
 - **Item 1 (Session D): α element-local re-allocation.** First
   observable M18 behavior change. New `coordinator::realloc_local`: when
   a mid-stream `CapsChanged` is applied to an element, the runner
