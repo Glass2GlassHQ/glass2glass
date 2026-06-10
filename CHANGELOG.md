@@ -16,6 +16,28 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Step 5e: correctness fix — `solve_legacy_cascade` reverts to
+  intercept-only (bit-compatible with the pre-M16 cascade). Step 4b
+  had incorrectly called the format-boundary's `propose_output_caps`
+  during the legacy cascade, producing per-link caps the legacy
+  workaround-#2 sinks (`WaylandSink`, `KmsSink`) can't consume —
+  e.g. NV12 at placeholder dims at startup, with the deferred-setup
+  branch then refusing the mid-stream real-dim `CapsChanged`.
+  Restored: every all-legacy chain element receives the single
+  fixated `Caps` from the cascade's final intercept, matching
+  pre-M16. The CI suite missed the regression because the e2e
+  `rtsp → ffmpeg → waylandsink` test is `#[ignore]`d (sandbox
+  blocks port 554).
+
+  **Revised 5d claim**: per-link configure benefits mixed chains
+  (one or both endpoints native). All-legacy chains keep the
+  single-fixated-caps model and workaround #2 stays load-bearing
+  for them — until those sinks migrate (which requires workaround
+  #1, the placeholder-dims fix, to land first so per-link NV12
+  carries real dims at startup).
+
+  Updated `legacy_cascade_with_boundary_transform` test and
+  `architecture_caps_nego_debt` memory.
 - Step 5d: per-link configure (deletes caps-nego workaround #2).
   Two coupled changes:
   - `solve_legacy_cascade` no longer clobbers upstream link slots

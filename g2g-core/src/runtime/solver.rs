@@ -190,22 +190,24 @@ fn solve_legacy_cascade(
     }
 
     let mut links: Vec<Caps> = Vec::with_capacity(n_links);
-    // Interior elements: each transform contributes (input_link,
-    // output_link) where input_link = intercept(upstream) and
-    // output_link = propose_output(input_link). The link between
-    // element i and i+1 (links[i]) takes the value of element i's
-    // *output*, which equals element i+1's *input*.
+    // Interior elements: bit-compatible with the pre-M16 inline
+    // cascade. Each transform contributes ONLY `intercept(upstream)`;
+    // `propose_output_caps` is intentionally NOT called here. In the
+    // legacy single-fixated-caps model, the same `Caps` flows through
+    // every element and the decoder's output-side caps don't appear
+    // until the mid-stream `CapsChanged` lands. The mixed/native
+    // cascade paths use `propose_output_caps` to derive per-link caps;
+    // the legacy cascade leaves that out so chains containing
+    // workaround #2 sinks (waylandsink/kmssink with their
+    // pass-through-then-defer pattern) keep working unchanged.
     for (i, c) in constraints.iter().enumerate().skip(1).take(n.saturating_sub(2)) {
         match c {
-            CapsConstraint::LegacyTransform { intercept, propose_output } => {
-                let input = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
+            CapsConstraint::LegacyTransform { intercept, propose_output: _ } => {
+                current = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
                     upstream: i - 1,
                     downstream: i,
                 })?;
-                // links[i-1] is the link between element i-1 and i,
-                // which equals this transform's input.
-                links.push(input.clone());
-                current = propose_output(&input);
+                links.push(current.clone());
             }
             CapsConstraint::LegacySource(_) | CapsConstraint::LegacySink(_) => {
                 return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
@@ -213,27 +215,32 @@ fn solve_legacy_cascade(
             _ => return Err(NegotiationFailure::MixedLegacyAndNative),
         }
     }
-    // Sink: links[n_links-1] is the link feeding the sink, which is
-    // sink.intercept_caps(current).
+    // Sink: cascade through its intercept, then fixate the result.
     if let CapsConstraint::LegacySink(intercept) = constraints[n - 1] {
-        let final_caps = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
+        current = intercept(&current).map_err(|_| NegotiationFailure::EmptyLink {
             upstream: n - 2,
             downstream: n - 1,
         })?;
-        links.push(final_caps);
+        links.push(current);
     }
 
-    // Phase 2 fixate: each link's slot is the intercept-narrowed caps
-    // for that hop. Fixate each independently so format-changing
-    // boundaries (decoder: H264 in, NV12 out) keep their per-link
-    // identity instead of collapsing to the final downstream caps.
-    // The runner consumes per-link caps so each element gets the side
-    // it expects.
-    for (li, slot) in links.iter_mut().enumerate() {
-        *slot = slot.fixate().map_err(|_| NegotiationFailure::Unfixable {
-            upstream: li,
-            downstream: li + 1,
+    // Phase 2 fixate the final value, then propagate it to every link
+    // slot. The pre-M16 cascade fed one `fixated` Caps to every
+    // `configure_pipeline` call; honoring that exactly means upstream
+    // slots carry the final fixated caps too. Format-changing
+    // boundaries that need per-link semantics must migrate to the
+    // native solver path (one endpoint at a time) — that's where the
+    // mixed cascade kicks in and the runner gets real per-link caps.
+    let fixed_last = links
+        .last()
+        .ok_or(NegotiationFailure::Degenerate)?
+        .fixate()
+        .map_err(|_| NegotiationFailure::Unfixable {
+            upstream: n - 2,
+            downstream: n - 1,
         })?;
+    for slot in links.iter_mut() {
+        *slot = fixed_last.clone();
     }
 
     Ok(links)
@@ -712,15 +719,17 @@ mod tests {
         };
         let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        // M16 step 5d: per-link caps. Link 0 is the decoder's input
-        // (H264 from the source); link 1 is the decoder's output / the
-        // sink's input (NV12). The runner uses each link's caps for
-        // the corresponding element's `configure_pipeline`, so the
-        // decoder receives H264 (what it expects) and the sink
-        // receives NV12.
+        // M16 step 5e: the legacy cascade is intercept-only, mirroring
+        // the pre-M16 single-fixated-caps model exactly. The decoder's
+        // `propose_output_caps` is ignored on this path because legacy
+        // sinks (e.g. waylandsink with workaround #2) depend on
+        // receiving the upstream-side caps at `configure_pipeline`
+        // and learning the real output dims later via mid-stream
+        // `CapsChanged`. Both link slots carry the same fixated caps.
+        // Format-changing semantics arrive when an element migrates to
+        // a native variant and the chain becomes mixed.
         let h264 = fixed_video(VideoFormat::H264, 1280, 720, 30);
-        let nv12 = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
-        assert_eq!(links, vec![h264, nv12]);
+        assert_eq!(links, vec![h264.clone(), h264]);
     }
 
     #[test]
