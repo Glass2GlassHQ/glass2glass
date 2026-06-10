@@ -453,23 +453,29 @@ where
         // Build the constraint chain in a scope so the immutable
         // borrows of `transform` / `sink` are released before the
         // `configure_pipeline` calls below take mutable access.
-        let fixated = {
+        let (src_caps, sink_caps) = {
             let src_c = CapsConstraint::LegacySource(start_proposal.clone());
             let tx_c = transform.caps_constraint_as_transform();
             let sink_c = sink.caps_constraint_as_sink();
             let links = solve_linear(&[&src_c, &tx_c, &sink_c])
                 .map_err(|_| G2gError::CapsMismatch)?;
-            // The legacy cascade fixates the final link; upstream link
-            // slots carry the same fixated caps that today's runner
-            // hands to every `configure_pipeline` call.
-            links.last().cloned().ok_or(G2gError::CapsMismatch)?
+            // M16 step 5d: per-link configure. For a 3-element chain
+            // links has length 2: [source-output / transform-input,
+            // transform-output / sink-input]. The transform's
+            // `configure_pipeline` historically receives one caps; we
+            // pass its *input* side, which is what existing decoders
+            // (e.g. `FfmpegH264Dec`) expect.
+            if links.len() != 2 {
+                return Err(G2gError::CapsMismatch);
+            }
+            (links[0].clone(), links[1].clone())
         };
 
         let mut refixate: Option<Caps> = None;
         for outcome in [
-            source.configure_pipeline(&fixated)?,
-            transform.configure_pipeline(&fixated)?,
-            sink.configure_pipeline(&fixated)?,
+            source.configure_pipeline(&src_caps)?,
+            transform.configure_pipeline(&src_caps)?,
+            sink.configure_pipeline(&sink_caps)?,
         ] {
             match outcome {
                 ConfigureOutcome::Accepted => {}
@@ -481,7 +487,11 @@ where
         }
         match refixate {
             Some(counter) => start_proposal = counter,
-            None => break fixated,
+            // M12 allocation flows along the downstream-facing side
+            // (the transform's output = the sink's input), so we
+            // break with `sink_caps` for the propose_allocation calls
+            // below.
+            None => break sink_caps,
         }
     };
 

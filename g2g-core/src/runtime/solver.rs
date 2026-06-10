@@ -223,25 +223,17 @@ fn solve_legacy_cascade(
         links.push(final_caps);
     }
 
-    // Phase 2 fixate. Today's cascade fixates only the final value;
-    // upstream links flow as-is (they may carry ranged fields that the
-    // current `configure_pipeline` path tolerates). Fixate the last
-    // link and propagate fixed values backward via `fixate` of each
-    // ranged field — but to preserve today's behavior bit-for-bit,
-    // only fixate the *final* link and leave upstream link assignments
-    // equal to whatever the cascade produced.
-    let last = links.last().ok_or(NegotiationFailure::Degenerate)?.clone();
-    let fixed_last = last.fixate().map_err(|_| NegotiationFailure::Unfixable {
-        upstream: n - 2,
-        downstream: n - 1,
-    })?;
-    *links.last_mut().unwrap() = fixed_last.clone();
-    // Propagate the fixated final caps backward as the assigned link
-    // value for every upstream link too — today's runner uses one
-    // `fixated` value across `configure_pipeline` calls for all
-    // elements, so this matches the existing behavior.
-    for slot in links.iter_mut().take(n_links - 1) {
-        *slot = fixed_last.clone();
+    // Phase 2 fixate: each link's slot is the intercept-narrowed caps
+    // for that hop. Fixate each independently so format-changing
+    // boundaries (decoder: H264 in, NV12 out) keep their per-link
+    // identity instead of collapsing to the final downstream caps.
+    // The runner consumes per-link caps so each element gets the side
+    // it expects.
+    for (li, slot) in links.iter_mut().enumerate() {
+        *slot = slot.fixate().map_err(|_| NegotiationFailure::Unfixable {
+            upstream: li,
+            downstream: li + 1,
+        })?;
     }
 
     Ok(links)
@@ -720,11 +712,15 @@ mod tests {
         };
         let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
-        // Today's cascade calls configure_pipeline with the *fixated
-        // final* caps for every element; cascade mirrors that, so both
-        // links carry the decoder output.
+        // M16 step 5d: per-link caps. Link 0 is the decoder's input
+        // (H264 from the source); link 1 is the decoder's output / the
+        // sink's input (NV12). The runner uses each link's caps for
+        // the corresponding element's `configure_pipeline`, so the
+        // decoder receives H264 (what it expects) and the sink
+        // receives NV12.
+        let h264 = fixed_video(VideoFormat::H264, 1280, 720, 30);
         let nv12 = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
-        assert_eq!(links, vec![nv12.clone(), nv12]);
+        assert_eq!(links, vec![h264, nv12]);
     }
 
     #[test]

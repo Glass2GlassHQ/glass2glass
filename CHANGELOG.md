@@ -16,6 +16,36 @@ Nothing is published yet; all versions are `0.1.0`.
   the *fixed* runtime description; `CapsSet` is the negotiation-time
   vocabulary. Re-exported from the crate root. Unit-tested for empty
   intersection, preference preservation, dedup, and fixate fallback.
+- Step 5d: per-link configure (deletes caps-nego workaround #2).
+  Two coupled changes:
+  - `solve_legacy_cascade` no longer clobbers upstream link slots
+    with the final fixated caps. Each link is fixated independently
+    and carries its own intercept-narrowed value, so format-changing
+    boundaries (decoder: H264 in / NV12 out) keep their per-link
+    identity.
+  - `run_source_transform_sink` extracts both `src_caps = links[0]`
+    and `sink_caps = links[1]` from the solver and passes each
+    element the side it expects: `source.configure_pipeline(src_caps)`,
+    `transform.configure_pipeline(src_caps)` (input side — what
+    decoders like `FfmpegH264Dec` validate against), and
+    `sink.configure_pipeline(sink_caps)`. M12 allocation queries
+    use the downstream-facing `sink_caps`.
+
+  **Regression caught and fixed**: in step 5c, migrating `FakeSink`
+  to `AcceptsAny` routed the rtsp e2e chain through the mixed
+  cascade, which correctly returned `links=[H264, NV12]`. But the
+  pre-5d runner fed `links.last()=NV12` to every element, including
+  the decoder, which rejects NV12 with `CapsMismatch`. The e2e test
+  is `#[ignore]`d so CI missed it. New regression test
+  `format_changing_transform_receives_input_side_caps` in
+  `pipeline_smoke.rs` covers this shape without needing ffmpeg.
+
+  **Workaround #2 retired**: `WaylandSink` / `KmsSink` now receive
+  NV12 directly at startup (when downstream of a decoder), so their
+  "Caps::Video { .. } => no-op" deferred-setup branch is no longer
+  load-bearing. The branch is left in place for safety; cleanup is
+  a follow-up. Updated `legacy_cascade_with_boundary_transform`
+  test to assert per-link semantics.
 - Step 5c: `CapsConstraint::AcceptsAny` wildcard sink variant for
   debug / probe / passthrough sinks whose `intercept_caps` is
   `Ok(upstream.clone())`. Solver treats it as no-op narrowing on
