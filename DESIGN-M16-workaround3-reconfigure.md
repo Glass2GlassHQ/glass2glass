@@ -150,3 +150,268 @@ guard for any future change to the swallow path.
 - The codec-vs-raw `Caps` split (`DESIGN-M16-caps-nego.md` §12) would
   make the decoder's input/output media types distinct types, which
   simplifies D4's validation. Independent; not required here.
+
+## 9. Mid-stream allocation re-cascade (deferred-but-specified)
+
+### 9.1 Why this matters for the capability target
+
+The framework target is *at least as capable as GStreamer, ideally
+lower latency*. GStreamer's allocation model (`GstQuery::Allocation`,
+`gst_buffer_pool_set_config`) is part of negotiation, not an
+afterthought: every src pad runs an allocation query against its peer
+sink pad on each `GST_EVENT_CAPS`. GPU integrations
+(`GstGLBufferPool`, VAAPI surface pools, DRM dumb-buffer pools)
+*require* the pool to be re-derived from the new caps before the
+first frame under those caps is allocated. A framework that re-runs
+caps negotiation but not allocation negotiation cannot host these
+elements correctly — it can host *only* allocators that ignore caps
+and over-allocate, which gives up the latency win the redesign is
+chasing.
+
+So "defer until needed" is not the long-term answer if the framework
+intends to host real GPU pools. The right answer is to land the
+mechanism the first time a concrete allocator depends on it, and to
+make that mechanism cleanly extensible to clock changes, latency
+adjustments, and any other mid-stream cross-element coordination.
+
+### 9.2 Today's M12 cascade and why it is startup-only
+
+`run_source_transform_sink` (lines around 501-510 of `runner.rs`)
+runs the cascade once before spawning futures:
+
+```text
+let p = sink.propose_allocation(&caps);    // sink's needs
+transform.configure_allocation(&p);        // transform absorbs them
+let p' = transform.propose_allocation(&caps); // transform's needs
+source.configure_allocation(&p');          // source allocates pool
+```
+
+This requires `&mut` access to all three elements. Once
+`Join2::new(source_fut, ...)` spawns, each element is owned by its
+own future. No mid-stream caps change re-queries the cascade.
+
+### 9.3 Failure modes the deferred state masks today
+
+Latent until an allocator actually consults negotiated caps:
+
+- **Pool size drift.** A sink pool sized for the negotiated H.264
+  caps stays H.264-sized after the decoder advertises NV12. With
+  workaround #1 placeholder dims (16×16) and the post-decode real
+  dims (e.g., 1920×1088), the size delta is two orders of magnitude.
+  Today nothing crashes because `propose_allocation` returns `None`
+  for every element in tree.
+- **Domain mismatch.** A future GPU sink that proposes `DmaBuf`
+  buffers cannot retroactively flip the upstream source from
+  `System` to `DmaBuf` mid-stream — the cascade never re-queries.
+- **Alignment / stride changes.** Codecs that emit different strides
+  for different resolutions (vaapi paths, e.g., 1280 → 1920 width
+  changes the stride from 1280 to 1920 with potential
+  hardware-imposed padding) need the downstream pool to know the new
+  stride before the first new-resolution frame.
+
+### 9.4 Decision: phased implementation, with the trigger condition stated
+
+The phasing here is structurally similar to workaround #3's A → B → C:
+land the cheap local mechanism first, restructure when the cheap one
+can't cover the next concrete case.
+
+| Phase | Mechanism | Covers | Trigger |
+|---|---|---|---|
+| **α (cheap)** | Element-local re-allocation. `configure_pipeline(new_caps)` invokes the element's own `propose_allocation` and stores the new params for the element's next-frame allocation. No cross-element cascade. | "Sink resizes its own pool." "Decoder re-derives its scratch buffer size." Common allocator-internal cases. | When the first allocator-internal pool ships. Probably alongside vaapidec NV12 surface pool or kmssink dmabuf pool. |
+| **β (correct)** | Runner restructure: a single coordinator task owns refs to source/transform/sink. The futures coordinate via channels; the coordinator runs the cascade. Mid-stream caps change at the boundary triggers a coordinator `Recascade { caps }` event. | Cross-element cascades: "source must allocate sink-shaped buffers." Also: mid-stream clock changes, latency budget tightening. | When the first element advertises that it *consumes* a downstream allocator's pool proposal across a mid-stream caps change. Concrete first candidates: a zero-copy DMABUF path source → decoder → sink chain; a VAAPI surface chain. |
+
+### 9.5 Why β is the long-term shape, not just a bigger α
+
+The coordinator restructure is the same machinery Phase C (§10) needs
+for non-linear topologies, the same machinery a future M-something
+needs for sinks-as-clock-providers when their reported clock changes
+mid-stream, and the same machinery audio/video sync will need. It is
+not an allocation-specific cost; once it lands, every cross-element
+mid-stream coordination becomes a coordinator event instead of
+ad-hoc.
+
+GStreamer effectively has this — the pipeline owns elements and
+orchestrates events. Our current spawn-and-forget futures topology
+is *lighter* than GStreamer's at startup but *less capable* mid-
+stream. The β restructure brings us to parity.
+
+### 9.6 Latency target for β
+
+GStreamer's `GST_EVENT_CAPS` triggers a synchronous allocation query
+on each src→sink pad link. Total latency for a 3-element chain is
+roughly: 2 allocation queries × (function-call overhead +
+allocator-side computation). Real-world: hundreds of microseconds to
+a millisecond.
+
+Our solver-mediated cascade can do better. The coordinator runs
+`solve_linear` over the affected subgraph (already O(n²) for tiny n)
+plus one allocation-cascade pass. The arithmetic is microseconds.
+The latency win over GStreamer comes from *not* round-tripping
+through pad query objects: our cascade is a direct function call
+chain serialized by the coordinator.
+
+Avoid double allocation across the boundary by exploiting the
+per-`Frame.caps` invariant (§5): elements key their pool by the
+frame's caps, not the element's currently-configured caps. In-flight
+old-caps frames complete under the old pool; new-caps frames pull
+from the new pool. Pre-allocate the new pool concurrently with old-
+pool drain.
+
+### 9.7 Decisions for sign-off
+
+- **R1.** Phased landing as above (α first, β when needed) vs. β
+  upfront. *Recommendation: α + β plan in design, α implemented when
+  the first allocator needs it, β implemented when the first
+  cross-element case needs it.* The plan stays in the design doc so
+  the next implementer doesn't re-derive it.
+- **R2.** β's coordinator: single task or shared `Arc<Mutex<>>` on
+  each element? *Recommendation: single-task coordinator.* Cleaner
+  Send/Sync story, no interior-mutability assumption forced on every
+  element.
+- **R3.** Mid-stream allocation event: in-band (a new
+  `PipelinePacket::AllocationProposal`) or coordinator-channel?
+  *Recommendation: coordinator-channel.* Backward in-band packets
+  collide with the existing reverse `Reconfigure` mechanism;
+  coordinator-channel keeps the data plane data-only.
+
+## 10. Phase C — non-linear topologies
+
+### 10.1 Scope statement
+
+Phase C applies the §4 subgraph re-solve principle to:
+
+- **Fan-out:** `source → fan-out → N sinks` (`run_source_fanout`).
+  Boundary upstream of the fan-out emits `CapsChanged`; each branch
+  needs its own subgraph re-solve.
+- **Muxer:** `N sources → muxer → 1 sink` (`run_muxer_sink`). Per-
+  source mid-stream caps change re-solves that source's input link.
+  Muxer's own output may also change as a function of input
+  changes, requiring it to emit `CapsChanged` downstream.
+
+GStreamer's `tee` (fan-out) and demuxers/muxers handle both cases.
+The capability target is parity-plus.
+
+### 10.2 Fan-out specifics
+
+Today's `run_source_fanout` broadcasts every mid-stream
+`CapsChanged` to each branch via `MultiSenderSink`. Each branch's
+sink-fut handles it with the adjacent-only `configure_pipeline`
+(Phase B's `re_solve_downstream_sink` helper is NOT applied in the
+fan-out runner).
+
+**Decisions for sign-off:**
+
+- **FO-1: failure-mode policy.** If branch B1 accepts the new caps
+  and B2 rejects:
+  - *Strict (recommended):* any branch reject kills the fan-out
+    with a structured failure. Matches GStreamer's default behavior
+    (a `tee` with a rejecting downstream errors the pipeline).
+  - *Graceful degradation (opt-in, future):* rejecting branches
+    drop out; remaining branches continue. Requires explicit
+    "drop branch and continue" mechanism the fan-out doesn't have
+    today. Add later behind a `FanOutPolicy::AllowBranchDrop`
+    enum, default `Strict`.
+  - *Permissive (status quo):* rejecting branches keep getting
+    old-config'd `process(CapsChanged)`. **Reject this as a
+    silent-corruption path.** Phase B's strictness invariant
+    applies per-branch.
+
+- **FO-2: per-branch re-solve.** Apply Phase B's
+  `re_solve_downstream_sink` per branch. Trivial assuming FO-1 picks
+  strict. Each branch's solver call is independent; latency win:
+  run them in parallel via `join_all` instead of sequentially.
+
+- **FO-3: branch addition / removal mid-stream.** A future
+  capability: add a new sink branch to a running fan-out, or remove
+  a branch cleanly. GStreamer supports this via `request-pad` on
+  `tee`. Out of scope for the initial Phase C; flag in the design
+  as "next after FO-1/2 land."
+
+### 10.3 Muxer specifics
+
+Today's `run_muxer_sink` negotiates each `source ↔ muxer-input` pair
+at startup (independent per input). The muxer's *output* caps
+(`mux.output_caps()`) is queried once at startup and fed to the
+downstream sink. No mid-stream re-query.
+
+**Decisions for sign-off:**
+
+- **MX-1: per-input re-solve.** Each input is independently
+  negotiated, so per-input re-solve is structurally Phase B applied
+  N times. Land alongside FO-2.
+
+- **MX-2: input-derived output propagation.** When a source mid-
+  stream changes its caps, the muxer's output caps may change as a
+  function of the new input. GStreamer's typical muxer behavior is
+  to re-emit `GST_EVENT_CAPS` downstream when the muxed output
+  format changes. We need the same: on per-input re-solve, also
+  query `mux.output_caps()` and, if it changed, emit
+  `CapsChanged(new_output)` downstream. The downstream
+  `run_muxer_sink` sink-fut hits Phase B's re-solve path on receipt.
+  - *Eager emit (recommended for latency):* the muxer emits the new
+    output `CapsChanged` immediately after its per-input re-solve
+    succeeds, in parallel with the in-flight old-caps frames
+    draining. The frame-caps invariant (§5) keeps downstream
+    correct.
+  - *Lazy emit (GStreamer-equivalent):* the muxer waits until it has
+    actually merged a frame under the new caps before emitting
+    `CapsChanged`. Simpler but adds one frame's worth of latency.
+
+- **MX-3: muxer's negotiation surface.** `MultiInputElement` does
+  not currently expose `caps_constraint_as_input(idx)` (the
+  per-input native variant). To run Phase B's solver-mediated
+  re-solve per input, the trait needs this method (same shape as
+  `AsyncElement::caps_constraint_as_sink` but indexed). Should be
+  added when MX-1 lands.
+
+### 10.4 The coordinator dependency
+
+Both FO-2 and MX-1/MX-2 are most cleanly expressed when the runner
+has a coordinator task (§9.4 β). Without it, per-branch and per-
+input re-solves are scattered across the spawned futures and the
+solver calls have to be repeated.
+
+This is not a blocker — Phase C can land before β if FO-2 and MX-1
+implementations duplicate the solver call. But β makes them clean
+one-liners.
+
+### 10.5 Latency targets vs. GStreamer
+
+GStreamer's `tee` mid-stream caps change: each downstream branch
+runs its allocation query and configure-caps sequentially. For N=4
+branches: 4× the cost.
+
+Our Phase C with the β coordinator: parallel `solve_linear` per
+branch (N microseconds each, true parallel via `join_all`). Total
+latency: max single-branch cost, not sum. This is the
+"hopefully lower latency than GStreamer" payoff for fan-out.
+
+Muxer mid-stream input change: GStreamer holds the muxer's output
+caps for one frame after an input change (lazy emit). We can do
+eager emit (MX-2 recommendation) and shave one frame of latency.
+
+### 10.6 Trigger conditions
+
+Phase C lands when:
+
+- A real production chain uses fan-out with a possibility of mid-
+  stream caps change. Concrete first candidate: a `tee` between a
+  decoder and two parallel sinks (display + recording).
+- Or: a real production chain uses muxer with a source whose caps
+  change mid-stream (e.g., adaptive bitrate audio + video mux).
+
+Neither exists in g2g today; tests use static caps. Until then,
+Phase C is design-locked, not implemented. The decisions FO-1, MX-2,
+and MX-3 are the structural ones — pin them now so the implementer
+isn't blocked.
+
+### 10.7 Decisions for sign-off (Phase C summary)
+
+- **FO-1.** Strict failure mode default; `FanOutPolicy::AllowBranchDrop`
+  as a future opt-in. Aligns with GStreamer.
+- **FO-2.** Per-branch re-solve via Phase B's helper, executed in
+  parallel.
+- **MX-2.** Eager emit of muxer output `CapsChanged` on per-input
+  re-solve (lower latency than GStreamer's lazy default).
+- **MX-3.** Add `MultiInputElement::caps_constraint_as_input(idx)`
+  trait method when MX-1 lands.
