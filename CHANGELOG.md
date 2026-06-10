@@ -25,9 +25,19 @@ Nothing is published yet; all versions are `0.1.0`.
   `m18_fanout_phase_c.rs`: FO-2 accept (a geometry change every branch
   admits reaches each branch's `process`) and FO-1 strict reject (one
   RGBA-only branch fails the fan-out on an NV12 switch, and never sees the
-  rejected caps). Fan-out branch α (element-local re-allocation) still
-  pending: it needs the allocation hooks on `DynAsyncElement` too. no_std
-  core build, core suite, and the std plugins suite all green.
+  rejected caps). no_std core build, core suite, and the std plugins suite
+  all green.
+
+- **Item 1 (Session D follow-up): fan-out branch α.** Completes the α
+  story for non-linear topologies. `DynAsyncElement` gains dyn-safe
+  `propose_allocation` / `configure_allocation` (blanket impl forwards to
+  `AsyncElement`); `coordinator::realloc_local_dyn` is the `Box`-erased
+  counterpart of `realloc_local`. `run_source_fanout` now re-allocates
+  each branch locally after the FO-2 re-solve applies the new caps. As in
+  the linear case, the fan-out runner never configures branch allocation
+  at startup, so the per-branch re-allocation is solely α. Covered by an
+  added assertion in `m18_fanout_phase_c.rs` (each branch records exactly
+  one re-allocation sized from the new caps).
 
 - **Item 2 (Phase C): muxer per-input re-solve (MX-1) + input-derived
   output re-emit (MX-2).** A per-input mid-stream `CapsChanged` is now

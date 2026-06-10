@@ -20,8 +20,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, Router, VideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, VideoFormat,
 };
 
 struct ZeroClock;
@@ -113,7 +113,17 @@ impl SourceLoop for ReconfigSrc {
 #[derive(Default)]
 struct BranchInner {
     caps_changes: Vec<Caps>,
+    configured_sizes: Vec<usize>,
     eos: bool,
+}
+
+fn geometry_size(caps: &Caps) -> Option<usize> {
+    match caps {
+        Caps::Video { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
+            Some(*w as usize * *h as usize)
+        }
+        _ => None,
+    }
 }
 
 /// Branch sink that declares a constraint (`accepts`: `Some` => only that
@@ -140,6 +150,14 @@ impl AsyncElement for RecordBranch {
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        geometry_size(caps).map(|size| AllocationParams::system(size, 1))
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        self.inner.lock().unwrap().configured_sizes.push(params.size_bytes);
     }
 
     fn process<'a>(
@@ -194,6 +212,14 @@ async fn fo2_accepted_caps_change_propagates_to_every_branch() {
             g.caps_changes,
             vec![rgba(1920, 1080)],
             "branch {name} must receive the re-solved CapsChanged"
+        );
+        // α: each branch re-allocates its own pool under the new caps. The
+        // fan-out runner never configures branch allocation at startup, so
+        // the single recorded size isolates the per-branch α hook.
+        assert_eq!(
+            g.configured_sizes,
+            vec![1920 * 1080],
+            "branch {name} must re-allocate locally under the new caps"
         );
     }
 }

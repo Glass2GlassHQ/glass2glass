@@ -16,6 +16,8 @@ use crate::runtime::coordinator::{
     coordinator, negotiate_source_transform_sink, realloc_local, CoordinatorEvent,
     MAX_FIXATION_ATTEMPTS,
 };
+#[cfg(feature = "std")]
+use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::join::Join2;
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
@@ -467,6 +469,9 @@ where
                                 .map_err(|_| G2gError::CapsMismatch)?;
                         match sink.configure_pipeline(&branch_caps)? {
                             ConfigureOutcome::Accepted => {
+                                // M18 α: element-local re-allocation of this
+                                // branch under its re-solved caps.
+                                realloc_local_dyn(sink, &branch_caps);
                                 sink.process(
                                     PipelinePacket::CapsChanged(branch_caps),
                                     &mut null,

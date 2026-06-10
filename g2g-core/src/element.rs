@@ -195,6 +195,14 @@ pub trait DynAsyncElement: ElementBound {
     /// `Box`-erased branch sink (fan-out Phase C FO-2) can be re-solved
     /// against its declared constraint on a mid-stream `CapsChanged`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_>;
+
+    /// Dyn-safe mirror of [`AsyncElement::propose_allocation`], so a
+    /// `Box`-erased branch sink can re-derive its own pool on a mid-stream
+    /// caps change (fan-out element-local α).
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams>;
+
+    /// Dyn-safe mirror of [`AsyncElement::configure_allocation`].
+    fn configure_allocation(&mut self, params: &AllocationParams);
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
@@ -225,5 +233,13 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         AsyncElement::caps_constraint_as_sink(self)
+    }
+
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        AsyncElement::propose_allocation(self, caps)
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        AsyncElement::configure_allocation(self, params)
     }
 }

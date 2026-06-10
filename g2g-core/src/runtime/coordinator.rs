@@ -212,3 +212,12 @@ where
         element.configure_allocation(&params);
     }
 }
+
+/// [`DynAsyncElement`] counterpart of [`realloc_local`], for `Box`-erased
+/// fan-out branch sinks.
+#[cfg(feature = "std")]
+pub(crate) fn realloc_local_dyn(element: &mut dyn crate::element::DynAsyncElement, caps: &Caps) {
+    if let Some(params) = element.propose_allocation(caps) {
+        element.configure_allocation(&params);
+    }
+}
