@@ -25,6 +25,16 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Step 5m: `VaapiH264Dec` (Linux cros-codecs VAAPI) overrides
+  `caps_constraint_as_transform` to return
+  `CapsConstraint::DerivedOutput(closure)`, identical in shape to steps
+  5k/5l. The closure validates H.264 input and emits NV12 at the same
+  dims/framerate; non-H.264 input yields an empty `CapsSet` so the
+  solver rejects at negotiation time. The VAAPI backend only emits
+  NV12, so the closure has no output-format choice. New unit test
+  `caps_constraint_is_derived_output_h264_to_nv12`. Not compiled on the
+  Windows dev host (the `vaapi` feature is Linux-only); change is
+  byte-identical in shape to the verified 5l/5k pattern.
 - Step 5l: `MfDecode` (Windows Media Foundation) overrides
   `caps_constraint_as_transform` to return
   `CapsConstraint::DerivedOutput(closure)`, mirroring step 5k. The

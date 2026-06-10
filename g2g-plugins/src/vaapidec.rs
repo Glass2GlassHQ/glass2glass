@@ -74,8 +74,8 @@ use cros_codecs::{BlockingMode, Fourcc};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PipelinePacket, Rate, VideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -278,6 +278,31 @@ impl AsyncElement for VaapiH264Dec {
         upstream_caps.intersect(&supported)
     }
 
+    /// M16 step 5m: native `DerivedOutput` — accepts H.264 at any
+    /// geometry and produces NV12 at the same dims/framerate. The closure
+    /// validates the input format and returns an empty set on mismatch, so
+    /// the solver rejects non-H.264 upstream at negotiation time instead of
+    /// via the dynamic `intercept_caps` callback. Mixed chains get real
+    /// per-link caps from the solver: H.264 to the decoder, NV12 to the
+    /// sink. Mirrors `FfmpegH264Dec` (step 5k); the VAAPI backend only ever
+    /// emits NV12, so there is no output-format choice.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::Video {
+                format: VideoFormat::H264,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::Video {
+                format: VideoFormat::Nv12,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }))
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
             Caps::Video {
@@ -460,5 +485,38 @@ mod tests {
     fn unconfigured_decoder_reports_zero_decoded() {
         let dec = VaapiH264Dec::new();
         assert_eq!(dec.decoded_count(), 0);
+    }
+
+    #[test]
+    fn caps_constraint_is_derived_output_h264_to_nv12() {
+        // M16 step 5m: DerivedOutput closure validates H.264 input and
+        // emits NV12 at the same dims/rate; non-H.264 yields an empty set.
+        let dec = VaapiH264Dec::new();
+        let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert_eq!(
+            f(&h264).alternatives(),
+            &[Caps::Video {
+                format: VideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
+
+        let vp9 = Caps::Video {
+            format: VideoFormat::Vp9,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert!(f(&vp9).is_empty());
     }
 }
