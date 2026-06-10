@@ -25,6 +25,22 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Cleanup (workaround #2 fully retired): removed the non-NV12 no-op
+  accept branch from `WaylandSink` / `KmsSink` `configure_pipeline`.
+  Reachability audit: every chain that reaches these sinks (incl. the
+  `wayland_smoke` / `kms_smoke` `rtsp → ffmpegdec → sink` tests) now goes
+  through a native `DerivedOutput` decoder, so the solver assigns the
+  sink link NV12 (fixated to `Fixed`) at startup; the branch only fired
+  on a decoder-less H.264→display chain, which exists in no test,
+  example, or real pipeline. The sinks now reject non-NV12 input loud
+  (`CapsMismatch`) instead of silently accepting undisplayable caps.
+  `intercept_caps` stays pass-through (the solver hands it NV12).
+  Updated tests: `configure_accepts_h264_as_deferred_noop` →
+  `configure_rejects_non_nv12`; `intercept_passes_through_h264_for_deferred_configure`
+  → `intercept_passes_through_any_format` (both sinks). Linux-gated
+  (`wayland-sink` / `kms-sink`), so not compiled on the Windows host; a
+  Linux + Wayland/DRM e2e is owed alongside the other deferred visual
+  checks.
 - Step 6 (DESIGN §8): `CapsFilter` element + ACCEPT_CAPS surface.
   `CapsConstraint::accepts(&Caps)` and `CapsSet::accepts(&Caps)` answer
   the ACCEPT_CAPS query (§7) as a pure check against the declared

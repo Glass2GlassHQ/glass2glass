@@ -279,16 +279,19 @@ impl AsyncElement for WaylandSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through. The format flowing at Phase-1 negotiation time
-        // is the decoder's *input* format (H.264 for our pipeline); the
-        // real NV12 caps arrive mid-stream as a `CapsChanged` after the
-        // decoder's first decoded frame. We validate NV12 in
-        // `configure_pipeline` when that landed CapsChanged is cascaded
-        // down to us — see the deferred-accept branch below.
+        // Pass-through at negotiation; the real NV12 validation happens in
+        // `configure_pipeline`. With the decoder native (`DerivedOutput`),
+        // the solver assigns this link NV12 directly, so configure receives
+        // NV12 at startup rather than the decoder's pre-decode H.264 caps.
         Ok(upstream_caps.clone())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // NV12 only. Now that every decoder is a native `DerivedOutput`,
+        // the solver lands NV12 on this link at startup, so the old
+        // accept-H.264-as-no-op workaround is gone: a non-NV12 sink input
+        // is a real pipeline error (e.g. an undecoded display chain) and
+        // fails loud here.
         let (w, h) = match absolute_caps {
             Caps::Video {
                 format: VideoFormat::Nv12,
@@ -296,13 +299,6 @@ impl AsyncElement for WaylandSink {
                 height: Dim::Fixed(h),
                 ..
             } => (*w, *h),
-            // Initial negotiation arrives with the decoder's pre-decode
-            // caps (H.264). Accept as a no-op; real setup happens when
-            // the decoder emits its NV12 `CapsChanged` mid-stream.
-            // This branch is still load-bearing for all-legacy chains;
-            // mixed/native chains downstream of a `DerivedOutput`
-            // decoder will land NV12 here directly at startup.
-            Caps::Video { .. } => return Ok(ConfigureOutcome::Accepted),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
@@ -818,10 +814,10 @@ mod tests {
     use g2g_core::Rate;
 
     #[test]
-    fn intercept_passes_through_h264_for_deferred_configure() {
-        // The framework collapses the decoder's pre/post caps into one
-        // negotiation, so the H.264 caps must pass through here. NV12 is
-        // validated at the mid-stream CapsChanged in `configure_pipeline`.
+    fn intercept_passes_through_any_format() {
+        // Negotiation-time intercept is pass-through; the NV12 requirement
+        // is enforced in `configure_pipeline`. (With a native decoder the
+        // solver hands this link NV12 anyway.)
         let sink = WaylandSink::new();
         let h264 = Caps::Video {
             format: VideoFormat::H264,
@@ -845,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn configure_accepts_h264_as_deferred_noop() {
+    fn configure_rejects_non_nv12() {
         let mut sink = WaylandSink::new();
         let h264 = Caps::Video {
             format: VideoFormat::H264,
@@ -853,13 +849,10 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        // Accepts without spawning a worker — real setup waits for the
-        // decoder's NV12 CapsChanged cascade.
-        match sink.configure_pipeline(&h264) {
-            Ok(_) => {}
-            Err(e) => panic!("deferred H.264 accept failed: {e:?}"),
-        }
-        assert!(sink.worker.is_none(), "no worker should be spawned on H.264 caps");
+        // A native decoder lands NV12 on this link; a non-NV12 sink input
+        // is a real error (e.g. an undecoded display chain), not a no-op.
+        assert_eq!(sink.configure_pipeline(&h264).err(), Some(G2gError::CapsMismatch));
+        assert!(sink.worker.is_none(), "no worker should be spawned on rejected caps");
     }
 
     #[test]

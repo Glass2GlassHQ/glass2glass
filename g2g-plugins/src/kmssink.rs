@@ -422,14 +422,18 @@ impl AsyncElement for KmsSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Pass-through. See WaylandSink for the same rationale: Phase-1
-        // negotiation carries the decoder's pre-decode (H.264) caps, not
-        // the post-decode NV12. We validate NV12 in `configure_pipeline`
-        // when the decoder's mid-stream CapsChanged cascades down to us.
+        // Pass-through at negotiation; NV12 is validated in
+        // `configure_pipeline`. See WaylandSink for the rationale: with the
+        // decoder native (`DerivedOutput`), the solver assigns this link
+        // NV12 directly, so configure receives NV12 at startup.
         Ok(upstream_caps.clone())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // NV12 only. Every decoder is now a native `DerivedOutput`, so the
+        // solver lands NV12 on this link at startup; the old
+        // accept-H.264-as-no-op workaround is gone and a non-NV12 sink
+        // input fails loud as a real pipeline error.
         let (w, h) = match absolute_caps {
             Caps::Video {
                 format: VideoFormat::Nv12,
@@ -437,10 +441,6 @@ impl AsyncElement for KmsSink {
                 height: Dim::Fixed(h),
                 ..
             } => (*w, *h),
-            // Initial negotiation with the decoder's H.264 input caps:
-            // accept as no-op, defer real setup until the NV12
-            // CapsChanged arrives mid-stream.
-            Caps::Video { .. } => return Ok(ConfigureOutcome::Accepted),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
@@ -544,7 +544,9 @@ mod tests {
     use g2g_core::Rate;
 
     #[test]
-    fn intercept_passes_through_h264_for_deferred_configure() {
+    fn intercept_passes_through_any_format() {
+        // Negotiation-time intercept is pass-through; NV12 is enforced in
+        // configure_pipeline. (A native decoder hands this link NV12.)
         let sink = KmsSink::new();
         let h264 = Caps::Video {
             format: VideoFormat::H264,
@@ -568,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn configure_accepts_h264_as_deferred_noop() {
+    fn configure_rejects_non_nv12() {
         let mut sink = KmsSink::new();
         let h264 = Caps::Video {
             format: VideoFormat::H264,
@@ -576,12 +578,11 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        match sink.configure_pipeline(&h264) {
-            Ok(_) => {}
-            Err(e) => panic!("deferred H.264 accept failed: {e:?}"),
-        }
-        assert!(sink.card.is_none(), "no DRM device opened on H.264 caps");
-        assert!(sink.slots.is_empty(), "no buffers allocated on H.264 caps");
+        // A native decoder lands NV12 on this link; non-NV12 is a real
+        // error (e.g. an undecoded display chain), not a deferred no-op.
+        assert_eq!(sink.configure_pipeline(&h264).err(), Some(G2gError::CapsMismatch));
+        assert!(sink.card.is_none(), "no DRM device opened on rejected caps");
+        assert!(sink.slots.is_empty(), "no buffers allocated on rejected caps");
     }
 
     #[test]
