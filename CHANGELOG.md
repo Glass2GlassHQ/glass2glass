@@ -25,6 +25,20 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Workaround #3 design (no code): `DESIGN-M16-workaround3-reconfigure.md`
+  turns the deferred forward in-band reconfigure into an implementable,
+  phased spec. Key finding: decoders swallow their input `CapsChanged`
+  and self-detect output geometry from decoded frames, which is
+  correctly ordered; the naive "re-derive and forward eagerly" fix
+  corrupts the stream across a B-frame reorder boundary (old-geometry
+  frames still draining). The reconfigure must stay at the decode
+  boundary. Phased plan: A) validate + record the input caps instead of
+  silently dropping (linear, CI-testable), B) runner re-solves the
+  downstream subgraph on a boundary `CapsChanged` (allocators /
+  multi-element downstream), C) non-linear topologies. Decisions D1-D4
+  (reuse `CapsChanged` vs new packet; derive via the `DerivedOutput`
+  closure; runner subgraph re-solve; acknowledge-don't-swallow) flagged
+  for sign-off.
 - Cleanup (workaround #2 fully retired): removed the non-NV12 no-op
   accept branch from `WaylandSink` / `KmsSink` `configure_pipeline`.
   Reachability audit: every chain that reaches these sinks (incl. the
