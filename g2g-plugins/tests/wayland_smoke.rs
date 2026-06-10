@@ -59,6 +59,7 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     let mut snk = WaylandSink::new().with_title("glass2glass smoke test");
     let clock = ZeroClock;
 
+    let start = std::time::Instant::now();
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 8),
@@ -66,17 +67,37 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     .await
     .expect("pipeline should complete within 60s")
     .expect("end-to-end Wayland pipeline should succeed");
+    let elapsed = start.elapsed();
 
+    let fps = stats.frames_emitted as f64 / elapsed.as_secs_f64();
     eprintln!(
-        "stats: emitted={} decoded={} presented={}",
+        "stats: emitted={} decoded={} presented={} elapsed={:.2}s effective_fps={:.1}",
         stats.frames_emitted,
         dec.decoded_count(),
         snk.frames_presented(),
+        elapsed.as_secs_f64(),
+        fps,
     );
 
     assert!(dec.decoded_count() > 0, "decoder produced no NV12 frames");
     // We don't assert `presented > 0` because the compositor's frame-
     // callback cadence and the EOS-driven shutdown can race: the last
     // few frames in flight may not paint before the worker exits.
-    // What we *do* assert: nothing in the pipeline errored.
+
+    // Pacing assertions: with compositor frame-callback gating, the
+    // producer is throttled to refresh. On a 60 Hz output, 60 frames
+    // should take ~1s. If pacing regresses (process() returns without
+    // waiting for the frame callback), fps will be hundreds — the
+    // decoder runs faster than display refresh by an order of magnitude.
+    // The lower bound catches the opposite regression (stall on a
+    // never-arriving callback) that the outer timeout would otherwise
+    // mask as "passed, just slow".
+    assert!(
+        fps < 200.0,
+        "pacing regression: {fps:.1} fps suggests process() is not waiting on the frame callback"
+    );
+    assert!(
+        fps > 10.0,
+        "pacing stall: only {fps:.1} fps — frame callback may not be firing"
+    );
 }

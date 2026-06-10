@@ -47,8 +47,10 @@
 //!   stays there. If the compositor's `configure` event resizes us we
 //!   ignore the new bounds (the video keeps drawing at its native
 //!   resolution and the compositor letterboxes / clips).
-//! - No audio sync, no PTS pacing — frames are presented as fast as
-//!   `process()` receives them, up to the compositor's frame callback.
+//! - No audio sync, no PTS pacing in the wall-clock sense. Backpressure
+//!   is compositor-driven: `process()` blocks until the compositor's
+//!   `frame` callback for the previously committed buffer arrives, so
+//!   the producer is naturally throttled to refresh.
 //! - Window decorations are server-side if the compositor offers them
 //!   (KDE, GNOME with the right protocol), otherwise the window is
 //!   borderless. v1 doesn't carry CSD.
@@ -103,9 +105,15 @@ use g2g_core::{
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
 /// bytes (sink-side conversion keeps the worker thread free for Wayland
-/// I/O). `Shutdown` exits the worker's event loop.
+/// I/O) plus a one-shot `ack` the worker signals once the frame has been
+/// committed *and* the compositor's next `frame` callback has fired —
+/// that's the signal we use to pace the producer to refresh.
+/// `Shutdown` exits the worker's event loop.
 enum WorkerCmd {
-    Frame(Vec<u8>),
+    Frame {
+        bytes: Vec<u8>,
+        ack: tokio::sync::oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -283,7 +291,15 @@ impl AsyncElement for WaylandSink {
                         .cmd_tx
                         .as_ref()
                         .ok_or(G2gError::NotConfigured)?;
-                    tx.send(WorkerCmd::Frame(xrgb))
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    tx.send(WorkerCmd::Frame { bytes: xrgb, ack: ack_tx })
+                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    // Block until the compositor's `frame` callback for
+                    // this commit arrives. RecvError means the worker
+                    // dropped the ack (shutdown / crash) — treat as a
+                    // hardware fault so the runner can react.
+                    ack_rx
+                        .await
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }
@@ -308,16 +324,22 @@ struct WorkerState {
     pool: SlotPool,
     buffer: Option<Buffer>,
     window: Window,
+    qh: QueueHandle<WorkerState>,
     width: u32,
     height: u32,
     configured: bool,
     exit: bool,
     ready: Option<Arc<parking_handshake::Handshake>>,
     presented: Arc<AtomicU64>,
-    /// Most recently received XRGB8888 frame, drawn on the next `frame`
-    /// callback. Holding only the latest keeps the worker bounded if
-    /// the producer outruns the compositor.
-    pending: Option<Vec<u8>>,
+    /// Frame queued before the surface is mappable. Once `configure`
+    /// lands we drain this into the first draw. With blocking pacing the
+    /// producer is throttled to one in-flight frame, so under steady
+    /// state this is None.
+    pending: Option<(Vec<u8>, tokio::sync::oneshot::Sender<()>)>,
+    /// Ack for the most recently committed frame. Signalled when the
+    /// compositor's matching `frame` callback fires, releasing the
+    /// blocked producer to push the next frame.
+    pending_ack: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 fn worker_main(
@@ -359,6 +381,7 @@ fn worker_main(
         pool,
         buffer: None,
         window,
+        qh: qh.clone(),
         width,
         height,
         configured: false,
@@ -366,17 +389,19 @@ fn worker_main(
         ready: Some(ready),
         presented,
         pending: None,
+        pending_ack: None,
     };
 
     // Wire the cmd channel into calloop so we wake on frame arrival.
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame(bytes)) => {
-            state.pending = Some(bytes);
-            // If we already had a frame callback in flight we'd draw on
-            // its arrival; otherwise drive a draw now. Drawing now is
-            // fine before the first frame callback subscription too.
+        ChanEvent::Msg(WorkerCmd::Frame { bytes, ack }) => {
+            // Producer is blocked on `ack` until our `frame` callback
+            // fires, so we should only ever see one in flight. If the
+            // surface isn't mappable yet, stash it; otherwise draw now.
             if state.configured {
-                state.try_draw();
+                state.draw(bytes, ack);
+            } else {
+                state.pending = Some((bytes, ack));
             }
         }
         ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
@@ -391,13 +416,12 @@ fn worker_main(
 }
 
 impl WorkerState {
-    /// Draw the pending frame into a `SlotPool` buffer and commit it.
-    /// No-ops if there's nothing pending (which is the steady state
-    /// between frame arrivals).
-    fn try_draw(&mut self) {
-        let Some(bytes) = self.pending.take() else {
-            return;
-        };
+    /// Copy `bytes` into a `SlotPool` buffer, request a `frame` callback
+    /// (so the compositor tells us when it's ready for the next one),
+    /// and commit. The producer's `ack` is stashed in `pending_ack`; we
+    /// signal it when the matching `frame` callback fires in
+    /// `CompositorHandler::frame`.
+    fn draw(&mut self, bytes: Vec<u8>, ack: tokio::sync::oneshot::Sender<()>) {
         let width = self.width as i32;
         let height = self.height as i32;
         let stride = self.width as i32 * 4;
@@ -425,17 +449,31 @@ impl WorkerState {
         let needed = (self.width * self.height * 4) as usize;
         if bytes.len() != needed {
             // Should never happen — sink-side conversion sizes exactly,
-            // and dims are fixed at configure time. Drop quietly.
+            // and dims are fixed at configure time. Drop quietly *and*
+            // release the producer so we don't deadlock the pipeline.
+            let _ = ack.send(());
             return;
         }
         canvas[..needed].copy_from_slice(&bytes[..needed]);
 
-        self.window.wl_surface().damage_buffer(0, 0, width, height);
-        buffer
-            .attach_to(self.window.wl_surface())
-            .expect("attach_to");
+        let surface = self.window.wl_surface();
+        // Subscribe to the compositor's `frame` callback for this commit.
+        // SCTK's CompositorHandler::frame routes by the WlSurface udata,
+        // so we pass a clone of the surface as the callback's user data.
+        surface.frame(&self.qh, surface.clone());
+        surface.damage_buffer(0, 0, width, height);
+        buffer.attach_to(surface).expect("attach_to");
         self.window.commit();
         self.presented.fetch_add(1, Ordering::Relaxed);
+
+        // If a prior ack is still outstanding (the compositor never sent
+        // us a frame callback for it before we drew again), release it
+        // now to keep the pipeline moving. Under steady blocking pacing
+        // this branch should be unreachable.
+        if let Some(stale) = self.pending_ack.take() {
+            let _ = stale.send(());
+        }
+        self.pending_ack = Some(ack);
     }
 }
 
@@ -463,9 +501,11 @@ impl CompositorHandler for WorkerState {
         _: &wl_surface::WlSurface,
         _: u32,
     ) {
-        // A frame callback would let us pace to compositor refresh; v1
-        // draws immediately on the next pending frame instead.
-        self.try_draw();
+        // The compositor is ready for the next frame. Release the
+        // producer blocked on this commit's ack so it can push another.
+        if let Some(ack) = self.pending_ack.take() {
+            let _ = ack.send(());
+        }
     }
     fn surface_enter(
         &mut self,
@@ -507,9 +547,10 @@ impl WindowHandler for WorkerState {
             if let Some(ready) = self.ready.take() {
                 ready.notify();
             }
-            // Draw whatever's queued; if nothing's queued yet, the next
-            // Frame cmd will draw.
-            self.try_draw();
+            // Drain any frame that arrived before we were mappable.
+            if let Some((bytes, ack)) = self.pending.take() {
+                self.draw(bytes, ack);
+            }
         }
     }
 }
