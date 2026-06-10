@@ -62,7 +62,7 @@ use drm::Device;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, Rate, VideoFormat,
+    PipelinePacket, VideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -400,21 +400,11 @@ impl AsyncElement for KmsSink {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // NV12 only; dims must be fixed by the time they reach us (the
-        // ffmpeg decoder emits Fixed dims on its first decoded frame).
-        let supported = Caps::Video {
-            format: VideoFormat::Nv12,
-            width: Dim::Range {
-                min: 16,
-                max: 8192,
-            },
-            height: Dim::Range {
-                min: 16,
-                max: 8192,
-            },
-            framerate: Rate::Any,
-        };
-        upstream_caps.intersect(&supported)
+        // Pass-through. See WaylandSink for the same rationale: Phase-1
+        // negotiation carries the decoder's pre-decode (H.264) caps, not
+        // the post-decode NV12. We validate NV12 in `configure_pipeline`
+        // when the decoder's mid-stream CapsChanged cascades down to us.
+        Ok(upstream_caps.clone())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -425,6 +415,10 @@ impl AsyncElement for KmsSink {
                 height: Dim::Fixed(h),
                 ..
             } => (*w, *h),
+            // Initial negotiation with the decoder's H.264 input caps:
+            // accept as no-op, defer real setup until the NV12
+            // CapsChanged arrives mid-stream.
+            Caps::Video { .. } => return Ok(ConfigureOutcome::Accepted),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
@@ -522,19 +516,19 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn intercept_rejects_i420() {
+    fn intercept_passes_through_h264_for_deferred_configure() {
         let sink = KmsSink::new();
-        let i420 = Caps::Video {
-            format: VideoFormat::I420,
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
         };
-        assert_eq!(sink.intercept_caps(&i420), Err(G2gError::CapsMismatch));
+        assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
 
     #[test]
-    fn intercept_narrows_nv12_with_fixed_geometry() {
+    fn intercept_passes_through_nv12() {
         let sink = KmsSink::new();
         let nv12 = Caps::Video {
             format: VideoFormat::Nv12,
@@ -543,6 +537,23 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
+    }
+
+    #[test]
+    fn configure_accepts_h264_as_deferred_noop() {
+        let mut sink = KmsSink::new();
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        match sink.configure_pipeline(&h264) {
+            Ok(_) => {}
+            Err(e) => panic!("deferred H.264 accept failed: {e:?}"),
+        }
+        assert!(sink.card.is_none(), "no DRM device opened on H.264 caps");
+        assert!(sink.slots.is_empty(), "no buffers allocated on H.264 caps");
     }
 
     #[test]
