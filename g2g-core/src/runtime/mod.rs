@@ -11,6 +11,7 @@
 //! implementation.
 
 mod channel;
+mod coordinator;
 mod join;
 mod runner;
 pub mod solver;
@@ -22,6 +23,7 @@ pub use channel::{
     bounded, link, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot, Receiver,
     ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
+pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
 pub use join::{join_all, Join2, JoinAll};
 pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, SourceLoop};
 

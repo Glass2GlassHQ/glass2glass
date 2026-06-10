@@ -233,6 +233,7 @@ where
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
+        coordinator_events: 0,
     })
 }
 
@@ -439,5 +440,6 @@ where
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
+        coordinator_events: 0,
     })
 }

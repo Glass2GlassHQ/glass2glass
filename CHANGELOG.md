@@ -7,6 +7,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 1 (Session B): coordinator control-channel scaffolding.** First
+  step of the allocation re-cascade β restructure
+  (DESIGN-M16-workaround3-reconfigure.md §9.4 β; R2 single-task
+  coordinator, R3 out-of-band channel). New `runtime::coordinator`
+  module: `CoordinatorEvent`, `CoordinatorHandle` (clonable producer over
+  the in-house mpsc), `Coordinator` task, and a `coordinator(capacity)`
+  constructor. `run_source_transform_sink` now spawns the coordinator as
+  a fourth join arm; the sink arm reports a `CoordinatorEvent::CapsChanged`
+  for each applied mid-stream `CapsChanged` and the stub only counts them.
+  The channel closes when the sink arm drops its handle, so the
+  coordinator terminates with the pipeline. No data-plane behavior change:
+  frames and EOS flow exactly as before; this only validates the channel
+  topology before Session C moves startup negotiation in and Session E
+  turns each event into a real `Recascade`. New
+  `RunStats.coordinator_events` field (`0` for runners without a
+  coordinator). New integration test `m18_coordinator.rs` (event observed
+  on applied caps change; zero events and clean termination otherwise).
+  no_std core build, core suite, and the std plugins suite all green.
+
 - **Item 3 (partial): fan-out constraint migration.** Symmetric move
   to item 2 on the `MultiOutputElement` side. Adds
   `MultiOutputElement::caps_constraint_as_input(&self) ->

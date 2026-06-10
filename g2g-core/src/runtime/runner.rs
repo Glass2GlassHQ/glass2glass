@@ -12,6 +12,7 @@ use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
+use crate::runtime::coordinator::{coordinator, CoordinatorEvent};
 use crate::runtime::join::Join2;
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
@@ -120,6 +121,13 @@ pub struct RunStats {
     /// `now_ns()` of the elected clock, read once after election — the
     /// pipeline's base-time origin.
     pub base_time_ns: u64,
+    /// M18 β scaffolding: number of `CoordinatorEvent`s the coordinator
+    /// task observed over this run's control channel. Today the only
+    /// event is a boundary forwarding a mid-stream `CapsChanged` the next
+    /// element accepted; β will turn each into a `Recascade`. `0` for
+    /// runners that don't yet spawn a coordinator (simple / fan-out /
+    /// fan-in / muxer).
+    pub coordinator_events: u64,
 }
 
 /// M16 workaround #3 Phase B helper: re-solve the downstream subgraph
@@ -313,6 +321,7 @@ where
         allocation,
         clock_priority,
         base_time_ns,
+        coordinator_events: 0,
     })
 }
 
@@ -467,6 +476,7 @@ where
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
+        coordinator_events: 0,
     })
 }
 
@@ -610,6 +620,16 @@ where
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
 
+    // M18 β scaffolding: a single coordinator task observes the
+    // control channel alongside the data-plane arms. The sink arm is the
+    // sole reporter for now (DESIGN-M16-workaround3-reconfigure.md §9.4
+    // R3: out-of-band channel, not in-band packets). No reconfiguration
+    // logic lives here yet — this validates the channel topology before
+    // Session E moves the real `Recascade` cascade onto it. The handle is
+    // moved into the sink arm; when that arm finishes, the last handle
+    // drops, the channel closes, and the coordinator task resolves.
+    let (coord, coord_handle) = coordinator(link_capacity);
+
     let source_fut = async move {
         let mut adapter = SenderSink::new(link1_tx);
         source.run(&mut adapter).await
@@ -651,6 +671,7 @@ where
     };
 
     let sink_fut = async move {
+        let coord_handle = coord_handle;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -680,6 +701,12 @@ where
                     };
                     match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
+                            // M18 β: report the applied mid-stream caps
+                            // change to the coordinator before forwarding
+                            // it into the sink. Observe-only today.
+                            coord_handle
+                                .report(CoordinatorEvent::CapsChanged(sink_caps.clone()))
+                                .await;
                             sink.process(
                                 PipelinePacket::CapsChanged(sink_caps),
                                 &mut null,
@@ -702,8 +729,15 @@ where
         }
     };
 
-    let (src_res, (tx_res, snk_res)) =
-        Join2::new(source_fut, Join2::new(transform_fut, sink_fut)).await;
+    // The coordinator task drains the control channel until the sink arm
+    // drops its handle. Joined as a fourth arm so it runs concurrently.
+    let coordinator_fut = coord.run();
+
+    let (src_res, (tx_res, (snk_res, coordinator_events))) = Join2::new(
+        source_fut,
+        Join2::new(transform_fut, Join2::new(sink_fut, coordinator_fut)),
+    )
+    .await;
     let emitted = src_res?;
     tx_res?;
     let consumed = snk_res?;
@@ -715,5 +749,6 @@ where
         allocation,
         clock_priority,
         base_time_ns,
+        coordinator_events,
     })
 }
