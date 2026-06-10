@@ -115,6 +115,27 @@ impl core::fmt::Debug for CapsConstraint<'_> {
     }
 }
 
+impl CapsConstraint<'_> {
+    /// ACCEPT_CAPS query (DESIGN-M16 §7): would this element accept a
+    /// link carrying `caps`? A pure check against the declared
+    /// constraint, with no runtime negotiation or back-and-forth.
+    ///
+    /// For sink / transform shapes this tests the *input* side; for the
+    /// source shape it tests the *produced* side. Wildcards accept
+    /// anything; the legacy bridges defer to their wrapped callbacks.
+    pub fn accepts(&self, caps: &Caps) -> bool {
+        match self {
+            Self::Accepts(set) | Self::Produces(set) | Self::Identity(set) => set.accepts(caps),
+            Self::Mapping(pairs) => pairs.iter().any(|(input, _)| input.accepts(caps)),
+            Self::DerivedOutput(f) => !f(caps).is_empty(),
+            Self::AcceptsAny | Self::IdentityAny => true,
+            Self::LegacySource(produced) => produced.intersect(caps).is_ok(),
+            Self::LegacyTransform { intercept, .. } => intercept(caps).is_ok(),
+            Self::LegacySink(intercept) => intercept(caps).is_ok(),
+        }
+    }
+}
+
 /// Optional preference data for tie-breaking. Reserved for the solver's
 /// scoring pass; the concrete algebra is unspecified (DESIGN-M16 §10).
 /// The empty value is meaningful: "use the constraint's own preference
@@ -308,6 +329,36 @@ mod tests {
     fn default_preferences_is_none() {
         assert!(FakeSource.caps_preferences().is_none());
         assert!(FakeSink.caps_preferences().is_none());
+    }
+
+    #[test]
+    fn accept_caps_query_checks_constraint_set() {
+        // ACCEPT_CAPS (DESIGN §7): pure check against the declared set.
+        let nv12_720 = video(VideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
+        let h264_720 = video(VideoFormat::H264, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
+
+        // Accepts(NV12/any) takes NV12, rejects H.264.
+        let sink = FakeSink.caps_constraint();
+        assert!(sink.accepts(&nv12_720));
+        assert!(!sink.accepts(&h264_720));
+
+        // Identity(NV12@1280x720) takes the exact caps, rejects a mismatch.
+        let id = CapsConstraint::Identity(CapsSet::one(nv12_720.clone()));
+        assert!(id.accepts(&nv12_720));
+        assert!(!id.accepts(&video(
+            VideoFormat::Nv12,
+            Dim::Fixed(1920),
+            Dim::Fixed(1080),
+            Rate::Any,
+        )));
+
+        // DerivedOutput keys on input validity: H.264 in, not NV12.
+        let dec = FakeDecoder.caps_constraint();
+        assert!(dec.accepts(&h264_720));
+
+        // Wildcards take anything.
+        assert!(CapsConstraint::AcceptsAny.accepts(&h264_720));
+        assert!(CapsConstraint::IdentityAny.accepts(&nv12_720));
     }
 
     #[test]

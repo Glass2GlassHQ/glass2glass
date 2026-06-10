@@ -25,6 +25,20 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Step 6 (DESIGN §8): `CapsFilter` element + ACCEPT_CAPS surface.
+  `CapsConstraint::accepts(&Caps)` and `CapsSet::accepts(&Caps)` answer
+  the ACCEPT_CAPS query (§7) as a pure check against the declared
+  constraint, no negotiation: set-shapes test membership, `Mapping`
+  tests its input sides, `DerivedOutput` tests input validity, wildcards
+  accept anything, legacy bridges defer to their wrapped callbacks.
+  `g2g-plugins::capsfilter::CapsFilter` is a pass-through transform whose
+  native constraint is `Identity(set)`; inserted anywhere it pins the
+  link to a concrete `CapsSet` (e.g. ahead of an `AcceptsAny` sink). It
+  narrows on the legacy/mixed path via `intercept_caps`, validates its
+  configured caps and any mid-stream `CapsChanged` against the filter
+  (loud `CapsMismatch` on violation), and forwards data unchanged. New
+  tests: `accept_caps_query_checks_constraint_set` (core) and three
+  `capsfilter` lib tests. Completes the §8 migration plan.
 - Workaround #1 (partial, opt-in): `RtspSrc::with_expected_dims(w, h)`.
   The RTSP handshake (and the real SDP geometry) only completes inside
   `run`, so `intercept_caps` defaults to a wide placeholder `Dim::Range`

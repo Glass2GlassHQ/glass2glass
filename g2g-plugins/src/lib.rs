@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod capsfilter;
 pub mod fakesink;
 pub mod h264parse;
 pub mod identity;

@@ -263,6 +263,14 @@ impl CapsSet {
     pub fn fixate(&self) -> Option<Caps> {
         self.alternatives.iter().find_map(|c| c.fixate().ok())
     }
+
+    /// True if any alternative is compatible with `caps` (a non-empty
+    /// intersection exists). The ACCEPT_CAPS predicate (DESIGN-M16 §7):
+    /// "would a link carrying `caps` satisfy this set?" — a pure check,
+    /// no negotiation.
+    pub fn accepts(&self, caps: &Caps) -> bool {
+        self.alternatives.iter().any(|a| a.intersect(caps).is_ok())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
