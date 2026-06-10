@@ -25,6 +25,22 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Step 5j (reordered): NV12 display sinks (`WaylandSink`, `KmsSink`)
+  tolerate mid-stream geometry changes. Previously `configure_pipeline`
+  with new dims after the worker / framebuffer pool was up returned
+  `CapsMismatch`; now it tears down the existing worker/slots
+  (`self.shutdown()` / `self.teardown()`) and falls through to
+  fresh setup at the new geometry. Same-dims is still a no-op.
+  This unblocks the next step (5k: migrate `FfmpegH264Dec` to
+  `DerivedOutput`): mixed chains will land NV12 at startup with
+  placeholder dims (RtspSrc workaround #1, fixated to min), and the
+  real geometry will arrive via mid-stream `CapsChanged` after SPS
+  parse — both transitions now succeed instead of the second
+  refusing. No new tests in this commit: the rebuild path runs
+  through `worker_main` (Wayland session) / `allocate_slots` (real
+  DRM card), neither testable in CI. Visual verification belongs to
+  the user's manual e2e run.
+
 - Step 5h: `CapsConstraint::IdentityAny` wildcard transform variant
   for pass-through transforms (probe / metering / tee) whose
   `intercept_caps` is `Ok(upstream.clone())`. Native solver couples

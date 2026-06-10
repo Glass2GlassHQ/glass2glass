@@ -449,14 +449,19 @@ impl AsyncElement for KmsSink {
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change after the buffer pool is allocated
-        // means we'd need to reallocate. Not handled in v1 — surface as
-        // CapsMismatch so the operator notices.
+        // Mid-stream geometry change: same dims is a no-op; different
+        // dims means we tear down the current framebuffers/slots and
+        // reallocate at the new geometry. M16 5j: enables decoder→sink
+        // chains where the initial NV12 caps carry placeholder dims
+        // (e.g. RtspSrc's `Range` workaround #1, fixated to min) and
+        // the real geometry lands via a mid-stream `CapsChanged` after
+        // SPS parse.
         if !self.slots.is_empty() {
             if w == self.width && h == self.height {
                 return Ok(ConfigureOutcome::Accepted);
             }
-            return Err(G2gError::CapsMismatch);
+            self.teardown();
+            // fall through to fresh allocate_slots below.
         }
 
         if self.card.is_none() {

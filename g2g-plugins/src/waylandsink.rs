@@ -41,8 +41,8 @@
 //! ## Constraints (v1)
 //!
 //! - NV12 input only.
-//! - Fixed input dims. Mid-stream geometry change rejects with
-//!   `CapsMismatch` (we'd need to recreate the SHM pool).
+//! - Mid-stream geometry change tears down the existing worker and
+//!   spawns a fresh one (M16 5j). Same-dims `CapsChanged` is a no-op.
 //! - No scaling: the window opens at the input video dimensions and
 //!   stays there. If the compositor's `configure` event resizes us we
 //!   ignore the new bounds (the video keeps drawing at its native
@@ -299,6 +299,9 @@ impl AsyncElement for WaylandSink {
             // Initial negotiation arrives with the decoder's pre-decode
             // caps (H.264). Accept as a no-op; real setup happens when
             // the decoder emits its NV12 `CapsChanged` mid-stream.
+            // This branch is still load-bearing for all-legacy chains;
+            // mixed/native chains downstream of a `DerivedOutput`
+            // decoder will land NV12 here directly at startup.
             Caps::Video { .. } => return Ok(ConfigureOutcome::Accepted),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -306,14 +309,18 @@ impl AsyncElement for WaylandSink {
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change after the worker is up means we'd
-        // need to teardown / re-bring the window. Same v1 stance as the
-        // KMS sink: accept iff dims are unchanged, otherwise refuse.
+        // Mid-stream geometry change: same dims is a no-op; different
+        // dims means we tear down the existing worker and spawn a fresh
+        // one. M16 5j: enables decoder→sink chains where the initial
+        // NV12 caps carry placeholder dims (e.g. RtspSrc's `Range`
+        // workaround #1, fixated to min) and the real geometry lands
+        // via a mid-stream `CapsChanged` after SPS parse.
         if self.worker.is_some() {
             if w == self.width && h == self.height {
                 return Ok(ConfigureOutcome::Accepted);
             }
-            return Err(G2gError::CapsMismatch);
+            self.shutdown();
+            // fall through to fresh-worker spawn below.
         }
 
         let (tx, rx) = channel::<WorkerCmd>();
