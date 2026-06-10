@@ -377,3 +377,132 @@ ever attempted as one piece.
 See `architecture_codec_vs_raw_format.md` in auto-memory for the full
 analysis and `architecture_caps_nego_debt.md` for the workarounds
 this would interact with.
+
+## 13. GStreamer parity assessment (M16 is the foundation, not completion)
+
+Assessment date 2026-06-10, after all of M16 steps 1-5m, workaround
+#2 retirement, workaround #3 Phase A + B, and latency observability
+landed; production visual e2e (`rtsp → ffmpegdec → wayland/kms`)
+verified.
+
+The framework target is *at least as capable as GStreamer, ideally
+lower latency*. M16 covers the linear pipeline case ≥ GStreamer with
+a structural latency edge (direct function calls instead of GStreamer's
+pad-query round-trip), but several real GStreamer capabilities are
+explicitly deferred. Honest rating: ~70-75% capability parity.
+
+### 13.1 What M16 delivers ≥ GStreamer
+
+- CSP solver with arc consistency on linear chains, returning per-link
+  caps. GStreamer's negotiation walks pad-by-pad with no global
+  validation — we get structured failure (`NegotiationFailure`) for
+  free.
+- ACCEPT_CAPS / `CapsFilter` covered identically.
+- Forward `CapsChanged` ordering invariant tested
+  (m16_workaround3_phase_a.rs) — the "decoder reorder boundary"
+  scenario is a regression guard GStreamer doesn't have at the
+  framework level.
+- Decoder validate-record on input `CapsChanged` (Phase A) — H.264 →
+  VP9 mid-stream is loud `CapsMismatch` rather than silent corruption.
+- Sinks tolerate mid-stream dim changes by rebuilding the surface.
+- Per-frame `Caps` tagging invariant: a `DataFrame`'s caps are
+  authoritative for that frame, allowing in-flight old-caps frames to
+  drain cleanly past a mid-stream reconfigure. This is the foundation
+  for the no-double-allocation latency win.
+
+### 13.2 What M16 explicitly defers (specified, no code)
+
+Documented in `DESIGN-M16-workaround3-reconfigure.md` §9 and §10:
+
+- **Allocation re-cascade (§9).** M12 `propose_allocation` runs only
+  at startup. GStreamer re-runs `GstQuery::Allocation` on every caps
+  change; GPU pools and DMABUF surfaces *require* this. Phased plan:
+  α (element-local) → β (coordinator restructure). β is the same
+  machinery several other items need.
+- **Phase C fan-out (§10).** Per-branch downstream subgraph re-solve
+  with strict failure policy (`FanOutPolicy::Strict`). Parallel
+  per-branch solver calls beat GStreamer's sequential pattern on
+  latency.
+- **Phase C muxer (§10).** Per-input re-solve plus eager output
+  `CapsChanged` emission. Eager emit shaves one frame vs. GStreamer's
+  lazy default.
+
+### 13.3 What M16 doesn't specify or cover
+
+- **Multi-element subgraph re-solve.** Phase B handles 1 link only.
+  Real chains with 4+ downstream elements (boundary → capsfilter →
+  converter → sink, or with allocators in the middle) need the full
+  downstream subgraph reconfigured. The runner shape currently caps
+  at 3 elements so this is theoretical until the runner generalizes.
+- **Async source caps discovery.** Workaround #1 has the opt-in
+  `RtspSrc::with_expected_dims(w, h)` for callers who know the
+  camera dims. The full fix needs `SourceLoop::intercept_caps` to be
+  async so the source can do an SDP DESCRIBE before negotiation.
+  GStreamer's `rtspsrc` does this.
+- **Pad templates as declarative metadata.** GStreamer's
+  `gst_element_factory_get_static_pad_templates` lets tools query an
+  element's accepted caps without instantiating it. Our
+  `caps_constraint_as_*` is a runtime method on a constructed
+  element. Tooling implications.
+- **Dynamic pads / request pads.** GStreamer's `tee::request-pad` and
+  `mux::request-pad` allow adding branches / inputs at runtime. Our
+  fan-out and muxer are static.
+- **Mid-stream element hot-swap.** M8's `ElementSlot` scaffolding
+  exists but mid-stream swap of a real element isn't supported.
+- **Bus events for negotiation failures.** M11 Bus exists; structured
+  caps-failure messages aren't routed through it. Today a failed
+  `NegotiationFailure` becomes an opaque `G2gError::CapsMismatch`.
+- **Preference algebra.** `CapsPreferences` is a placeholder. The
+  solver uses constraint-internal order for tie-breaks. GStreamer's
+  more elaborate "best fit" caps selection across competing
+  structures isn't implemented.
+
+### 13.4 The M18 parity push, ordered by value-per-work
+
+1. **Allocation re-cascade β (coordinator restructure).** Single
+   biggest lever. Unlocks GPU pools / DMABUF / VAAPI chains, AND
+   cleanly enables items 3 and 4 (Phase C, multi-element re-solve)
+   and a future mid-stream clock-change mechanism. The restructure
+   pays off across many capabilities; it's a foundation, not a feature.
+2. **`mux` migration + Phase C muxer.** Real audio/video mux chains
+   need this. Trait surface change (`MultiInputElement::caps_constraint_as_input(idx)`)
+   noted in workaround3 §10 MX-3.
+3. **Fan-out Phase C with FO-1 strict default.** `tee` to display +
+   recording. Parallel per-branch solver calls is the latency win.
+4. **Multi-element runner.** Once chains exceed 3 elements, mid-
+   stream re-solve must cover the full downstream subgraph. Couples
+   to item 1 cleanly.
+5. **Async `SourceLoop::intercept_caps`.** Closes workaround #1's
+   remaining gap. Trait change touches every source.
+6. **Pad templates declarative metadata.** Tools and pre-instantiation
+   solver queries.
+7. **Bus integration for negotiation failures.** Quick win once item 1
+   has restructured the runner.
+8. **Preference algebra.** Concrete trigger required (a competing-
+   constraint scenario that forces it).
+9. **Dynamic pads / hot-swap.** Lowest priority. No production driver.
+
+Items 1-4 are the bulk of the gap. Doing them gets to ~95% parity
+with the latency edge intact.
+
+### 13.5 How to think about M16 going forward
+
+M16 is "the negotiation foundation." Its job was:
+- Replace the single-cascade caps model with CSP.
+- Land the solver, the legacy bridge, the mixed cascade, the per-link
+  runner, native variants for the common element shapes, and the
+  ordering invariants the redesign rests on.
+- Retire the existing workarounds where the new architecture removes
+  the need.
+- Make the foundation visually verified on production hardware so
+  future work doesn't rebuild it.
+
+It is *not* "negotiation complete." The deferred items above are
+real GStreamer capabilities we don't yet match. An M18-ish parity
+push is the right framing for closing the gap; piecemeal additions
+risk re-doing item 1's restructure work later.
+
+When work depends on a deferred item (a real GPU pool, multi-element
+chain, audio/video mux, branched topology with mid-stream caps
+changes), surface the gap before building on top — don't lock the
+foundation into a shape that the M18 push will need to undo.
