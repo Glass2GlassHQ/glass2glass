@@ -25,6 +25,58 @@ Nothing is published yet; all versions are `0.1.0`.
   (`architecture_codec_vs_raw_format.md`). M17-sized refactor;
   M16 continues on the current shape.
 
+- Workaround #3 Phase B (sink-side downstream subgraph re-solve):
+  `run_simple_pipeline` and `run_source_transform_sink` now route every
+  mid-stream forward `CapsChanged` arriving at the sink through a new
+  `re_solve_downstream_sink()` helper before calling
+  `configure_pipeline`. The helper runs `solve_linear` over
+  `[LegacySource(new_caps), sink.caps_constraint_as_sink()]` and
+  returns the assigned sink-input caps. A `NegotiationFailure::EmptyLink`
+  here means the sink's declared constraint rejects the boundary's
+  output — the runner drops the forward `CapsChanged` and signals a
+  reverse `Reconfigure::Renegotiate` upstream (§7 forward × reverse:
+  the request hits the transform's link, not the source, so the
+  failure surfaces *at the boundary*). `NegotiationFailure::Unfixable`
+  (e.g. a decoder leaving `Rate::Any` because framerate isn't
+  pixel-level data) is treated as success and `new_caps` is passed
+  through unchanged — fixation is a startup-negotiation concern, not
+  a mid-stream re-solve one. The observable change in the current
+  3-element runner: a sink with a restrictive
+  `Accepts(set)` constraint can short-circuit a hostile mid-stream
+  `CapsChanged` via the solver even if its legacy `configure_pipeline`
+  would have silently accepted. New
+  `g2g-plugins/tests/m16_workaround3_phase_b.rs`: a `HostileBoundary`
+  fake transform injects a non-NV12 mid-stream `CapsChanged`; a
+  `PickySink` declares `Accepts(NV12)` for the solver but accepts
+  every shape in `configure_pipeline`. Asserts the hostile caps never
+  reach `process` while a matching NV12 geometry-change still
+  propagates. Full Linux feature matrix
+  (`ffmpeg rtsp wayland-sink kms-sink`) green.
+- Workaround #3 Phase A (retired for linear topology): decoders
+  (`FfmpegH264Dec`, `MfDecode`, `VaapiH264Dec`) stop silently swallowing
+  input `PipelinePacket::CapsChanged`. On arrival they validate the
+  format (loud `CapsMismatch` on a hostile mid-stream H.264 → VP9
+  switch; previously dropped silently) and record the caps into a new
+  `input_caps` field. The output `CapsChanged` is still emitted at the
+  decode boundary from decoded-frame geometry, preserving the §3
+  ordering invariant. Each decoder's `DerivedOutput` closure now
+  delegates to a free `derive_output_caps()` helper so a
+  `debug_assert!` before each output `CapsChanged` push verifies
+  decode-time geometry agrees with the closure applied to the recorded
+  input (via `Caps::intersect` non-empty — handles the
+  `Fixed`-vs-`Any` framerate asymmetry without false positives). New
+  test `g2g-plugins/tests/m16_workaround3_phase_a.rs`: a
+  `FakeReorderDecoder` simulates B-frame reorder; asserts the output
+  `CapsChanged(B)` appears strictly between the last A-tagged frame
+  and the first B-tagged frame (the regression guard against any
+  future "eager forward" temptation), plus the loud-reject case. All
+  44 g2g-plugins lib + integration suites green across
+  `ffmpeg + rtsp + wayland-sink + kms-sink + vaapi` on Fedora.
+  Decisions D2 (single source of truth via the closure) and D4
+  (acknowledge, don't swallow) implemented. D1 (carrier) and D3
+  (runner subgraph re-solve) not load-bearing for Phase A; they
+  arrive with Phase B alongside the §7 forward × reverse
+  `Reconfigure` race resolution.
 - Workaround #3 design (no code): `DESIGN-M16-workaround3-reconfigure.md`
   turns the deferred forward in-band reconfigure into an implementable,
   phased spec. Key finding: decoders swallow their input `CapsChanged`

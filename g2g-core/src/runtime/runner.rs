@@ -13,7 +13,7 @@ use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::join::Join2;
-use crate::runtime::solver::solve_linear;
+use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -122,6 +122,44 @@ pub struct RunStats {
     pub base_time_ns: u64,
 }
 
+/// M16 workaround #3 Phase B helper: re-solve the downstream subgraph
+/// when a forward `CapsChanged` crosses a format boundary mid-stream.
+///
+/// Today's 3-element runner has a single downstream link (boundary →
+/// sink), so the subgraph is one link and the solver's role is
+/// structural: it queries the sink's declared `CapsConstraint` (which
+/// may reject the boundary's output via `Accepts(set)` cleanly) before
+/// the sink ever sees `configure_pipeline`. The returned `Caps` is what
+/// the runner then hands to `configure_pipeline`.
+///
+/// Longer chains (4+ elements, future runner variants) will iterate
+/// the solver result to reconfigure every changed downstream link, not
+/// just the immediate next element — that's the structural unlock
+/// `DESIGN-M16-workaround3-reconfigure.md` §4 calls out.
+///
+/// Forward × reverse race (§7): an `EmptyLink` here means the sink
+/// can't take the boundary's output. The caller drops the forward
+/// `CapsChanged` and signals a reverse `Reconfigure` *into the
+/// boundary*, not past it to the source — that boundary owns the
+/// derivation and is the right place to surface the structured
+/// failure. An `Unfixable` (the boundary's caps left a ranged field
+/// like `Rate::Any` — common for decoders that don't know framerate at
+/// the pixel level) is *not* a failure: it means the sink accepted the
+/// shape, the caps just aren't fully fixated. Pass `new_caps` through
+/// unchanged.
+fn re_solve_downstream_sink<S>(new_caps: &Caps, sink: &S) -> Result<Caps, NegotiationFailure>
+where
+    S: AsyncElement + ?Sized,
+{
+    let src_c = CapsConstraint::LegacySource(new_caps.clone());
+    let sink_c = sink.caps_constraint_as_sink();
+    match solve_linear(&[&src_c, &sink_c]) {
+        Ok(links) => links.into_iter().last().ok_or(NegotiationFailure::Degenerate),
+        Err(NegotiationFailure::Unfixable { .. }) => Ok(new_caps.clone()),
+        Err(other) => Err(other),
+    }
+}
+
 /// Drives a `source → sink` pipeline over a single bounded link.
 /// Initial Phase 1+2 negotiation runs with bounded `ReFixate` backtrack
 /// (M8 piece 5): if any element's `configure_pipeline()` returns a
@@ -211,14 +249,32 @@ where
                     return Ok::<u64, G2gError>(consumed);
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    // M16 workaround #3 Phase B: re-solve the downstream
+                    // subgraph before applying. For a 2-element chain
+                    // the subgraph is one link, so the solver's role is
+                    // structural — it checks the sink's declared
+                    // `CapsConstraint::caps_constraint_as_sink()`
+                    // (which a native sink may use to reject the new
+                    // shape cleanly) before any `configure_pipeline`
+                    // call. Failure becomes a structured upstream
+                    // `Renegotiate` request instead of an opaque
+                    // `CapsMismatch`.
+                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
+                        Ok(caps) => caps,
+                        Err(_) => {
+                            link_rx
+                                .request_reconfigure(Reconfigure::Renegotiate);
+                            continue;
+                        }
+                    };
                     // M8 piece 1: runner cascades mid-stream caps changes
                     // through configure_pipeline before the element sees
                     // the notification packet. Guarantees DataFrames with
                     // the new caps never reach a stale element.
-                    match sink.configure_pipeline(&new_caps)? {
+                    match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
                             sink.process(
-                                PipelinePacket::CapsChanged(new_caps),
+                                PipelinePacket::CapsChanged(sink_caps),
                                 &mut null,
                             )
                             .await?;
@@ -601,10 +657,28 @@ where
                     return Ok::<u64, G2gError>(consumed);
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    match sink.configure_pipeline(&new_caps)? {
+                    // M16 workaround #3 Phase B: re-solve the downstream
+                    // subgraph (boundary → sink) before applying. The
+                    // boundary that emitted this `CapsChanged` is the
+                    // transform; the subgraph is the one link feeding
+                    // the sink. A `NegotiationFailure` here means the
+                    // sink's declared `CapsConstraint` rejects the
+                    // boundary's output — surface it as a reverse
+                    // Reconfigure into the transform (§7 forward ×
+                    // reverse race: terminates at the boundary, does
+                    // not propagate past the source).
+                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
+                        Ok(caps) => caps,
+                        Err(_) => {
+                            link2_rx
+                                .request_reconfigure(Reconfigure::Renegotiate);
+                            continue;
+                        }
+                    };
+                    match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
                             sink.process(
-                                PipelinePacket::CapsChanged(new_caps),
+                                PipelinePacket::CapsChanged(sink_caps),
                                 &mut null,
                             )
                             .await?;
