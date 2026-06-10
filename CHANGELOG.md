@@ -34,6 +34,21 @@ Nothing is published yet; all versions are `0.1.0`.
 - M12 complete: with M8–M12 done, `g2g` reaches dynamic-pipeline feature parity
   with GStreamer (per DESIGN.md §4.10) while keeping the static typed layer.
 
+### M13: End-to-end RTSP → ffmpeg decode (Linux software path)
+- `RtspSrc::intercept_caps` now advertises fixate-friendly `Dim::Range` /
+  `Rate::Range` instead of `Any`. `Caps::fixate()` rejects `Any` and aborted
+  Phase 2 negotiation before any network handshake; the placeholder is
+  overwritten by the SDP-derived `CapsChanged` emitted from `run`.
+- `RtspSrc` drops every `VideoFrame` until the first `is_random_access_point`
+  IDR. retina's `FrameFormat::SIMPLE` only prepends SPS/PPS on keyframes, so
+  mid-GOP tune-in (typical for live RTSP servers like MediaMTX) would feed
+  parameterless slices to the decoder and stall with "non-existing PPS 0".
+- New `rtsp_ffmpeg_e2e` integration test (`rtsp` + `ffmpeg` features, Linux):
+  `RtspSrc → FfmpegH264Dec → FakeSink` over `run_source_transform_sink`,
+  asserting decoded I420 frames reach the sink with a fixed-dim `CapsChanged`
+  preceding the first `DataFrame`. Module docs include a MediaMTX + ffmpeg
+  recipe for a deterministic local fixture.
+
 ### M13: Windows hardware decode (Media Foundation)
 - `MfDecode` element (`mf-decode` feature, Windows-only): wraps the Media
   Foundation H.264 Decoder MFT (`CLSID_MSH264DecoderMFT`, an `IMFTransform`).

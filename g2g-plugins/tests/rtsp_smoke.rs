@@ -24,24 +24,28 @@ impl PipelineClock for ZeroClock {
 }
 
 #[test]
-fn rtspsrc_intercept_caps_returns_h264_with_any_geometry() {
-    // intercept_caps is called by the runner during Phase 1 negotiation,
-    // before we connect to the server. Until the SPS lands (M6), geometry
-    // and framerate are advertised as Any.
+fn rtspsrc_intercept_caps_advertises_fixate_friendly_h264_range() {
+    // intercept_caps runs during Phase 1 before we touch the network. The
+    // real dims live in the SDP and only land inside `run`, so we advertise
+    // a wide `Range` (not `Any`, which `Caps::fixate()` rejects) and rely
+    // on the SDP-derived `CapsChanged` to refine to a fixed geometry.
     use g2g_core::runtime::SourceLoop as _;
     let src = RtspSrc::new("rtsp://invalid.example/never-reached");
     let caps = src.intercept_caps().expect("intercept_caps should succeed");
-    match caps {
+    // Critical contract: the advertised caps must be fixable, else the
+    // runner aborts with `CapsMismatch` before any frames flow.
+    caps.fixate().expect("RtspSrc caps must be fixate-friendly");
+    match &caps {
         Caps::Video {
             format,
             width,
             height,
             framerate,
         } => {
-            assert_eq!(format, VideoFormat::H264);
-            assert_eq!(width, Dim::Any);
-            assert_eq!(height, Dim::Any);
-            assert_eq!(framerate, Rate::Any);
+            assert_eq!(*format, VideoFormat::H264);
+            assert!(matches!(width, Dim::Range { .. }));
+            assert!(matches!(height, Dim::Range { .. }));
+            assert!(matches!(framerate, Rate::Range { .. }));
         }
         other => panic!("expected Caps::Video, got {other:?}"),
     }

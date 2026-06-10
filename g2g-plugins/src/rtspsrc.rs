@@ -76,12 +76,21 @@ impl SourceLoop for RtspSrc {
         Self: 'a;
 
     fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        // SPS parsing is M6; until then advertise H.264 with any geometry.
+        // The real dims come from the SDP, which only lands after DESCRIBE
+        // (inside `run`). To survive Phase 2's `Caps::fixate()` we advertise
+        // a wide Range rather than `Any` (`Any` is unfixable and aborts
+        // negotiation). The fixated placeholder is overwritten by the first
+        // `CapsChanged` we push once the session connects; downstream
+        // elements that care about geometry (e.g. allocators) only act on
+        // the cascaded refinement, not on this placeholder.
         Ok(Caps::Video {
             format: VideoFormat::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
+            width: Dim::Range { min: 16, max: 8192 },
+            height: Dim::Range { min: 16, max: 8192 },
+            framerate: Rate::Range {
+                min_q16: 1 << 16,
+                max_q16: 240 << 16,
+            },
         })
     }
 
@@ -164,6 +173,14 @@ async fn run_rtsp(
     let limit = src.target_frames.unwrap_or(u64::MAX);
     let mut emitted: u64 = 0;
     let mut origin_rtp: Option<i64> = None;
+    // retina (FrameFormat::SIMPLE) only prepends SPS/PPS on keyframes
+    // (`is_random_access_point`). When we tune into a live stream mid-GOP
+    // the first arriving access units are typically P-frames; emitting them
+    // would feed slices to the decoder before any parameter set, producing
+    // "non-existing PPS N referenced" and stalling until the next IDR. Drop
+    // everything up to and including the wait for the first keyframe so the
+    // decoder's first input is always SPS + PPS + IDR.
+    let mut seen_keyframe = false;
 
     while emitted < limit {
         let item = match demuxed.next().await {
@@ -175,6 +192,13 @@ async fn run_rtsp(
         let CodecItem::VideoFrame(vf) = item else {
             continue;
         };
+
+        if !seen_keyframe {
+            if !vf.is_random_access_point() {
+                continue;
+            }
+            seen_keyframe = true;
+        }
 
         if vf.has_new_parameters() {
             // Re-read parameters via the demuxer (which proxies to the
