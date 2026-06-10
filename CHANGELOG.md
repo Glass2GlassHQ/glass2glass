@@ -34,6 +34,31 @@ Nothing is published yet; all versions are `0.1.0`.
 - M12 complete: with M8–M12 done, `g2g` reaches dynamic-pipeline feature parity
   with GStreamer (per DESIGN.md §4.10) while keeping the static typed layer.
 
+### M15: RTSP reconnect + long-running stability soak
+- `RtspSrc` now supports reconnect-with-backoff. Off by default for
+  backwards compatibility; opt in with `.with_reconnect(max_attempts)`
+  and optionally `.with_reconnect_backoff(initial_ms, max_ms)`.
+  Exponential backoff caps at `max_ms`. Network/protocol errors trigger
+  retry; a graceful server-side end-of-stream (retina's demuxer returning
+  `None`, typical for VOD finishing) terminates without retry.
+- `run_rtsp` refactored into an outer reconnect orchestrator and inner
+  `run_session`. State threaded across sessions:
+  - cumulative `sequence` counter so downstream sees monotonic IDs;
+  - `pts_base_ns` offset so per-session PTS continues monotonically
+    across reconnects (with a deliberate 1 s gap marking the boundary).
+- A `PipelinePacket::Flush` is emitted before each reconnect so the
+  decoder flushes its codec state and sinks reset `last_sequence`.
+- `tests/rtsp_soak.rs` (#[ignore]) is a long-running stability soak
+  configurable via `G2G_SOAK_SECONDS` (default 30) and `G2G_SOAK_MIN_FRAMES`
+  (default `seconds * 20`). Asserts monotonic `sequence` and `pts_ns`,
+  and that the pipeline reaches the frame floor — catches PTS regressions
+  and stalls that the 2-second smokes miss. Module docs cover the manual
+  reconnect-exercise workflow (Ctrl-C the publisher, watch it resume).
+- `tests/rtsp_smoke.rs` gains `rtspsrc_with_reconnect_retries_then_fails`
+  which exercises the reconnect orchestrator against an unreachable URL,
+  asserting the source retries `max_attempts` times before surfacing an
+  error.
+
 ### M14: Wayland display sink (Linux, NV12, desktop-dev convenience)
 - `WaylandSink` element (`wayland-sink` feature, Linux-only): opens an
   `xdg_toplevel` window on the running compositor and presents NV12 frames

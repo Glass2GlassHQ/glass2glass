@@ -52,6 +52,43 @@ fn rtspsrc_intercept_caps_advertises_fixate_friendly_h264_range() {
 }
 
 #[tokio::test]
+async fn rtspsrc_with_reconnect_retries_then_fails() {
+    // Unreachable address + reconnect with a short backoff. The source
+    // must try max_attempts+1 times (the first connect plus the retries)
+    // then surface a Hardware error. The whole loop must complete well
+    // under our timeout so a hang regression is visible.
+    let url = "rtsp://127.0.0.1:1/never-listens";
+    let mut src = RtspSrc::new(url)
+        .with_reconnect(3)
+        .with_reconnect_backoff(10, 50);
+    let mut snk = FakeSink::new();
+    let clock = ZeroClock;
+
+    let started = std::time::Instant::now();
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(10),
+            run_simple_pipeline(&mut src, &mut snk, &clock, 4),
+        )
+        .await
+        .expect("reconnect retries should complete within 10s");
+    let elapsed = started.elapsed();
+
+    // 3 retries with backoff 10, 20, 40 ms = 70 ms minimum of sleeps;
+    // realistic network/connect overhead pushes total to ~hundreds of ms.
+    // The point of the assertion: we didn't return on the first failure.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(50),
+        "must have slept between retries; actual elapsed = {elapsed:?}",
+    );
+
+    let err = result.expect_err("exhausted retries must surface as error");
+    assert!(
+        matches!(err, G2gError::Hardware(_) | G2gError::CapsMismatch),
+        "unexpected error: {err:?}",
+    );
+}
+
+#[tokio::test]
 async fn rtspsrc_bad_url_returns_hardware_error_or_caps_mismatch() {
     // Hitting an unreachable address must fail fast rather than hang.
     let url = "rtsp://127.0.0.1:1/no-such-server";

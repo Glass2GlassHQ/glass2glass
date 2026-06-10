@@ -657,6 +657,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g2g_core::Rate;
 
     #[test]
     fn intercept_passes_through_h264_for_deferred_configure() {

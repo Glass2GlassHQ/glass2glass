@@ -22,6 +22,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::time::Duration;
 use std::string::{String, ToString};
 use std::sync::Arc;
 
@@ -39,11 +40,33 @@ use g2g_core::{
     PipelinePacket, Rate, VideoFormat,
 };
 
+/// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
+/// surfaces as `G2gError::Hardware` and the source ends. When enabled,
+/// the source retries up to `max_attempts` times with exponential backoff
+/// between `initial_backoff_ms` and `max_backoff_ms`. A `PipelinePacket::Flush`
+/// is emitted to downstream between sessions to signal the discontinuity
+/// (the decoder flushes its state, the sink resets `last_sequence`).
+#[derive(Debug, Clone, Copy)]
+struct ReconnectPolicy {
+    max_attempts: u32,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+}
+
+impl ReconnectPolicy {
+    const DISABLED: Self = Self {
+        max_attempts: 0,
+        initial_backoff_ms: 0,
+        max_backoff_ms: 0,
+    };
+}
+
 #[derive(Debug)]
 pub struct RtspSrc {
     url: String,
     user_agent: String,
     target_frames: Option<u64>,
+    reconnect: ReconnectPolicy,
     configured: bool,
 }
 
@@ -53,6 +76,7 @@ impl RtspSrc {
             url: url.into(),
             user_agent: "glass2glass/0.1".to_string(),
             target_frames: None,
+            reconnect: ReconnectPolicy::DISABLED,
             configured: false,
         }
     }
@@ -66,6 +90,35 @@ impl RtspSrc {
 
     pub fn with_user_agent<S: Into<String>>(mut self, ua: S) -> Self {
         self.user_agent = ua.into();
+        self
+    }
+
+    /// Enable automatic reconnect on session failure. `max_attempts == 0`
+    /// (the default via [`Self::new`]) disables reconnect entirely;
+    /// pass any positive count to opt in. Backoff starts at 250 ms and
+    /// doubles per attempt, capped at 5 s. Use [`Self::with_reconnect_backoff`]
+    /// to override.
+    ///
+    /// Reconnect triggers on network/protocol errors only — a server-side
+    /// graceful end-of-stream (eg a VOD finishing) is treated as final
+    /// and the source emits EOS without retrying.
+    pub fn with_reconnect(mut self, max_attempts: u32) -> Self {
+        self.reconnect.max_attempts = max_attempts;
+        if self.reconnect.initial_backoff_ms == 0 {
+            self.reconnect.initial_backoff_ms = 250;
+        }
+        if self.reconnect.max_backoff_ms == 0 {
+            self.reconnect.max_backoff_ms = 5_000;
+        }
+        self
+    }
+
+    /// Override the exponential-backoff bounds used by [`Self::with_reconnect`].
+    /// `initial_backoff_ms` is the wait before the first retry; each
+    /// subsequent retry doubles up to `max_backoff_ms`.
+    pub fn with_reconnect_backoff(mut self, initial_ms: u64, max_ms: u64) -> Self {
+        self.reconnect.initial_backoff_ms = initial_ms;
+        self.reconnect.max_backoff_ms = max_ms;
         self
     }
 }
@@ -117,38 +170,140 @@ impl SourceLoop for RtspSrc {
     }
 }
 
+/// Outer reconnect orchestrator. Calls [`run_session`] for each connect
+/// attempt; on network/protocol failure, waits according to the
+/// reconnect policy and tries again until either the frame limit is hit,
+/// the server gracefully closes, or `max_attempts` is exhausted.
+///
+/// State threaded across sessions:
+/// - `total_emitted`: cumulative `DataFrame` count, also the next frame's
+///   `sequence`. Continues monotonically across reconnects.
+/// - `pts_base_ns`: PTS offset applied to the per-session relative PTS so
+///   downstream sees monotonic timestamps even across discontinuities.
+///   Bumped by `1 s` (a deliberate gap to mark the reconnect boundary)
+///   after each successful session before the next one runs.
 async fn run_rtsp(
     src: &RtspSrc,
     out: &mut dyn OutputSink,
 ) -> Result<u64, G2gError> {
-    let url = url::Url::parse(&src.url).map_err(|_| G2gError::CapsMismatch)?;
+    let limit = src.target_frames.unwrap_or(u64::MAX);
+    let mut total_emitted: u64 = 0;
+    let mut pts_base_ns: u64 = 0;
+    let mut attempt: u32 = 0;
+    let mut backoff_ms = src.reconnect.initial_backoff_ms.max(1);
+    let mut last_session_max_pts: u64 = 0;
+
+    loop {
+        let outcome =
+            run_session(src, out, &mut total_emitted, pts_base_ns, limit, &mut last_session_max_pts)
+                .await;
+        match outcome {
+            SessionOutcome::LimitReached | SessionOutcome::GracefulEnd => {
+                return Ok(total_emitted);
+            }
+            SessionOutcome::DownstreamError(e) => {
+                // A downstream `out.push` failure (eg sink panicked) is
+                // never something a reconnect can fix.
+                return Err(e);
+            }
+            SessionOutcome::NetworkError(e) => {
+                if src.reconnect.max_attempts == 0 {
+                    return Err(e);
+                }
+                attempt += 1;
+                if attempt > src.reconnect.max_attempts {
+                    return Err(e);
+                }
+                std::eprintln!(
+                    "rtsp: session ended ({:?}); reconnect {}/{} after {}ms",
+                    e,
+                    attempt,
+                    src.reconnect.max_attempts,
+                    backoff_ms,
+                );
+                // Tell downstream we have a discontinuity coming. The
+                // ffmpeg decoder flushes its codec state on Flush so
+                // the next session's IDR primes cleanly; sinks reset
+                // their `last_sequence` so the new (continuing) sequence
+                // counter isn't rejected as out-of-order.
+                let _ = out.push(PipelinePacket::Flush).await;
+                // Push PTS forward past the gap before the next session.
+                pts_base_ns = last_session_max_pts.saturating_add(1_000_000_000);
+
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = backoff_ms
+                    .saturating_mul(2)
+                    .min(src.reconnect.max_backoff_ms.max(backoff_ms));
+            }
+        }
+    }
+}
+
+/// Result of a single connect+play+drain session.
+#[derive(Debug)]
+enum SessionOutcome {
+    /// `target_frames` reached: we emitted enough, stop cleanly.
+    LimitReached,
+    /// retina's demuxer returned `None` — the server closed the stream
+    /// without error (typical for VOD reaching end-of-file).
+    GracefulEnd,
+    /// retina or the network errored. Eligible for reconnect.
+    #[allow(dead_code)]
+    NetworkError(G2gError),
+    /// A downstream `out.push` failed. Not retryable.
+    DownstreamError(G2gError),
+}
+
+/// Run one RTSP session: DESCRIBE, SETUP, PLAY, drain until error /
+/// graceful end / frame limit. Updates `total_emitted` in place and
+/// records the highest PTS we emitted for the reconnect-gap computation.
+async fn run_session(
+    src: &RtspSrc,
+    out: &mut dyn OutputSink,
+    total_emitted: &mut u64,
+    pts_base_ns: u64,
+    limit: u64,
+    last_session_max_pts: &mut u64,
+) -> SessionOutcome {
+    let url = match url::Url::parse(&src.url) {
+        Ok(u) => u,
+        // A bad URL is fatal across reconnects too — emit it as a
+        // network error and let the policy decide (the test for
+        // `127.0.0.1:1/no-such-server` flows through here).
+        Err(_) => return SessionOutcome::NetworkError(G2gError::CapsMismatch),
+    };
 
     let session_group = Arc::new(SessionGroup::default());
     let opts = SessionOptions::default()
         .session_group(session_group)
         .user_agent(src.user_agent.clone());
 
-    let mut session = Session::describe(url, opts)
-        .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let mut session = match Session::describe(url, opts).await {
+        Ok(s) => s,
+        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+    };
 
-    let video_idx = session
+    let video_idx = match session
         .streams()
         .iter()
-        .position(|s| {
-            s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265")
-        })
-        .ok_or(G2gError::CapsMismatch)?;
+        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
+    {
+        Some(i) => i,
+        None => return SessionOutcome::NetworkError(G2gError::CapsMismatch),
+    };
 
     let clock_rate = u64::from(session.streams()[video_idx].clock_rate_hz());
 
-    session
+    if session
         .setup(
             video_idx,
             SetupOptions::default().frame_format(FrameFormat::SIMPLE),
         )
         .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        .is_err()
+    {
+        return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+    }
 
     // After SETUP, retina has parsed the SPS/PPS from the SDP (when present)
     // and exposes it as a `VideoParameters`. We use it to emit a fixed-cap
@@ -157,22 +312,22 @@ async fn run_rtsp(
     let mut current_caps =
         caps_from_video_params(video_params_for(session.streams(), video_idx));
 
-    let played = session
-        .play(PlayOptions::default())
-        .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let played = match session.play(PlayOptions::default()).await {
+        Ok(p) => p,
+        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+    };
 
-    let mut demuxed = played
-        .demuxed()
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let mut demuxed = match played.demuxed() {
+        Ok(d) => d,
+        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+    };
 
     if let Some(caps) = &current_caps {
-        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+        if let Err(e) = out.push(PipelinePacket::CapsChanged(caps.clone())).await {
+            return SessionOutcome::DownstreamError(e);
+        }
     }
 
-    let limit = src.target_frames.unwrap_or(u64::MAX);
-    let mut emitted: u64 = 0;
-    let mut origin_rtp: Option<i64> = None;
     // retina (FrameFormat::SIMPLE) only prepends SPS/PPS on keyframes
     // (`is_random_access_point`). When we tune into a live stream mid-GOP
     // the first arriving access units are typically P-frames; emitting them
@@ -181,12 +336,20 @@ async fn run_rtsp(
     // everything up to and including the wait for the first keyframe so the
     // decoder's first input is always SPS + PPS + IDR.
     let mut seen_keyframe = false;
+    let mut origin_rtp: Option<i64> = None;
+    let mut session_max_pts: u64 = pts_base_ns;
 
-    while emitted < limit {
+    while *total_emitted < limit {
         let item = match demuxed.next().await {
             Some(Ok(item)) => item,
-            Some(Err(_)) => return Err(G2gError::Hardware(HardwareError::Other)),
-            None => break,
+            Some(Err(_)) => {
+                *last_session_max_pts = session_max_pts;
+                return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+            }
+            None => {
+                *last_session_max_pts = session_max_pts;
+                return SessionOutcome::GracefulEnd;
+            }
         };
 
         let CodecItem::VideoFrame(vf) = item else {
@@ -201,15 +364,13 @@ async fn run_rtsp(
         }
 
         if vf.has_new_parameters() {
-            // Re-read parameters via the demuxer (which proxies to the
-            // underlying playing session) and emit CapsChanged if they
-            // actually represent a different geometry/framerate from what
-            // we last advertised.
             let refreshed =
                 caps_from_video_params(video_params_for(demuxed.streams(), video_idx));
             if refreshed != current_caps {
                 if let Some(caps) = &refreshed {
-                    out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                    if let Err(e) = out.push(PipelinePacket::CapsChanged(caps.clone())).await {
+                        return SessionOutcome::DownstreamError(e);
+                    }
                 }
                 current_caps = refreshed;
             }
@@ -218,7 +379,9 @@ async fn run_rtsp(
         let rtp_pts = vf.timestamp().timestamp();
         let origin = *origin_rtp.get_or_insert(rtp_pts);
         let rel_rtp = rtp_pts.saturating_sub(origin).max(0) as u64;
-        let pts_ns = rel_rtp.saturating_mul(1_000_000_000) / clock_rate.max(1);
+        let rel_pts_ns = rel_rtp.saturating_mul(1_000_000_000) / clock_rate.max(1);
+        let pts_ns = pts_base_ns.saturating_add(rel_pts_ns);
+        session_max_pts = session_max_pts.max(pts_ns);
 
         let frame_caps = current_caps.clone().unwrap_or_else(any_h264_caps);
         let bytes = vf.into_data().into_boxed_slice();
@@ -232,14 +395,18 @@ async fn run_rtsp(
                 duration_ns: 0,
                 capture_ns: pts_ns,
             },
-            sequence: emitted,
+            sequence: *total_emitted,
         };
 
-        out.push(PipelinePacket::DataFrame(frame)).await?;
-        emitted += 1;
+        if let Err(e) = out.push(PipelinePacket::DataFrame(frame)).await {
+            *last_session_max_pts = session_max_pts;
+            return SessionOutcome::DownstreamError(e);
+        }
+        *total_emitted += 1;
     }
 
-    Ok(emitted)
+    *last_session_max_pts = session_max_pts;
+    SessionOutcome::LimitReached
 }
 
 fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&VideoParameters> {
