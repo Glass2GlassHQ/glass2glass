@@ -53,6 +53,14 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     eprintln!("connecting to {url}");
 
     const TARGET: u64 = 60;
+    // Each of the two pipeline links holds this many in-flight packets.
+    // Latency at steady state is dominated by `2 * cap * frame_period`,
+    // so this is the key knob for the glass-to-glass latency hunt.
+    let link_cap: usize = std::env::var("G2G_LINK_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    eprintln!("link capacity = {link_cap}");
 
     let mut src = RtspSrc::new(url).with_frame_limit(TARGET);
     let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
@@ -62,7 +70,7 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     let start = std::time::Instant::now();
     let stats = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, 8),
+        run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, link_cap),
     )
     .await
     .expect("pipeline should complete within 60s")
