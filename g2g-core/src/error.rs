@@ -28,6 +28,8 @@ pub enum HardwareError {
     Wgpu,
     /// `HRESULT` from a Windows Media Foundation / COM call.
     MediaFoundation(i32),
+    /// `CUresult` code from a CUDA Driver API call.
+    Cuda(i32),
     /// Other backend-specific failure.
     Other,
 }

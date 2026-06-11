@@ -28,6 +28,12 @@ vaapi = ["std", "dep:cros-codecs"]
 ffmpeg = ["std", "dep:ffmpeg-next"]
 # Embassy single-core executor support. Implementation deferred to a later milestone.
 embassy = []
+# CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
+# `Backend::NvdecCuda` `MemoryDomain::Cuda` NV12 frame back to system memory
+# (device->host `cuMemcpy2D`) so the decode path reaches the existing CPU
+# sinks for bring-up. Hand-rolled FFI linking `libcuda` directly (no crate
+# dep); Linux + NVIDIA only, implies std. See DESIGN-C3-cuda.md §3.4, §4.
+cuda = ["std"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);

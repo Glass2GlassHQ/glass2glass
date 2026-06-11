@@ -5,6 +5,46 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 3, step 1): `CudaDownload` device->host bring-up element
+
+- New `g2g-plugins::cuda::CudaDownload` transform behind a new `cuda`
+  feature (Linux + NVIDIA, implies std). Copies a `Backend::NvdecCuda`
+  `MemoryDomain::Cuda` NV12 frame back to system memory (device->host
+  `cuMemcpy2D`, honouring the device-side row pitch) so a CUDA-resident
+  stream reaches the existing CPU sinks (`WaylandSink` / `KmsSink`). It
+  negates the zero-copy latency win, but it makes the `NvdecCuda` decode
+  path end-to-end usable and testable (frame counts, geometry) before the
+  real `CudaGlSink` exists. This is the low-risk Phase 3 bring-up element
+  (DESIGN-C3-cuda.md §3.4, §4 step 1).
+- Caps surface is `Identity(NV12)` with open geometry: input and output are
+  the same NV12 description (caps do not encode the memory domain), so the
+  element drops into any `NvdecCuda -> sink` chain without changing
+  negotiation; only the frame's domain changes (`Cuda -> System`). A frame
+  already in system memory passes through untouched, so it is a safe no-op
+  on the `Software` / `NvdecCuvid` backends.
+- Packed NV12 destination: luma plane (`width*height`) then interleaved
+  chroma (`2*ceil(w/2)*ceil(h/2)`); for even dims the standard
+  `width*height*3/2`. The per-plane copy descriptors (`nv12_plane_copies`)
+  are pure geometry, unit-tested for even and odd dimensions without a GPU.
+- CUDA bindings: thin hand-rolled FFI linking `libcuda` directly (no crate
+  dep), per DESIGN-C3-cuda.md §6 (`cudarc` has no GL-interop wrappers and
+  fights the foreign-`CUcontext` ownership). Exactly the surface this
+  element needs: `cuCtxPushCurrent_v2` / `cuCtxPopCurrent_v2` (push the
+  ffmpeg-owned context the pointers are valid in, always pop) and
+  `cuMemcpy2D_v2`. `#[repr(C)] CudaMemcpy2D` mirrors `cuda.h` field-for-field
+  (verified against the CUDA Driver API docs). Every `unsafe` block carries
+  a `// SAFETY:` note.
+- New `HardwareError::Cuda(i32)` variant carries the raw `CUresult` on a
+  driver failure, mirroring `Vulkan(i32)` / `MediaFoundation(i32)`. Core
+  change; compiles in std and no_std.
+- Five GPU-free unit tests (`Identity(NV12)` constraint, non-NV12 reject,
+  intercept narrowing, even- and odd-dimension plane packing).
+- VERIFICATION: the device-copy path is `cuda`-feature + Linux + NVIDIA-GPU
+  only and does not compile on the Windows dev host; first-compile and the
+  e2e (`rtspsrc -> h264parse -> ffmpegdec[NvdecCuda] -> CudaDownload ->
+  WaylandSink`) are owed on the Linux+GPU box, same as the rest of C3. The
+  default workspace build/test/clippy and the no_std core baseline are green.
+
 ### C3 (Phase 2): NVDEC CUDA hwframe output (`Backend::NvdecCuda`)
 
 - New `FfmpegH264Dec` backend that keeps decoded NV12 resident in GPU

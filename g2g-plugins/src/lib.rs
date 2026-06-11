@@ -53,3 +53,9 @@ pub mod kmssink;
 // desktop-dev convenience sink — see module docs.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
+
+// CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
+// `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`
+// stream reaches the CPU sinks. Hand-rolled libcuda FFI; Linux + NVIDIA only.
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+pub mod cuda;

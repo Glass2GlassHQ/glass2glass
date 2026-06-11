@@ -104,6 +104,9 @@ the device pointers themselves still need a GPU to exercise.
 1. **`CudaDownload`** element (§3.4). Smallest CUDA FFI surface
    (`cuMemcpy2D` D->H + context push/pop). Unblocks `NvdecCuda -> download ->
    existing sink` so the decode path is verifiable before any GL work.
+   **Landed** (`g2g-plugins::cuda`, `cuda` feature): `Identity(NV12)`
+   transform, hand-rolled libcuda FFI, GPU-free plane-packing tests. First
+   compile + device e2e owed on Linux+GPU.
 2. **`CudaGlSink`** (new sink, §3.2): EGL context on a Wayland surface
    (reuse the `WaylandSink` windowing approach via SCTK + `wl_egl_window`)
    or GBM/KMS for the tty case; CUDA-GL registered texture; NV12 shader.
