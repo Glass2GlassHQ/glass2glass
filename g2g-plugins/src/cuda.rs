@@ -344,7 +344,147 @@ mod ffi {
         #[link_name = "cuMemcpy2D_v2"]
         pub fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> CuResult;
     }
+
+    // --- CUDA-GL interop (C3 Phase 3, step 2 / `CudaGlSink`) ---
+    //
+    // Staged ahead of its consumer (the EGL/GL windowing in step 2 phase B):
+    // the per-frame path is map -> get the mapped `cudaArray` -> `cuMemcpy2D`
+    // the NV12 plane device->array -> unmap, presenting via a fragment shader
+    // (DESIGN-C3-cuda.md §3.2, Appendix A). Signatures are verified against
+    // the CUDA Driver API docs (`CUDA_GL` / `CUDA_GRAPHICS` groups). These GL
+    // entry points live in `libcuda` itself, so no extra link is needed.
+    // `#[allow(dead_code)]` until phase B calls them; `non_snake_case` keeps
+    // the C names so they map 1:1 to the docs for the phase-B implementer.
+
+    /// `CUgraphicsResource` is an opaque handle (`struct CUgraphicsResource_st *`).
+    #[allow(dead_code)]
+    pub type CuGraphicsResource = *mut c_void;
+    /// `CUarray` is an opaque handle (`struct CUarray_st *`).
+    #[allow(dead_code)]
+    pub type CuArray = *mut c_void;
+    /// `CUstream`; the default stream is null.
+    #[allow(dead_code)]
+    pub type CuStream = *mut c_void;
+    /// `GLuint` (OpenGL texture name).
+    #[allow(dead_code)]
+    pub type GlUint = u32;
+    /// `GLenum` (OpenGL enumerant).
+    #[allow(dead_code)]
+    pub type GlEnum = u32;
+
+    /// `CUmemorytype::CU_MEMORYTYPE_ARRAY`: a `cuMemcpy2D` destination that is
+    /// a mapped `CUarray` (the GL texture) rather than host/device memory.
+    #[allow(dead_code)]
+    pub const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
+    /// `CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD`: CUDA fully overwrites the
+    /// resource each frame (the decoder plane is its sole writer), so the
+    /// driver may skip preserving prior contents.
+    #[allow(dead_code)]
+    pub const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
+    /// `GL_TEXTURE_2D` target (OpenGL spec constant).
+    #[allow(dead_code)]
+    pub const GL_TEXTURE_2D: GlEnum = 0x0DE1;
+
+    #[allow(dead_code, non_snake_case)]
+    #[link(name = "cuda")]
+    extern "C" {
+        /// Register a GL texture object for CUDA access.
+        pub fn cuGraphicsGLRegisterImage(
+            pCudaResource: *mut CuGraphicsResource,
+            image: GlUint,
+            target: GlEnum,
+            Flags: u32,
+        ) -> CuResult;
+        /// Unregister a previously-registered graphics resource.
+        pub fn cuGraphicsUnregisterResource(resource: CuGraphicsResource) -> CuResult;
+        /// Map graphics resources for access by CUDA.
+        pub fn cuGraphicsMapResources(
+            count: u32,
+            resources: *mut CuGraphicsResource,
+            hStream: CuStream,
+        ) -> CuResult;
+        /// Unmap graphics resources.
+        pub fn cuGraphicsUnmapResources(
+            count: u32,
+            resources: *mut CuGraphicsResource,
+            hStream: CuStream,
+        ) -> CuResult;
+        /// Get the `CUarray` through which to access a mapped resource.
+        pub fn cuGraphicsSubResourceGetMappedArray(
+            pArray: *mut CuArray,
+            resource: CuGraphicsResource,
+            arrayIndex: u32,
+            mipLevel: u32,
+        ) -> CuResult;
+    }
 }
+
+/// Per-plane extent of the NV12 -> GL-texture upload (CUDA device memory ->
+/// mapped `cudaArray`), in bytes per row and rows. Pure geometry, so it is
+/// unit-testable without a GPU.
+///
+/// Per DESIGN-C3-cuda.md Appendix A the NV12 frame is two GL textures: a
+/// full-res `R8` luma plane (1 byte / texel) and a half-res `RG8` interleaved
+/// CbCr chroma plane (2 bytes / texel). The source row pitch comes from the
+/// [`OwnedCudaBuffer`] at upload time; the destination is a `cudaArray`, which
+/// carries no pitch of its own.
+#[derive(Debug, PartialEq, Eq)]
+pub struct GlUpload {
+    /// Bytes copied per row into the texture's array.
+    pub width_bytes: usize,
+    /// Number of rows.
+    pub height: usize,
+}
+
+/// Luma then chroma upload extents for a `width` x `height` NV12 frame.
+pub fn nv12_gl_uploads(width: u32, height: u32) -> (GlUpload, GlUpload) {
+    let w = width as usize;
+    let h = height as usize;
+    let luma = GlUpload {
+        width_bytes: w,
+        height: h,
+    };
+    let chroma = GlUpload {
+        // RG8 half-res: ceil(w/2) texels * 2 bytes, ceil(h/2) rows.
+        width_bytes: 2 * w.div_ceil(2),
+        height: h.div_ceil(2),
+    };
+    (luma, chroma)
+}
+
+/// GLSL ES 1.00 vertex shader: pass the texcoords through and position a
+/// fullscreen quad. Paired with [`FRAGMENT_SHADER_NV12`].
+pub const VERTEX_SHADER: &str = "\
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+varying vec2 v_uv;
+void main() {
+    v_uv = a_uv;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}
+";
+
+/// GLSL ES 1.00 fragment shader: sample the NV12 luma (`R8`) and interleaved
+/// chroma (`RG8`) textures and convert BT.601 limited-range YCbCr -> RGB.
+/// Verbatim from DESIGN-C3-cuda.md Appendix A (swap the matrix for BT.709 on
+/// HD sources once a colour-metadata field exists on `Caps`).
+pub const FRAGMENT_SHADER_NV12: &str = "\
+precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D y_tex;
+uniform sampler2D uv_tex;
+void main() {
+    float y = texture2D(y_tex, v_uv).r;
+    vec2  c = texture2D(uv_tex, v_uv).rg;
+    y = 1.1643 * (y - 0.0625);
+    float cb = c.x - 0.5;
+    float cr = c.y - 0.5;
+    float r = y + 1.5958 * cr;
+    float g = y - 0.3917 * cb - 0.8129 * cr;
+    float b = y + 2.0170 * cb;
+    gl_FragColor = vec4(r, g, b, 1.0);
+}
+";
 
 #[cfg(test)]
 mod tests {
@@ -442,5 +582,47 @@ mod tests {
         assert_eq!(chroma.height, 2);
         assert_eq!(chroma.dst_offset, 9);
         assert_eq!(total, 9 + 8);
+    }
+
+    #[test]
+    fn gl_uploads_even_dims() {
+        // Luma R8 is full-res (1 byte/texel); chroma RG8 is half-res
+        // (2 bytes/texel).
+        let (luma, chroma) = nv12_gl_uploads(1920, 1080);
+        assert_eq!(
+            luma,
+            GlUpload {
+                width_bytes: 1920,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            chroma,
+            GlUpload {
+                width_bytes: 1920,
+                height: 540
+            }
+        );
+    }
+
+    #[test]
+    fn gl_uploads_odd_dims_round_chroma_up() {
+        let (luma, chroma) = nv12_gl_uploads(3, 3);
+        assert_eq!(luma.width_bytes, 3);
+        assert_eq!(luma.height, 3);
+        // ceil(3/2)=2 texels -> 4 bytes wide (RG8), 2 rows tall.
+        assert_eq!(chroma.width_bytes, 4);
+        assert_eq!(chroma.height, 2);
+    }
+
+    #[test]
+    fn shaders_declare_the_nv12_sampler_pair() {
+        // Lock the Appendix A contract the CUDA upload side relies on: a
+        // full-res luma sampler and a half-res interleaved chroma sampler.
+        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D y_tex"));
+        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D uv_tex"));
+        // Vertex shader feeds the fragment shader's texcoord varying.
+        assert!(VERTEX_SHADER.contains("varying vec2 v_uv"));
+        assert!(FRAGMENT_SHADER_NV12.contains("varying vec2 v_uv"));
     }
 }
