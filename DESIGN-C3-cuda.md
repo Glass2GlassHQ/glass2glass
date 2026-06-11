@@ -32,7 +32,14 @@ consumer (display) takes the handoff without a PCIe round-trip.
   the generic `h264` decoder with an `AV_HWDEVICE_TYPE_CUDA` device and a
   `get_format` hook selecting `AV_PIX_FMT_CUDA`. Emits `MemoryDomain::Cuda`
   frames; the owning `AVFrame` is the keep-alive. NV12 only. Not yet
-  compiled/verified (Linux+GPU owed).
+  compiled (Linux+GPU owed), but the FFI was verified against docs.rs:
+  `get_format` callback typedef, `hw_device_ctx: *mut AVBufferRef`,
+  `extra_hw_frames: c_int`, the `av_hwdevice_ctx_create` signature,
+  `AVHWDeviceContext.hwctx: *mut c_void`, and `AVBufferRef.data: *mut u8`
+  all match the code; `Decoder` is `Decoder(pub Context)` with
+  `Deref`/`DerefMut`, so `decoder_ctx.as_mut_ptr()` is reachable and the
+  field writes survive `open_as_with`. Residual risk is borrow/lint nits,
+  not API shape.
 
 ## 3. Phase 3: the consumer problem
 
@@ -115,15 +122,61 @@ A `wayland_smoke`-style manual benchmark (`rtspsrc -> h264parse ->
 ffmpegdec[NvdecCuda] -> CudaGlSink`) is the acceptance test; compare p50/p95
 against the `NvdecCuvid -> WaylandSink` system-memory baseline.
 
-## 6. Open decisions
+## 6. Decisions
 
+- **CUDA bindings: thin hand-rolled FFI, not `cudarc`.** `cudarc` is
+  maintained and its default dynamic-loading would even build on the
+  Windows dev host, but (a) it has no CUDA-GL interop wrappers
+  (`cuGraphicsGLRegisterImage` and friends are exactly what `CudaGlSink`
+  needs and are absent), and (b) its safe API assumes it owns the
+  `CudaContext`, whereas our `CUcontext` is created and owned by ffmpeg's
+  hwdevice and carried on `OwnedCudaBuffer` — so the consumer must
+  `cuCtxPushCurrent` a *foreign* context, which fights cudarc's ownership
+  model. The needed surface is small and matches Phase 2's existing
+  `ffmpeg::ffi` hand-rolled style: `cuCtxPushCurrent_v2` / `_PopCurrent_v2`,
+  `cuMemcpy2D_v2` (download) or device->device into the GL resource, and the
+  GL-interop quartet `cuGraphicsGLRegisterImage`, `cuGraphicsMapResources`,
+  `cuGraphicsSubResourceGetMappedArray`, `cuGraphicsUnmapResources`. Link
+  `libcuda` directly (always present on Linux+NVIDIA, the feature's gate).
+  Keep `cudarc` in reserve only if the surface grows past a handful of
+  calls. A thin internal `cuda` module in `g2g-plugins` holds these behind
+  the new feature.
 - **GL-on-Wayland vs GL-on-KMS first.** Wayland reuses `WaylandSink`'s
   windowing and is the dev-loop sink; KMS/GBM is the production tty path.
   Lean Wayland first (faster iteration), KMS second.
-- **Feature naming / crate placement** for the CUDA FFI: a thin internal
-  `cuda` module in `g2g-plugins` vs a dedicated dependency
-  (`cudarc` / `cust`). A maintained crate (e.g. `cudarc`) would avoid
-  hand-rolled driver-API FFI; evaluate before writing raw bindings.
+
+## Appendix A: NV12 -> RGB fragment shader
+
+Concrete and windowing-independent, so it can land verbatim in either the
+Wayland or KMS `CudaGlSink`. NV12 is two GL textures: a full-res `R8` luma
+plane and a half-res `RG8` interleaved chroma plane (Cb in `.r`, Cr in
+`.g`). BT.601 limited range, matching `WaylandSink`'s existing CPU convert
+(swap the matrix for BT.709 on HD sources once a colour-metadata field
+exists on `Caps`).
+
+```glsl
+precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D y_tex;   // R8,  full-res luma
+uniform sampler2D uv_tex;  // RG8, half-res interleaved CbCr (NV12)
+
+void main() {
+    float y = texture2D(y_tex, v_uv).r;
+    vec2  c = texture2D(uv_tex, v_uv).rg;     // (Cb, Cr)
+    y = 1.1643 * (y - 0.0625);                // limited-range luma
+    float cb = c.x - 0.5;
+    float cr = c.y - 0.5;
+    float r = y + 1.5958 * cr;
+    float g = y - 0.3917 * cb - 0.8129 * cr;
+    float b = y + 2.0170 * cb;
+    gl_FragColor = vec4(r, g, b, 1.0);
+}
+```
+
+The CUDA side maps each GL texture as a `cudaArray` and `cuMemcpy2D`s the
+matching `OwnedCudaBuffer` plane (luma_ptr/luma_pitch to `y_tex`,
+chroma_ptr/chroma_pitch to `uv_tex`), device->device, honouring the source
+pitch. Register the textures once at first frame, not per frame.
 
 ## 7. References
 
