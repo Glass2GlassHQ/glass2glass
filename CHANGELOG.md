@@ -79,6 +79,12 @@ Nothing is published yet; all versions are `0.1.0`.
   default core build, full workspace tests, and workspace clippy all
   green; the change touches only `g2g-core` (`memory.rs`, `query.rs`,
   `lib.rs`).
+- Two GPU-free runner tests in `m12_allocation.rs` prove the wiring claim:
+  the allocation query conveys a consumer's `MemoryDomainKind::Cuda`
+  proposal end-to-end to the producer, and the CUDA domain survives a
+  transform fold (most-demanding size/align win, consumer dictates the
+  domain). These exercise the real linear runners with fake elements and
+  run on the Windows host.
 
 ### LatencyProfile knob on runners
 

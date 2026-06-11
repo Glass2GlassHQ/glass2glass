@@ -15,7 +15,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, BufferPool, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -237,6 +237,60 @@ async fn three_stage_transform_folds_its_requirement() {
     );
     assert_eq!(src.pool_buffer_size(), 4096);
     assert_eq!(sink.received_sizes, vec![4096]);
+}
+
+#[tokio::test]
+async fn cuda_domain_proposal_conveyed_to_source() {
+    // C3: a GPU consumer asks for device-resident buffers (MemoryDomainKind::
+    // Cuda) so a CUDA producer (eg NvdecCuda) can hand frames over copy-free.
+    // The allocation query must convey the consumer's domain (and size/align)
+    // upstream unchanged. The fake source still allocates a System pool (it
+    // can't touch CUDA on this host); the assertion is on the conveyed query,
+    // which is the cross-element handoff the GPU path depends on.
+    let mut src = PoolSrc::new(64);
+    let mut sink = ProposingSink::new(Some(AllocationParams::cuda(4096, 4, 256)));
+    let clock = ZeroClock;
+
+    let stats = run_simple_pipeline(&mut src, &mut sink, &clock, 4)
+        .await
+        .expect("pipeline should complete");
+
+    let alloc = stats.allocation.expect("the sink's CUDA proposal must be conveyed");
+    assert_eq!(
+        alloc.domain,
+        MemoryDomainKind::Cuda,
+        "the consumer's CUDA domain reaches the producer"
+    );
+    assert_eq!((alloc.size_bytes, alloc.align), (4096, 256));
+    assert_eq!(
+        src.proposed.map(|p| p.domain),
+        Some(MemoryDomainKind::Cuda),
+        "source's configure_allocation saw the CUDA domain"
+    );
+}
+
+#[tokio::test]
+async fn cuda_domain_survives_transform_fold() {
+    // A CUDA consumer proposal folded with an intermediate transform's larger
+    // System requirement: the most-demanding size/align win, but the consumer
+    // dictates the domain, so the source is still asked for CUDA memory.
+    let mut src = PoolSrc::new(64);
+    let mut tx = FoldingTransform { own_min_size: 8192, seen_downstream: None };
+    let mut sink = ProposingSink::new(Some(AllocationParams::cuda(4096, 2, 256)));
+    let clock = ZeroClock;
+
+    let stats = run_source_transform_sink(&mut src, &mut tx, &mut sink, &clock, 4)
+        .await
+        .expect("pipeline should complete");
+
+    let alloc = stats.allocation.expect("folded proposal conveyed");
+    assert_eq!(
+        alloc.domain,
+        MemoryDomainKind::Cuda,
+        "consumer domain dictates through the fold"
+    );
+    assert_eq!(alloc.size_bytes, 8192, "larger transform size wins");
+    assert_eq!(alloc.align, 256, "consumer alignment preserved");
 }
 
 #[tokio::test]
