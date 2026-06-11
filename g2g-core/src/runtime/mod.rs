@@ -25,7 +25,10 @@ pub use channel::{
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
 pub use join::{join_all, Join2, JoinAll};
-pub use runner::{run_simple_pipeline, run_source_transform_sink, RunStats, SourceLoop};
+pub use runner::{
+    run_simple_pipeline, run_source_transform_sink, LatencyProfile, LinkCapacity, RunStats,
+    SourceLoop,
+};
 
 #[cfg(feature = "std")]
 pub use runner::run_source_fanout;

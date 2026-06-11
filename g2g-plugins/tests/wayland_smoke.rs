@@ -25,12 +25,16 @@
 //! libnvcuvid + a libavcodec build with cuvid). Example:
 //!
 //! ```sh
-//! G2G_LINK_CAP=1 G2G_DECODER=nvdec \
+//! G2G_DECODER=nvdec \
 //!     G2G_RTSP_TEST_URL=rtsp://localhost:8554/pattern \
 //!     cargo test -p g2g-plugins \
 //!     --features "rtsp ffmpeg wayland-sink" \
 //!     --test wayland_smoke -- --ignored --nocapture
 //! ```
+//!
+//! Default link capacity is now `LatencyProfile::Live` (cap = 2), so
+//! the smoke runs under the same low-latency profile a production live
+//! pipeline uses. Override via `G2G_LINK_CAP=N` to probe other depths.
 
 #![cfg(all(
     target_os = "linux",
@@ -39,7 +43,7 @@
     feature = "wayland-sink"
 ))]
 
-use g2g_core::runtime::run_source_transform_sink;
+use g2g_core::runtime::{run_source_transform_sink, LatencyProfile, LinkCapacity};
 use g2g_core::PipelineClock;
 use g2g_plugins::ffmpegdec::{Backend, FfmpegH264Dec, OutputFormat};
 use g2g_plugins::rtspsrc::RtspSrc;
@@ -77,11 +81,15 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     // Each of the two pipeline links holds this many in-flight packets.
     // Latency at steady state is dominated by `2 * cap * frame_period`,
     // so this is the key knob for the glass-to-glass latency hunt.
-    let link_cap: usize = std::env::var("G2G_LINK_CAP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    eprintln!("link capacity = {link_cap}");
+    // Default to `LatencyProfile::Live` (cap = 2) since the smoke test
+    // models a camera-to-display feed. `G2G_LINK_CAP=N` overrides to
+    // probe behaviour at an arbitrary depth (the live-edge bisection
+    // tooling uses this).
+    let link_cap: LinkCapacity = match std::env::var("G2G_LINK_CAP").ok().and_then(|s| s.parse().ok()) {
+        Some(n) => LinkCapacity::new(n),
+        None => LatencyProfile::Live.link_capacity(),
+    };
+    eprintln!("link capacity = {}", link_cap.get());
 
     // G2G_DECODER selects the libavcodec backend: `software` (default,
     // built-in H.264 decoder) or `nvdec` (h264_cuvid, requires NVIDIA

@@ -15,7 +15,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// A clock pinned to a fixed instant, so a test can assert the exact base time

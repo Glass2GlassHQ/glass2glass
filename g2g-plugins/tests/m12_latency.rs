@@ -14,7 +14,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, LatencyReport, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 const MS: u64 = 1_000_000;

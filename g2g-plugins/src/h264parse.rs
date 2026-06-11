@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 #[derive(Debug, Default)]

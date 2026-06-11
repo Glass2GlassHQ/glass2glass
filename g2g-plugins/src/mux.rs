@@ -98,7 +98,7 @@ impl MultiInputElement for InterleaveMux {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, Rate, VideoCodec, RawVideoFormat};
+    use g2g_core::{Dim, Rate, RawVideoFormat};
 
     fn nv12(w: u32, h: u32) -> Caps {
         Caps::RawVideo {

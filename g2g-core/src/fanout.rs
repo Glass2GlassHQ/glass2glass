@@ -430,7 +430,7 @@ impl MergerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
+    use crate::caps::{Dim, Rate, RawVideoFormat};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use core::future::Future;

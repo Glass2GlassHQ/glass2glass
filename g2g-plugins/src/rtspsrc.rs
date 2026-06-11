@@ -37,7 +37,7 @@ use std::sync::Arc;
 use alloc::boxed::Box;
 
 use futures_util::StreamExt;
-use retina::client::{PlayOptions, Session, SessionGroup, SessionOptions, SetupOptions};
+use retina::client::{Described, PlayOptions, Session, SessionGroup, SessionOptions, SetupOptions};
 use retina::codec::{CodecItem, FrameFormat, ParametersRef, VideoParameters};
 
 use g2g_core::frame::Frame;
@@ -45,7 +45,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
@@ -69,6 +69,26 @@ impl ReconnectPolicy {
     };
 }
 
+/// Post-SETUP retina session stashed by `intercept_caps`, consumed by
+/// `run`'s first session attempt so the server isn't asked for two
+/// DESCRIBE / SETUP round-trips at startup. Reconnect attempts after
+/// the first network failure still rebuild from scratch — by definition
+/// the stashed session is gone once the connection drops.
+struct StashedSession {
+    session: Session<Described>,
+    video_idx: usize,
+    caps: Caps,
+}
+
+impl core::fmt::Debug for StashedSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StashedSession")
+            .field("video_idx", &self.video_idx)
+            .field("caps", &self.caps)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub struct RtspSrc {
     url: String,
@@ -85,6 +105,10 @@ pub struct RtspSrc {
     /// the runner can call `caps_constraint` more than once during
     /// re-fixate retries without a second DESCRIBE.
     discovered_caps: Option<Caps>,
+    /// Post-SETUP retina session captured by the probe. `run` takes it
+    /// on the first session attempt and skips straight to PLAY, saving
+    /// a redundant DESCRIBE + SETUP round-trip at startup.
+    stashed_session: Option<StashedSession>,
     configured: bool,
 }
 
@@ -97,6 +121,7 @@ impl RtspSrc {
             reconnect: ReconnectPolicy::DISABLED,
             expected_dims: None,
             discovered_caps: None,
+            stashed_session: None,
             configured: false,
         }
     }
@@ -188,9 +213,11 @@ impl SourceLoop for RtspSrc {
             if let Some(c) = &self.discovered_caps {
                 return Ok(c.clone());
             }
-            let caps = probe_caps_with_reconnect(&self.url, &self.user_agent, &self.reconnect)
-                .await?;
+            let stashed =
+                probe_session_with_reconnect(&self.url, &self.user_agent, &self.reconnect).await?;
+            let caps = stashed.caps.clone();
             self.discovered_caps = Some(caps.clone());
+            self.stashed_session = Some(stashed);
             Ok(caps)
         })
     }
@@ -211,7 +238,7 @@ impl SourceLoop for RtspSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let emitted = run_rtsp(self, out).await?;
+            let emitted = run_rtsp(&mut *self, out).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(emitted)
         })
@@ -231,7 +258,7 @@ impl SourceLoop for RtspSrc {
 ///   Bumped by `1 s` (a deliberate gap to mark the reconnect boundary)
 ///   after each successful session before the next one runs.
 async fn run_rtsp(
-    src: &RtspSrc,
+    src: &mut RtspSrc,
     out: &mut dyn OutputSink,
 ) -> Result<u64, G2gError> {
     let limit = src.target_frames.unwrap_or(u64::MAX);
@@ -306,59 +333,30 @@ enum SessionOutcome {
 /// graceful end / frame limit. Updates `total_emitted` in place and
 /// records the highest PTS we emitted for the reconnect-gap computation.
 async fn run_session(
-    src: &RtspSrc,
+    src: &mut RtspSrc,
     out: &mut dyn OutputSink,
     total_emitted: &mut u64,
     pts_base_ns: u64,
     limit: u64,
     last_session_max_pts: &mut u64,
 ) -> SessionOutcome {
-    let url = match url::Url::parse(&src.url) {
-        Ok(u) => u,
-        // A bad URL is fatal across reconnects too — emit it as a
-        // network error and let the policy decide (the test for
-        // `127.0.0.1:1/no-such-server` flows through here).
-        Err(_) => return SessionOutcome::NetworkError(G2gError::CapsMismatch),
+    // Fast path: the probe in `intercept_caps` already left a
+    // post-SETUP session and the parsed caps. Take them and skip
+    // straight to PLAY. Reconnect attempts after a network failure
+    // can't reuse this; `stashed_session` is `take`n once and stays
+    // `None` for any later session.
+    let (session, video_idx, current_caps) = match src.stashed_session.take() {
+        Some(stashed) => (stashed.session, stashed.video_idx, Some(stashed.caps)),
+        None => match connect_describe_setup(&src.url, &src.user_agent).await {
+            Ok((s, idx)) => {
+                let caps = caps_from_video_params(video_params_for(s.streams(), idx));
+                (s, idx, caps)
+            }
+            Err(e) => return SessionOutcome::NetworkError(e),
+        },
     };
-
-    let session_group = Arc::new(SessionGroup::default());
-    let opts = SessionOptions::default()
-        .session_group(session_group)
-        .user_agent(src.user_agent.clone());
-
-    let mut session = match Session::describe(url, opts).await {
-        Ok(s) => s,
-        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
-    };
-
-    let video_idx = match session
-        .streams()
-        .iter()
-        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
-    {
-        Some(i) => i,
-        None => return SessionOutcome::NetworkError(G2gError::CapsMismatch),
-    };
-
     let clock_rate = u64::from(session.streams()[video_idx].clock_rate_hz());
-
-    if session
-        .setup(
-            video_idx,
-            SetupOptions::default().frame_format(FrameFormat::SIMPLE),
-        )
-        .await
-        .is_err()
-    {
-        return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
-    }
-
-    // After SETUP, retina has parsed the SPS/PPS from the SDP (when present)
-    // and exposes it as a `VideoParameters`. We use it to emit a fixed-cap
-    // `CapsChanged` before the first frame so downstream elements can size
-    // hardware allocations without waiting for the first bitstream parse.
-    let mut current_caps =
-        caps_from_video_params(video_params_for(session.streams(), video_idx));
+    let mut current_caps = current_caps;
 
     let played = match session.play(PlayOptions::default()).await {
         Ok(p) => p,
@@ -460,18 +458,22 @@ async fn run_session(
 /// reconnect policy so a transient connect failure during negotiation
 /// retries with the same backoff `run` uses for mid-session drops.
 /// With `ReconnectPolicy::DISABLED` (the default) this is a single
-/// `probe_caps` call.
-async fn probe_caps_with_reconnect(
+/// probe attempt.
+///
+/// On success the returned [`StashedSession`] holds the post-SETUP
+/// retina session so the caller can stash it and let `run` skip the
+/// duplicate DESCRIBE + SETUP at startup.
+async fn probe_session_with_reconnect(
     url: &str,
     user_agent: &str,
     policy: &ReconnectPolicy,
-) -> Result<Caps, G2gError> {
+) -> Result<StashedSession, G2gError> {
     let mut attempt: u32 = 0;
     let mut backoff_ms = policy.initial_backoff_ms.max(1);
     let max_attempts = policy.max_attempts;
     loop {
-        match probe_caps(url, user_agent).await {
-            Ok(caps) => return Ok(caps),
+        match probe_session(url, user_agent).await {
+            Ok(stashed) => return Ok(stashed),
             // `CapsMismatch` is a structural problem (bad URL, no H.264
             // stream): retrying won't help, surface immediately.
             Err(G2gError::CapsMismatch) => return Err(G2gError::CapsMismatch),
@@ -489,13 +491,29 @@ async fn probe_caps_with_reconnect(
 
 /// Async probe used by `intercept_caps` to discover real SDP geometry
 /// before negotiation. Performs DESCRIBE + SETUP, extracts H.264
-/// `VideoParameters`, drops the session, and returns the parsed caps.
+/// `VideoParameters`, and returns the post-SETUP session alongside the
+/// parsed caps so the source can stash both and let `run` skip the
+/// duplicate connect.
 ///
-/// Failure modes are flattened to `G2gError::Hardware`: the source has
-/// no caps to advertise, so the runner fails negotiation cleanly. A
-/// caller that wants to advertise fixed caps without I/O should use
-/// [`RtspSrc::with_expected_dims`] instead.
-async fn probe_caps(url: &str, user_agent: &str) -> Result<Caps, G2gError> {
+/// Failure modes are flattened to `G2gError::Hardware` / `CapsMismatch`:
+/// the source has no caps to advertise, so the runner fails negotiation
+/// cleanly. A caller that wants to advertise fixed caps without I/O
+/// should use [`RtspSrc::with_expected_dims`] instead.
+async fn probe_session(url: &str, user_agent: &str) -> Result<StashedSession, G2gError> {
+    let (session, video_idx) = connect_describe_setup(url, user_agent).await?;
+    let caps = caps_from_video_params(video_params_for(session.streams(), video_idx))
+        .ok_or(G2gError::CapsMismatch)?;
+    Ok(StashedSession { session, video_idx, caps })
+}
+
+/// Shared DESCRIBE + SETUP step. Used both by the probe path (caching
+/// the result in `RtspSrc::stashed_session`) and the reconnect path in
+/// `run_session` (after the stash is exhausted). Returns the post-SETUP
+/// session and the negotiated video stream index.
+async fn connect_describe_setup(
+    url: &str,
+    user_agent: &str,
+) -> Result<(Session<Described>, usize), G2gError> {
     let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
     let session_group = Arc::new(SessionGroup::default());
     let opts = SessionOptions::default()
@@ -516,8 +534,7 @@ async fn probe_caps(url: &str, user_agent: &str) -> Result<Caps, G2gError> {
         )
         .await
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    caps_from_video_params(video_params_for(session.streams(), video_idx))
-        .ok_or(G2gError::CapsMismatch)
+    Ok((session, video_idx))
 }
 
 fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&VideoParameters> {

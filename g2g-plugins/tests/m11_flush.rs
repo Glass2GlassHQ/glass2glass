@@ -13,7 +13,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
-    Rate, VideoCodec, RawVideoFormat,
+    Rate, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
 

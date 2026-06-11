@@ -10,7 +10,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::mux::InterleaveMux;
 

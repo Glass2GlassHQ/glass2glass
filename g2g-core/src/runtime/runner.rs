@@ -116,6 +116,79 @@ pub trait SourceLoop: ElementBound {
     }
 }
 
+/// Per-link queue depth handed to a runner. Each forward link between
+/// elements holds this many in-flight packets before backpressure
+/// kicks in; the steady-state glass-to-glass latency floor under
+/// backpressure is roughly `2 * link_capacity * consumer_period`.
+///
+/// Construct via a [`LatencyProfile`] for intent-based selection
+/// (`LatencyProfile::Live` for camera-to-display pipelines,
+/// `LatencyProfile::Throughput` for batch jobs) or via `From<usize>`
+/// for fine-grained tuning. Both forms compose through the runner's
+/// `impl Into<LinkCapacity>` parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkCapacity(usize);
+
+impl LinkCapacity {
+    /// `n` clamped to at least 1: a zero-capacity link would deadlock
+    /// the producer on its first push.
+    pub fn new(n: usize) -> Self {
+        Self(n.max(1))
+    }
+
+    /// Underlying queue depth. Used by the runner internals; callers
+    /// typically pass the `LinkCapacity` (or a `LatencyProfile`)
+    /// directly into the runner instead of unpacking.
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl From<usize> for LinkCapacity {
+    fn from(n: usize) -> Self {
+        Self::new(n)
+    }
+}
+
+/// Intent-based selector for [`LinkCapacity`]. Picks the link queue
+/// depth from the workload's latency-vs-throughput tradeoff so callers
+/// don't have to remember the steady-state floor formula
+/// (`2 * cap * consumer_period`).
+///
+/// At 60 fps:
+/// - `Live` (cap=2) -> ~67 ms floor. Right for RTSP -> decode -> display.
+/// - `Throughput` (cap=8) -> ~267 ms floor. Right for file ingest /
+///   batch where smoothing jitter matters more than time-to-glass.
+/// - `Custom(n)` -> caller picks. Useful when a profile bisection or
+///   live-edge tuning needs a specific value (a smoke test setting
+///   `cap=1` to push the floor below one frame, for example).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatencyProfile {
+    /// `link_capacity = 2`. Live camera -> display.
+    Live,
+    /// `link_capacity = 8`. Batch / throughput.
+    Throughput,
+    /// Caller-specified depth.
+    Custom(usize),
+}
+
+impl LatencyProfile {
+    /// The `LinkCapacity` this profile maps to.
+    pub fn link_capacity(self) -> LinkCapacity {
+        match self {
+            Self::Live => LinkCapacity::new(2),
+            Self::Throughput => LinkCapacity::new(8),
+            Self::Custom(n) => LinkCapacity::new(n),
+        }
+    }
+}
+
+impl From<LatencyProfile> for LinkCapacity {
+    fn from(p: LatencyProfile) -> Self {
+        p.link_capacity()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RunStats {
     pub frames_emitted: u64,
@@ -212,13 +285,14 @@ pub async fn run_simple_pipeline<Src, Snk, Clk>(
     source: &mut Src,
     sink: &mut Snk,
     clock: &Clk,
-    link_capacity: usize,
+    link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    let link_capacity: usize = link_capacity.into().get();
     // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
     // so migrated native sources (e.g. `VideoTestSrc::Produces(...)`)
     // take the native solver path. `ReFixate` retry falls back to
@@ -380,13 +454,14 @@ pub async fn run_source_fanout<Src, Tx, Clk>(
     fanout: &mut Tx,
     sinks: Vec<&mut dyn DynAsyncElement>,
     _clock: &Clk,
-    link_capacity: usize,
+    link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
     Tx: MultiOutputElement,
     Clk: PipelineClock,
 {
+    let link_capacity: usize = link_capacity.into().get();
     let branch_count = sinks.len();
     assert!(branch_count > 0, "fan-out needs at least one sink");
 
@@ -566,7 +641,7 @@ pub async fn run_source_transform_sink<Src, Tx, Snk, Clk>(
     transform: &mut Tx,
     sink: &mut Snk,
     clock: &Clk,
-    link_capacity: usize,
+    link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
@@ -574,6 +649,7 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    let link_capacity: usize = link_capacity.into().get();
     // M18 Session C: the startup negotiation loop (solver + per-link
     // configure cascade with bounded `ReFixate` retry) is owned by the
     // coordinator module now, since β reuses the same machinery for the
@@ -754,4 +830,46 @@ where
         base_time_ns,
         coordinator_events,
     })
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn live_profile_maps_to_capacity_2() {
+        assert_eq!(LatencyProfile::Live.link_capacity().get(), 2);
+    }
+
+    #[test]
+    fn throughput_profile_maps_to_capacity_8() {
+        assert_eq!(LatencyProfile::Throughput.link_capacity().get(), 8);
+    }
+
+    #[test]
+    fn custom_profile_passes_through() {
+        assert_eq!(LatencyProfile::Custom(16).link_capacity().get(), 16);
+    }
+
+    #[test]
+    fn link_capacity_clamps_zero_to_one() {
+        // A zero-depth link would deadlock the producer on its first push;
+        // the constructor clamps so callers passing `0` (or a misconfigured
+        // env var) get a runnable pipeline rather than a hang.
+        assert_eq!(LinkCapacity::new(0).get(), 1);
+        assert_eq!(LinkCapacity::from(0usize).get(), 1);
+        assert_eq!(LatencyProfile::Custom(0).link_capacity().get(), 1);
+    }
+
+    #[test]
+    fn from_usize_and_from_profile_compose_through_into() {
+        // The runner takes `impl Into<LinkCapacity>`; both an integer and
+        // a profile must reach the same internal usize without ceremony.
+        fn take<C: Into<LinkCapacity>>(c: C) -> usize {
+            c.into().get()
+        }
+        assert_eq!(take(4usize), 4);
+        assert_eq!(take(LatencyProfile::Live), 2);
+        assert_eq!(take(LatencyProfile::Throughput), 8);
+    }
 }

@@ -31,7 +31,7 @@ use crate::frame::PipelinePacket;
 use crate::query::LatencyReport;
 use crate::runtime::channel::{bounded, link, SenderSink};
 use crate::runtime::join::join_all;
-use crate::runtime::runner::{NullSink, RunStats, SourceLoop};
+use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 
 /// Dyn-safe mirror of [`SourceLoop`] for heterogeneous fan-in branches, the
 /// source-side analog of [`DynAsyncElement`](crate::element::DynAsyncElement).
@@ -98,12 +98,13 @@ pub async fn run_fanin_sink<Snk, Clk>(
     merger: &mut Merger,
     sink: &mut Snk,
     _clock: &Clk,
-    link_capacity: usize,
+    link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError>
 where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    let link_capacity: usize = link_capacity.into().get();
     let input_count = sources.len();
     assert!(input_count > 0, "fan-in needs at least one source");
     assert!(
@@ -296,13 +297,14 @@ pub async fn run_muxer_sink<Mux, Snk, Clk>(
     mux: &mut Mux,
     sink: &mut Snk,
     _clock: &Clk,
-    link_capacity: usize,
+    link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError>
 where
     Mux: MultiInputElement,
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    let link_capacity: usize = link_capacity.into().get();
     let input_count = sources.len();
     assert!(input_count > 0, "muxer needs at least one source");
     assert!(

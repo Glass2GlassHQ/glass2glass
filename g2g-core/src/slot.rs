@@ -136,7 +136,7 @@ impl AsyncElement for ElementSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec};
     use crate::element::{DynAsyncElement, OutputSink, PushOutcome};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};

@@ -140,7 +140,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
+    use crate::caps::{Dim, Rate, RawVideoFormat};
 
     /// Fully concrete caps (a real producer names every field).
     fn fixed(format: RawVideoFormat, w: u32, h: u32) -> Caps {

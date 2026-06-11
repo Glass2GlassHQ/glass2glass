@@ -21,7 +21,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, VideoCodec, RawVideoFormat,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, RawVideoFormat,
 };
 
 struct ZeroClock;

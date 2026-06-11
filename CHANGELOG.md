@@ -5,6 +5,48 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### LatencyProfile knob on runners
+
+- New `LatencyProfile` enum + `LinkCapacity` newtype in
+  `g2g_core::runtime`. Runner signatures change from
+  `link_capacity: usize` to `link_capacity: impl Into<LinkCapacity>`,
+  so callers express intent (`LatencyProfile::Live`,
+  `LatencyProfile::Throughput`, `LatencyProfile::Custom(n)`) instead of
+  remembering the steady-state floor formula `2 * cap * frame_period`.
+  Test code keeps working — `4usize` still composes via
+  `From<usize> for LinkCapacity`.
+- `LatencyProfile::Live` -> capacity 2 (~67 ms floor at 60 fps; RTSP ->
+  decode -> display). `Throughput` -> 8 (~267 ms; batch / file
+  ingest). `Custom(n)` -> caller picks; clamps 0 to 1 so a misconfigured
+  env var doesn't deadlock the producer.
+- `wayland_smoke` defaults to `LatencyProfile::Live` (was hard-coded
+  to 8 with `G2G_LINK_CAP` override). The env var is now a
+  bisection-tooling override, not the only path to a low-latency run.
+  The recipe in `project_wayland_smoke_recipe.md` no longer needs
+  `G2G_LINK_CAP=1` to express live intent.
+- 5 unit tests in `g2g-core/src/runtime/runner.rs` (`profile_tests`)
+  lock the profile -> capacity mapping, the zero-clamp, and the
+  `Into<LinkCapacity>` composition so a refactor can't silently
+  drift the defaults.
+
+### RtspSrc: stash post-SETUP session, skip duplicate connect
+
+- `intercept_caps`'s probe used to DESCRIBE + SETUP, extract caps, and
+  *drop* the session — `run`'s first session attempt re-paid the same
+  round-trips on the same server. Now the probe stashes the post-SETUP
+  `Session<Described>` in `RtspSrc::stashed_session` alongside the
+  discovered caps; `run_session` takes it on the first attempt and
+  goes straight to PLAY. Reconnects after a network failure rebuild
+  from scratch (by definition the stashed session is gone once the
+  connection drops).
+- Shared `connect_describe_setup` helper extracts the DESCRIBE +
+  SETUP step from `run_session`; both the probe path (`probe_session`)
+  and the reconnect path call it. `probe_caps_with_reconnect` renamed
+  to `probe_session_with_reconnect`, returns a `StashedSession`
+  carrying session + video_idx + caps.
+- `run_rtsp` and `run_session` take `&mut RtspSrc` (was `&RtspSrc`) so
+  the stash can be `take`n at the boundary between probe and run.
+
 ### M17: split `VideoFormat` into codec vs. raw pixel layout
 
 - `Caps::Video { format: VideoFormat, .. }` (where `VideoFormat`

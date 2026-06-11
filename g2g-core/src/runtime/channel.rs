@@ -369,7 +369,7 @@ impl OutputSink for SenderSink {
 #[cfg(test)]
 mod link_tests {
     use super::*;
-    use crate::caps::{Caps, Dim, Rate, VideoCodec, RawVideoFormat};
+    use crate::caps::{Caps, Dim, Rate, VideoCodec};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::boxed::Box;

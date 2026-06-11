@@ -7,7 +7,7 @@
 
 use g2g_core::runtime::solver::NegotiationFailure;
 use g2g_core::{
-    pad_link, types_can_link, Caps, Dim, PadCaps, PadDirection, PadTemplates, Rate, VideoCodec, RawVideoFormat,
+    pad_link, types_can_link, Caps, Dim, PadCaps, PadDirection, PadTemplates, Rate, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::h264parse::H264Parse;

@@ -12,7 +12,7 @@
 #![cfg(feature = "rtsp")]
 
 use g2g_core::runtime::run_simple_pipeline;
-use g2g_core::{Caps, Dim, G2gError, PipelineClock, VideoCodec, RawVideoFormat};
+use g2g_core::{Caps, Dim, G2gError, PipelineClock, VideoCodec};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::rtspsrc::RtspSrc;
 
