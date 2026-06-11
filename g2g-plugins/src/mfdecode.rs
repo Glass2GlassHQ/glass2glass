@@ -11,14 +11,16 @@
 //! and every `IMFTransform` call runs on that same thread. `MfDecode` is
 //! therefore `!Send` and must run on a current-thread / single-thread executor.
 //!
+//! NV12 stride: the MFT's output buffer may carry per-row padding when the
+//! reported `MF_MT_DEFAULT_STRIDE` exceeds the width (hardware MFTs align rows
+//! up; the MS software decoder packs tightly). `copy_sample` strips that
+//! padding via `pack_nv12` so downstream always sees tightly-packed NV12.
+//!
 //! Deferred:
 //! - D3D11 zero-copy output (would need a new `MemoryDomain` variant); this
 //!   element always copies decoded pixels into a `System` slice.
 //! - DXVA hardware-accelerated decode (would set `MF_SA_D3D11_AWARE`); the MS
 //!   software decoder path is used.
-//! - NV12 stride handling assumes the MFT's contiguous output buffer is
-//!   tightly packed (stride == width). True for the software decoder; a
-//!   strided copy keyed on `MF_MT_DEFAULT_STRIDE` is deferred.
 
 use core::future::Future;
 use core::mem::ManuallyDrop;
@@ -32,8 +34,8 @@ use windows::Win32::Media::MediaFoundation::{
     MFStartup, CLSID_MSH264DecoderMFT, MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
     MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_OUTPUT_DATA_BUFFER, MFVideoFormat_H264, MFVideoFormat_NV12, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-    MF_MT_SUBTYPE, MF_VERSION,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -55,6 +57,12 @@ struct DecoderState {
     width: u32,
     height: u32,
     out_size: u32,
+    /// Row pitch in bytes of the MFT's NV12 output (`MF_MT_DEFAULT_STRIDE`),
+    /// `>= width`. The MS software decoder packs tightly (`stride == width`),
+    /// but a DXVA / hardware MFT aligns rows up, so the contiguous output
+    /// buffer carries per-row padding that must be stripped before the packed
+    /// NV12 the downstream sinks expect.
+    stride: u32,
 }
 
 /// One decoded picture, pixels already copied out of the MFT buffer.
@@ -221,7 +229,7 @@ impl MfDecode {
                         .GetSampleTime()
                         .map(|hns| (hns.max(0) as u64).saturating_mul(100))
                         .unwrap_or(0);
-                    let bytes = copy_sample(&sample)?;
+                    let bytes = copy_sample(&sample, st.width, st.height, st.stride)?;
                     Ok(OutputStep::Frame(DecodedNv12 {
                         bytes,
                         width: st.width,
@@ -240,10 +248,11 @@ impl MfDecode {
     /// cached geometry / output buffer size from it.
     fn renegotiate(&mut self) -> Result<(), G2gError> {
         let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
-        let (w, h) = set_nv12_output(&st.transform)?;
+        let (w, h, stride) = set_nv12_output(&st.transform)?;
         st.out_size = output_buffer_size(&st.transform, w, h)?;
         st.width = w;
         st.height = h;
+        st.stride = stride;
         Ok(())
     }
 }
@@ -433,7 +442,7 @@ fn init_decoder(width: u32, height: u32) -> Result<DecoderState, G2gError> {
         transform
     };
 
-    let (w, h) = set_nv12_output(&transform)?;
+    let (w, h, stride) = set_nv12_output(&transform)?;
     let out_size = output_buffer_size(&transform, w, h)?;
 
     // SAFETY: streaming-mode messages on the owning thread.
@@ -451,11 +460,15 @@ fn init_decoder(width: u32, height: u32) -> Result<DecoderState, G2gError> {
         width: w,
         height: h,
         out_size,
+        stride,
     })
 }
 
-/// Select the first NV12 output type the MFT offers and return its geometry.
-fn set_nv12_output(transform: &IMFTransform) -> Result<(u32, u32), G2gError> {
+/// Select the first NV12 output type the MFT offers and return its geometry
+/// and row stride. The stride (`MF_MT_DEFAULT_STRIDE`) is the source row pitch
+/// for the de-pad in [`pack_nv12`]; it is floored at `width` so a missing or
+/// bottom-up attribute degrades to the tightly-packed assumption.
+fn set_nv12_output(transform: &IMFTransform) -> Result<(u32, u32, u32), G2gError> {
     let mut i = 0u32;
     loop {
         // SAFETY: type enumeration on the owning thread.
@@ -469,7 +482,12 @@ fn set_nv12_output(transform: &IMFTransform) -> Result<(u32, u32), G2gError> {
                     unsafe { transform.SetOutputType(0, &t, 0) }.map_err(mf_err)?;
                     // SAFETY: reading the frame-size attribute off the type.
                     let size = unsafe { t.GetUINT64(&MF_MT_FRAME_SIZE) }.unwrap_or(0);
-                    return Ok(unpack_size(size));
+                    let (w, h) = unpack_size(size);
+                    // SAFETY: reading the (optional) default-stride attribute.
+                    // Absent on the packed software path; present (>= width)
+                    // when a hardware MFT aligns rows up.
+                    let stride = unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(0);
+                    return Ok((w, h, stride.max(w)));
                 }
                 i += 1;
             }
@@ -512,8 +530,14 @@ fn make_input_sample(data: &[u8], pts_ns: u64) -> Result<IMFSample, G2gError> {
     }
 }
 
-/// Copy the decoded pixels out of a sample into an owned buffer.
-fn copy_sample(sample: &IMFSample) -> Result<Box<[u8]>, G2gError> {
+/// Copy the decoded pixels out of a sample into a tightly-packed NV12 buffer,
+/// stripping any per-row stride padding the MFT applied.
+fn copy_sample(
+    sample: &IMFSample,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<Box<[u8]>, G2gError> {
     // SAFETY: contiguous-buffer access on the owning thread; `ptr` is valid
     // for `len` bytes between Lock and Unlock, where we copy it out.
     unsafe {
@@ -523,12 +547,34 @@ fn copy_sample(sample: &IMFSample) -> Result<Box<[u8]>, G2gError> {
         buffer
             .Lock(&mut ptr, None, Some(&mut len))
             .map_err(mf_err)?;
-        let owned = core::slice::from_raw_parts(ptr, len as usize)
-            .to_vec()
-            .into_boxed_slice();
+        let src = core::slice::from_raw_parts(ptr, len as usize);
+        let packed = pack_nv12(src, width as usize, height as usize, stride as usize);
         buffer.Unlock().map_err(mf_err)?;
-        Ok(owned)
+        packed
     }
+}
+
+/// De-pad a strided NV12 source buffer into a tightly-packed
+/// `width * height * 3 / 2` buffer: the Y plane is `height` rows and the
+/// interleaved UV plane `height / 2` rows, each `width` bytes wide read from a
+/// `stride`-byte source pitch. When `stride == width` this is a single
+/// contiguous copy. Rows beyond what the source actually holds are skipped
+/// (left zero) rather than panicking, so a short buffer fails safe.
+fn pack_nv12(src: &[u8], width: usize, height: usize, stride: usize) -> Result<Box<[u8]>, G2gError> {
+    if width == 0 || height == 0 || stride < width {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let rows = height + height / 2; // Y plane + half-height interleaved UV
+    let mut dst = alloc::vec![0u8; width * rows].into_boxed_slice();
+    for row in 0..rows {
+        let src_start = row * stride;
+        let dst_start = row * width;
+        let Some(src_row) = src.get(src_start..src_start + width) else {
+            break; // source shorter than advertised; leave the rest zeroed
+        };
+        dst[dst_start..dst_start + width].copy_from_slice(src_row);
+    }
+    Ok(dst)
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -584,6 +630,7 @@ fn mf_err(e: windows::core::Error) -> G2gError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn frame_size_packs_and_unpacks() {
@@ -632,6 +679,59 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
+    }
+
+    #[test]
+    fn pack_nv12_packed_source_is_identity() {
+        // stride == width: a 4x2 NV12 frame (Y=8 bytes, UV=4 bytes) copies
+        // through unchanged.
+        let src: Vec<u8> = (0..12).collect();
+        let out = pack_nv12(&src, 4, 2, 4).unwrap();
+        assert_eq!(&out[..], &src[..]);
+        assert_eq!(out.len(), 4 * 2 * 3 / 2);
+    }
+
+    #[test]
+    fn pack_nv12_strips_row_stride_padding() {
+        // 4x2 NV12 with stride 6: each of the 3 rows (2 Y + 1 UV) holds 4 data
+        // bytes then 2 pad bytes. The packed output drops the padding.
+        let width = 4;
+        let height = 2;
+        let stride = 6;
+        let rows = height + height / 2; // 3
+        let mut src = Vec::new();
+        for row in 0..rows {
+            for col in 0..width {
+                src.push((row * 10 + col) as u8); // data
+            }
+            src.push(0xFF); // pad
+            src.push(0xFF); // pad
+        }
+        let out = pack_nv12(&src, width, height, stride).unwrap();
+        let expected: Vec<u8> = vec![
+            0, 1, 2, 3, // Y row 0
+            10, 11, 12, 13, // Y row 1
+            20, 21, 22, 23, // UV row
+        ];
+        assert_eq!(&out[..], &expected[..]);
+        assert!(!out.contains(&0xFF), "padding bytes must be stripped");
+    }
+
+    #[test]
+    fn pack_nv12_rejects_bad_geometry() {
+        // stride < width is impossible NV12; zero dims have no pixels.
+        assert!(pack_nv12(&[0; 16], 8, 2, 4).is_err());
+        assert!(pack_nv12(&[0; 16], 0, 2, 4).is_err());
+    }
+
+    #[test]
+    fn pack_nv12_short_source_fails_safe() {
+        // A source shorter than advertised leaves the missing tail zeroed
+        // rather than panicking. 4x2 needs 3 rows; supply only the first.
+        let src: Vec<u8> = vec![1, 2, 3, 4];
+        let out = pack_nv12(&src, 4, 2, 4).unwrap();
+        assert_eq!(&out[0..4], &[1, 2, 3, 4]);
+        assert_eq!(&out[4..], &[0; 8]); // remaining rows zeroed
     }
 
     #[test]

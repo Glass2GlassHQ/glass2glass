@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M13: `MfDecode` NV12 stride handling (Windows)
+
+- `MfDecode` no longer assumes the Media Foundation decoder's NV12 output is
+  tightly packed. The MFT can report an `MF_MT_DEFAULT_STRIDE` larger than the
+  frame width (hardware MFTs align rows up; the MS software decoder packs
+  tightly), in which case the contiguous output buffer carries per-row padding
+  that would feed garbage to the packed-NV12 sinks (`WaylandSink`, `KmsSink`).
+- `set_nv12_output` now also reads the output type's `MF_MT_DEFAULT_STRIDE`
+  (floored at `width`, so a missing or bottom-up value degrades to the
+  packed assumption) and caches it on `DecoderState`. `copy_sample` strips the
+  padding via a new pure `pack_nv12(src, width, height, stride)` that copies
+  `width` bytes from each of the `height + height/2` source rows (Y plane +
+  half-height interleaved UV) into a tightly-packed `width*height*3/2` buffer.
+  `stride == width` stays a row-wise copy; a short source buffer leaves the
+  tail zeroed rather than panicking.
+- Four GPU-free unit tests for `pack_nv12` (packed identity, stride
+  de-padding, bad-geometry reject, short-source fail-safe). VERIFIED on the
+  Windows dev host: `cargo test -p g2g-plugins --features mf-decode` (26
+  passed) and `cargo clippy --features mf-decode` green.
+
 ### C3 (Phase 3, step 3): allocation-query handshake for the CUDA path
 
 - Completes the C3 roadmap (DESIGN-C3-cuda.md §4 step 3): wires the M12
