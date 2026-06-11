@@ -88,9 +88,9 @@ use ffmpeg::Error as FfError;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive, Dim, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
-    RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
+    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate,
+    VideoCodec, RawVideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -197,6 +197,14 @@ pub struct FfmpegH264Dec {
     /// system-memory backends. Stamped onto every emitted `OwnedCudaBuffer`
     /// so a consumer can push the right context before touching the memory.
     cuda_context: u64,
+    /// M12 / C3 step 3: the downstream consumer's allocation proposal,
+    /// recorded in `configure_allocation`. A `MemoryDomainKind::Cuda` request
+    /// from a GPU sink (`CudaGlSink`) is satisfied by construction on the
+    /// `NvdecCuda` backend (it already emits device-resident frames). The
+    /// `min_buffers` hint is reserved for a future `extra_hw_frames` sizing
+    /// optimization, which needs the allocation query to run before
+    /// `configure_pipeline` opens the decoder (today it runs after).
+    requested_alloc: Option<AllocationParams>,
 }
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
@@ -235,7 +243,14 @@ impl FfmpegH264Dec {
             input_caps: None,
             pts_to_arrival: alloc::collections::BTreeMap::new(),
             cuda_context: 0,
+            requested_alloc: None,
         }
+    }
+
+    /// The downstream consumer's recorded M12 allocation proposal, if any
+    /// (see [`AsyncElement::configure_allocation`]).
+    pub fn requested_alloc(&self) -> Option<AllocationParams> {
+        self.requested_alloc
     }
 
     /// Whether this backend emits frames in CUDA device memory
@@ -451,6 +466,16 @@ impl AsyncElement for FfmpegH264Dec {
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
             derive_output_caps(input, out_fmt)
         }))
+    }
+
+    /// M12 / C3 step 3: record the downstream consumer's allocation proposal.
+    /// A `MemoryDomainKind::Cuda` request (from `CudaGlSink`) is honoured by
+    /// construction on the `NvdecCuda` backend, which already emits
+    /// device-resident frames; the other backends emit system memory, so a
+    /// Cuda request there is simply unsatisfiable and stays recorded for
+    /// diagnostics rather than silently changing the output domain.
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        self.requested_alloc = Some(*params);
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -1153,5 +1178,23 @@ mod tests {
                 framerate: Rate::Fixed(30 << 16),
             }]
         );
+    }
+
+    #[test]
+    fn records_downstream_cuda_allocation_proposal() {
+        // C3 step 3: a CudaGlSink proposes device-resident buffers; the runner
+        // conveys that to the decoder's configure_allocation. The NvdecCuda
+        // backend already emits Cuda frames, so the request is honoured by
+        // construction; here we assert the proposal is recorded (the handshake
+        // the GPU path's allocation query depends on).
+        use g2g_core::MemoryDomainKind;
+        let mut dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        assert_eq!(dec.requested_alloc(), None);
+        let proposal = AllocationParams::cuda(1920 * 1080 * 3 / 2, 3, 256);
+        AsyncElement::configure_allocation(&mut dec, &proposal);
+        let recorded = dec.requested_alloc().expect("proposal recorded");
+        assert_eq!(recorded.domain, MemoryDomainKind::Cuda);
+        assert_eq!(recorded.min_buffers, 3);
+        assert_eq!(recorded.align, 256);
     }
 }

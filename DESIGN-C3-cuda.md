@@ -129,6 +129,13 @@ the device pointers themselves still need a GPU to exercise.
 3. Wire the allocation query so `CudaGlSink` proposes
    `MemoryDomainKind::Cuda` and `NvdecCuda` honours it (the cross-element
    handshake Phase 1 already conveys).
+   - **Landed:** `CudaGlSink::propose_allocation` returns a Cuda proposal
+     (NV12-sized, 256-aligned, pool headroom); `FfmpegH264Dec::configure_allocation`
+     records it (`requested_alloc()`), honoured by construction on the
+     `NvdecCuda` backend. The runner calls `configure_allocation` after
+     `configure_pipeline`, so sizing `extra_hw_frames` from the proposal's
+     `min_buffers` is left as a future optimization (needs the alloc query
+     ahead of decoder open).
 
 ## 5. Verification gaps
 

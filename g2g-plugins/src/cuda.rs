@@ -183,6 +183,16 @@ struct PlaneCopy {
 /// Packed NV12 layout: luma plane (`width` x `height`) at offset 0, then the
 /// interleaved chroma plane (`2*ceil(width/2)` x `ceil(height/2)`). For even
 /// dimensions the total is `width * height * 3 / 2`.
+/// Packed NV12 buffer size in bytes for a `width` x `height` frame
+/// (`width*height` luma + `2*ceil(w/2)*ceil(h/2)` interleaved chroma; for even
+/// dims the familiar `width*height*3/2`). Used by `CudaGlSink` to size its M12
+/// allocation proposal.
+pub fn nv12_byte_size(width: u32, height: u32) -> usize {
+    // The pitches do not affect the packed size; pass width as a tight pitch.
+    let (_, _, total) = nv12_plane_copies(width, height, width, width);
+    total
+}
+
 fn nv12_plane_copies(
     width: u32,
     height: u32,
@@ -734,6 +744,13 @@ mod tests {
         assert_eq!(chroma.height, 2);
         assert_eq!(chroma.dst_offset, 9);
         assert_eq!(total, 9 + 8);
+    }
+
+    #[test]
+    fn nv12_byte_size_matches_three_halves_for_even_dims() {
+        assert_eq!(nv12_byte_size(1920, 1080), 1920 * 1080 * 3 / 2);
+        // Odd dims round the chroma planes up.
+        assert_eq!(nv12_byte_size(3, 3), 9 + 8);
     }
 
     #[test]

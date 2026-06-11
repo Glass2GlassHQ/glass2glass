@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 3, step 3): allocation-query handshake for the CUDA path
+
+- Completes the C3 roadmap (DESIGN-C3-cuda.md §4 step 3): wires the M12
+  allocation query so the GPU sink declares it wants device memory and the
+  CUDA decoder records the request. The cross-element conveyance machinery
+  itself already existed (and is tested generically in `m12_allocation.rs`,
+  including the two CUDA-domain cases); this connects the real elements.
+- `CudaGlSink::propose_allocation` returns `AllocationParams::cuda(...)`: a
+  `MemoryDomainKind::Cuda` proposal sized to the NV12 frame
+  (`cuda::nv12_byte_size`), with pool headroom (`min_buffers = 3`: the frame
+  on the GL thread plus the one the runner link holds) and 256-byte GPU
+  alignment. Returns `None` until the geometry is fixed. The runner conveys
+  this to the upstream decoder's `configure_allocation`.
+- `FfmpegH264Dec::configure_allocation` records the proposal
+  (`requested_alloc()` accessor). On the `NvdecCuda` backend a Cuda request is
+  honoured by construction (it already emits device-resident frames); the
+  system-memory backends can't satisfy it, so the request stays recorded for
+  diagnostics rather than silently changing the output domain. The runner
+  calls `configure_allocation` *after* `configure_pipeline` (the decoder is
+  already open), so the recorded `min_buffers` is not yet used to size the
+  hwframe pool's `extra_hw_frames` (still the fixed `8` from Phase 2); doing so
+  is a future optimization that needs the allocation query moved ahead of
+  decoder open, noted in the field docs.
+- New GPU-free unit tests: `cuda::nv12_byte_size` (even/odd dims),
+  `CudaGlSink` proposes Cuda with the right size/align/headroom, and
+  `FfmpegH264Dec` records a conveyed Cuda proposal. These run on Linux under
+  `--features cuda-gl` / `--features ffmpeg` (the modules are Linux-gated);
+  the platform-agnostic conveyance remains covered on the Windows host by
+  `m12_allocation.rs`. Default workspace build/test/clippy green.
+
 ### C3 (Phase 3, step 2b): `CudaGlSink` (first draft, owed first compile)
 
 - `g2g-plugins::cudaglsink::CudaGlSink` behind a new `cuda-gl` feature

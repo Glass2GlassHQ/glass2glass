@@ -87,13 +87,23 @@ use wayland_egl::WlEglSurface;
 use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, Frame, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim,
+    Frame, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    RawVideoFormat,
 };
 
 use crate::cuda::{
-    make_context_current, CudaGlInterop, FRAGMENT_SHADER_NV12, VERTEX_SHADER,
+    make_context_current, nv12_byte_size, CudaGlInterop, FRAGMENT_SHADER_NV12, VERTEX_SHADER,
 };
+
+/// Device-buffer pool headroom the sink asks the producer to keep resident:
+/// the frame in flight on the GL thread plus the one the runner link holds, so
+/// the decoder's hwframe pool does not starve under live pacing.
+const CUDA_POOL_HEADROOM: usize = 3;
+
+/// GPU upload alignment the sink requests (256 bytes is the common CUDA / NVENC
+/// surface alignment).
+const CUDA_ALIGN: usize = 256;
 
 /// Worker-thread command. `Frame` carries the decoded CUDA buffer (still
 /// device-resident) plus the source-side `arrival_ns` for latency and a
@@ -217,6 +227,23 @@ impl AsyncElement for CudaGlSink {
         // Pass-through at negotiation; NV12 is enforced in configure_pipeline.
         // The native decoder lands NV12 on this link via its DerivedOutput.
         Ok(upstream_caps.clone())
+    }
+
+    /// M12 / C3 step 3: ask the producer to keep buffers in CUDA device memory
+    /// so the `NvdecCuda` -> sink handoff stays on the GPU. The runner conveys
+    /// this `MemoryDomainKind::Cuda` proposal to the decoder's
+    /// `configure_allocation`. Returns `None` until the geometry is known (no
+    /// proposal to make pre-`configure_pipeline`).
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        let (w, h, _) = caps.dims()?;
+        let (&Dim::Fixed(w), &Dim::Fixed(h)) = (w, h) else {
+            return None;
+        };
+        Some(AllocationParams::cuda(
+            nv12_byte_size(w, h),
+            CUDA_POOL_HEADROOM,
+            CUDA_ALIGN,
+        ))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -889,5 +916,18 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn proposes_cuda_device_memory() {
+        use g2g_core::MemoryDomainKind;
+        let sink = CudaGlSink::new();
+        let p = sink
+            .propose_allocation(&nv12(1920, 1080))
+            .expect("fixed-geometry NV12 yields a proposal");
+        assert_eq!(p.domain, MemoryDomainKind::Cuda);
+        assert_eq!(p.size_bytes, 1920 * 1080 * 3 / 2);
+        assert_eq!(p.align, CUDA_ALIGN);
+        assert_eq!(p.min_buffers, CUDA_POOL_HEADROOM);
     }
 }
