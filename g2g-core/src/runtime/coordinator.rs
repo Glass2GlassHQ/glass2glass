@@ -21,6 +21,7 @@ use crate::caps::Caps;
 use crate::element::{AsyncElement, ConfigureOutcome};
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
+use crate::query::AllocationParams;
 use crate::runtime::channel::{bounded, Receiver, Sender};
 use crate::runtime::runner::SourceLoop;
 use crate::runtime::solver::solve_linear;
@@ -104,8 +105,18 @@ pub(crate) struct LinearNegotiation {
     /// structure the negotiation produces.
     #[allow(dead_code)]
     pub(crate) source_link: Caps,
-    /// Caps on the transform-output / sink-input link.
+    /// Caps on the transform-output / sink-input link. Retained for β's
+    /// re-cascade (Session E), the same as `source_link`; the M12 allocation
+    /// query that used to read it now runs inside negotiation against the
+    /// per-link caps directly.
+    #[allow(dead_code)]
     pub(crate) sink_link: Caps,
+    /// The folded M12 allocation proposal handed to the source (the
+    /// most-demanding of the sink's and transform's requirements), or `None`
+    /// if no element proposed. The runner records it on `RunStats`. Resolved
+    /// before `configure_pipeline` so a transform (e.g. a hardware decoder)
+    /// can size its buffer pool from `min_buffers` at open time.
+    pub(crate) allocation: Option<AllocationParams>,
 }
 
 /// M18 Session C: startup negotiation for a `source → transform → sink`
@@ -134,7 +145,7 @@ where
 {
     let mut refix_counter: Option<Caps> = None;
     let mut attempts = 0u32;
-    let (source_link, sink_link) = loop {
+    let (source_link, sink_link, allocation) = loop {
         attempts += 1;
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
@@ -167,6 +178,21 @@ where
             (links[0].clone(), links[1].clone())
         };
 
+        // M12 allocation query, resolved *before* the `configure_pipeline`
+        // cascade so a transform (e.g. a hardware decoder) can size its buffer
+        // pool from the downstream consumer's `min_buffers` when it opens.
+        // Resolve sink → transform first so the transform folds the sink's
+        // requirement into the proposal it answers to the source. (Previously
+        // this ran in the runner *after* negotiation, i.e. after the decoder
+        // had already opened with a fixed default.)
+        if let Some(p) = sink.propose_allocation(&sink_caps) {
+            transform.configure_allocation(&p);
+        }
+        let allocation = transform.propose_allocation(&sink_caps);
+        if let Some(p) = &allocation {
+            source.configure_allocation(p);
+        }
+
         let mut refixate: Option<Caps> = None;
         for outcome in [
             source.configure_pipeline(&src_caps)?,
@@ -183,10 +209,10 @@ where
         }
         match refixate {
             Some(counter) => refix_counter = Some(counter),
-            None => break (src_caps, sink_caps),
+            None => break (src_caps, sink_caps, allocation),
         }
     };
-    Ok(LinearNegotiation { source_link, sink_link })
+    Ok(LinearNegotiation { source_link, sink_link, allocation })
 }
 
 /// M18 α — element-local re-allocation on a mid-stream caps change.

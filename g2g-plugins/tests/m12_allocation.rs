@@ -189,6 +189,74 @@ impl AsyncElement for FoldingTransform {
     }
 }
 
+/// Records, at `configure_pipeline` time, whether its allocation had already
+/// been configured. A hardware decoder uses exactly this ordering to size its
+/// buffer pool (`extra_hw_frames` / output texture count) from the downstream
+/// `min_buffers` when it opens the codec.
+struct OrderRecordingTransform {
+    alloc_configured: bool,
+    /// `Some(true)` if `configure_allocation` ran before `configure_pipeline`.
+    alloc_seen_at_open: Option<bool>,
+}
+
+impl AsyncElement for OrderRecordingTransform {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn configure_allocation(&mut self, _params: &AllocationParams) {
+        self.alloc_configured = true;
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.alloc_seen_at_open = Some(self.alloc_configured);
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::Eos => Ok(()),
+                other => {
+                    out.push(other).await?;
+                    Ok(())
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn transform_allocation_precedes_configure_pipeline() {
+    // The reorder under test: the M12 allocation query now runs before the
+    // configure_pipeline cascade, so a transform (decoder) has its downstream
+    // min_buffers in hand when it opens, instead of after.
+    let mut src = PoolSrc::new(64);
+    let mut tx = OrderRecordingTransform { alloc_configured: false, alloc_seen_at_open: None };
+    let mut sink = ProposingSink::new(Some(AllocationParams::cuda(4096, 4, 256)));
+    let clock = ZeroClock;
+
+    run_source_transform_sink(&mut src, &mut tx, &mut sink, &clock, 4)
+        .await
+        .expect("pipeline should complete");
+
+    assert_eq!(
+        tx.alloc_seen_at_open,
+        Some(true),
+        "configure_allocation must run before configure_pipeline so a decoder \
+         can size its pool from min_buffers at open time"
+    );
+}
+
 #[tokio::test]
 async fn source_sink_pool_handoff() {
     let mut src = PoolSrc::new(64);

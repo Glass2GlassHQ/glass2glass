@@ -201,9 +201,9 @@ pub struct FfmpegH264Dec {
     /// recorded in `configure_allocation`. A `MemoryDomainKind::Cuda` request
     /// from a GPU sink (`CudaGlSink`) is satisfied by construction on the
     /// `NvdecCuda` backend (it already emits device-resident frames). The
-    /// `min_buffers` hint is reserved for a future `extra_hw_frames` sizing
-    /// optimization, which needs the allocation query to run before
-    /// `configure_pipeline` opens the decoder (today it runs after).
+    /// `min_buffers` hint sizes the CUDA hwframe pool's `extra_hw_frames` at
+    /// open time: the runner's M12 allocation query now runs before
+    /// `configure_pipeline`, so this is recorded by the time the decoder opens.
     requested_alloc: Option<AllocationParams>,
 }
 
@@ -569,8 +569,17 @@ impl AsyncElement for FfmpegH264Dec {
                 // Pool headroom: the decoder must keep enough surfaces for the
                 // frames we hold downstream (link capacity) plus its own
                 // reorder/reference set. Without this the pool can starve once
-                // a few frames are in flight to the sink.
-                (*raw).extra_hw_frames = 8;
+                // a few frames are in flight to the sink. The downstream
+                // consumer's M12 proposal (now recorded before this open, via
+                // the allocation-query reorder) carries its hold count in
+                // `min_buffers`; size the pool to that plus a reorder margin,
+                // falling back to 8 when no consumer proposed.
+                const REORDER_MARGIN: usize = 4;
+                let headroom = self
+                    .requested_alloc
+                    .map(|p| (p.min_buffers + REORDER_MARGIN) as i32)
+                    .unwrap_or(8);
+                (*raw).extra_hw_frames = headroom;
 
                 // The codec now owns a ref; release ours so only the decoder
                 // keeps the device alive.

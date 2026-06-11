@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M12: allocation query runs before `configure_pipeline` (pool sizing)
+
+- The M12 allocation query for a `source -> transform -> sink` chain now runs
+  *inside* `negotiate_source_transform_sink`, between `solve_linear` and the
+  `configure_pipeline` cascade, instead of in the runner *after* negotiation.
+  This lets a transform (a hardware decoder) size its buffer pool from the
+  downstream consumer's `min_buffers` when it opens the codec, rather than
+  after the pool is already fixed. Behavior-preserving for existing pipelines:
+  sources build their pools in `run()` (after both calls either way), and the
+  folded source-facing proposal still surfaces on `RunStats.allocation`.
+- `LinearNegotiation` gained an `allocation` field carrying that proposal; the
+  query (sink -> transform fold -> source) moved verbatim, only earlier. The
+  `ReFixate` retry re-runs it each attempt, so the recorded params always match
+  the final negotiated caps. `run_simple_pipeline` (source -> sink, no
+  transform) is unchanged; its source allocates in `run()`, so the order
+  doesn't matter there.
+- `FfmpegH264Dec` (`NvdecCuda`) now sizes the CUDA hwframe pool's
+  `extra_hw_frames` from the recorded `min_buffers` (`min_buffers + 4` reorder
+  margin), falling back to the previous fixed `8` when no consumer proposed.
+  Closes the optimization the C3 allocation-handshake notes flagged as deferred
+  on the ordering. (`MfDecode`'s MFT manages its own output texture pool, so
+  there `min_buffers` stays informational.)
+- New runner test `transform_allocation_precedes_configure_pipeline`
+  (`m12_allocation.rs`): a fake transform records, at `configure_pipeline`
+  time, that its `configure_allocation` already ran, the regression guard for
+  the ordering. VERIFIED: `cargo test -p g2g-core` (49) + `m12_allocation` (6),
+  full workspace, workspace clippy, and the no_std core baseline all green. The
+  `FfmpegH264Dec` change is `ffmpeg`-feature + Linux-only and is owed a Linux
+  compile, same as the rest of that path.
+
 ### M18 item 6: pad templates for the Windows decode/display elements
 
 - `MfDecode` and `D3D11Sink` now implement `PadTemplates`, so a tool can

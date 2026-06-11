@@ -656,9 +656,12 @@ where
     // mid-stream re-cascade. `sink_link` is the downstream-facing caps
     // (transform output = sink input) that M12 allocation flows along,
     // so it stands in for the loop's former `negotiated_caps`.
-    let negotiated_caps = negotiate_source_transform_sink(source, transform, sink)
-        .await?
-        .sink_link;
+    // M12 allocation query now runs *inside* negotiation, before the
+    // `configure_pipeline` cascade, so a transform (e.g. a hardware decoder)
+    // sizes its buffer pool from the downstream `min_buffers` at open time.
+    // The folded source-facing proposal comes back on `RunStats`.
+    let negotiation = negotiate_source_transform_sink(source, transform, sink).await?;
+    let allocation = negotiation.allocation;
 
     // M12 latency query: fold the configured chain source → transform → sink.
     let latency = LatencyReport::aggregate([
@@ -666,17 +669,6 @@ where
         AsyncElement::latency(transform),
         AsyncElement::latency(sink),
     ]);
-
-    // M12 allocation query: each producer asks its downstream peer what
-    // buffers to allocate. Resolve sink → transform first so the transform can
-    // fold the sink's requirement into the proposal it answers to the source.
-    if let Some(p) = sink.propose_allocation(&negotiated_caps) {
-        AsyncElement::configure_allocation(transform, &p);
-    }
-    let allocation = transform.propose_allocation(&negotiated_caps);
-    if let Some(p) = &allocation {
-        source.configure_allocation(p);
-    }
 
     // M12 clock distribution: elect the pipeline clock from any element that
     // offers one (live source > provider > system fallback) and read its epoch.
