@@ -69,6 +69,13 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
     "Win32_Media_KernelStreaming",
+    # DXVA / D3D11 zero-copy decode output (W1): D3D11 device + texture types,
+    # the D3D_DRIVER_TYPE enum, and DXGI (adapter type in D3D11CreateDevice's
+    # signature; DXGI_FORMAT for the texture domain).
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
 ] }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try

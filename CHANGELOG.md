@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### W1 (Phase 2): `MfDecode` DXVA / D3D11 hardware decode
+
+- `MfDecode::with_d3d11()` opts the Windows decoder into DXVA hardware decode.
+  `configure_pipeline` then creates a hardware D3D11 device
+  (`D3D11CreateDevice`, `D3D_DRIVER_TYPE_HARDWARE`, video support, multithread
+  protection on, which Media Foundation requires) and a Media Foundation DXGI
+  device manager (`MFCreateDXGIDeviceManager` + `ResetDevice`), and hands it to
+  the MFT via `MFT_MESSAGE_SET_D3D_MANAGER` before setting the media types. The
+  decode then runs on the GPU. Default stays the MS software decoder.
+- The sync `CLSID_MSH264DecoderMFT` does DXVA in-place when given a D3D
+  manager, so no async-MFT / `MFTEnumEx` event loop is needed: the existing
+  synchronous `ProcessInput`/`ProcessOutput` drain still drives it. With a D3D
+  manager the MFT allocates its own output samples
+  (`MFT_OUTPUT_STREAM_PROVIDES_SAMPLES`); `process_output` detects that flag
+  and passes a null sample so the MFT fills it, instead of pre-allocating a
+  system buffer. The software path is byte-identical to before.
+- Phase 2 reads the (D3D11-backed) output sample back to packed system NV12 via
+  the existing `copy_sample`, so every current sink keeps working with
+  hardware decode. The zero-copy `MemoryDomain::D3D11Texture` output (no
+  readback) is Phase 3.
+- `DecoderState` holds the D3D11 device and DXGI manager for the decoder's
+  lifetime; the device outlives every output sample. New GPU-free builder unit
+  test (`with_d3d11` toggles the opt-in). VERIFIED on the Windows dev host:
+  `cargo test -p g2g-plugins --features mf-decode` (27 passed, the D3D11 path
+  COMPILES) and `cargo clippy --features mf-decode` green. The actual DXVA
+  decode runtime (device creation + GPU decode of a real H.264 stream) is owed
+  as a user-side run on a machine with a GPU; the Windows dev host can do it.
+- Adds `windows` crate features `Win32_Graphics_Direct3D11`,
+  `Win32_Graphics_Direct3D`, `Win32_Graphics_Dxgi`, `Win32_Graphics_Dxgi_Common`.
+
 ### W1 (Phase 1): Direct3D 11 memory domain foundation
 
 - First phase of the Windows zero-copy decode -> display track, the analog of

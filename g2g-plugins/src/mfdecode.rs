@@ -30,16 +30,24 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown,
-    MFStartup, CLSID_MSH264DecoderMFT, MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
-    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_OUTPUT_DATA_BUFFER, MFVideoFormat_H264, MFVideoFormat_NV12, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+    IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, CLSID_MSH264DecoderMFT,
+    MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
+    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+use windows::core::Interface;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -63,6 +71,19 @@ struct DecoderState {
     /// buffer carries per-row padding that must be stripped before the packed
     /// NV12 the downstream sinks expect.
     stride: u32,
+    /// True when the MFT allocates its own output samples
+    /// (`MFT_OUTPUT_STREAM_PROVIDES_SAMPLES`), as the DXVA / D3D11 path does:
+    /// `ProcessOutput` is then called with a null sample and the MFT fills it
+    /// with a (D3D11-backed) sample we take ownership of. The software path
+    /// clears this and we pre-allocate a system-memory output sample.
+    provides_samples: bool,
+    /// D3D11 device backing the DXVA decode, kept alive for the decoder's
+    /// lifetime. `None` on the software path. Held so the device (and the
+    /// DXGI manager that references it) outlive every output texture.
+    _d3d_device: Option<ID3D11Device>,
+    /// DXGI device manager handed to the MFT via `MFT_MESSAGE_SET_D3D_MANAGER`.
+    /// `None` on the software path.
+    _dxgi_manager: Option<IMFDXGIDeviceManager>,
 }
 
 /// One decoded picture, pixels already copied out of the MFT buffer.
@@ -87,6 +108,11 @@ pub struct MfDecode {
     state: Option<DecoderState>,
     com_started: bool,
     configured: bool,
+    /// Opt into DXVA / D3D11 hardware decode (`with_d3d11`). When set,
+    /// `configure_pipeline` creates a D3D11 device + DXGI manager and hands it
+    /// to the MFT, so decode runs on the GPU. Default `false` (the MS software
+    /// decoder, system-memory output).
+    use_d3d11: bool,
     last_caps: Option<Caps>,
     /// M16 workaround #3 Phase A: most recent input caps received via
     /// `PipelinePacket::CapsChanged`. Used to validate the format on
@@ -120,10 +146,27 @@ impl MfDecode {
             state: None,
             com_started: false,
             configured: false,
+            use_d3d11: false,
             last_caps: None,
             input_caps: None,
             emitted: 0,
         }
+    }
+
+    /// Enable DXVA / D3D11 hardware decode. `configure_pipeline` then creates a
+    /// hardware D3D11 device and hands the MFT a DXGI device manager, so decode
+    /// runs on the GPU. The MFT allocates D3D11-backed output samples; this
+    /// (Phase 2) reads them back to packed system NV12 so every existing sink
+    /// keeps working. The zero-copy `MemoryDomain::D3D11Texture` output is the
+    /// next phase. Falls back loud (`Hardware`) if no D3D11 device is available.
+    pub fn with_d3d11(mut self) -> Self {
+        self.use_d3d11 = true;
+        self
+    }
+
+    /// Whether DXVA / D3D11 hardware decode is enabled (see [`with_d3d11`]).
+    pub fn uses_d3d11(&self) -> bool {
+        self.use_d3d11
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -195,29 +238,37 @@ impl MfDecode {
 
     fn process_output(&self) -> Result<OutputStep, G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        // SAFETY: every call runs on the element's owning COM thread. The
-        // output sample is caller-allocated; the refs handed to the
-        // MFT_OUTPUT_DATA_BUFFER are reclaimed and released right after the
-        // ProcessOutput call regardless of its result.
+        // SAFETY: every call runs on the element's owning COM thread. We supply
+        // an output sample only on the software path; the DXVA path sets
+        // `provides_samples`, so the MFT allocates a (D3D11-backed) sample and
+        // writes it into the struct, which we take ownership of below. The refs
+        // in the FFI struct are reclaimed right after ProcessOutput regardless
+        // of its result.
         unsafe {
-            let buffer = MFCreateMemoryBuffer(st.out_size).map_err(mf_err)?;
-            let sample = MFCreateSample().map_err(mf_err)?;
-            sample.AddBuffer(&buffer).map_err(mf_err)?;
+            let preallocated = if st.provides_samples {
+                None
+            } else {
+                let buffer = MFCreateMemoryBuffer(st.out_size).map_err(mf_err)?;
+                let sample = MFCreateSample().map_err(mf_err)?;
+                sample.AddBuffer(&buffer).map_err(mf_err)?;
+                Some(sample)
+            };
 
             let mut out = [MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: 0,
-                pSample: ManuallyDrop::new(Some(sample.clone())),
+                pSample: ManuallyDrop::new(preallocated),
                 dwStatus: 0,
                 pEvents: ManuallyDrop::new(None),
             }];
             let mut status = 0u32;
             let r = st.transform.ProcessOutput(0, &mut out, &mut status);
 
-            // Balance the refs we placed into the FFI struct.
-            drop(ManuallyDrop::into_inner(core::mem::replace(
+            // Take the output sample (ours on the software path, the MFT's on
+            // the DXVA path) and release any events.
+            let out_sample = ManuallyDrop::into_inner(core::mem::replace(
                 &mut out[0].pSample,
                 ManuallyDrop::new(None),
-            )));
+            ));
             drop(ManuallyDrop::into_inner(core::mem::replace(
                 &mut out[0].pEvents,
                 ManuallyDrop::new(None),
@@ -225,10 +276,13 @@ impl MfDecode {
 
             match r {
                 Ok(()) => {
+                    let sample = out_sample.ok_or(G2gError::Hardware(HardwareError::Other))?;
                     let pts_ns = sample
                         .GetSampleTime()
                         .map(|hns| (hns.max(0) as u64).saturating_mul(100))
                         .unwrap_or(0);
+                    // Phase 2: read the (possibly D3D11-backed) sample back to
+                    // packed system NV12. The zero-copy texture path is Phase 3.
                     let bytes = copy_sample(&sample, st.width, st.height, st.stride)?;
                     Ok(OutputStep::Frame(DecodedNv12 {
                         bytes,
@@ -250,6 +304,7 @@ impl MfDecode {
         let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
         let (w, h, stride) = set_nv12_output(&st.transform)?;
         st.out_size = output_buffer_size(&st.transform, w, h)?;
+        st.provides_samples = output_provides_samples(&st.transform)?;
         st.width = w;
         st.height = h;
         st.stride = stride;
@@ -307,7 +362,7 @@ impl AsyncElement for MfDecode {
         }
         self.com_started = true;
 
-        self.state = Some(init_decoder(w, h)?);
+        self.state = Some(init_decoder(w, h, self.use_d3d11)?);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -418,14 +473,35 @@ impl Drop for MfDecode {
 }
 
 /// Create the decoder MFT, set the H.264 input type and an NV12 output type,
-/// and put it into streaming mode.
-fn init_decoder(width: u32, height: u32) -> Result<DecoderState, G2gError> {
-    // SAFETY: COM object creation + media-type configuration on the owning
-    // thread; all arguments are valid for the duration of each call.
-    let transform: IMFTransform = unsafe {
-        let transform: IMFTransform =
-            CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER).map_err(mf_err)?;
+/// and put it into streaming mode. When `use_d3d11`, a hardware D3D11 device
+/// and DXGI manager are created and handed to the MFT first, so it decodes via
+/// DXVA and allocates its own (D3D11-backed) output samples.
+fn init_decoder(width: u32, height: u32, use_d3d11: bool) -> Result<DecoderState, G2gError> {
+    // SAFETY: COM object creation on the owning thread.
+    let transform: IMFTransform =
+        unsafe { CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER) }
+            .map_err(mf_err)?;
 
+    // DXVA: build the device + manager and hand it to the MFT before any media
+    // type is set (the MFT switches to D3D11 output allocation on receipt).
+    let (d3d_device, dxgi_manager) = if use_d3d11 {
+        let (device, manager, token) = create_d3d11_device_and_manager()?;
+        // SAFETY: ResetDevice associates the device with the manager; the
+        // SET_D3D_MANAGER message hands the manager (as a ULONG_PTR) to the MFT.
+        unsafe {
+            manager.ResetDevice(&device, token).map_err(mf_err)?;
+            transform
+                .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
+                .map_err(mf_err)?;
+        }
+        (Some(device), Some(manager))
+    } else {
+        (None, None)
+    };
+
+    // SAFETY: media-type configuration on the owning thread; all arguments are
+    // valid for the duration of each call.
+    unsafe {
         let input = MFCreateMediaType().map_err(mf_err)?;
         input
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
@@ -439,11 +515,11 @@ fn init_decoder(width: u32, height: u32) -> Result<DecoderState, G2gError> {
                 .map_err(mf_err)?;
         }
         transform.SetInputType(0, &input, 0).map_err(mf_err)?;
-        transform
-    };
+    }
 
     let (w, h, stride) = set_nv12_output(&transform)?;
     let out_size = output_buffer_size(&transform, w, h)?;
+    let provides_samples = output_provides_samples(&transform)?;
 
     // SAFETY: streaming-mode messages on the owning thread.
     unsafe {
@@ -461,7 +537,56 @@ fn init_decoder(width: u32, height: u32) -> Result<DecoderState, G2gError> {
         height: h,
         out_size,
         stride,
+        provides_samples,
+        _d3d_device: d3d_device,
+        _dxgi_manager: dxgi_manager,
     })
+}
+
+/// Create a hardware D3D11 device with video support and wrap it in a Media
+/// Foundation DXGI device manager. Returns the device, the manager, and the
+/// manager's reset token. The device is created with multithread protection
+/// on, which Media Foundation requires for a shared decode device.
+fn create_d3d11_device_and_manager(
+) -> Result<(ID3D11Device, IMFDXGIDeviceManager, u32), G2gError> {
+    // SAFETY: D3D11/MF object creation on the owning thread; out-params are
+    // initialised by the calls before we read them.
+    unsafe {
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            None, // default feature levels
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+        .map_err(mf_err)?;
+        let device = device.ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let context = context.ok_or(G2gError::Hardware(HardwareError::Other))?;
+
+        // MF requires the decode device to be multithread-protected.
+        let multithread: ID3D11Multithread = context.cast().map_err(mf_err)?;
+        let _ = multithread.SetMultithreadProtected(true);
+
+        let mut token = 0u32;
+        let mut manager: Option<IMFDXGIDeviceManager> = None;
+        MFCreateDXGIDeviceManager(&mut token, &mut manager).map_err(mf_err)?;
+        let manager = manager.ok_or(G2gError::Hardware(HardwareError::Other))?;
+
+        Ok((device, manager, token))
+    }
+}
+
+/// Whether the MFT allocates its own output samples (the DXVA / D3D11 path).
+fn output_provides_samples(transform: &IMFTransform) -> Result<bool, G2gError> {
+    // SAFETY: stream-info query on the owning thread.
+    let info = unsafe { transform.GetOutputStreamInfo(0) }.map_err(mf_err)?;
+    Ok(info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0)
 }
 
 /// Select the first NV12 output type the MFT offers and return its geometry
@@ -679,6 +804,12 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
+    }
+
+    #[test]
+    fn d3d11_opt_in_defaults_off() {
+        assert!(!MfDecode::new().uses_d3d11());
+        assert!(MfDecode::new().with_d3d11().uses_d3d11());
     }
 
     #[test]
