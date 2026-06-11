@@ -57,7 +57,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, D3D11KeepAlive,
     Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture,
-    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Live MFT plus the negotiated output geometry. Recreated nowhere — the
@@ -512,6 +512,30 @@ impl AsyncElement for MfDecode {
             }
             Ok(())
         })
+    }
+}
+
+impl PadTemplates for MfDecode {
+    /// Consumes H.264 and produces NV12, both at any geometry (the MFT derives
+    /// the output dims from the stream). Memory domain (System vs D3D11Texture)
+    /// is not encoded in caps, so the templates are backend-independent.
+    fn pad_templates() -> Vec<PadTemplate> {
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264)),
+            PadTemplate::source(CapsSet::one(nv12)),
+        ])
     }
 }
 
@@ -1003,6 +1027,29 @@ mod tests {
         let out = pack_nv12(&src, 4, 2, 4).unwrap();
         assert_eq!(&out[0..4], &[1, 2, 3, 4]);
         assert_eq!(&out[4..], &[0; 8]); // remaining rows zeroed
+    }
+
+    #[test]
+    fn pad_templates_are_h264_in_nv12_out() {
+        use g2g_core::{PadDirection, PadTemplates};
+        let sink = MfDecode::pad_template(PadDirection::Sink).expect("has sink pad");
+        let source = MfDecode::pad_template(PadDirection::Source).expect("has source pad");
+        // H.264 in, NV12 out.
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Any,
+        };
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Any,
+        };
+        assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&h264)));
+        assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&nv12)));
+        assert!(!matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&nv12)));
     }
 
     #[test]

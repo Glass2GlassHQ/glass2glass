@@ -47,6 +47,7 @@ use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -76,9 +77,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim,
-    G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PipelineClock,
-    PipelinePacket, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    Dim, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Texture-pool headroom the sink asks the decoder to keep resident: the frame
@@ -296,6 +297,20 @@ impl AsyncElement for D3D11Sink {
                 }
             }
         })
+    }
+}
+
+impl PadTemplates for D3D11Sink {
+    /// A terminal sink: accepts NV12 at any geometry (the memory domain
+    /// D3D11Texture is not encoded in caps). No source pad.
+    fn pad_templates() -> Vec<PadTemplate> {
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([PadTemplate::sink(CapsSet::one(nv12))])
     }
 }
 
@@ -654,6 +669,45 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pad_template_links_from_an_nv12_source() {
+        use g2g_core::{
+            types_can_link, CapsSet, PadCaps, PadDirection, PadTemplate, PadTemplates,
+        };
+
+        // The sink exposes one NV12 sink pad and no source pad.
+        let t = D3D11Sink::pad_templates();
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].direction, PadDirection::Sink);
+        assert!(matches!(t[0].caps, PadCaps::Fixed(ref s) if s.accepts(&nv12(1920, 1080))));
+
+        // A NV12 source links into it; an RGBA one does not.
+        struct Nv12Source;
+        impl PadTemplates for Nv12Source {
+            fn pad_templates() -> Vec<PadTemplate> {
+                Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                }))])
+            }
+        }
+        struct RgbaSource;
+        impl PadTemplates for RgbaSource {
+            fn pad_templates() -> Vec<PadTemplate> {
+                Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
+                    format: RawVideoFormat::Rgba8,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                }))])
+            }
+        }
+        assert!(types_can_link::<Nv12Source, D3D11Sink>());
+        assert!(!types_can_link::<RgbaSource, D3D11Sink>());
     }
 
     #[test]

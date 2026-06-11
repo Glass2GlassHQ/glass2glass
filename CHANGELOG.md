@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 6: pad templates for the Windows decode/display elements
+
+- `MfDecode` and `D3D11Sink` now implement `PadTemplates`, so a tool can
+  introspect their static caps and check link compatibility before either is
+  constructed (`gst_element_factory_get_static_pad_templates` analog). Extends
+  the existing coverage (`VideoTestSrc` / `FakeSink` / `H264Parse`) to the
+  Windows GPU path. `MfDecode`: H.264 sink pad + NV12 source pad (the memory
+  domain is not encoded in caps, so the templates are backend-independent).
+  `D3D11Sink`: a terminal NV12 sink pad, no source pad.
+- New integration test `windows_decode_to_display_chain_links_by_type`
+  (gated on `mf-decode` + `d3d11-sink`) proves the whole chain is
+  introspectable pre-instantiation: `H264Parse -> MfDecode -> D3D11Sink` all
+  link by type, while an RGBA source is correctly rejected at the decoder.
+  Plus element-local unit tests for each template. VERIFIED on the Windows dev
+  host: `cargo test -p g2g-plugins --features "mf-decode d3d11-sink"` (34 lib +
+  the chain test) and clippy green; default workspace unaffected.
+
 ### W1: allocation-query handshake for the D3D11 path
 
 - Mirrors C3 step 3 on the Windows side, completing the W1 <-> C3 symmetry.

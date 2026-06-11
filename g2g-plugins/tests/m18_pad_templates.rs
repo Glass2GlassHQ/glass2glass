@@ -71,3 +71,21 @@ fn a_source_has_no_sink_pad_so_nothing_feeds_into_it() {
     assert!(VideoTestSrc::pad_template(PadDirection::Sink).is_none());
     assert!(!types_can_link::<H264Parse, VideoTestSrc>());
 }
+
+/// The full Windows decode -> display chain is introspectable before any
+/// element is built: H264Parse -> MfDecode -> D3D11Sink all link by type.
+#[cfg(all(target_os = "windows", feature = "mf-decode", feature = "d3d11-sink"))]
+#[test]
+fn windows_decode_to_display_chain_links_by_type() {
+    use g2g_plugins::d3d11sink::D3D11Sink;
+    use g2g_plugins::mfdecode::MfDecode;
+
+    // H.264 parser -> decoder (both H.264 at the boundary).
+    assert!(types_can_link::<H264Parse, MfDecode>());
+    // Decoder NV12 output -> NV12 present sink.
+    assert!(types_can_link::<MfDecode, D3D11Sink>());
+    // An RGBA test source cannot feed the H.264 decoder.
+    assert!(!types_can_link::<VideoTestSrc, MfDecode>());
+    // The sink is terminal: no source pad to feed anything downstream.
+    assert!(D3D11Sink::pad_template(PadDirection::Source).is_none());
+}
