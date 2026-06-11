@@ -21,7 +21,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, VideoFormat,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, Router, VideoCodec, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -32,8 +32,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn rgba(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -41,8 +41,8 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn nv12(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Nv12,
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -50,8 +50,8 @@ fn nv12(w: u32, h: u32) -> Caps {
 }
 
 fn rgba_any() -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -79,8 +79,12 @@ struct ReconfigSrc {
 impl SourceLoop for ReconfigSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.initial.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.initial.clone()))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -116,10 +120,8 @@ struct BranchInner {
 }
 
 fn geometry_size(caps: &Caps) -> Option<usize> {
-    match caps {
-        Caps::Video { width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-            Some(*w as usize * *h as usize)
-        }
+    match caps.dims()? {
+        (Dim::Fixed(w), Dim::Fixed(h), _) => Some(*w as usize * *h as usize),
         _ => None,
     }
 }

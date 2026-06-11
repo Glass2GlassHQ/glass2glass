@@ -13,12 +13,18 @@
 //! before the first `DataFrame`; mid-stream parameter changes (signaled by
 //! `VideoFrame::has_new_parameters`) trigger a fresh `CapsChanged`.
 //!
+//! M18 item 5: `intercept_caps` is async (`SourceLoop::CapsFuture`), so
+//! the source can probe the server for real SDP dims/fps during
+//! negotiation. The default path connects, DESCRIBEs, SETUPs, extracts
+//! the H.264 [`VideoParameters`], drops the session, and caches the
+//! discovered caps for `run` to skip re-probing. [`RtspSrc::with_expected_dims`]
+//! short-circuits the probe entirely, returning the caller-supplied
+//! geometry without I/O (useful for tests and offline negotiation).
+//!
 //! Remaining limitations:
-//! - `intercept_caps()` returns a wide placeholder Range by default
-//!   because the network handshake (and the real SDP dims) happen inside
-//!   `run`. [`RtspSrc::with_expected_dims`] is the opt-in fix for callers
-//!   who know the resolution; a pre-play caps probe (real auto-detection)
-//!   would require extending `SourceLoop` with an async `intercept_caps`.
+//! - The probe and `run`'s session open are distinct connections; the
+//!   server pays for two DESCRIBEs at startup. A future optimization is
+//!   to stash the post-SETUP session and consume it in `run`.
 //! - Each frame still copies retina's `Vec<u8>` into a `Box<[u8]>`. A
 //!   `Bytes`-aware `SystemSlice` variant (zero-copy) is deferred.
 
@@ -39,7 +45,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, Rate, VideoFormat,
+    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
@@ -70,11 +76,15 @@ pub struct RtspSrc {
     target_frames: Option<u64>,
     reconnect: ReconnectPolicy,
     /// Caller-supplied expected geometry. When set, `intercept_caps`
-    /// advertises these as fixed dims instead of the wide placeholder
-    /// Range (workaround #1), so a downstream sink negotiates the real
-    /// geometry at startup. The SDP's actual dims still arrive as a
-    /// mid-stream `CapsChanged`; if they differ, downstream rebuilds.
+    /// returns these as fixed dims without performing a network probe
+    /// (useful for tests and known cameras). The SDP's actual dims still
+    /// arrive as a mid-stream `CapsChanged`; if they differ, downstream
+    /// rebuilds.
     expected_dims: Option<(u32, u32)>,
+    /// Caps discovered by the async `intercept_caps` probe. Cached so
+    /// the runner can call `caps_constraint` more than once during
+    /// re-fixate retries without a second DESCRIBE.
+    discovered_caps: Option<Caps>,
     configured: bool,
 }
 
@@ -86,6 +96,7 @@ impl RtspSrc {
             target_frames: None,
             reconnect: ReconnectPolicy::DISABLED,
             expected_dims: None,
+            discovered_caps: None,
             configured: false,
         }
     }
@@ -152,33 +163,35 @@ impl SourceLoop for RtspSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        // The real dims come from the SDP, which only lands after DESCRIBE
-        // (inside `run`). To survive Phase 2's `Caps::fixate()` we advertise
-        // a wide Range rather than `Any` (`Any` is unfixable and aborts
-        // negotiation). The fixated placeholder is overwritten by the first
-        // `CapsChanged` we push once the session connects; downstream
-        // elements that care about geometry (e.g. allocators) only act on
-        // the cascaded refinement, not on this placeholder.
-        //
-        // `with_expected_dims` overrides the placeholder with fixed dims so
-        // the chain negotiates the real geometry at startup; a later
-        // `CapsChanged` still corrects them if the SDP disagrees.
-        let (width, height) = match self.expected_dims {
-            Some((w, h)) => (Dim::Fixed(w), Dim::Fixed(h)),
-            None => (
-                Dim::Range { min: 16, max: 8192 },
-                Dim::Range { min: 16, max: 8192 },
-            ),
-        };
-        Ok(Caps::Video {
-            format: VideoFormat::H264,
-            width,
-            height,
-            framerate: Rate::Range {
-                min_q16: 1 << 16,
-                max_q16: 240 << 16,
-            },
+    type CapsFuture<'a> = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        Box::pin(async move {
+            // Fast path: caller-supplied geometry skips the probe.
+            // Framerate stays as a fixable Range (Any would be rejected
+            // by `Caps::fixate`); the real value lands as a mid-stream
+            // `CapsChanged` if the SDP carries one.
+            if let Some((w, h)) = self.expected_dims {
+                return Ok(Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    width: Dim::Fixed(w),
+                    height: Dim::Fixed(h),
+                    framerate: Rate::Range {
+                        min_q16: 1 << 16,
+                        max_q16: 240 << 16,
+                    },
+                });
+            }
+            // Memoized probe: a re-fixate retry skips the second DESCRIBE.
+            if let Some(c) = &self.discovered_caps {
+                return Ok(c.clone());
+            }
+            let caps = probe_caps_with_reconnect(&self.url, &self.user_agent, &self.reconnect)
+                .await?;
+            self.discovered_caps = Some(caps.clone());
+            Ok(caps)
         })
     }
 
@@ -443,6 +456,70 @@ async fn run_session(
     SessionOutcome::LimitReached
 }
 
+/// Reconnect-aware wrapper around `probe_caps`: applies the source's
+/// reconnect policy so a transient connect failure during negotiation
+/// retries with the same backoff `run` uses for mid-session drops.
+/// With `ReconnectPolicy::DISABLED` (the default) this is a single
+/// `probe_caps` call.
+async fn probe_caps_with_reconnect(
+    url: &str,
+    user_agent: &str,
+    policy: &ReconnectPolicy,
+) -> Result<Caps, G2gError> {
+    let mut attempt: u32 = 0;
+    let mut backoff_ms = policy.initial_backoff_ms.max(1);
+    let max_attempts = policy.max_attempts;
+    loop {
+        match probe_caps(url, user_agent).await {
+            Ok(caps) => return Ok(caps),
+            // `CapsMismatch` is a structural problem (bad URL, no H.264
+            // stream): retrying won't help, surface immediately.
+            Err(G2gError::CapsMismatch) => return Err(G2gError::CapsMismatch),
+            Err(e) => {
+                if attempt >= max_attempts {
+                    return Err(e);
+                }
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                attempt += 1;
+                backoff_ms = (backoff_ms * 2).min(policy.max_backoff_ms.max(backoff_ms));
+            }
+        }
+    }
+}
+
+/// Async probe used by `intercept_caps` to discover real SDP geometry
+/// before negotiation. Performs DESCRIBE + SETUP, extracts H.264
+/// `VideoParameters`, drops the session, and returns the parsed caps.
+///
+/// Failure modes are flattened to `G2gError::Hardware`: the source has
+/// no caps to advertise, so the runner fails negotiation cleanly. A
+/// caller that wants to advertise fixed caps without I/O should use
+/// [`RtspSrc::with_expected_dims`] instead.
+async fn probe_caps(url: &str, user_agent: &str) -> Result<Caps, G2gError> {
+    let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
+    let session_group = Arc::new(SessionGroup::default());
+    let opts = SessionOptions::default()
+        .session_group(session_group)
+        .user_agent(user_agent.to_string());
+    let mut session = Session::describe(url, opts)
+        .await
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let video_idx = session
+        .streams()
+        .iter()
+        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
+        .ok_or(G2gError::CapsMismatch)?;
+    session
+        .setup(
+            video_idx,
+            SetupOptions::default().frame_format(FrameFormat::SIMPLE),
+        )
+        .await
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    caps_from_video_params(video_params_for(session.streams(), video_idx))
+        .ok_or(G2gError::CapsMismatch)
+}
+
 fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&VideoParameters> {
     match streams[idx].parameters() {
         Some(ParametersRef::Video(v)) => Some(v),
@@ -453,8 +530,8 @@ fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&V
 fn caps_from_video_params(params: Option<&VideoParameters>) -> Option<Caps> {
     let p = params?;
     let (w, h) = p.pixel_dimensions();
-    Some(Caps::Video {
-        format: VideoFormat::H264,
+    Some(Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: rate_from_frame_rate(p.frame_rate()),
@@ -490,38 +567,33 @@ mod tests {
         assert_eq!(rate_from_frame_rate(None), Rate::Any);
     }
 
-    #[test]
-    fn intercept_caps_defaults_to_placeholder_range() {
-        // Workaround #1: without expected dims, advertise a fixable Range.
-        let src = RtspSrc::new("rtsp://example/stream");
-        assert_eq!(
-            src.intercept_caps(),
-            Ok(Caps::Video {
-                format: VideoFormat::H264,
-                width: Dim::Range { min: 16, max: 8192 },
-                height: Dim::Range { min: 16, max: 8192 },
-                framerate: Rate::Range {
-                    min_q16: 1 << 16,
-                    max_q16: 240 << 16,
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn with_expected_dims_advertises_fixed_geometry() {
-        // Opt-in fix: expected dims surface as fixed caps at negotiation,
-        // so a downstream sink sizes its surface once at startup.
-        let src = RtspSrc::new("rtsp://example/stream").with_expected_dims(1920, 1080);
-        let caps = src.intercept_caps().expect("caps");
+    #[tokio::test]
+    async fn with_expected_dims_skips_probe_and_returns_fixed_geometry() {
+        // Fast path: caller-supplied geometry skips the network probe, so
+        // intercept_caps resolves without any I/O. (Useful for tests in
+        // sandbox environments where the network is unreachable.)
+        let mut src = RtspSrc::new("rtsp://example/stream").with_expected_dims(1920, 1080);
+        let caps = src.intercept_caps().await.expect("caps");
         match caps {
-            Caps::Video { format, width, height, .. } => {
-                assert_eq!(format, VideoFormat::H264);
+            Caps::CompressedVideo { codec, width, height, .. } => {
+                assert_eq!(codec, VideoCodec::H264);
                 assert_eq!(width, Dim::Fixed(1920));
                 assert_eq!(height, Dim::Fixed(1080));
             }
-            other => panic!("expected video caps, got {other:?}"),
+            other => panic!("expected compressed video caps, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn intercept_caps_memoizes_expected_dims_across_repeat_calls() {
+        // The runner queries `caps_constraint` (which awaits `intercept_caps`)
+        // on every re-fixate retry. With `with_expected_dims` no probe runs,
+        // so two consecutive queries must return the same fixed caps without
+        // I/O.
+        let mut src = RtspSrc::new("rtsp://example/stream").with_expected_dims(640, 480);
+        let a = src.intercept_caps().await.expect("first");
+        let b = src.intercept_caps().await.expect("second");
+        assert_eq!(a, b);
     }
 
     #[test]

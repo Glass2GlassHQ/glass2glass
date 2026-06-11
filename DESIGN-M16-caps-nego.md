@@ -482,8 +482,14 @@ remains.
 4. **Multi-element runner.** Once chains exceed 3 elements, mid-
    stream re-solve must cover the full downstream subgraph. Couples
    to item 1 cleanly.
-5. **Async `SourceLoop::intercept_caps`.** Closes workaround #1's
-   remaining gap. Trait change touches every source.
+5. **Async `SourceLoop::intercept_caps`.** *Done (M18).* Trait gains
+   `type CapsFuture<'a>` + `fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>`;
+   default `caps_constraint` awaits it. `DynSourceLoop` returns
+   `BoxFuture`. `RtspSrc` now performs DESCRIBE + SETUP in the probe
+   path, parses `VideoParameters`, caches the result; reconnect policy
+   wraps the probe, so transient connect failures retry with the same
+   backoff `run` uses for mid-session drops. `with_expected_dims` is
+   the offline fast-path (no I/O). Closes workaround #1.
 6. **Pad templates declarative metadata.** *Done (M18).* `PadTemplates`
    trait (type-level `pad_templates()`), `pad_link` / `types_can_link`
    pre-instantiation solver queries; implemented for `VideoTestSrc`,

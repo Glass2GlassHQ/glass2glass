@@ -136,7 +136,7 @@ impl AsyncElement for ElementSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use crate::element::{DynAsyncElement, OutputSink, PushOutcome};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
@@ -360,8 +360,8 @@ mod tests {
             counter,
             configured: true,
         }));
-        let upstream = Caps::Video {
-            format: VideoFormat::H264,
+        let upstream = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,

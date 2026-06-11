@@ -559,33 +559,41 @@ fn narrow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use alloc::boxed::Box;
     use alloc::vec;
 
-    fn video(fmt: VideoFormat, w: Dim, h: Dim, r: Rate) -> Caps {
-        Caps::Video { format: fmt, width: w, height: h, framerate: r }
+    fn video(fmt: RawVideoFormat, w: Dim, h: Dim, r: Rate) -> Caps {
+        Caps::RawVideo { format: fmt, width: w, height: h, framerate: r }
     }
 
-    fn fixed_video(fmt: VideoFormat, w: u32, h: u32, fps: u32) -> Caps {
+    fn fixed_video(fmt: RawVideoFormat, w: u32, h: u32, fps: u32) -> Caps {
         video(fmt, Dim::Fixed(w), Dim::Fixed(h), Rate::Fixed(fps << 16))
+    }
+
+    fn compressed(codec: VideoCodec, w: Dim, h: Dim, r: Rate) -> Caps {
+        Caps::CompressedVideo { codec, width: w, height: h, framerate: r }
+    }
+
+    fn fixed_compressed(codec: VideoCodec, w: u32, h: u32, fps: u32) -> Caps {
+        compressed(codec, Dim::Fixed(w), Dim::Fixed(h), Rate::Fixed(fps << 16))
     }
 
     #[test]
     fn solves_source_sink_minimal_chain() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::Nv12, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &sink]).unwrap();
-        assert_eq!(links, vec![fixed_video(VideoFormat::Nv12, 1280, 720, 30)]);
+        assert_eq!(links, vec![fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)]);
     }
 
     #[test]
     fn empty_link_when_formats_disjoint() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::H264, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30)));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         assert_eq!(
             solve_linear(&[&src, &sink]),
@@ -595,15 +603,15 @@ mod tests {
 
     #[test]
     fn degenerate_when_fewer_than_two_elements() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::Nv12, 1, 1, 1)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
         assert_eq!(solve_linear(&[&src]), Err(NegotiationFailure::Degenerate));
         assert_eq!(solve_linear(&[]), Err(NegotiationFailure::Degenerate));
     }
 
     #[test]
     fn endpoint_shape_mismatch_rejected() {
-        let id = CapsConstraint::Identity(CapsSet::one(fixed_video(VideoFormat::Nv12, 1, 1, 1)));
-        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(VideoFormat::Nv12, 1, 1, 1)));
+        let id = CapsConstraint::Identity(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
+        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1, 1, 1)));
         assert_eq!(
             solve_linear(&[&id, &sink]),
             Err(NegotiationFailure::EndpointShapeMismatch { index: 0 })
@@ -614,8 +622,8 @@ mod tests {
     fn preference_tie_break_picks_self_first_alt() {
         // Source prefers Rgba8 then H264 (both fully fixed at the same
         // dims); sink accepts both with reversed preference.
-        let rgba = fixed_video(VideoFormat::Rgba8, 640, 480, 30);
-        let h264 = fixed_video(VideoFormat::H264, 640, 480, 30);
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 640, 480, 30);
+        let h264 = fixed_compressed(VideoCodec::H264, 640, 480, 30);
         let src = CapsConstraint::Produces(CapsSet::from_alternatives(vec![rgba.clone(), h264.clone()]));
         let sink = CapsConstraint::Accepts(CapsSet::from_alternatives(vec![h264.clone(), rgba.clone()]));
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -626,28 +634,28 @@ mod tests {
 
     #[test]
     fn identity_couples_input_and_output() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::Nv12, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
         let id = CapsConstraint::Identity(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &id, &sink]).unwrap();
         assert_eq!(links, vec![
-            fixed_video(VideoFormat::Nv12, 1280, 720, 30),
-            fixed_video(VideoFormat::Nv12, 1280, 720, 30),
+            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
+            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
         ]);
     }
 
     #[test]
     fn identity_format_mismatch_returns_empty_link() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::H264, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30)));
         let id = CapsConstraint::Identity(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &id, &sink]),
@@ -658,10 +666,10 @@ mod tests {
     #[test]
     fn derived_output_evaluated_after_input_fixates() {
         // Decoder: H264 input → Nv12 output at the same dims.
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::H264, 1920, 1080, 60)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1920, 1080, 60)));
         let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Video { width, height, framerate, .. } => CapsSet::one(Caps::Video {
-                format: VideoFormat::Nv12,
+            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
@@ -669,12 +677,12 @@ mod tests {
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
         assert_eq!(links, vec![
-            fixed_video(VideoFormat::H264, 1920, 1080, 60),
-            fixed_video(VideoFormat::Nv12, 1920, 1080, 60),
+            fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
+            fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60),
         ]);
     }
 
@@ -685,30 +693,30 @@ mod tests {
         // Output dims come from the matching pair (mapping doesn't
         // propagate dims between paired sides — that's `DerivedOutput`'s
         // job).
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::H265, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H265, 1280, 720, 30)));
         let map = CapsConstraint::Mapping(vec![
             (
-                CapsSet::one(video(VideoFormat::H264, Dim::Any, Dim::Any, Rate::Any)),
-                CapsSet::one(fixed_video(VideoFormat::Nv12, 640, 480, 30)),
+                CapsSet::one(compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any)),
+                CapsSet::one(fixed_video(RawVideoFormat::Nv12, 640, 480, 30)),
             ),
             (
-                CapsSet::one(video(VideoFormat::H265, Dim::Any, Dim::Any, Rate::Any)),
-                CapsSet::one(fixed_video(VideoFormat::Nv12, 1280, 720, 30)),
+                CapsSet::one(compressed(VideoCodec::H265, Dim::Any, Dim::Any, Rate::Any)),
+                CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)),
             ),
         ]);
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &map, &sink]).unwrap();
-        assert_eq!(links[0], fixed_video(VideoFormat::H265, 1280, 720, 30));
-        assert_eq!(links[1], fixed_video(VideoFormat::Nv12, 1280, 720, 30));
+        assert_eq!(links[0], fixed_compressed(VideoCodec::H265, 1280, 720, 30));
+        assert_eq!(links[1], fixed_video(RawVideoFormat::Nv12, 1280, 720, 30));
     }
 
     #[test]
     fn legacy_cascade_source_to_sink() {
         // Source produces 720p NV12; sink accepts anything (returns
         // upstream unchanged from its intercept_caps).
-        let src_caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let src_caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::LegacySource(src_caps.clone());
         let sink = CapsConstraint::LegacySink(Box::new(|upstream: &Caps| Ok(upstream.clone())));
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -717,7 +725,7 @@ mod tests {
 
     #[test]
     fn legacy_cascade_with_pass_through_transform() {
-        let src_caps = fixed_video(VideoFormat::Nv12, 1920, 1080, 60);
+        let src_caps = fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60);
         let src = CapsConstraint::LegacySource(src_caps.clone());
         let id = CapsConstraint::LegacyTransform {
             intercept: Box::new(|c: &Caps| Ok(c.clone())),
@@ -731,13 +739,13 @@ mod tests {
     #[test]
     fn legacy_cascade_with_boundary_transform() {
         // Decoder: input H264, output NV12 at matching dims.
-        let src_caps = fixed_video(VideoFormat::H264, 1280, 720, 30);
+        let src_caps = fixed_compressed(VideoCodec::H264, 1280, 720, 30);
         let src = CapsConstraint::LegacySource(src_caps.clone());
         let dec = CapsConstraint::LegacyTransform {
             intercept: Box::new(|c: &Caps| Ok(c.clone())),
             propose_output: Box::new(|c: &Caps| match c {
-                Caps::Video { width, height, framerate, .. } => Caps::Video {
-                    format: VideoFormat::Nv12,
+                Caps::CompressedVideo { width, height, framerate, .. } => Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
@@ -756,13 +764,13 @@ mod tests {
         // `CapsChanged`. Both link slots carry the same fixated caps.
         // Format-changing semantics arrive when an element migrates to
         // a native variant and the chain becomes mixed.
-        let h264 = fixed_video(VideoFormat::H264, 1280, 720, 30);
+        let h264 = fixed_compressed(VideoCodec::H264, 1280, 720, 30);
         assert_eq!(links, vec![h264.clone(), h264]);
     }
 
     #[test]
     fn legacy_cascade_intercept_failure_returns_empty_link() {
-        let src = CapsConstraint::LegacySource(fixed_video(VideoFormat::H264, 1280, 720, 30));
+        let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
         let sink = CapsConstraint::LegacySink(Box::new(|_: &Caps| Err(crate::error::G2gError::CapsMismatch)));
         assert!(matches!(
             solve_linear(&[&src, &sink]),
@@ -775,10 +783,10 @@ mod tests {
         // Migration shape: source still on legacy bridge, sink moved to
         // native Accepts. The mixed cascade fixates link from the
         // source and narrows against the sink's CapsSet.
-        let caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::LegacySource(caps.clone());
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &sink]).unwrap();
         assert_eq!(links, vec![caps]);
@@ -787,7 +795,7 @@ mod tests {
     #[test]
     fn mixed_native_source_legacy_sink() {
         // Reverse migration shape: native source, legacy sink.
-        let caps = fixed_video(VideoFormat::Nv12, 640, 480, 30);
+        let caps = fixed_video(RawVideoFormat::Nv12, 640, 480, 30);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let sink = CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())));
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -799,14 +807,14 @@ mod tests {
         // Source migrated to native, decoder still on legacy bridge,
         // sink migrated. Exercises forward cascade through a legacy
         // boundary transform between two native endpoints.
-        let h264 = fixed_video(VideoFormat::H264, 1920, 1080, 60);
-        let nv12 = fixed_video(VideoFormat::Nv12, 1920, 1080, 60);
+        let h264 = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60);
         let src = CapsConstraint::Produces(CapsSet::one(h264));
         let dec = CapsConstraint::LegacyTransform {
             intercept: Box::new(|c: &Caps| Ok(c.clone())),
             propose_output: Box::new(|c: &Caps| match c {
-                Caps::Video { width, height, framerate, .. } => Caps::Video {
-                    format: VideoFormat::Nv12,
+                Caps::CompressedVideo { width, height, framerate, .. } => Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
@@ -815,20 +823,20 @@ mod tests {
             }),
         };
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         let links = solve_linear(&[&src, &dec, &sink]).unwrap();
         assert_eq!(links, vec![
-            fixed_video(VideoFormat::H264, 1920, 1080, 60),
+            fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
             nv12,
         ]);
     }
 
     #[test]
     fn mixed_chain_empty_link_when_sink_rejects() {
-        let src = CapsConstraint::LegacySource(fixed_video(VideoFormat::H264, 1280, 720, 30));
+        let src = CapsConstraint::LegacySource(fixed_compressed(VideoCodec::H264, 1280, 720, 30));
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &sink]),
@@ -838,7 +846,7 @@ mod tests {
 
     #[test]
     fn accepts_any_native_chain_passes_source_caps_through() {
-        let caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let sink = CapsConstraint::AcceptsAny;
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -849,7 +857,7 @@ mod tests {
     fn accepts_any_mixed_chain_passes_legacy_source_through() {
         // Migration shape: legacy source still on the bridge, sink
         // migrated to AcceptsAny.
-        let caps = fixed_video(VideoFormat::H264, 1920, 1080, 60);
+        let caps = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
         let src = CapsConstraint::LegacySource(caps.clone());
         let sink = CapsConstraint::AcceptsAny;
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -864,7 +872,7 @@ mod tests {
         // element is invisible to the solver. Forward-cascade paths
         // (mixed/legacy) do reject this via `forward_propagate` because
         // they need an explicit output rule.
-        let caps = fixed_video(VideoFormat::Nv12, 1, 1, 1);
+        let caps = fixed_video(RawVideoFormat::Nv12, 1, 1, 1);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let mid = CapsConstraint::AcceptsAny;
         let sink = CapsConstraint::Accepts(CapsSet::one(caps.clone()));
@@ -878,7 +886,7 @@ mod tests {
         // The wildcard transform doesn't constrain by any set; it just
         // forces input = output, so both links carry the source's
         // produced caps.
-        let caps = fixed_video(VideoFormat::Nv12, 1280, 720, 30);
+        let caps = fixed_video(RawVideoFormat::Nv12, 1280, 720, 30);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let mid = CapsConstraint::IdentityAny;
         let sink = CapsConstraint::AcceptsAny;
@@ -888,7 +896,7 @@ mod tests {
 
     #[test]
     fn identity_any_in_mixed_chain_passes_legacy_source_through() {
-        let caps = fixed_video(VideoFormat::H264, 1920, 1080, 60);
+        let caps = fixed_compressed(VideoCodec::H264, 1920, 1080, 60);
         let src = CapsConstraint::LegacySource(caps.clone());
         let mid = CapsConstraint::IdentityAny;
         let sink = CapsConstraint::AcceptsAny;
@@ -900,7 +908,7 @@ mod tests {
     fn identity_any_endpoint_position_rejected_in_mixed() {
         // IdentityAny is interior-only; using it as a source or sink
         // should fail the endpoint shape check.
-        let caps = fixed_video(VideoFormat::Nv12, 1, 1, 1);
+        let caps = fixed_video(RawVideoFormat::Nv12, 1, 1, 1);
         let bad_src = CapsConstraint::IdentityAny;
         let sink = CapsConstraint::Accepts(CapsSet::one(caps));
         assert!(matches!(
@@ -914,7 +922,7 @@ mod tests {
         // 5f-style chain: native source (Produces) → AcceptsAny.
         // Confirms the all-native arc-consistency path passes Produces's
         // caps through and the chain returns the source's fixed caps.
-        let caps = fixed_video(VideoFormat::Rgba8, 1280, 720, 30);
+        let caps = fixed_video(RawVideoFormat::Rgba8, 1280, 720, 30);
         let src = CapsConstraint::Produces(CapsSet::one(caps.clone()));
         let sink = CapsConstraint::AcceptsAny;
         let links = solve_linear(&[&src, &sink]).unwrap();
@@ -923,13 +931,13 @@ mod tests {
 
     #[test]
     fn mapping_no_surviving_pair_returns_empty_link() {
-        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(VideoFormat::Av1, 1280, 720, 30)));
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::Av1, 1280, 720, 30)));
         let map = CapsConstraint::Mapping(vec![(
-            CapsSet::one(video(VideoFormat::H264, Dim::Any, Dim::Any, Rate::Any)),
-            CapsSet::one(video(VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any)),
+            CapsSet::one(compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any)),
+            CapsSet::one(video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any)),
         )]);
         let sink = CapsConstraint::Accepts(CapsSet::one(video(
-            VideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
         )));
         assert!(matches!(
             solve_linear(&[&src, &map, &sink]),

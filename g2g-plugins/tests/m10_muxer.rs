@@ -10,7 +10,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, VideoFormat,
+    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 use g2g_plugins::mux::InterleaveMux;
 
@@ -22,7 +22,7 @@ impl PipelineClock for ZeroClock {
 }
 
 fn vcaps(width: Dim) -> Caps {
-    Caps::Video { format: VideoFormat::Rgba8, width, height: Dim::Fixed(480), framerate: Rate::Fixed(30 << 16) }
+    Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height: Dim::Fixed(480), framerate: Rate::Fixed(30 << 16) }
 }
 
 fn make_frame(seq: u64) -> Frame {
@@ -48,8 +48,12 @@ impl SourceLoop for CapSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.advertise.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.advertise.clone()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

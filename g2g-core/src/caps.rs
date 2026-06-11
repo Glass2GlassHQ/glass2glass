@@ -2,10 +2,35 @@ use alloc::vec::Vec;
 
 use crate::error::G2gError;
 
+/// Caps describes one fixated (or partially-narrowed) link.
+///
+/// Video is split into [`Caps::CompressedVideo`] and [`Caps::RawVideo`]
+/// because a codec bitstream and a raw pixel buffer are *different
+/// kinds* of media, not different values of one "format" slot. A raw
+/// sink (waylandsink, kmssink) intercepting a `CompressedVideo` caps is
+/// a category error; the type system now expresses that as a variant
+/// mismatch rather than a runtime enum compare. (Mirrors GStreamer's
+/// `video/x-h264` vs `video/x-raw` distinction; M17 split.)
+///
+/// Both video variants carry geometry today. That's pragmatic, not
+/// honest: GStreamer's `video/x-h264` doesn't have width/height because
+/// they live in the SPS. Our solver, the RtspSrc placeholder Range, and
+/// our `Range`-as-placeholder convention all hang off geometry on
+/// compressed caps. Dropping it is a deeper rework that overlaps
+/// workaround #1's redesign; out of scope here.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Caps {
-    Video {
-        format: VideoFormat,
+    /// Compressed video bitstream (codec). Width/height/framerate are
+    /// nominal until the bitstream parser confirms them via SPS/equivalent.
+    CompressedVideo {
+        codec: VideoCodec,
+        width: Dim,
+        height: Dim,
+        framerate: Rate,
+    },
+    /// Raw pixel buffer in `format`. Geometry is authoritative.
+    RawVideo {
+        format: RawVideoFormat,
         width: Dim,
         height: Dim,
         framerate: Rate,
@@ -25,16 +50,29 @@ pub enum Caps {
 impl Caps {
     /// Phase 1 intersection (DESIGN.md §4.2). Narrow `self` against `other`,
     /// returning the overlap. Both must be the same variant; ranged fields
-    /// (`Dim`/`Rate`) intersect field-wise, scalar fields (`format`,
-    /// `channels`, `sample_rate`, tensor dtype/shape/layout) must be equal.
-    /// Any empty field overlap, variant mismatch, or scalar mismatch yields
-    /// `CapsMismatch`.
+    /// (`Dim`/`Rate`) intersect field-wise, scalar fields (`codec` /
+    /// `format`, `channels`, `sample_rate`, tensor dtype/shape/layout) must
+    /// be equal. Any empty field overlap, variant mismatch, or scalar
+    /// mismatch yields `CapsMismatch`.
+    ///
+    /// `CompressedVideo` and `RawVideo` are distinct variants — a raw
+    /// sink offered compressed input gets `CapsMismatch` structurally,
+    /// not a runtime format compare.
     pub fn intersect(&self, other: &Caps) -> Result<Caps, G2gError> {
         match (self, other) {
             (
-                Caps::Video { format: fa, width: wa, height: ha, framerate: ra },
-                Caps::Video { format: fb, width: wb, height: hb, framerate: rb },
-            ) if fa == fb => Ok(Caps::Video {
+                Caps::CompressedVideo { codec: ca, width: wa, height: ha, framerate: ra },
+                Caps::CompressedVideo { codec: cb, width: wb, height: hb, framerate: rb },
+            ) if ca == cb => Ok(Caps::CompressedVideo {
+                codec: *ca,
+                width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
+                height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
+                framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
+            }),
+            (
+                Caps::RawVideo { format: fa, width: wa, height: ha, framerate: ra },
+                Caps::RawVideo { format: fb, width: wb, height: hb, framerate: rb },
+            ) if fa == fb => Ok(Caps::RawVideo {
                 format: *fa,
                 width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
@@ -55,11 +93,11 @@ impl Caps {
     /// True when every ranged field is `Fixed`. Scalar-only variants are
     /// always fixed.
     pub fn is_fixed(&self) -> bool {
-        match self {
-            Caps::Video { width, height, framerate, .. } => {
+        match self.dims() {
+            Some((width, height, framerate)) => {
                 width.is_fixed() && height.is_fixed() && framerate.is_fixed()
             }
-            Caps::Audio { .. } | Caps::Tensor { .. } => true,
+            None => true,
         }
     }
 
@@ -72,13 +110,33 @@ impl Caps {
     /// `CapsMismatch`.
     pub fn fixate(&self) -> Result<Caps, G2gError> {
         match self {
-            Caps::Video { format, width, height, framerate } => Ok(Caps::Video {
+            Caps::CompressedVideo { codec, width, height, framerate } => {
+                Ok(Caps::CompressedVideo {
+                    codec: *codec,
+                    width: width.fixate().ok_or(G2gError::CapsMismatch)?,
+                    height: height.fixate().ok_or(G2gError::CapsMismatch)?,
+                    framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
+                })
+            }
+            Caps::RawVideo { format, width, height, framerate } => Ok(Caps::RawVideo {
                 format: *format,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
                 framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
             }),
             Caps::Audio { .. } | Caps::Tensor { .. } => Ok(self.clone()),
+        }
+    }
+
+    /// Borrow the geometry triple if this caps carries one. Both video
+    /// variants (compressed + raw) currently do; `Audio` and `Tensor`
+    /// return `None`. Used by element code that needs width/height/fps
+    /// without caring whether the link is pre- or post-decode.
+    pub fn dims(&self) -> Option<(&Dim, &Dim, &Rate)> {
+        match self {
+            Caps::CompressedVideo { width, height, framerate, .. }
+            | Caps::RawVideo { width, height, framerate, .. } => Some((width, height, framerate)),
+            Caps::Audio { .. } | Caps::Tensor { .. } => None,
         }
     }
 }
@@ -273,12 +331,24 @@ impl CapsSet {
     }
 }
 
+/// Compressed video codec carried in a [`Caps::CompressedVideo`] link.
+/// Split out of the old `VideoFormat` enum so a decoder's "I accept
+/// codec, I emit raw" boundary is type-level rather than a runtime
+/// format compare. M17 split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum VideoFormat {
+pub enum VideoCodec {
     H264,
     H265,
     Av1,
     Vp9,
+}
+
+/// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
+/// the old `VideoFormat` enum so a raw sink (waylandsink/kmssink)
+/// rejects compressed input structurally rather than via runtime check.
+/// M17 split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RawVideoFormat {
     Nv12,
     I420,
     Rgba8,
@@ -316,7 +386,7 @@ mod tests {
     use alloc::vec;
 
     fn video(width: Dim, height: Dim, framerate: Rate) -> Caps {
-        Caps::Video { format: VideoFormat::Rgba8, width, height, framerate }
+        Caps::RawVideo { format: RawVideoFormat::Rgba8, width, height, framerate }
     }
 
     #[test]
@@ -392,8 +462,8 @@ mod tests {
 
     #[test]
     fn caps_intersect_rejects_format_mismatch() {
-        let a = Caps::Video {
-            format: VideoFormat::H264,
+        let a = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -465,14 +535,14 @@ mod tests {
     #[test]
     fn capsset_intersect_preserves_self_preference_order() {
         // self: prefers Rgba8 then H264; other: accepts both with any dims.
-        let rgba = |w| Caps::Video {
-            format: VideoFormat::Rgba8,
+        let rgba = |w| Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
             width: w,
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        let h264 = |w| Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = |w| Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: w,
             height: Dim::Any,
             framerate: Rate::Any,

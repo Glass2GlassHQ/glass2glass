@@ -39,7 +39,20 @@ pub trait SourceLoop: ElementBound {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError>;
+    /// Future returned by [`intercept_caps`]. Async so a source can perform
+    /// I/O during negotiation (e.g. RTSP DESCRIBE + SDP parse, hardware
+    /// capability probe). Sources that produce caps without I/O can return
+    /// [`core::future::Ready`] and the runner pays no cost.
+    type CapsFuture<'a>: Future<Output = Result<Caps, G2gError>> + 'a
+    where
+        Self: 'a;
+
+    /// Negotiation-time caps query. Awaited by the runner during startup
+    /// (and on re-fixate retries). `&mut self` because real implementations
+    /// (e.g. `RtspSrc`) open a session here and stash the connected state
+    /// for `run` to resume from. Synchronous sources just return
+    /// `core::future::ready(Ok(caps))`.
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>;
 
     fn configure_pipeline(
         &mut self,
@@ -91,13 +104,15 @@ pub trait SourceLoop: ElementBound {
     }
 
     /// M16 step 5f: declare this source's negotiation-time constraint.
-    /// Default: eagerly evaluate `intercept_caps()` and wrap as a
+    /// Default: eagerly await `intercept_caps()` and wrap as a
     /// `LegacySource(Caps)` for the solver. Migrated sources override
     /// to return `Produces(CapsSet)` (or another native variant) and
     /// the chain takes the native arc-consistency path when every
     /// other element is also native.
-    fn caps_constraint(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::LegacySource(self.intercept_caps()?))
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
     }
 }
 
@@ -216,10 +231,12 @@ where
         if attempts > MAX_FIXATION_ATTEMPTS {
             return Err(G2gError::FixationFailed);
         }
+        // Resolve src_c in its own scope so its borrow of `source`
+        // releases before `configure_pipeline(&fixated)` below.
         let fixated = {
             let src_c = match &refix_counter {
                 Some(c) => CapsConstraint::LegacySource(c.clone()),
-                None => source.caps_constraint()?,
+                None => source.caps_constraint().await?,
             };
             let sink_c = sink.caps_constraint_as_sink();
             let links = solve_linear(&[&src_c, &sink_c])
@@ -384,7 +401,7 @@ where
     // restructure) does — it slots in here via per-branch calls to
     // `re_solve_downstream_sink`.
     let fixated = {
-        let src_c = source.caps_constraint()?;
+        let src_c = source.caps_constraint().await?;
         let fanout_c = fanout.caps_constraint_as_input();
         let links = solve_linear(&[&src_c, &fanout_c])
             .map_err(|_| G2gError::CapsMismatch)?;
@@ -563,7 +580,9 @@ where
     // mid-stream re-cascade. `sink_link` is the downstream-facing caps
     // (transform output = sink input) that M12 allocation flows along,
     // so it stands in for the loop's former `negotiated_caps`.
-    let negotiated_caps = negotiate_source_transform_sink(source, transform, sink)?.sink_link;
+    let negotiated_caps = negotiate_source_transform_sink(source, transform, sink)
+        .await?
+        .sink_link;
 
     // M12 latency query: fold the configured chain source → transform → sink.
     let latency = LatencyReport::aggregate([

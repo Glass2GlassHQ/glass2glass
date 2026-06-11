@@ -193,18 +193,22 @@ pub fn legacy_sink_constraint<'a, S: AsyncElement + ?Sized>(sink: &'a S) -> Caps
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use alloc::vec;
 
-    fn video(format: VideoFormat, w: Dim, h: Dim, r: Rate) -> Caps {
-        Caps::Video { format, width: w, height: h, framerate: r }
+    fn video(format: RawVideoFormat, w: Dim, h: Dim, r: Rate) -> Caps {
+        Caps::RawVideo { format, width: w, height: h, framerate: r }
+    }
+
+    fn compressed(codec: VideoCodec, w: Dim, h: Dim, r: Rate) -> Caps {
+        Caps::CompressedVideo { codec, width: w, height: h, framerate: r }
     }
 
     struct FakeSource;
     impl FormatElement for FakeSource {
         fn caps_constraint(&self) -> CapsConstraint<'_> {
-            CapsConstraint::Produces(CapsSet::one(video(
-                VideoFormat::H264,
+            CapsConstraint::Produces(CapsSet::one(compressed(
+                VideoCodec::H264,
                 Dim::Fixed(1920),
                 Dim::Fixed(1080),
                 Rate::Fixed(30 << 16),
@@ -224,7 +228,7 @@ mod tests {
     impl FormatElement for FakeSink {
         fn caps_constraint(&self) -> CapsConstraint<'_> {
             CapsConstraint::Accepts(CapsSet::one(video(
-                VideoFormat::Nv12,
+                RawVideoFormat::Nv12,
                 Dim::Any,
                 Dim::Any,
                 Rate::Any,
@@ -245,8 +249,8 @@ mod tests {
         fn caps_constraint(&self) -> CapsConstraint<'_> {
             // Output dims are read from the input caps; framerate is preserved.
             CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-                Caps::Video { width, height, framerate, .. } => CapsSet::one(Caps::Video {
-                    format: VideoFormat::Nv12,
+                Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
@@ -286,14 +290,14 @@ mod tests {
     #[test]
     fn derived_output_is_function_of_input() {
         let d = FakeDecoder;
-        let input = video(VideoFormat::H264, Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let input = compressed(VideoCodec::H264, Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16));
         let c = d.caps_constraint();
         match c {
             CapsConstraint::DerivedOutput(f) => {
                 let out = f(&input);
                 assert_eq!(
                     out.alternatives(),
-                    &[video(VideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16))]
+                    &[video(RawVideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16))]
                 );
             }
             _ => panic!("expected DerivedOutput"),
@@ -305,10 +309,10 @@ mod tests {
         struct FakeScaler;
         impl FormatElement for FakeScaler {
             fn caps_constraint(&self) -> CapsConstraint<'_> {
-                let in_a = CapsSet::one(video(VideoFormat::Nv12, Dim::Fixed(1920), Dim::Fixed(1080), Rate::Any));
-                let out_a = CapsSet::one(video(VideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any));
-                let in_b = CapsSet::one(video(VideoFormat::I420, Dim::Fixed(1920), Dim::Fixed(1080), Rate::Any));
-                let out_b = CapsSet::one(video(VideoFormat::I420, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any));
+                let in_a = CapsSet::one(video(RawVideoFormat::Nv12, Dim::Fixed(1920), Dim::Fixed(1080), Rate::Any));
+                let out_a = CapsSet::one(video(RawVideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any));
+                let in_b = CapsSet::one(video(RawVideoFormat::I420, Dim::Fixed(1920), Dim::Fixed(1080), Rate::Any));
+                let out_b = CapsSet::one(video(RawVideoFormat::I420, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any));
                 CapsConstraint::Mapping(vec![(in_a, out_a), (in_b, out_b)])
             }
             fn configure_link(
@@ -334,8 +338,8 @@ mod tests {
     #[test]
     fn accept_caps_query_checks_constraint_set() {
         // ACCEPT_CAPS (DESIGN §7): pure check against the declared set.
-        let nv12_720 = video(VideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
-        let h264_720 = video(VideoFormat::H264, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
+        let nv12_720 = video(RawVideoFormat::Nv12, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
+        let h264_720 = compressed(VideoCodec::H264, Dim::Fixed(1280), Dim::Fixed(720), Rate::Any);
 
         // Accepts(NV12/any) takes NV12, rejects H.264.
         let sink = FakeSink.caps_constraint();
@@ -346,7 +350,7 @@ mod tests {
         let id = CapsConstraint::Identity(CapsSet::one(nv12_720.clone()));
         assert!(id.accepts(&nv12_720));
         assert!(!id.accepts(&video(
-            VideoFormat::Nv12,
+            RawVideoFormat::Nv12,
             Dim::Fixed(1920),
             Dim::Fixed(1080),
             Rate::Any,
@@ -373,14 +377,14 @@ mod tests {
         impl AsyncElement for FakeXform {
             type ProcessFuture<'a> = Ready<Result<(), G2gError>>;
             fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
-                match upstream {
-                    Caps::Video { height, framerate, .. } => Ok(Caps::Video {
-                        format: VideoFormat::H264,
+                match upstream.dims() {
+                    Some((_w, height, framerate)) => Ok(Caps::CompressedVideo {
+                        codec: VideoCodec::H264,
                         width: Dim::Fixed(640),
                         height: height.clone(),
                         framerate: framerate.clone(),
                     }),
-                    _ => Err(G2gError::CapsMismatch),
+                    None => Err(G2gError::CapsMismatch),
                 }
             }
             fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -398,8 +402,8 @@ mod tests {
             }
             fn propose_output_caps(&self, input: &Caps) -> Caps {
                 match input {
-                    Caps::Video { width, height, framerate, .. } => Caps::Video {
-                        format: VideoFormat::Nv12,
+                    Caps::CompressedVideo { width, height, framerate, .. } => Caps::RawVideo {
+                        format: RawVideoFormat::Nv12,
                         width: width.clone(),
                         height: height.clone(),
                         framerate: framerate.clone(),
@@ -411,13 +415,13 @@ mod tests {
 
         let xf = FakeXform;
         let c = legacy_transform_constraint(&xf);
-        let upstream = video(VideoFormat::H264, Dim::Fixed(1920), Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let upstream = compressed(VideoCodec::H264, Dim::Fixed(1920), Dim::Fixed(720), Rate::Fixed(30 << 16));
         match &c {
             CapsConstraint::LegacyTransform { intercept, propose_output } => {
                 let narrowed = intercept(&upstream).unwrap();
-                assert_eq!(narrowed, video(VideoFormat::H264, Dim::Fixed(640), Dim::Fixed(720), Rate::Fixed(30 << 16)));
+                assert_eq!(narrowed, compressed(VideoCodec::H264, Dim::Fixed(640), Dim::Fixed(720), Rate::Fixed(30 << 16)));
                 let out = propose_output(&narrowed);
-                assert_eq!(out, video(VideoFormat::Nv12, Dim::Fixed(640), Dim::Fixed(720), Rate::Fixed(30 << 16)));
+                assert_eq!(out, video(RawVideoFormat::Nv12, Dim::Fixed(640), Dim::Fixed(720), Rate::Fixed(30 << 16)));
             }
             _ => panic!("expected LegacyTransform"),
         }
@@ -425,7 +429,7 @@ mod tests {
 
     #[test]
     fn configure_link_signature_works_for_all_shapes() {
-        let cap = video(VideoFormat::Nv12, Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let cap = video(RawVideoFormat::Nv12, Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16));
         FakeSource.configure_link(None, Some(&cap)).unwrap();
         FakeSink.configure_link(Some(&cap), None).unwrap();
         FakeDecoder.configure_link(Some(&cap), Some(&cap)).unwrap();

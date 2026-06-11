@@ -27,7 +27,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    VideoFormat,
+    VideoCodec, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -38,8 +38,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Nv12,
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -55,8 +55,12 @@ struct NvSource {
 impl SourceLoop for NvSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.initial.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.initial.clone()))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -140,12 +144,8 @@ struct PoolSink {
 }
 
 fn geometry_size(caps: &Caps) -> Option<usize> {
-    match caps {
-        Caps::Video {
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            ..
-        } => Some(*w as usize * *h as usize),
+    match caps.dims()? {
+        (Dim::Fixed(w), Dim::Fixed(h), _) => Some(*w as usize * *h as usize),
         _ => None,
     }
 }
@@ -158,8 +158,8 @@ impl AsyncElement for PoolSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(Caps::Video {
-            format: VideoFormat::Nv12,
+        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,

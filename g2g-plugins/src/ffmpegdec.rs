@@ -75,7 +75,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -89,10 +89,10 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    fn video_format(self) -> VideoFormat {
+    fn raw_format(self) -> RawVideoFormat {
         match self {
-            OutputFormat::I420 => VideoFormat::I420,
-            OutputFormat::Nv12 => VideoFormat::Nv12,
+            OutputFormat::I420 => RawVideoFormat::I420,
+            OutputFormat::Nv12 => RawVideoFormat::Nv12,
         }
     }
 }
@@ -351,8 +351,8 @@ impl AsyncElement for FfmpegH264Dec {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let supported = Caps::Video {
-            format: VideoFormat::H264,
+        let supported = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -373,7 +373,7 @@ impl AsyncElement for FfmpegH264Dec {
     /// legacy single-fixated cascade to the per-link path without
     /// regression.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let out_fmt = self.output_format.video_format();
+        let out_fmt = self.output_format.raw_format();
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
             derive_output_caps(input, out_fmt)
         }))
@@ -381,8 +381,8 @@ impl AsyncElement for FfmpegH264Dec {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Video {
-                format: VideoFormat::H264,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
                 ..
             } => {}
             _ => return Err(G2gError::CapsMismatch),
@@ -465,8 +465,8 @@ impl AsyncElement for FfmpegH264Dec {
                     // our own output `CapsChanged` at the decode boundary
                     // from decoded-frame geometry, not eagerly here.
                     match &c {
-                        Caps::Video {
-                            format: VideoFormat::H264,
+                        Caps::CompressedVideo {
+                            codec: VideoCodec::H264,
                             ..
                         } => {}
                         _ => return Err(G2gError::CapsMismatch),
@@ -501,7 +501,7 @@ impl AsyncElement for FfmpegH264Dec {
                     // stale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input, out_format.video_format());
+                        let expected = derive_output_caps(input, out_format.raw_format());
                         debug_assert!(
                             !expected
                                 .intersect(&CapsSet::one(new_caps.clone()))
@@ -539,14 +539,14 @@ impl AsyncElement for FfmpegH264Dec {
 /// Non-H.264 input yields an empty `CapsSet`: the solver treats that as a
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
-fn derive_output_caps(input: &Caps, out_fmt: VideoFormat) -> CapsSet {
+fn derive_output_caps(input: &Caps, out_fmt: RawVideoFormat) -> CapsSet {
     match input {
-        Caps::Video {
-            format: VideoFormat::H264,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width,
             height,
             framerate,
-        } => CapsSet::one(Caps::Video {
+        } => CapsSet::one(Caps::RawVideo {
             format: out_fmt,
             width: width.clone(),
             height: height.clone(),
@@ -557,8 +557,8 @@ fn derive_output_caps(input: &Caps, out_fmt: VideoFormat) -> CapsSet {
 }
 
 fn yuv420_caps(format: OutputFormat, w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: format.video_format(),
+    Caps::RawVideo {
+        format: format.raw_format(),
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
@@ -697,8 +697,8 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = c else {
             panic!("expected DerivedOutput");
         };
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
@@ -706,8 +706,8 @@ mod tests {
         let out = f(&h264);
         assert_eq!(
             out.alternatives(),
-            &[Caps::Video {
-                format: VideoFormat::Nv12,
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
@@ -715,8 +715,8 @@ mod tests {
         );
 
         // Non-H.264 input → empty CapsSet (solver rejects with EmptyLink).
-        let vp9 = Caps::Video {
-            format: VideoFormat::Vp9,
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
@@ -728,8 +728,8 @@ mod tests {
     fn i420_caps_are_fixed() {
         assert_eq!(
             yuv420_caps(OutputFormat::I420, 640, 480),
-            Caps::Video {
-                format: VideoFormat::I420,
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
@@ -741,8 +741,8 @@ mod tests {
     fn nv12_caps_advertise_nv12_format() {
         assert_eq!(
             yuv420_caps(OutputFormat::Nv12, 1280, 720),
-            Caps::Video {
-                format: VideoFormat::Nv12,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
                 framerate: Rate::Any,
@@ -764,8 +764,8 @@ mod tests {
     #[test]
     fn intercept_rejects_non_h264() {
         let dec = FfmpegH264Dec::new();
-        let vp9 = Caps::Video {
-            format: VideoFormat::Vp9,
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -776,8 +776,8 @@ mod tests {
     #[test]
     fn intercept_narrows_h264_geometry() {
         let dec = FfmpegH264Dec::new();
-        let proposal = Caps::Video {
-            format: VideoFormat::H264,
+        let proposal = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
@@ -806,8 +806,8 @@ mod tests {
         let nv = FfmpegH264Dec::new()
             .with_output_format(OutputFormat::Nv12)
             .with_backend(Backend::NvdecCuvid);
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),

@@ -38,7 +38,9 @@ use crate::runtime::runner::{NullSink, RunStats, SourceLoop};
 /// Boxes `run`'s future so a `Vec<&mut dyn DynSourceLoop>` can hold sources
 /// of different concrete types.
 pub trait DynSourceLoop: ElementBound {
-    fn intercept_caps(&self) -> Result<Caps, G2gError>;
+    fn intercept_caps<'a>(
+        &'a mut self,
+    ) -> BoxFuture<'a, Result<Caps, G2gError>>;
 
     fn configure_pipeline(
         &mut self,
@@ -54,11 +56,14 @@ pub trait DynSourceLoop: ElementBound {
 }
 
 /// Blanket adapter: every [`SourceLoop`] is usable as a [`DynSourceLoop`]
-/// by boxing its `run` future. Calls are disambiguated to `SourceLoop::`
-/// because the two traits share method names.
+/// by boxing its `run` and `intercept_caps` futures. Calls are
+/// disambiguated to `SourceLoop::` because the two traits share method
+/// names.
 impl<T: SourceLoop> DynSourceLoop for T {
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        SourceLoop::intercept_caps(self)
+    fn intercept_caps<'a>(
+        &'a mut self,
+    ) -> BoxFuture<'a, Result<Caps, G2gError>> {
+        Box::pin(SourceLoop::intercept_caps(self))
     }
 
     fn configure_pipeline(
@@ -113,7 +118,7 @@ where
     let mut sources = sources;
     let mut merged_caps: Option<Caps> = None;
     for (i, source) in sources.iter_mut().enumerate() {
-        let proposal = source.intercept_caps()?;
+        let proposal = source.intercept_caps().await?;
         let fixated = proposal.fixate()?;
         if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
             return Err(G2gError::FixationFailed);
@@ -309,7 +314,7 @@ where
     // `solve_mux_input` helper (Phase C MX-1 reuses it mid-stream).
     let mut sources = sources;
     for (i, source) in sources.iter_mut().enumerate() {
-        let proposal = source.intercept_caps()?;
+        let proposal = source.intercept_caps().await?;
         let fixated = solve_mux_input(proposal, mux, i)?;
         if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
             return Err(G2gError::FixationFailed);

@@ -12,7 +12,7 @@
 #![cfg(feature = "rtsp")]
 
 use g2g_core::runtime::run_simple_pipeline;
-use g2g_core::{Caps, Dim, G2gError, PipelineClock, Rate, VideoFormat};
+use g2g_core::{Caps, Dim, G2gError, PipelineClock, VideoCodec, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::rtspsrc::RtspSrc;
 
@@ -23,32 +23,47 @@ impl PipelineClock for ZeroClock {
     }
 }
 
-#[test]
-fn rtspsrc_intercept_caps_advertises_fixate_friendly_h264_range() {
-    // intercept_caps runs during Phase 1 before we touch the network. The
-    // real dims live in the SDP and only land inside `run`, so we advertise
-    // a wide `Range` (not `Any`, which `Caps::fixate()` rejects) and rely
-    // on the SDP-derived `CapsChanged` to refine to a fixed geometry.
+#[tokio::test]
+async fn rtspsrc_intercept_caps_with_expected_dims_skips_probe_and_fixates() {
+    // M18 item 5: `intercept_caps` is async and probes the server by
+    // default. `with_expected_dims` is the offline fast path: caps come
+    // from the caller, no network touch. The advertised caps must still
+    // be fixable so Phase 2 doesn't abort with `CapsMismatch`.
     use g2g_core::runtime::SourceLoop as _;
-    let src = RtspSrc::new("rtsp://invalid.example/never-reached");
-    let caps = src.intercept_caps().expect("intercept_caps should succeed");
-    // Critical contract: the advertised caps must be fixable, else the
-    // runner aborts with `CapsMismatch` before any frames flow.
-    caps.fixate().expect("RtspSrc caps must be fixate-friendly");
+    let mut src = RtspSrc::new("rtsp://invalid.example/never-reached")
+        .with_expected_dims(1920, 1080);
+    let caps = src.intercept_caps().await.expect("intercept_caps");
+    caps.fixate().expect("expected-dims caps must be fixate-friendly");
     match &caps {
-        Caps::Video {
-            format,
+        Caps::CompressedVideo {
+            codec,
             width,
             height,
-            framerate,
+            ..
         } => {
-            assert_eq!(*format, VideoFormat::H264);
-            assert!(matches!(width, Dim::Range { .. }));
-            assert!(matches!(height, Dim::Range { .. }));
-            assert!(matches!(framerate, Rate::Range { .. }));
+            assert_eq!(*codec, VideoCodec::H264);
+            assert_eq!(*width, Dim::Fixed(1920));
+            assert_eq!(*height, Dim::Fixed(1080));
         }
-        other => panic!("expected Caps::Video, got {other:?}"),
+        other => panic!("expected Caps::CompressedVideo, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn rtspsrc_intercept_caps_probes_and_fails_on_unreachable_url() {
+    // Without `with_expected_dims`, intercept_caps attempts DESCRIBE +
+    // SETUP. An unreachable URL must surface a `Hardware` error during
+    // negotiation rather than (as before M18 item 5) silently advertising
+    // a placeholder Range and exploding inside `run`.
+    use g2g_core::runtime::SourceLoop as _;
+    let mut src = RtspSrc::new("rtsp://127.0.0.1:1/never-listens");
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        src.intercept_caps(),
+    )
+    .await
+    .expect("probe must terminate within 5s");
+    assert!(matches!(res, Err(G2gError::Hardware(_))), "got {res:?}");
 }
 
 #[tokio::test]
@@ -142,11 +157,11 @@ async fn rtspsrc_pulls_h264_from_live_server() {
     let first = &changes[0];
     assert_eq!(first.frames_before, 0, "CapsChanged must precede first frame");
     match &first.caps {
-        Caps::Video { format, width, height, .. } => {
-            assert_eq!(*format, VideoFormat::H264);
+        Caps::CompressedVideo { codec, width, height, .. } => {
+            assert_eq!(*codec, VideoCodec::H264);
             assert!(matches!(width, Dim::Fixed(_)), "width should be Fixed, got {width:?}");
             assert!(matches!(height, Dim::Fixed(_)), "height should be Fixed, got {height:?}");
         }
-        other => panic!("expected Caps::Video, got {other:?}"),
+        other => panic!("expected Caps::CompressedVideo, got {other:?}"),
     }
 }

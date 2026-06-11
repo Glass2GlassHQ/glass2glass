@@ -14,7 +14,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, PushOutcome, Rate, Reconfigure, VideoFormat,
+    PipelinePacket, PushOutcome, Rate, Reconfigure, VideoCodec, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -25,8 +25,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn caps_at(width: u32, height: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(width),
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
@@ -47,8 +47,12 @@ impl SourceLoop for CapsChangingTestSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.initial.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.initial.clone()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -122,7 +126,7 @@ impl AsyncElement for OrderedRecordingSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let width = match absolute_caps {
-            Caps::Video { width: Dim::Fixed(w), .. } => *w,
+            Caps::RawVideo { width: Dim::Fixed(w), .. } => *w,
             _ => 0,
         };
         self.push(Event::Configure { width });
@@ -136,7 +140,7 @@ impl AsyncElement for OrderedRecordingSink {
     ) -> Self::ProcessFuture<'a> {
         let event = match &packet {
             PipelinePacket::DataFrame(f) => Event::Data { seq: f.sequence },
-            PipelinePacket::CapsChanged(Caps::Video { width: Dim::Fixed(w), .. }) => {
+            PipelinePacket::CapsChanged(Caps::RawVideo { width: Dim::Fixed(w), .. }) => {
                 Event::CapsChanged { width: *w }
             }
             PipelinePacket::CapsChanged(_) => Event::CapsChanged { width: 0 },
@@ -205,8 +209,12 @@ impl SourceLoop for StaticCapsSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.proposal.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.proposal.clone()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -327,7 +335,7 @@ impl AsyncElement for PickyByWidthSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let w = match absolute_caps {
-            Caps::Video { width: Dim::Fixed(w), .. } => *w,
+            Caps::RawVideo { width: Dim::Fixed(w), .. } => *w,
             _ => 0,
         };
         self.configures.lock().unwrap().push(w);
@@ -346,7 +354,7 @@ impl AsyncElement for PickyByWidthSink {
     ) -> Self::ProcessFuture<'a> {
         match &packet {
             PipelinePacket::CapsChanged(c) => {
-                if let Caps::Video { width: Dim::Fixed(w), .. } = c {
+                if let Caps::RawVideo { width: Dim::Fixed(w), .. } = c {
                     *self.current_width.lock().unwrap() = *w;
                 }
             }
@@ -382,8 +390,12 @@ impl SourceLoop for ReconfigurableTestSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.initial.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.initial.clone()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -525,14 +537,14 @@ impl AsyncElement for IntersectingRecordingSink {
 /// through the runner.
 #[tokio::test]
 async fn range_negotiation_intersects_then_fixates_to_minimum() {
-    let proposal = Caps::Video {
-        format: VideoFormat::Rgba8,
+    let proposal = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Range { min: 640, max: 1920 },
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     };
-    let supported = Caps::Video {
-        format: VideoFormat::Rgba8,
+    let supported = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Range { min: 1280, max: 3840 },
         height: Dim::Any,
         framerate: Rate::Any,

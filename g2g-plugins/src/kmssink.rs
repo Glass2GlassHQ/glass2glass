@@ -63,7 +63,7 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoCodec, RawVideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -454,8 +454,8 @@ impl AsyncElement for KmsSink {
         // accept-H.264-as-no-op workaround is gone and a non-NV12 sink
         // input fails loud as a real pipeline error.
         let (w, h) = match absolute_caps {
-            Caps::Video {
-                format: VideoFormat::Nv12,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 ..
@@ -576,8 +576,8 @@ mod tests {
         // Negotiation-time intercept is pass-through; NV12 is enforced in
         // configure_pipeline. (A native decoder hands this link NV12.)
         let sink = KmsSink::new();
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
@@ -588,8 +588,8 @@ mod tests {
     #[test]
     fn intercept_passes_through_nv12() {
         let sink = KmsSink::new();
-        let nv12 = Caps::Video {
-            format: VideoFormat::Nv12,
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
@@ -600,8 +600,8 @@ mod tests {
     #[test]
     fn configure_rejects_non_nv12() {
         let mut sink = KmsSink::new();
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
@@ -616,8 +616,8 @@ mod tests {
     #[test]
     fn configure_rejects_odd_dims() {
         let mut sink = KmsSink::new();
-        let odd = Caps::Video {
-            format: VideoFormat::Nv12,
+        let odd = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(641),
             height: Dim::Fixed(480),
             framerate: Rate::Any,

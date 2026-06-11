@@ -140,11 +140,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
 
     /// Fully concrete caps (a real producer names every field).
-    fn fixed(format: VideoFormat, w: u32, h: u32) -> Caps {
-        Caps::Video {
+    fn fixed(format: RawVideoFormat, w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
@@ -153,15 +153,15 @@ mod tests {
     }
 
     /// A format at any geometry / framerate (a broad static template).
-    fn any_geom(format: VideoFormat) -> Caps {
-        Caps::Video { format, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
+    fn any_geom(format: RawVideoFormat) -> Caps {
+        Caps::RawVideo { format, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
     }
 
     /// Produces RGBA at any geometry (static superset, like `VideoTestSrc`).
     struct RgbaSource;
     impl PadTemplates for RgbaSource {
         fn pad_templates() -> Vec<PadTemplate> {
-            alloc::vec![PadTemplate::source(CapsSet::one(any_geom(VideoFormat::Rgba8)))]
+            alloc::vec![PadTemplate::source(CapsSet::one(any_geom(RawVideoFormat::Rgba8)))]
         }
     }
 
@@ -169,7 +169,7 @@ mod tests {
     struct Nv12Sink;
     impl PadTemplates for Nv12Sink {
         fn pad_templates() -> Vec<PadTemplate> {
-            alloc::vec![PadTemplate::sink(CapsSet::one(any_geom(VideoFormat::Nv12)))]
+            alloc::vec![PadTemplate::sink(CapsSet::one(any_geom(RawVideoFormat::Nv12)))]
         }
     }
 
@@ -184,16 +184,16 @@ mod tests {
     #[test]
     fn compatible_pads_link_to_fixated_caps() {
         // A concrete producer feeding a broad sink fixates to the producer's caps.
-        let producer = PadTemplate::source(CapsSet::one(fixed(VideoFormat::Rgba8, 1280, 720)));
-        let consumer = PadTemplate::sink(CapsSet::one(any_geom(VideoFormat::Rgba8)));
+        let producer = PadTemplate::source(CapsSet::one(fixed(RawVideoFormat::Rgba8, 1280, 720)));
+        let consumer = PadTemplate::sink(CapsSet::one(any_geom(RawVideoFormat::Rgba8)));
         let caps = pad_link(&producer, &consumer).expect("pads overlap");
-        assert_eq!(caps, fixed(VideoFormat::Rgba8, 1280, 720));
+        assert_eq!(caps, fixed(RawVideoFormat::Rgba8, 1280, 720));
     }
 
     #[test]
     fn disjoint_pads_report_empty_link() {
-        let producer = PadTemplate::source(CapsSet::one(any_geom(VideoFormat::Rgba8)));
-        let consumer = PadTemplate::sink(CapsSet::one(any_geom(VideoFormat::Nv12)));
+        let producer = PadTemplate::source(CapsSet::one(any_geom(RawVideoFormat::Rgba8)));
+        let consumer = PadTemplate::sink(CapsSet::one(any_geom(RawVideoFormat::Nv12)));
         assert!(
             matches!(pad_link(&producer, &consumer), Err(NegotiationFailure::EmptyLink { .. })),
             "RGBA producer cannot feed an NV12-only sink"
@@ -202,9 +202,9 @@ mod tests {
 
     #[test]
     fn wildcard_sink_accepts_any_producer() {
-        let producer = PadTemplate::source(CapsSet::one(fixed(VideoFormat::Rgba8, 640, 480)));
+        let producer = PadTemplate::source(CapsSet::one(fixed(RawVideoFormat::Rgba8, 640, 480)));
         let caps = pad_link(&producer, &PadTemplate::sink_any()).expect("any sink accepts");
-        assert_eq!(caps, fixed(VideoFormat::Rgba8, 640, 480));
+        assert_eq!(caps, fixed(RawVideoFormat::Rgba8, 640, 480));
     }
 
     #[test]

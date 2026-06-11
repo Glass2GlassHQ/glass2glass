@@ -30,7 +30,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelineClock, PipelinePacket, Rate, VideoFormat,
+    PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
 
@@ -44,8 +44,8 @@ impl PipelineClock for ZeroClock {
 fn h264_caps(w: u32, h: u32) -> Caps {
     // Framerate must be fixated (not `Any`) so the solver can fixate
     // the link feeding into the legacy-bridged decoder.
-    Caps::Video {
-        format: VideoFormat::H264,
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -53,8 +53,8 @@ fn h264_caps(w: u32, h: u32) -> Caps {
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Nv12,
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
@@ -94,8 +94,12 @@ impl ScriptedSource {
 impl SourceLoop for ScriptedSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.current_caps.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.current_caps.clone()))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -178,8 +182,8 @@ impl AsyncElement for FakeReorderDecoder {
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
         // Accept H.264 only.
         match upstream {
-            Caps::Video {
-                format: VideoFormat::H264,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
                 ..
             } => Ok(upstream.clone()),
             _ => Err(G2gError::CapsMismatch),
@@ -208,8 +212,8 @@ impl AsyncElement for FakeReorderDecoder {
                     // would reach the sink before buffered old-caps
                     // frames drain — the ordering bug §3 warns about).
                     match &c {
-                        Caps::Video {
-                            format: VideoFormat::H264,
+                        Caps::CompressedVideo {
+                            codec: VideoCodec::H264,
                             ..
                         } => {}
                         _ => return Err(G2gError::CapsMismatch),
@@ -238,8 +242,8 @@ impl AsyncElement for FakeReorderDecoder {
                     if self.queue.borrow().len() > self.buffering {
                         let (in_caps, tag) = self.queue.borrow_mut().pop_front().unwrap();
                         let out_caps = match in_caps {
-                            Caps::Video {
-                                format: VideoFormat::H264,
+                            Caps::CompressedVideo {
+                                codec: VideoCodec::H264,
                                 width: Dim::Fixed(w),
                                 height: Dim::Fixed(h),
                                 ..
@@ -273,8 +277,8 @@ impl AsyncElement for FakeReorderDecoder {
                     // boundary CapsChanged rule applies.
                     while let Some((in_caps, tag)) = self.queue.borrow_mut().pop_front() {
                         let out_caps = match in_caps {
-                            Caps::Video {
-                                format: VideoFormat::H264,
+                            Caps::CompressedVideo {
+                                codec: VideoCodec::H264,
                                 width: Dim::Fixed(w),
                                 height: Dim::Fixed(h),
                                 ..
@@ -424,7 +428,11 @@ struct ScriptedSourceBadCaps {
 impl SourceLoop for ScriptedSourceBadCaps {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         self.inner.intercept_caps()
     }
 
@@ -443,8 +451,8 @@ impl SourceLoop for ScriptedSourceBadCaps {
                         // the hostile codec switch.
                         caps_changes_seen += 1;
                         let c = if caps_changes_seen == 1 {
-                            Caps::Video {
-                                format: VideoFormat::Vp9,
+                            Caps::CompressedVideo {
+                                codec: VideoCodec::Vp9,
                                 width: Dim::Fixed(w),
                                 height: Dim::Fixed(h),
                                 framerate: Rate::Any,

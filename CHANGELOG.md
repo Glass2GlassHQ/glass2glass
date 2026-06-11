@@ -5,6 +5,91 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M17: split `VideoFormat` into codec vs. raw pixel layout
+
+- `Caps::Video { format: VideoFormat, .. }` (where `VideoFormat`
+  conflated `H264`/`H265`/`Av1`/`Vp9` with `Nv12`/`I420`/`Rgba8`/`Bgra8`)
+  is gone. Replaced by two distinct `Caps` variants:
+  - `Caps::CompressedVideo { codec: VideoCodec, width, height, framerate }`
+  - `Caps::RawVideo { format: RawVideoFormat, width, height, framerate }`
+- New enums: `VideoCodec { H264, H265, Av1, Vp9 }` and
+  `RawVideoFormat { Nv12, I420, Rgba8, Bgra8 }`. Old `VideoFormat`
+  removed.
+- A raw sink (`waylandsink`, `kmssink`) offered compressed input now
+  fails negotiation structurally via `Caps::intersect` variant
+  mismatch, not a runtime format compare. Mirrors GStreamer's
+  `video/x-h264` vs `video/x-raw` distinction.
+- New `Caps::dims(&self) -> Option<(&Dim, &Dim, &Rate)>` helper for
+  element code that needs geometry without caring whether the link is
+  pre- or post-decode. Several pattern-match sites collapsed to use it.
+- `Caps::intersect` / `is_fixed` / `fixate` updated for the new
+  variants; `is_fixed` now delegates to `dims()`.
+- Both video variants keep `width/height/framerate` for now. Honest
+  answer is GStreamer drops them on `video/x-h264` because they live
+  in SPS, but our solver + RtspSrc placeholder Range + Range-as-
+  placeholder convention all hang off geometry on compressed caps.
+  Dropping it is a deeper rework overlapping workaround #1's
+  redesign; out of scope here.
+- No `codec_data` / `extras` field added. Latent need (SPS+PPS in
+  negotiation, profile/level) but no current consumer; add when first
+  driver lands.
+- `AcceptsAny` still matches any `Caps` variant — no split into
+  `AcceptsAnyRaw` / `AcceptsAnyCompressed`. Sinks that need to
+  discriminate already pattern-match the format.
+- Migration touched ~145 `Caps::Video` constructors and ~206
+  `VideoFormat::` references across the workspace (sources, decoders,
+  sinks, solver, fan-in/out, ~16 test files). Most was mechanical;
+  helper functions in tests gained both `video()` (raw) and
+  `compressed()` variants. `OutputFormat::video_format()` renamed to
+  `raw_format()` in `ffmpegdec.rs`.
+- Verified: `cargo test --workspace` (175 passed, 0 failed),
+  `cargo test --features rtsp` (80 passed), `cargo test --features
+  "rtsp ffmpeg"` (95 passed), `cargo check --features vaapi`,
+  `cargo check --features wayland-sink`, no_std baseline.
+
+### M18 item 5: async `SourceLoop::intercept_caps`
+
+- Closes workaround #1 (RtspSrc placeholder Range). Sources can now
+  perform I/O during negotiation and return real caps instead of a wide
+  placeholder. `SourceLoop` gains `type CapsFuture<'a>` and
+  `fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>`; the
+  default `caps_constraint()` is also async and awaits `intercept_caps`.
+  `&self` → `&mut self` so a source can stash state (the discovered
+  caps, an open session) for `run` to reuse.
+- `DynSourceLoop` (the erased mirror used by fan-in / muxer) becomes
+  `BoxFuture<'a, Result<Caps, G2gError>>`-returning. Same shape as
+  `DynAsyncElement::process`.
+- Runtime call sites — `runner.rs::run_simple_chain`, `run_source_fanout`,
+  `coordinator::negotiate_source_transform_sink`, `fanin.rs::run_fanin_sink`
+  / `run_muxer_sink` — `.await` the new future.
+  `negotiate_source_transform_sink` is now `async fn`.
+- `RtspSrc` refactor: `intercept_caps` performs DESCRIBE + SETUP, parses
+  H.264 `VideoParameters`, drops the session, and caches the discovered
+  caps for `caps_constraint` re-fixate retries. `with_expected_dims` is
+  the offline fast path (returns caller-supplied geometry without I/O,
+  framerate stays a fixable Range). Failures flow through the reconnect
+  policy: a transient connect drop during negotiation retries with the
+  same backoff `run` uses for mid-session drops; structural failures
+  (bad URL, no H.264 stream) surface immediately.
+- Test sources mechanically migrated (~16 files): each gains
+  `type CapsFuture<'a> = core::future::Ready<...>` and a one-line
+  `intercept_caps` returning `core::future::ready(...)`.
+- New `m18_async_intercept_caps` test proves the runner genuinely awaits
+  the caps future: a source `tokio::time::sleep`s in `intercept_caps`,
+  and the pipeline's elapsed time must be at least the sleep interval.
+  A sync stub would finish in microseconds.
+- RtspSrc test surface updated:
+  `rtspsrc_intercept_caps_with_expected_dims_skips_probe_and_fixates`
+  replaces the old placeholder-Range assertion;
+  `rtspsrc_intercept_caps_probes_and_fails_on_unreachable_url` covers
+  the new probe-failure pathway. `rtspsrc_with_reconnect_retries_then_fails`
+  now exercises probe-side reconnect (probe failure goes through the
+  same retry+backoff loop `run` uses for session drops).
+- Documents the structural cost: probe and `run`'s session-open are
+  distinct connections, so the server pays for two DESCRIBEs at
+  startup. A future optimization is to stash the post-SETUP session
+  and consume it in `run`.
+
 ### caps-nego: drop per-frame `Frame.caps`
 
 - Removed the `caps: Caps` field from `Frame` in `g2g-core/src/frame.rs`.

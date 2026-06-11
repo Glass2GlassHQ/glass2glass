@@ -21,7 +21,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec, RawVideoFormat};
 use g2g_plugins::ffmpegdec::{FfmpegH264Dec, OutputFormat};
 
 #[derive(Default)]
@@ -62,8 +62,8 @@ async fn decode_once(output: OutputFormat) {
     assert!(!bitstream.is_empty(), "fixture is empty");
 
     let mut dec = FfmpegH264Dec::new().with_output_format(output);
-    let upstream = Caps::Video {
-        format: VideoFormat::H264,
+    let upstream = Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -123,12 +123,12 @@ async fn decode_once(output: OutputFormat) {
     // I420 and NV12 have identical byte length (w*h*3/2 for even dims); only
     // the chroma layout differs. The runner checks length + format tag.
     let expected_format = match output {
-        OutputFormat::I420 => VideoFormat::I420,
-        OutputFormat::Nv12 => VideoFormat::Nv12,
+        OutputFormat::I420 => RawVideoFormat::I420,
+        OutputFormat::Nv12 => RawVideoFormat::Nv12,
     };
     let first = caps_changes.first().unwrap();
     match first {
-        Caps::Video {
+        Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),

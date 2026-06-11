@@ -18,7 +18,7 @@ use std::sync::Arc;
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoFormat};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec, RawVideoFormat};
 use g2g_plugins::vaapidec::VaapiH264Dec;
 
 /// `OutputSink` that records every packet it receives. The decoder feeds it
@@ -54,8 +54,8 @@ async fn vaapi_h264_decodes_fixture() {
 
     // Phase 1/2 negotiation surrogates: we know the upstream is H.264 with
     // unknown geometry until SPS lands.
-    let upstream = Caps::Video {
-        format: VideoFormat::H264,
+    let upstream = Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -63,8 +63,8 @@ async fn vaapi_h264_decodes_fixture() {
     let narrowed = dec.intercept_caps(&upstream).expect("intercept H.264");
     assert!(matches!(
         narrowed,
-        Caps::Video {
-            format: VideoFormat::H264,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             ..
         }
     ));
@@ -124,8 +124,8 @@ async fn vaapi_h264_decodes_fixture() {
 
     let first = caps_changes.first().unwrap();
     match first {
-        Caps::Video {
-            format: VideoFormat::Nv12,
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             ..

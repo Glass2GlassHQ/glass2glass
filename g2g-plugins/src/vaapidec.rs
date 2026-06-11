@@ -26,7 +26,7 @@
 //!   consumers release it. This element copies pixels into `System` memory
 //!   to match `MfDecode`'s shape.
 //! - H.265 decode. The same stateless decoder framework supports it; a sibling
-//!   element keyed on `VideoFormat::H265` is straightforward.
+//!   element keyed on `VideoCodec::H265` is straightforward.
 //! - Mid-stream resolution change is observed (`DecoderEvent::FormatChanged`)
 //!   but resolution-driven `Reconfigure` upstream is not yet plumbed.
 //!
@@ -75,7 +75,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -274,8 +274,8 @@ impl AsyncElement for VaapiH264Dec {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Consumes H.264 at any geometry; intersecting narrows the proposal
         // and rejects non-H.264 inputs.
-        let supported = Caps::Video {
-            format: VideoFormat::H264,
+        let supported = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -297,8 +297,8 @@ impl AsyncElement for VaapiH264Dec {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Video {
-                format: VideoFormat::H264,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
                 ..
             } => {}
             _ => return Err(G2gError::CapsMismatch),
@@ -341,8 +341,8 @@ impl AsyncElement for VaapiH264Dec {
                     // from decoded stream info at the decode boundary
                     // so the ordering invariant from §3 is preserved.
                     match &c {
-                        Caps::Video {
-                            format: VideoFormat::H264,
+                        Caps::CompressedVideo {
+                            codec: VideoCodec::H264,
                             ..
                         } => {}
                         _ => return Err(G2gError::CapsMismatch),
@@ -406,13 +406,13 @@ impl AsyncElement for VaapiH264Dec {
 /// there's no output-format choice.
 fn derive_output_caps(input: &Caps) -> CapsSet {
     match input {
-        Caps::Video {
-            format: VideoFormat::H264,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width,
             height,
             framerate,
-        } => CapsSet::one(Caps::Video {
-            format: VideoFormat::Nv12,
+        } => CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
@@ -422,8 +422,8 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Nv12,
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
@@ -482,8 +482,8 @@ mod tests {
     fn nv12_caps_are_fixed() {
         assert_eq!(
             nv12_caps(640, 480),
-            Caps::Video {
-                format: VideoFormat::Nv12,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
@@ -494,8 +494,8 @@ mod tests {
     #[test]
     fn intercept_rejects_non_h264() {
         let dec = VaapiH264Dec::new();
-        let vp9 = Caps::Video {
-            format: VideoFormat::Vp9,
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -506,8 +506,8 @@ mod tests {
     #[test]
     fn intercept_narrows_h264_geometry() {
         let dec = VaapiH264Dec::new();
-        let proposal = Caps::Video {
-            format: VideoFormat::H264,
+        let proposal = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
@@ -529,24 +529,24 @@ mod tests {
         let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
         };
         assert_eq!(
             f(&h264).alternatives(),
-            &[Caps::Video {
-                format: VideoFormat::Nv12,
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
             }]
         );
 
-        let vp9 = Caps::Video {
-            format: VideoFormat::Vp9,
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),

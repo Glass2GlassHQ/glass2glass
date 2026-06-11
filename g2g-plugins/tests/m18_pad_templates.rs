@@ -7,7 +7,7 @@
 
 use g2g_core::runtime::solver::NegotiationFailure;
 use g2g_core::{
-    pad_link, types_can_link, Caps, Dim, PadCaps, PadDirection, PadTemplates, Rate, VideoFormat,
+    pad_link, types_can_link, Caps, Dim, PadCaps, PadDirection, PadTemplates, Rate, VideoCodec, RawVideoFormat,
 };
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::h264parse::H264Parse;
@@ -22,8 +22,8 @@ fn introspects_pad_templates_without_constructing() {
     match &src_pads[0].caps {
         PadCaps::Fixed(set) => assert_eq!(
             set.alternatives()[0],
-            Caps::Video {
-                format: VideoFormat::Rgba8,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,

@@ -120,11 +120,11 @@ impl AsyncElement for CapsFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, Rate, VideoFormat};
+    use g2g_core::{Dim, Rate, VideoCodec, RawVideoFormat};
 
     fn nv12(w: u32, h: u32) -> Caps {
-        Caps::Video {
-            format: VideoFormat::Nv12,
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
@@ -144,16 +144,16 @@ mod tests {
     fn intercept_narrows_compatible_upstream() {
         // Filter on NV12/any-dims narrows an any-dims upstream to itself
         // and rejects a different format.
-        let f = CapsFilter::new(Caps::Video {
-            format: VideoFormat::Nv12,
+        let f = CapsFilter::new(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
         });
         assert_eq!(f.intercept_caps(&nv12(1280, 720)), Ok(nv12(1280, 720)));
 
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,

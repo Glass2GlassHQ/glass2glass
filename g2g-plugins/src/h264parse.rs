@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoFormat,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 #[derive(Debug, Default)]
@@ -52,8 +52,8 @@ impl AsyncElement for H264Parse {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // H264Parse consumes H.264 at any geometry; intersecting against
         // that narrows the proposal and rejects non-H.264 inputs.
-        let supported = Caps::Video {
-            format: VideoFormat::H264,
+        let supported = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -68,8 +68,8 @@ impl AsyncElement for H264Parse {
     /// upstream at negotiation time instead of via the dynamic
     /// `intercept_caps` callback.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Identity(CapsSet::one(Caps::Video {
-            format: VideoFormat::H264,
+        CapsConstraint::Identity(CapsSet::one(Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -81,8 +81,8 @@ impl AsyncElement for H264Parse {
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Video {
-                format: VideoFormat::H264,
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264,
                 ..
             } => {
                 self.configured = true;
@@ -105,8 +105,8 @@ impl AsyncElement for H264Parse {
                 PipelinePacket::DataFrame(frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
                         if let Some((w, h)) = extract_sps_dims(slice.as_slice()) {
-                            let new_caps = Caps::Video {
-                                format: VideoFormat::H264,
+                            let new_caps = Caps::CompressedVideo {
+                                codec: VideoCodec::H264,
                                 width: Dim::Fixed(w),
                                 height: Dim::Fixed(h),
                                 framerate: Rate::Any,
@@ -140,8 +140,8 @@ impl PadTemplates for H264Parse {
     /// Consumes and produces H.264 at any geometry (the parser refines
     /// geometry mid-stream from the SPS but never changes media type).
     fn pad_templates() -> Vec<PadTemplate> {
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -554,8 +554,8 @@ mod tests {
     }
 
     fn h264_parse_caps() -> Caps {
-        Caps::Video {
-            format: VideoFormat::H264,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -577,7 +577,7 @@ mod tests {
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
-            PipelinePacket::CapsChanged(Caps::Video { width, height, .. }) => {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo { width, height, .. }) => {
                 assert_eq!(*width, Dim::Fixed(1280));
                 assert_eq!(*height, Dim::Fixed(720));
             }
@@ -633,7 +633,7 @@ mod tests {
             .packets
             .iter()
             .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::Video { width, .. }) => Some(width.clone()),
+                PipelinePacket::CapsChanged(Caps::CompressedVideo { width, .. }) => Some(width.clone()),
                 _ => None,
             })
             .collect();
@@ -644,8 +644,8 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_h264_caps_in_intercept() {
         let parse = H264Parse::new();
-        let vp9 = Caps::Video {
-            format: VideoFormat::Vp9,
+        let vp9 = Caps::CompressedVideo {
+            codec: VideoCodec::Vp9,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -665,8 +665,8 @@ mod tests {
             CapsConstraint::Identity(set) => {
                 assert_eq!(
                     set.alternatives(),
-                    &[Caps::Video {
-                        format: VideoFormat::H264,
+                    &[Caps::CompressedVideo {
+                        codec: VideoCodec::H264,
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,

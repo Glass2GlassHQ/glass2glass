@@ -25,7 +25,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    MultiInputElement, OutputSink, PipelineClock, PipelinePacket, Rate, VideoFormat,
+    MultiInputElement, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 use g2g_plugins::mux::InterleaveMux;
 
@@ -37,8 +37,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn rgba(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -46,8 +46,8 @@ fn rgba(w: u32, h: u32) -> Caps {
 }
 
 fn nv12(w: u32, h: u32) -> Caps {
-    Caps::Video {
-        format: VideoFormat::Nv12,
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
@@ -75,8 +75,12 @@ struct ReconfigSrc {
 impl SourceLoop for ReconfigSrc {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.initial.clone())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.initial.clone()))
     }
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -161,14 +165,14 @@ impl DerivedMux {
     }
 
     fn derived_output(&self) -> Caps {
-        match self.configured.first().and_then(|c| c.as_ref()) {
-            Some(Caps::Video { width, height, framerate, .. }) => Caps::Video {
-                format: VideoFormat::Nv12,
+        match self.configured.first().and_then(|c| c.as_ref()).and_then(|c| c.dims()) {
+            Some((width, height, framerate)) => Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
             },
-            _ => nv12(2, 2),
+            None => nv12(2, 2),
         }
     }
 }

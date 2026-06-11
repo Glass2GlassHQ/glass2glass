@@ -1,7 +1,7 @@
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelineClock, PipelinePacket,
-    VideoFormat,
+    VideoCodec, RawVideoFormat,
 };
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
@@ -144,13 +144,17 @@ async fn h264parse_identity_negotiates_in_mixed_chain() {
     }
     impl SourceLoop for H264EosSource {
         type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
-        fn intercept_caps(&self) -> Result<Caps, G2gError> {
-            Ok(Caps::Video {
-                format: VideoFormat::H264,
-                width: Dim::Fixed(1280),
-                height: Dim::Fixed(720),
-                framerate: Rate::Fixed(30 << 16),
-            })
+        type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+        where
+            Self: 'a;
+
+        fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+            core::future::ready(Ok(Caps::CompressedVideo {
+    codec: VideoCodec::H264,
+    width: Dim::Fixed(1280),
+    height: Dim::Fixed(720),
+    framerate: Rate::Fixed(30 << 16),
+}))
         }
         fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
             self.configured = true;
@@ -196,7 +200,7 @@ async fn format_changing_transform_receives_input_side_caps() {
     use std::boxed::Box;
 
     struct FormatBoundary {
-        configured_with: Cell<Option<VideoFormat>>,
+        configured_with: Cell<Option<RawVideoFormat>>,
     }
     impl AsyncElement for FormatBoundary {
         type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
@@ -207,7 +211,7 @@ async fn format_changing_transform_receives_input_side_caps() {
             // Record whatever format we receive. The test asserts this
             // is the source's format (Rgba8), not the downstream-facing
             // post-decode format.
-            if let Caps::Video { format, .. } = caps {
+            if let Caps::RawVideo { format, .. } = caps {
                 self.configured_with.set(Some(*format));
             }
             Ok(ConfigureOutcome::Accepted)
@@ -228,8 +232,8 @@ async fn format_changing_transform_receives_input_side_caps() {
         fn propose_output_caps(&self, input: &Caps) -> Caps {
             // Swap format: Rgba8 → Nv12, dims preserved.
             match input {
-                Caps::Video { width, height, framerate, .. } => Caps::Video {
-                    format: VideoFormat::Nv12,
+                Caps::RawVideo { width, height, framerate, .. } => Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
@@ -257,7 +261,7 @@ async fn format_changing_transform_receives_input_side_caps() {
     // the downstream format (Nv12).
     assert_eq!(
         tx.configured_with.get(),
-        Some(VideoFormat::Rgba8),
+        Some(RawVideoFormat::Rgba8),
         "transform should be configured with its input-side caps"
     );
 }
@@ -272,8 +276,8 @@ async fn capsfilter_passes_matching_format_in_native_chain() {
     use g2g_core::{Caps, Dim, Rate};
 
     let mut src = VideoTestSrc::new(32, 32, 30, 12);
-    let mut filter = CapsFilter::new(Caps::Video {
-        format: VideoFormat::Rgba8,
+    let mut filter = CapsFilter::new(Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -299,8 +303,8 @@ async fn capsfilter_rejects_incompatible_format() {
     use g2g_core::{Caps, Dim, Rate};
 
     let mut src = VideoTestSrc::new(32, 32, 30, 12);
-    let mut filter = CapsFilter::new(Caps::Video {
-        format: VideoFormat::Nv12,
+    let mut filter = CapsFilter::new(Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,

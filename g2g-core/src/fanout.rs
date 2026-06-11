@@ -430,15 +430,15 @@ impl MergerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, VideoFormat};
+    use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use core::future::Future;
     use core::pin::Pin;
 
     fn caps() -> Caps {
-        Caps::Video {
-            format: VideoFormat::Rgba8,
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
             width: Dim::Fixed(16),
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),

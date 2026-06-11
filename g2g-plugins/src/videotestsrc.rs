@@ -13,7 +13,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 #[derive(Debug)]
@@ -61,8 +61,8 @@ impl VideoTestSrc {
     }
 
     fn caps(&self) -> Caps {
-        Caps::Video {
-            format: VideoFormat::Rgba8,
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
@@ -75,16 +75,24 @@ impl SourceLoop for VideoTestSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.caps())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.caps()))
     }
 
     /// M16 step 5f: native `Produces` constraint. The chain is now
     /// fully-native when paired with `AcceptsAny`-migrated sinks
     /// (e.g. `FakeSink`, `syncsink`), exercising the all-native
     /// arc-consistency solver path instead of the mixed cascade.
-    fn caps_constraint(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(self.caps())))
+    /// Synchronous override (no I/O), so we sidestep the default's
+    /// `async move` indirection.
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps()))))
     }
 
     fn configure_pipeline(
@@ -171,8 +179,8 @@ impl PadTemplates for VideoTestSrc {
     /// framerate. A constructed instance narrows to its configured dims via
     /// `SourceLoop::caps_constraint`.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::Video {
-            format: VideoFormat::Rgba8,
+        Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,

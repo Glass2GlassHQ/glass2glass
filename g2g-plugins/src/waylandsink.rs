@@ -101,7 +101,7 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoCodec, RawVideoFormat,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -293,8 +293,8 @@ impl AsyncElement for WaylandSink {
         // is a real pipeline error (e.g. an undecoded display chain) and
         // fails loud here.
         let (w, h) = match absolute_caps {
-            Caps::Video {
-                format: VideoFormat::Nv12,
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 ..
@@ -819,8 +819,8 @@ mod tests {
         // is enforced in `configure_pipeline`. (With a native decoder the
         // solver hands this link NV12 anyway.)
         let sink = WaylandSink::new();
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
@@ -831,8 +831,8 @@ mod tests {
     #[test]
     fn intercept_passes_through_nv12() {
         let sink = WaylandSink::new();
-        let nv12 = Caps::Video {
-            format: VideoFormat::Nv12,
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
@@ -843,8 +843,8 @@ mod tests {
     #[test]
     fn configure_rejects_non_nv12() {
         let mut sink = WaylandSink::new();
-        let h264 = Caps::Video {
-            format: VideoFormat::H264,
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
@@ -906,8 +906,8 @@ mod tests {
     #[test]
     fn configure_rejects_odd_dims() {
         let mut sink = WaylandSink::new();
-        let odd = Caps::Video {
-            format: VideoFormat::Nv12,
+        let odd = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
             width: Dim::Fixed(641),
             height: Dim::Fixed(480),
             framerate: Rate::Any,

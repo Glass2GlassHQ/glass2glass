@@ -369,7 +369,7 @@ impl OutputSink for SenderSink {
 #[cfg(test)]
 mod link_tests {
     use super::*;
-    use crate::caps::{Caps, Dim, Rate, VideoFormat};
+    use crate::caps::{Caps, Dim, Rate, VideoCodec, RawVideoFormat};
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::boxed::Box;
@@ -416,8 +416,8 @@ mod link_tests {
     }
 
     fn proposed_caps() -> Caps {
-        Caps::Video {
-            format: VideoFormat::H264,
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,

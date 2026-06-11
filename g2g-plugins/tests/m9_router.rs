@@ -19,7 +19,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_source_fanout, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, Router, VideoFormat,
+    PipelinePacket, Rate, Router, VideoCodec, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -30,8 +30,8 @@ impl PipelineClock for ZeroClock {
 }
 
 fn caps() -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(16),
         height: Dim::Fixed(16),
         framerate: Rate::Fixed(30 << 16),
@@ -59,8 +59,12 @@ impl SourceLoop for BarrierSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(caps())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(caps()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

@@ -122,7 +122,7 @@ pub(crate) struct LinearNegotiation {
 /// cascade and fixates the final caps. `ReFixate` retry stays here (the
 /// solver doesn't model counter-proposals): on each retry the source's
 /// `LegacySource` seed is replaced by the counter and the solver is re-run.
-pub(crate) fn negotiate_source_transform_sink<Src, Tx, Snk>(
+pub(crate) async fn negotiate_source_transform_sink<Src, Tx, Snk>(
     source: &mut Src,
     transform: &mut Tx,
     sink: &mut Snk,
@@ -149,7 +149,7 @@ where
             // legacy concept.
             let src_c = match &refix_counter {
                 Some(c) => CapsConstraint::LegacySource(c.clone()),
-                None => source.caps_constraint()?,
+                None => source.caps_constraint().await?,
             };
             let tx_c = transform.caps_constraint_as_transform();
             let sink_c = sink.caps_constraint_as_sink();

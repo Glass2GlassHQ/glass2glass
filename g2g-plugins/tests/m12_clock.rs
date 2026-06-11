@@ -15,7 +15,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoFormat,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// A clock pinned to a fixed instant, so a test can assert the exact base time
@@ -28,8 +28,8 @@ impl PipelineClock for FixedClock {
 }
 
 fn caps() -> Caps {
-    Caps::Video {
-        format: VideoFormat::Rgba8,
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
@@ -55,8 +55,12 @@ impl SourceLoop for EmitSrc {
     where
         Self: 'a;
 
-    fn intercept_caps(&self) -> Result<Caps, G2gError> {
-        Ok(caps())
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(caps()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
