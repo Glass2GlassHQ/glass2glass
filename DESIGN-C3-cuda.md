@@ -112,6 +112,17 @@ the device pointers themselves still need a GPU to exercise.
    or GBM/KMS for the tty case; CUDA-GL registered texture; NV12 shader.
    This is the real zero-copy-ish display payoff. Largest lift; new EGL/GL
    + CUDA-GL FFI surface, behind a new feature (e.g. `cuda-gl`).
+   - **Step 2a landed** (`g2g-plugins::cuda`, `cuda` feature): the CUDA-GL
+     interop FFI (register / map / get-array / unmap, verified against the
+     driver docs), the `nv12_gl_uploads` per-plane device->`cudaArray` copy
+     extents (tested), and the Appendix A vertex + fragment shaders as
+     consts. The interop entry points are `#[allow(dead_code)]` until 2b.
+   - **Step 2b (remaining):** EGL context on the Wayland surface, GL program
+     + fullscreen quad, the per-frame map/copy/unmap render loop wired into
+     the sink's `AsyncElement` worker (the `WaylandSink` worker-thread model
+     applies). Open decision: EGL/GL bindings (raw FFI vs `khronos-egl` +
+     `glow`) and how to get a `wl_egl_window` from the SCTK surface. Behind a
+     new `cuda-gl` feature that adds the EGL/GL deps.
 3. Wire the allocation query so `CudaGlSink` proposes
    `MemoryDomainKind::Cuda` and `NvdecCuda` honours it (the cross-element
    handshake Phase 1 already conveys).

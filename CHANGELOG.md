@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 3, step 2a): CUDA-GL interop foundation
+
+- Groundwork for `CudaGlSink` (DESIGN-C3-cuda.md §3.2, §4 step 2), the real
+  zero-copy-ish display path: decoded NV12 stays on the GPU and is presented
+  via CUDA-GL interop (`cuGraphicsMapResources` -> mapped `cudaArray` ->
+  device->array `cuMemcpy2D` -> fragment-shader YCbCr->RGB), removing the
+  PCIe round-trip and the CPU colour convert. Staged ahead of the EGL/Wayland
+  windowing (step 2b) so the verifiable pieces land first, mirroring how
+  Phase 1's core types preceded Phase 2's FFI.
+- Extends the `g2g-plugins::cuda` FFI (behind the existing `cuda` feature,
+  Linux + NVIDIA) with the CUDA-GL interop entry points, verified against the
+  CUDA Driver API docs (`CUDA_GL` / `CUDA_GRAPHICS` groups):
+  `cuGraphicsGLRegisterImage`, `cuGraphicsUnregisterResource`,
+  `cuGraphicsMapResources`, `cuGraphicsUnmapResources`,
+  `cuGraphicsSubResourceGetMappedArray`, plus the `CU_MEMORYTYPE_ARRAY` /
+  `WRITE_DISCARD` / `GL_TEXTURE_2D` constants and opaque handle aliases. These
+  live in `libcuda` itself, so no extra link. Marked `#[allow(dead_code)]`
+  until step 2b calls them.
+- `nv12_gl_uploads(width, height)` computes the per-plane device->`cudaArray`
+  copy extents: a full-res `R8` luma texture (1 byte/texel) and a half-res
+  `RG8` interleaved CbCr texture (2 bytes/texel). Pure geometry, unit-tested
+  for even and odd dims.
+- The NV12->RGB fragment shader and its paired vertex shader land verbatim
+  from DESIGN-C3-cuda.md Appendix A as `FRAGMENT_SHADER_NV12` / `VERTEX_SHADER`
+  consts (GLSL ES 1.00, BT.601 limited range). A test locks the `y_tex` /
+  `uv_tex` sampler contract the CUDA upload side depends on.
+- VERIFICATION: the module is `cuda`-feature + Linux + NVIDIA-gated and does
+  not compile on the Windows dev host; the GPU-free unit tests (plane extents,
+  shader contract) run under `cargo test -p g2g-plugins --features cuda` on
+  the Linux box. Step 2b (EGL context on a Wayland surface, GL program, the
+  map/copy/unmap render loop) is the remaining lift and needs an EGL/GL
+  binding-crate decision. Default workspace build/clippy green.
+
 ### C3 (Phase 3, step 1): `CudaDownload` device->host bring-up element
 
 - New `g2g-plugins::cuda::CudaDownload` transform behind a new `cuda`
