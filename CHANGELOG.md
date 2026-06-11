@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 1): CUDA memory domain foundation
+
+- First phase of the zero-copy NVDEC -> GPU display track. Goal: keep
+  `Backend::NvdecCuvid`'s decoded NV12 resident in CUDA device memory
+  instead of cuvid's default device->host copy, so a GPU consumer
+  (display scanout) takes the handoff copy-free. Phase 1 lands only the
+  platform-agnostic core types (compiles and tests on the Windows dev
+  host); the ffmpeg hwframe output (Phase 2) and the KmsSink CUDA
+  consumer (Phase 3) follow.
+- New `MemoryDomain::Cuda(OwnedCudaBuffer)` variant and matching
+  `MemoryDomainKind::Cuda`, mirroring the existing handle-based
+  `VulkanTexture` / `WebGPUBuffer` variants (no CUDA link in `no_std`
+  core). `OwnedCudaBuffer` carries the two NV12 plane device pointers
+  (luma Y, interleaved chroma UV) with row pitches, visible dims, the
+  `CUcontext` the pointers are valid in, and a keep-alive owner.
+- `CudaKeepAlive` trait (`Debug + Send`): the producing element boxes
+  its owning handle (an ffmpeg `CUDA`-hwframe `AVFrame`) as a trait
+  object so core never links CUDA; dropping the buffer drops the box and
+  releases the allocation back to the hwframe pool. Pointers stay valid
+  for exactly the keep-alive's lifetime.
+- `AllocationParams::cuda(size, count, align)` constructor so a GPU
+  consumer can request device-resident buffers via the M12 allocation
+  query. This makes `MemoryDomainKind::Cuda` the first cross-element
+  pool domain that crosses a real producer/consumer boundary, the
+  driver M18 item 1 (allocation re-cascade beta) was waiting on.
+- Two unit tests in `memory.rs`: `kind()` maps the new variant, and a
+  `FlagOnDrop` keep-alive proves the backing allocation is released
+  exactly when the buffer drops. no_std baseline (`--no-default-features`),
+  default core build, full workspace tests, and workspace clippy all
+  green; the change touches only `g2g-core` (`memory.rs`, `query.rs`,
+  `lib.rs`).
+
 ### LatencyProfile knob on runners
 
 - New `LatencyProfile` enum + `LinkCapacity` newtype in

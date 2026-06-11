@@ -54,6 +54,18 @@ impl AllocationParams {
         }
     }
 
+    /// A CUDA device-memory proposal: a GPU consumer (decoder feeding a GPU
+    /// sink / inference) asks its producer to keep buffers resident on the
+    /// device so the handoff is copy-free.
+    pub const fn cuda(size_bytes: usize, min_buffers: usize, align: usize) -> Self {
+        Self {
+            size_bytes,
+            min_buffers,
+            align,
+            domain: MemoryDomainKind::Cuda,
+        }
+    }
+
     /// Fold an upstream element's own requirement into this (downstream)
     /// proposal: the larger size, buffer count, and alignment win. `self` is
     /// the consumer-most proposal and dictates the memory `domain`.

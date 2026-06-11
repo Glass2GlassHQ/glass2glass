@@ -54,7 +54,8 @@ pub use format_element::{
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use link::LinkPolicy;
 pub use memory::{
-    MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice,
+    CudaKeepAlive, MemoryDomain, MemoryDomainKind, OwnedCudaBuffer, OwnedDmaBuf,
+    OwnedVulkanTexture, OwnedWebGPUBuffer, SystemSlice,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
