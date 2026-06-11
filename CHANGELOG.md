@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### W1 (Phase 4): `D3D11Sink` present sink
+
+- Completes the Windows zero-copy decode -> display track. `D3D11Sink`
+  (`d3d11-sink` feature, Windows-only) consumes `MemoryDomain::D3D11Texture`
+  frames from `MfDecode::with_d3d11()` and presents them in a Win32 window via
+  a DXGI flip-model swapchain. The NV12 -> RGB colour convert runs on the GPU
+  through a D3D11 video processor (`VideoProcessorBlt`), so the decoded texture
+  never leaves the GPU. The Windows analog of `CudaGlSink`.
+- Same worker-thread model as `WaylandSink` / `CudaGlSink`: a dedicated thread
+  owns the window + message pump + D3D11 objects (both thread-affine); the sink
+  struct holds only `Send` handles (an mpsc sender + atomics). The decoded
+  `OwnedD3D11Texture` is `Send`, so it crosses to the worker and the texture
+  (and its owning `IMFSample`) stays pinned until presented. NV12-in-D3D11
+  only (`UnsupportedDomain` otherwise); per-frame ack gives backpressure;
+  mid-stream geometry change respawns the worker.
+- The swapchain + video processor are created lazily on the first frame from
+  that frame's `ID3D11Device` (the decoder's device), since a D3D11 resource
+  and the views over it must share a device, avoiding a second device + texture
+  sharing. The window is created up front (no device needed).
+- All COM (D3D11 video device/context/processor/views, the input/output view
+  descriptors, the DXGI swapchain, and the Win32 window + message loop) was
+  verified against the fetched `windows-0.62.2` source per AGENTS.md. Adds
+  `windows` features `Win32_UI_WindowsAndMessaging`, `Win32_System_LibraryLoader`,
+  `Win32_Graphics_Gdi`.
+- Three GPU-free unit tests (intercept pass-through, non-NV12 reject, odd-dim
+  reject). VERIFIED on the Windows dev host: `cargo test -p g2g-plugins
+  --features d3d11-sink` (19 passed, the full present path COMPILES) and
+  `cargo clippy --features d3d11-sink` green. The actual present (real GPU
+  decode into textures shown in a window) is owed as a user-side run on a GPU
+  machine; the dev host can do it. Acceptance test: `rtspsrc -> h264parse ->
+  mfdecode[with_d3d11] -> d3d11sink`, a visible window with decoded video.
+
 ### W1 (Phase 3): `MfDecode` zero-copy D3D11 texture output
 
 - Completes the Windows zero-copy decode track. With `with_d3d11()`, `MfDecode`

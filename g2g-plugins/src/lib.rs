@@ -33,6 +33,11 @@ pub mod rtspsrc;
 #[cfg(all(target_os = "windows", feature = "mf-decode"))]
 pub mod mfdecode;
 
+// D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
+// swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
+#[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
+pub mod d3d11sink;
+
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]

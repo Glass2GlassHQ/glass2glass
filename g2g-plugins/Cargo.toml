@@ -17,6 +17,11 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
+# Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
+# frames in a Win32 window via a DXGI swapchain + D3D11 video processor
+# (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
+# implies std. Pairs with MfDecode::with_d3d11().
+d3d11-sink = ["std", "dep:windows"]
 # Linux hardware H.264 decode via VAAPI through the `cros-codecs` crate.
 # Pulls cros-codecs (+ libva + GBM bindings); Linux-only, implies std.
 vaapi = ["std", "dep:cros-codecs"]
@@ -76,6 +81,10 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # D3D11 present sink (d3d11-sink): Win32 window + message loop.
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
 ] }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
