@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### W1 (Phase 1): Direct3D 11 memory domain foundation
+
+- First phase of the Windows zero-copy decode -> display track, the analog of
+  the C3 CUDA track for the `MfDecode` path. Goal: keep DXVA-decoded NV12
+  resident in a D3D11 texture instead of copying it to system memory, so a
+  DXGI / D3D11 consumer (a swapchain present sink) takes the handoff without a
+  GPU->CPU copy. Phase 1 lands only the platform-agnostic core types (compiles
+  and tests on the Windows dev host); the `MfDecode` DXVA output (Phase 2) and
+  the present sink (Phase 3) follow.
+- New `MemoryDomain::D3D11Texture(OwnedD3D11Texture)` variant and matching
+  `MemoryDomainKind::D3D11Texture`, mirroring the handle-based `Cuda` variant
+  (no `windows`-crate link in `no_std` core). `OwnedD3D11Texture` carries the
+  `ID3D11Texture2D` pointer, the subresource index of this frame within it
+  (DXVA decoders hand out a texture *array* whose subresources are the decoded
+  surfaces), the visible dims, the `DXGI_FORMAT`, the `ID3D11Device`, and a
+  keep-alive owner.
+- `D3D11KeepAlive` trait (`Debug + Send`): the producing element boxes its
+  owning handle (a Media Foundation `IMFSample` / `IMFDXGIBuffer`) as a trait
+  object so core never links the `windows` crate; dropping the buffer drops
+  the box and releases the sample back to the decoder.
+- `AllocationParams::d3d11(size, count, align)` constructor, the Windows analog
+  of `AllocationParams::cuda`, so a DXGI consumer can request texture-resident
+  buffers via the M12 allocation query.
+- Two unit tests in `memory.rs` (`kind()` maps the new variant; a `FlagOnDrop`
+  keep-alive proves the backing texture is released exactly when the buffer
+  drops). VERIFIED on the Windows dev host: full workspace tests (114 core
+  passed), workspace clippy, and the no_std baseline all green.
+
 ### M13: `MfDecode` NV12 stride handling (Windows)
 
 - `MfDecode` no longer assumes the Media Foundation decoder's NV12 output is

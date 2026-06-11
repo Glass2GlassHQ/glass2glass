@@ -66,6 +66,18 @@ impl AllocationParams {
         }
     }
 
+    /// A Direct3D 11 texture proposal: the Windows analog of [`cuda`](Self::cuda).
+    /// A DXGI / D3D11 consumer asks its producer (a DXVA decoder) to keep
+    /// buffers resident in GPU textures so the handoff is copy-free.
+    pub const fn d3d11(size_bytes: usize, min_buffers: usize, align: usize) -> Self {
+        Self {
+            size_bytes,
+            min_buffers,
+            align,
+            domain: MemoryDomainKind::D3D11Texture,
+        }
+    }
+
     /// Fold an upstream element's own requirement into this (downstream)
     /// proposal: the larger size, buffer count, and alignment win. `self` is
     /// the consumer-most proposal and dictates the memory `domain`.

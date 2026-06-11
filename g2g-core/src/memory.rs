@@ -14,6 +14,12 @@ pub enum MemoryDomain {
     /// no device->host copy. The backing allocation is owned elsewhere (eg an
     /// ffmpeg `CUDA`-hwframe `AVFrame`); see [`OwnedCudaBuffer`].
     Cuda(OwnedCudaBuffer),
+    /// Direct3D 11 texture (Windows GPU memory). The decoded frame stays in a
+    /// `ID3D11Texture2D` so a DXGI / D3D11 consumer (a swapchain present sink)
+    /// uses it without a GPU->CPU copy. The texture is owned elsewhere (eg a
+    /// Media Foundation `IMFDXGIBuffer` from a DXVA decoder); see
+    /// [`OwnedD3D11Texture`]. The Windows analog of [`MemoryDomain::Cuda`].
+    D3D11Texture(OwnedD3D11Texture),
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
@@ -27,6 +33,7 @@ pub enum MemoryDomainKind {
     VulkanTexture,
     WebGPUBuffer,
     Cuda,
+    D3D11Texture,
 }
 
 impl MemoryDomain {
@@ -38,6 +45,7 @@ impl MemoryDomain {
             MemoryDomain::VulkanTexture(_) => MemoryDomainKind::VulkanTexture,
             MemoryDomain::WebGPUBuffer(_) => MemoryDomainKind::WebGPUBuffer,
             MemoryDomain::Cuda(_) => MemoryDomainKind::Cuda,
+            MemoryDomain::D3D11Texture(_) => MemoryDomainKind::D3D11Texture,
         }
     }
 }
@@ -207,6 +215,77 @@ impl OwnedCudaBuffer {
 /// worker-thread boundaries like every other domain.
 pub trait CudaKeepAlive: core::fmt::Debug + Send {}
 
+/// A decoded picture left in a Direct3D 11 texture (Windows GPU memory). Holds
+/// the `ID3D11Texture2D` pointer, the subresource index of this frame within
+/// it (DXVA decoders commonly hand out one texture *array* whose subresources
+/// are the decoded surfaces), the visible dims, the DXGI format, the D3D11
+/// device the texture belongs to, and a keep-alive owner that pins the texture
+/// for as long as the pointer is referenced.
+///
+/// The texture is not owned by this struct: a Media Foundation `IMFDXGIBuffer`
+/// (from a DXVA `IMFTransform`) owns it. `g2g-core` cannot link the `windows`
+/// crate (it is `no_std`), so the producing element boxes its owning handle as
+/// a [`D3D11KeepAlive`] trait object; dropping this buffer drops the box and
+/// releases the sample back to the decoder. The pointer stays valid for
+/// exactly the keep-alive's lifetime. The Windows analog of [`OwnedCudaBuffer`].
+#[derive(Debug)]
+pub struct OwnedD3D11Texture {
+    /// `ID3D11Texture2D` (as `u64`) backing this frame.
+    pub texture: u64,
+    /// Index of this frame's subresource within `texture` (0 for a
+    /// single-surface texture; the decode slot for a texture array).
+    pub subresource: u32,
+    /// Visible picture dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// `DXGI_FORMAT` (as `u32`) of the texture, eg `DXGI_FORMAT_NV12` (103).
+    pub dxgi_format: u32,
+    /// `ID3D11Device` (as `u64`) the texture belongs to. A consumer must use
+    /// this device (or one sharing its adapter) to read the texture.
+    pub device: u64,
+    /// Pins the backing texture (eg the decoder's `IMFSample`) for the life of
+    /// the pointer. Dropping it releases the allocation.
+    keep_alive: Box<dyn D3D11KeepAlive>,
+}
+
+impl OwnedD3D11Texture {
+    /// Wrap a D3D11 texture pointer with the owner that keeps it valid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        texture: u64,
+        subresource: u32,
+        width: u32,
+        height: u32,
+        dxgi_format: u32,
+        device: u64,
+        keep_alive: Box<dyn D3D11KeepAlive>,
+    ) -> Self {
+        Self {
+            texture,
+            subresource,
+            width,
+            height,
+            dxgi_format,
+            device,
+            keep_alive,
+        }
+    }
+
+    /// The keep-alive owner, exposed so a consumer that imports the texture
+    /// into another API (eg a Direct3D swapchain) can take shared ownership.
+    pub fn keep_alive(&self) -> &dyn D3D11KeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedD3D11Texture`]'s texture pointer. The
+/// texture is owned by the producing element (typically a Media Foundation
+/// `IMFSample` / `IMFDXGIBuffer` from a DXVA decoder); `g2g-core` cannot link
+/// the `windows` crate, so the element boxes its owning handle as this trait
+/// object. Dropping the box releases the texture. `Send` so a frame can cross
+/// the runner's worker-thread boundaries like every other domain.
+pub trait D3D11KeepAlive: core::fmt::Debug + Send {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +303,7 @@ mod tests {
         }
     }
     impl CudaKeepAlive for FlagOnDrop {}
+    impl D3D11KeepAlive for FlagOnDrop {}
 
     #[test]
     fn cuda_domain_reports_cuda_kind() {
@@ -262,6 +342,44 @@ mod tests {
         assert!(
             dropped.load(Ordering::SeqCst),
             "dropping the buffer must release the backing allocation"
+        );
+    }
+
+    #[test]
+    fn d3d11_domain_reports_d3d11_kind() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tex = OwnedD3D11Texture::new(
+            0xDEAD_BEEF,
+            2,
+            1920,
+            1080,
+            103, // DXGI_FORMAT_NV12
+            0xD3D1_CE,
+            Box::new(FlagOnDrop(dropped.clone())),
+        );
+        let domain = MemoryDomain::D3D11Texture(tex);
+        assert_eq!(domain.kind(), MemoryDomainKind::D3D11Texture);
+    }
+
+    #[test]
+    fn dropping_d3d11_texture_releases_keep_alive() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tex = OwnedD3D11Texture::new(
+            0xDEAD_BEEF,
+            2,
+            1920,
+            1080,
+            103,
+            0xD3D1_CE,
+            Box::new(FlagOnDrop(dropped.clone())),
+        );
+        assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
+        assert_eq!(tex.texture, 0xDEAD_BEEF);
+        assert_eq!(tex.subresource, 2);
+        drop(tex);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the texture must release the backing allocation"
         );
     }
 }
