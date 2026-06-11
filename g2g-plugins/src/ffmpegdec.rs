@@ -29,6 +29,20 @@
 //! need an `AVHWDeviceContext` and a `get_format` hook (it is a true
 //! hwaccel, not a standalone codec like cuvid).
 //!
+//! [`Backend::NvdecCuda`] (C3) is that true-hwaccel path for NVIDIA: instead
+//! of the standalone `h264_cuvid` codec (which copies NV12 back to system
+//! memory), it attaches an `AV_HWDEVICE_TYPE_CUDA` device to the generic
+//! `h264` decoder and registers a `get_format` hook that selects
+//! `AV_PIX_FMT_CUDA`. Decoded NV12 then stays resident in GPU memory: each
+//! frame is emitted as `MemoryDomain::Cuda`, carrying the two NV12 plane
+//! device pointers and the `CUcontext`, with the owning `AVFrame` boxed as
+//! the buffer's `CudaKeepAlive` so the pointers stay valid until a downstream
+//! GPU consumer drops the frame. This removes cuvid's device->host copy; the
+//! payoff lands when a CUDA-consuming sink (Phase 3) takes the handoff.
+//! Output is always NV12 (the decoder's native device layout); requesting
+//! `OutputFormat::I420` with this backend is rejected loud at configure time
+//! (a GPU colour convert would be needed and is out of scope here).
+//!
 //! Pipeline:
 //!
 //! ```text
@@ -72,10 +86,11 @@ use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive, Dim, FrameTiming,
+    G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
+    RawVideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -112,12 +127,21 @@ pub enum Backend {
     /// needed; the only difference from the software path is the source
     /// `AVFrame`'s pixel format.
     NvdecCuvid,
+    /// NVIDIA NVDEC via the generic `h264` decoder with an attached
+    /// `AV_HWDEVICE_TYPE_CUDA` device and a `get_format` hook selecting
+    /// `AV_PIX_FMT_CUDA`. Decoded NV12 stays in GPU memory; frames are
+    /// emitted as `MemoryDomain::Cuda` for a zero-copy handoff to a CUDA
+    /// consumer. Output is always NV12; `OutputFormat::I420` is rejected
+    /// at configure time. Requires libavcodec built with the CUDA hwaccel
+    /// and a working NVIDIA driver at runtime.
+    NvdecCuda,
 }
 
-/// One decoded picture, pixels already copied out of the libavcodec frame
-/// in the configured `OutputFormat` layout.
+/// One decoded picture. Either the pixels already copied out of the
+/// libavcodec frame into system memory (Software / NvdecCuvid), or a CUDA
+/// device buffer still resident on the GPU (NvdecCuda).
 struct DecodedPicture {
-    bytes: Box<[u8]>,
+    payload: DecodedPayload,
     width: u32,
     height: u32,
     pts_ns: u64,
@@ -125,6 +149,15 @@ struct DecodedPicture {
     /// frame so glass-to-glass latency survives decode. Looked up in
     /// `pts_to_arrival` after libavcodec echoes the input pts back.
     arrival_ns: u64,
+}
+
+/// Where a decoded picture's pixels live.
+enum DecodedPayload {
+    /// Packed `OutputFormat` bytes in system memory (CPU decode path or
+    /// cuvid's system-memory output).
+    System(Box<[u8]>),
+    /// NV12 still in CUDA device memory (NvdecCuda zero-copy path).
+    Cuda(OwnedCudaBuffer),
 }
 
 pub struct FfmpegH264Dec {
@@ -159,6 +192,11 @@ pub struct FfmpegH264Dec {
     /// reordering libavcodec does internally because we key on pts,
     /// which the codec layer echoes verbatim.
     pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
+    /// `CUcontext` (as `u64`) of the CUDA hwdevice created for the
+    /// `NvdecCuda` backend, extracted at `configure_pipeline`. `0` for the
+    /// system-memory backends. Stamped onto every emitted `OwnedCudaBuffer`
+    /// so a consumer can push the right context before touching the memory.
+    cuda_context: u64,
 }
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
@@ -196,7 +234,14 @@ impl FfmpegH264Dec {
             low_delay: false,
             input_caps: None,
             pts_to_arrival: alloc::collections::BTreeMap::new(),
+            cuda_context: 0,
         }
+    }
+
+    /// Whether this backend emits frames in CUDA device memory
+    /// (`MemoryDomain::Cuda`) rather than copying them to system memory.
+    fn outputs_cuda(&self) -> bool {
+        matches!(self.backend, Backend::NvdecCuda)
     }
 
     /// Switch the output layout. NV12 is required by `KmsSink` and most GPU
@@ -234,6 +279,17 @@ impl FfmpegH264Dec {
             Backend::NvdecCuvid => {
                 self.cuvid_surfaces = Some(4);
                 self.low_delay = true;
+            }
+            Backend::NvdecCuda => {
+                // The generic CUDA hwaccel ignores the cuvid-private
+                // `surfaces` option; pool depth is controlled via
+                // `extra_hw_frames` at open time instead. Low-delay still
+                // applies (release each picture as soon as decoded). The
+                // device frame is NV12, so force the output layout to match
+                // what we emit; an I420 request is rejected at configure.
+                self.cuvid_surfaces = None;
+                self.low_delay = true;
+                self.output_format = OutputFormat::Nv12;
             }
         }
         self
@@ -304,12 +360,16 @@ impl FfmpegH264Dec {
 
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         let format = self.output_format;
+        let outputs_cuda = self.outputs_cuda();
+        let cuda_context = self.cuda_context;
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        let mut frame = FfVideo::empty();
         loop {
+            // Fresh frame per iteration: the CUDA path moves the whole
+            // `AVFrame` into the emitted buffer's keep-alive, so it cannot be
+            // a reused scratch frame. The system path copies out and drops it.
+            let mut frame = FfVideo::empty();
             match decoder.receive_frame(&mut frame) {
                 Ok(()) => {
-                    let bytes = copy_yuv420(&frame, format)?;
                     // libavcodec returns the PTS we fed in (or AV_NOPTS_VALUE
                     // = INT64_MIN if it could not propagate one); treat the
                     // sentinel as zero so we don't return a wild timestamp.
@@ -317,11 +377,25 @@ impl FfmpegH264Dec {
                         Some(p) if p >= 0 => p as u64,
                         _ => 0,
                     };
+                    let width = frame.width();
+                    let height = frame.height();
+                    let payload = if outputs_cuda {
+                        // SAFETY: the NvdecCuda backend decodes into
+                        // `AV_PIX_FMT_CUDA` frames; `cuda_context` is the
+                        // `CUcontext` its hwdevice was created with. The
+                        // helper reads the device pointers and moves the
+                        // frame into the buffer's keep-alive.
+                        DecodedPayload::Cuda(unsafe {
+                            cuda_buffer_from_frame(frame, cuda_context)?
+                        })
+                    } else {
+                        DecodedPayload::System(copy_yuv420(&frame, format)?)
+                    };
                     let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
-                        bytes,
-                        width: frame.width(),
-                        height: frame.height(),
+                        payload,
+                        width,
+                        height,
                         pts_ns,
                         arrival_ns,
                     });
@@ -392,8 +466,16 @@ impl AsyncElement for FfmpegH264Dec {
         // repeatedly is safe and cheap.
         ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
+        // NvdecCuda needs NV12 out (the device frame's native layout); reject
+        // an I420 request loud rather than silently emit mismatched caps.
+        if self.backend == Backend::NvdecCuda && self.output_format != OutputFormat::Nv12 {
+            return Err(G2gError::CapsMismatch);
+        }
+
         let codec = match self.backend {
-            Backend::Software => codec::decoder::find(Id::H264),
+            // The generic `h264` decoder hosts the CUDA hwaccel; NvdecCuda
+            // attaches a CUDA device + get_format hook to it below.
+            Backend::Software | Backend::NvdecCuda => codec::decoder::find(Id::H264),
             // `h264_cuvid` is a standalone codec entry, not a hwaccel hook,
             // so it's found by name rather than by AVCodecID. If absent, the
             // libavcodec build wasn't compiled with `--enable-cuvid` or
@@ -424,6 +506,53 @@ impl AsyncElement for FfmpegH264Dec {
                 opts.set("surfaces", &v);
             }
         }
+
+        // NvdecCuda: create a CUDA hwdevice, hand the generic h264 decoder a
+        // reference to it plus a get_format hook that selects AV_PIX_FMT_CUDA,
+        // so decoded NV12 stays in device memory. Done on the raw
+        // AVCodecContext before open, the canonical `hw_decode.c` setup.
+        if self.backend == Backend::NvdecCuda {
+            // SAFETY: standard ffmpeg hwaccel init on a freshly-allocated,
+            // not-yet-opened context. `av_hwdevice_ctx_create` initialises
+            // `hw_device_ctx`; we read the CUcontext out of the device's
+            // hwctx, hand the codec its own ref, drop ours, and install the
+            // get_format callback. All pointers are checked for null.
+            unsafe {
+                let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
+                let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+                    &mut hw_device_ctx,
+                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                    core::ptr::null(),     // default CUDA device
+                    core::ptr::null_mut(), // no options
+                    0,
+                );
+                if ret < 0 || hw_device_ctx.is_null() {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+
+                // Walk the device buffer to its AVCUDADeviceContext and read
+                // the CUcontext. The device stays alive for the decoder's
+                // lifetime via the codec's own ref taken below, so this
+                // pointer remains valid for every frame we emit.
+                let dev_ctx = (*hw_device_ctx).data as *const ffmpeg::ffi::AVHWDeviceContext;
+                let cuda_dev = (*dev_ctx).hwctx as *const AVCUDADeviceContextHead;
+                self.cuda_context = (*cuda_dev).cuda_ctx as u64;
+
+                let raw = decoder_ctx.as_mut_ptr();
+                (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_device_ctx);
+                (*raw).get_format = Some(get_cuda_format);
+                // Pool headroom: the decoder must keep enough surfaces for the
+                // frames we hold downstream (link capacity) plus its own
+                // reorder/reference set. Without this the pool can starve once
+                // a few frames are in flight to the sink.
+                (*raw).extra_hw_frames = 8;
+
+                // The codec now owns a ref; release ours so only the decoder
+                // keeps the device alive.
+                ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx);
+            }
+        }
+
         let decoder = decoder_ctx
             .open_as_with(codec, opts)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
@@ -512,8 +641,14 @@ impl AsyncElement for FfmpegH264Dec {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps.clone());
                 }
+                let domain = match d.payload {
+                    DecodedPayload::System(bytes) => {
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes))
+                    }
+                    DecodedPayload::Cuda(buf) => MemoryDomain::Cuda(buf),
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(d.bytes)),
+                    domain,
                     timing: FrameTiming {
                         pts_ns: d.pts_ns,
                         dts_ns: d.pts_ns,
@@ -682,6 +817,111 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
 enum SourceLayout {
     Planar420,
     SemiPlanar420,
+}
+
+/// `get_format` hook for the `NvdecCuda` backend: pick `AV_PIX_FMT_CUDA` if the
+/// decoder offers it (keeping frames in device memory), else `AV_PIX_FMT_NONE`
+/// so libavcodec fails the format selection loud rather than silently falling
+/// back to a software pixel format we don't expect.
+///
+/// # Safety
+/// Called by libavcodec with a valid `*ctx` and a `formats` array terminated
+/// by `AV_PIX_FMT_NONE`. We only read the array.
+unsafe extern "C" fn get_cuda_format(
+    _ctx: *mut ffmpeg::ffi::AVCodecContext,
+    mut formats: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    if formats.is_null() {
+        return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
+    }
+    // SAFETY: the list is non-null and AV_PIX_FMT_NONE-terminated per the
+    // get_format contract; we walk it without passing the terminator.
+    unsafe {
+        while *formats != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *formats == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA {
+                return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
+            }
+            formats = formats.add(1);
+        }
+    }
+    ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+}
+
+/// Read the NV12 plane device pointers out of a decoded `AV_PIX_FMT_CUDA`
+/// frame and wrap them in an [`OwnedCudaBuffer`], moving the `AVFrame` into the
+/// buffer's keep-alive so the device memory stays referenced until a
+/// downstream consumer drops the frame.
+///
+/// # Safety
+/// `frame` must be a decoded CUDA hwframe (`format == AV_PIX_FMT_CUDA`) from a
+/// decoder whose hwdevice was created with `cuda_context`. The plane pointers
+/// are valid for the lifetime of the owned frame.
+unsafe fn cuda_buffer_from_frame(
+    frame: FfVideo,
+    cuda_context: u64,
+) -> Result<OwnedCudaBuffer, G2gError> {
+    // SAFETY: `as_ptr` yields the owned AVFrame pointer; reading these public
+    // fields is sound while we hold the frame. The reads copy into locals, so
+    // moving `frame` into the keep-alive afterwards leaves no dangling borrow.
+    let (luma_ptr, chroma_ptr, luma_pitch, chroma_pitch, width, height) = unsafe {
+        let f = frame.as_ptr();
+        (
+            (*f).data[0] as u64,
+            (*f).data[1] as u64,
+            (*f).linesize[0] as u32,
+            (*f).linesize[1] as u32,
+            (*f).width as u32,
+            (*f).height as u32,
+        )
+    };
+    if luma_ptr == 0 || chroma_ptr == 0 {
+        // Not a device frame (would-be system fallback); fail loud rather than
+        // hand a downstream CUDA consumer a host or null pointer.
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    let keep_alive = Box::new(CudaFrameOwner(frame));
+    Ok(OwnedCudaBuffer::new(
+        luma_ptr,
+        chroma_ptr,
+        luma_pitch,
+        chroma_pitch,
+        width,
+        height,
+        cuda_context,
+        keep_alive,
+    ))
+}
+
+/// Owns a decoded CUDA `AVFrame` so its device pointers stay valid while the
+/// frame travels downstream. Boxed as the [`CudaKeepAlive`] of an
+/// [`OwnedCudaBuffer`]; dropping it `av_frame_free`s the frame, returning the
+/// surface to the decoder's hwframe pool.
+struct CudaFrameOwner(FfVideo);
+
+// SAFETY: an `AVFrame` (like the decoder's `AVCodecContext`) is `!Send` by
+// default. We uphold `Send` by construction: the runner moves the frame
+// between worker tasks but never shares it, so the frame is owned and moved,
+// never aliased, the same contract as the decoder itself.
+unsafe impl Send for CudaFrameOwner {}
+
+impl core::fmt::Debug for CudaFrameOwner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CudaFrameOwner(<AVFrame>)")
+    }
+}
+
+impl CudaKeepAlive for CudaFrameOwner {}
+
+/// Leading fields of libavutil's `AVCUDADeviceContext` (from
+/// `hwcontext_cuda.h`). We mirror only the head rather than depend on
+/// ffmpeg-sys-next having bound the optional CUDA header at build time. The
+/// field order (`cuda_ctx`, `stream`) is stable public ABI; we read just
+/// `cuda_ctx`.
+#[repr(C)]
+#[derive(Debug)]
+struct AVCUDADeviceContextHead {
+    cuda_ctx: *mut core::ffi::c_void,
+    stream: *mut core::ffi::c_void,
 }
 
 #[cfg(test)]
@@ -865,5 +1105,53 @@ mod tests {
     fn unconfigured_decoder_reports_zero_decoded() {
         let dec = FfmpegH264Dec::new();
         assert_eq!(dec.decoded_count(), 0);
+    }
+
+    #[test]
+    fn nvdec_cuda_backend_forces_nv12_and_low_delay() {
+        // The CUDA device frame is NV12, so the backend pins the output
+        // layout to match what it emits and enables low-delay release. It
+        // does not use the cuvid-private `surfaces` knob.
+        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        assert_eq!(dec.backend(), Backend::NvdecCuda);
+        assert_eq!(dec.output_format(), OutputFormat::Nv12);
+        assert!(dec.low_delay());
+        assert_eq!(dec.cuvid_surfaces(), None);
+    }
+
+    #[test]
+    fn nvdec_cuda_backend_overrides_prior_i420() {
+        // with_backend after a with_output_format(I420) still lands on NV12
+        // (the backend's requirement wins), so the common build order is safe.
+        let dec = FfmpegH264Dec::new()
+            .with_output_format(OutputFormat::I420)
+            .with_backend(Backend::NvdecCuda);
+        assert_eq!(dec.output_format(), OutputFormat::Nv12);
+    }
+
+    #[test]
+    fn nvdec_cuda_caps_constraint_is_nv12() {
+        // Negotiation surface is unchanged from the other backends: H.264 in,
+        // NV12 out at the same geometry. Only the memory domain of the emitted
+        // frame differs, which caps do not encode.
+        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert_eq!(
+            f(&h264).alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
     }
 }

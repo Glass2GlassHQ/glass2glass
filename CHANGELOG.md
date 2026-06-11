@@ -5,6 +5,49 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 2): NVDEC CUDA hwframe output (`Backend::NvdecCuda`)
+
+- New `FfmpegH264Dec` backend that keeps decoded NV12 resident in GPU
+  memory. Unlike `Backend::NvdecCuvid` (standalone `h264_cuvid` codec,
+  copies NV12 back to system memory), `NvdecCuda` attaches an
+  `AV_HWDEVICE_TYPE_CUDA` device to the generic `h264` decoder and
+  installs a `get_format` hook selecting `AV_PIX_FMT_CUDA`, the canonical
+  `hw_decode.c` true-hwaccel pattern. Decoded frames are emitted as
+  `MemoryDomain::Cuda` carrying the two NV12 plane device pointers, row
+  pitches, dims, and the `CUcontext`; the owning `AVFrame` is boxed as the
+  buffer's `CudaKeepAlive`, so the device memory is released back to the
+  hwframe pool exactly when a downstream consumer drops the frame. Removes
+  cuvid's device->host copy; the latency payoff lands once a CUDA-consuming
+  sink (Phase 3) takes the handoff copy-free.
+- Output is always NV12 (the device frame's native layout):
+  `with_backend(NvdecCuda)` pins `OutputFormat::Nv12` and `configure_pipeline`
+  rejects an I420 request loud (a GPU colour convert would be needed, out of
+  scope). Negotiation surface is unchanged (H.264 in, NV12 out, same
+  geometry) so chains compose identically to the other backends; only the
+  emitted frame's memory domain differs, which caps do not encode.
+- `extra_hw_frames = 8` gives the decoder pool headroom for the frames held
+  in flight downstream (link capacity) plus its own reference set, so the
+  pool does not starve under `LatencyProfile::Live`. `low_delay` is on (as
+  for cuvid); the cuvid-private `surfaces` knob does not apply to the
+  generic hwaccel.
+- The decode loop allocates a fresh `AVFrame` per drained picture (the CUDA
+  path moves the whole frame into the keep-alive, so it cannot be reused
+  scratch); the system-memory paths (`Software`, `NvdecCuvid`) are otherwise
+  byte-identical. `DecodedPicture` gained a `DecodedPayload` enum
+  (`System(Box<[u8]>)` vs `Cuda(OwnedCudaBuffer)`).
+- Raw FFI via `ffmpeg_next::ffi` (re-exported `ffmpeg-sys-next`):
+  `av_hwdevice_ctx_create`, `av_buffer_ref`/`unref`, a `get_cuda_format`
+  C callback, and an `AVCUDADeviceContextHead` `#[repr(C)]` mirror of the
+  public `AVCUDADeviceContext` head (read the `CUcontext` without depending
+  on ffmpeg-sys-next having bound the optional CUDA header). Every `unsafe`
+  block carries a `// SAFETY:` note; `CudaFrameOwner` asserts `Send` under
+  the same ownership-transfer contract as the decoder.
+- Three GPU-free unit tests lock the builder surface (NvdecCuda forces NV12
+  + low-delay, overrides a prior I420, and its caps constraint is NV12).
+- VERIFICATION: this path is `ffmpeg`-feature + Linux + NVIDIA-GPU only and
+  does not compile on the Windows dev host; first-compile and the e2e decode
+  are owed on the Linux+GPU box, same as the existing rtsp/kms/wayland code.
+
 ### C3 (Phase 1): CUDA memory domain foundation
 
 - First phase of the zero-copy NVDEC -> GPU display track. Goal: keep
