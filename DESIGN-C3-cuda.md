@@ -117,12 +117,15 @@ the device pointers themselves still need a GPU to exercise.
      driver docs), the `nv12_gl_uploads` per-plane device->`cudaArray` copy
      extents (tested), and the Appendix A vertex + fragment shaders as
      consts. The interop entry points are `#[allow(dead_code)]` until 2b.
-   - **Step 2b (remaining):** EGL context on the Wayland surface, GL program
-     + fullscreen quad, the per-frame map/copy/unmap render loop wired into
-     the sink's `AsyncElement` worker (the `WaylandSink` worker-thread model
-     applies). Open decision: EGL/GL bindings (raw FFI vs `khronos-egl` +
-     `glow`) and how to get a `wl_egl_window` from the SCTK surface. Behind a
-     new `cuda-gl` feature that adds the EGL/GL deps.
+   - **Step 2b first draft landed** (`g2g-plugins::cudaglsink::CudaGlSink`,
+     `cuda-gl` feature): EGL context on the Wayland surface (`wayland-egl`
+     `wl_egl_window` from the SCTK surface), `glow` GL ES 3 program +
+     fullscreen quad with the two NV12 textures, and the per-frame
+     map/copy/unmap render loop via `CudaGlInterop`, on the `WaylandSink`
+     worker-thread model. Bindings: `khronos-egl` (static) + `glow` +
+     `wayland-egl`. NOT yet compiled (Windows host); first compile + e2e owed
+     on Linux+GPU, with `// VERIFY:` notes on the few crate-API spots most
+     likely to need a fixup.
 3. Wire the allocation query so `CudaGlSink` proposes
    `MemoryDomainKind::Cuda` and `NvdecCuda` honours it (the cross-element
    handshake Phase 1 already conveys).

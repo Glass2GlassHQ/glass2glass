@@ -279,6 +279,20 @@ unsafe fn copy_plane(
     check(unsafe { ffi::cu_memcpy_2d(&copy) })
 }
 
+/// Push `context` onto the calling thread's CUDA current-context stack and
+/// leave it current. The `CudaGlSink` worker calls this once on its GL thread
+/// (with the ffmpeg-owned context from the first decoded frame) so subsequent
+/// CUDA-GL interop and copies run in that context.
+///
+/// # Safety
+/// `context` must be a valid `CUcontext` and the calling thread must own the
+/// stack it is pushed onto (a dedicated worker thread).
+#[cfg(feature = "cuda-gl")]
+pub unsafe fn make_context_current(context: u64) -> Result<(), G2gError> {
+    // SAFETY: `context` is a valid CUcontext per the contract.
+    unsafe { check(ffi::cu_ctx_push_current(context as ffi::CuContext)) }
+}
+
 /// Map a `CUresult` to a `Result`, carrying the raw code on failure.
 fn check(code: ffi::CuResult) -> Result<(), G2gError> {
     if code == ffi::CUDA_SUCCESS {
@@ -485,6 +499,144 @@ void main() {
     gl_FragColor = vec4(r, g, b, 1.0);
 }
 ";
+
+/// CUDA side of the NV12 -> GL-texture presentation (`CudaGlSink`). Registers
+/// the two GL textures (full-res `R8` luma, half-res `RG8` chroma) with CUDA
+/// once, then per frame maps them, copies each decoded NV12 plane
+/// device->`cudaArray` (`cuMemcpy2D`), and unmaps. Unregisters on drop.
+///
+/// The textures must already be allocated at the plane dimensions and a GL
+/// context current on the calling thread, and the ffmpeg CUDA context must be
+/// current (pushed) on that same thread. The sink worker owns this on its GL
+/// thread, so the raw resource handles never cross threads.
+#[cfg(feature = "cuda-gl")]
+#[derive(Debug)]
+pub struct CudaGlInterop {
+    y_res: ffi::CuGraphicsResource,
+    uv_res: ffi::CuGraphicsResource,
+}
+
+#[cfg(feature = "cuda-gl")]
+impl CudaGlInterop {
+    /// Register the luma (`y_tex`) and chroma (`uv_tex`) GL textures with CUDA
+    /// (write-discard: CUDA is their sole writer).
+    ///
+    /// # Safety
+    /// `y_tex`/`uv_tex` must be live `GL_TEXTURE_2D` names allocated at the
+    /// luma/chroma plane dimensions in the GL context current on this thread;
+    /// the ffmpeg CUDA context must be current (pushed) on this thread.
+    pub unsafe fn register(y_tex: u32, uv_tex: u32) -> Result<Self, G2gError> {
+        let mut y_res: ffi::CuGraphicsResource = core::ptr::null_mut();
+        let mut uv_res: ffi::CuGraphicsResource = core::ptr::null_mut();
+        // SAFETY: the textures are live GL_TEXTURE_2D names per the contract.
+        unsafe {
+            check(ffi::cuGraphicsGLRegisterImage(
+                &mut y_res,
+                y_tex,
+                ffi::GL_TEXTURE_2D,
+                ffi::CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
+            ))?;
+            if let Err(e) = check(ffi::cuGraphicsGLRegisterImage(
+                &mut uv_res,
+                uv_tex,
+                ffi::GL_TEXTURE_2D,
+                ffi::CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD,
+            )) {
+                // Roll back the luma registration so we don't leak it.
+                let _ = ffi::cuGraphicsUnregisterResource(y_res);
+                return Err(e);
+            }
+        }
+        Ok(Self { y_res, uv_res })
+    }
+
+    /// Copy the decoded NV12 planes of `buf` into the registered GL textures
+    /// (device->array), honouring the source pitch.
+    ///
+    /// # Safety
+    /// `buf`'s pointers must be valid device memory in the CUDA context
+    /// current on this thread; the registered textures must match the frame
+    /// geometry.
+    pub unsafe fn upload(&self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        let (luma, chroma) = nv12_gl_uploads(buf.width, buf.height);
+        let mut resources = [self.y_res, self.uv_res];
+        // SAFETY: both resources are registered; the array handles obtained
+        // below are valid only between map and unmap, so the copies sit
+        // strictly inside that window and the unmap always runs.
+        unsafe {
+            check(ffi::cuGraphicsMapResources(
+                2,
+                resources.as_mut_ptr(),
+                core::ptr::null_mut(),
+            ))?;
+            let y_copy = copy_plane_to_array(self.y_res, buf.luma_ptr, buf.luma_pitch, &luma);
+            let uv_copy =
+                copy_plane_to_array(self.uv_res, buf.chroma_ptr, buf.chroma_pitch, &chroma);
+            let unmap = check(ffi::cuGraphicsUnmapResources(
+                2,
+                resources.as_mut_ptr(),
+                core::ptr::null_mut(),
+            ));
+            y_copy.and(uv_copy).and(unmap)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cuda-gl")]
+impl Drop for CudaGlInterop {
+    fn drop(&mut self) {
+        // SAFETY: both resources were registered in `register` and not yet
+        // unregistered; best-effort cleanup, a failure here is unactionable.
+        unsafe {
+            let _ = ffi::cuGraphicsUnregisterResource(self.y_res);
+            let _ = ffi::cuGraphicsUnregisterResource(self.uv_res);
+        }
+    }
+}
+
+/// `cuMemcpy2D` one NV12 plane from device memory into a mapped `cudaArray`.
+///
+/// # Safety
+/// `resource` must be currently mapped; `src_device` must be valid device
+/// memory of at least `src_pitch * upload.height` bytes in the current context.
+#[cfg(feature = "cuda-gl")]
+unsafe fn copy_plane_to_array(
+    resource: ffi::CuGraphicsResource,
+    src_device: u64,
+    src_pitch: u32,
+    upload: &GlUpload,
+) -> Result<(), G2gError> {
+    let mut array: ffi::CuArray = core::ptr::null_mut();
+    // SAFETY: `resource` is mapped; array index 0 / mip 0 is the base image.
+    unsafe {
+        check(ffi::cuGraphicsSubResourceGetMappedArray(
+            &mut array, resource, 0, 0,
+        ))?;
+    }
+    let copy = ffi::CudaMemcpy2D {
+        src_x_in_bytes: 0,
+        src_y: 0,
+        src_memory_type: ffi::CU_MEMORYTYPE_DEVICE,
+        src_host: core::ptr::null(),
+        src_device,
+        src_array: core::ptr::null_mut(),
+        src_pitch: src_pitch as usize,
+        dst_x_in_bytes: 0,
+        dst_y: 0,
+        dst_memory_type: ffi::CU_MEMORYTYPE_ARRAY,
+        dst_host: core::ptr::null_mut(),
+        dst_device: 0,
+        dst_array: array,
+        // Pitch is ignored for an array destination.
+        dst_pitch: 0,
+        width_in_bytes: upload.width_bytes,
+        height: upload.height,
+    };
+    // SAFETY: fully-initialised array-destination CUDA_MEMCPY2D; the driver
+    // only reads through it.
+    unsafe { check(ffi::cu_memcpy_2d(&copy)) }
+}
 
 #[cfg(test)]
 mod tests {

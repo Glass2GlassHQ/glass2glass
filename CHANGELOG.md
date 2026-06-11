@@ -5,6 +5,48 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### C3 (Phase 3, step 2b): `CudaGlSink` (first draft, owed first compile)
+
+- `g2g-plugins::cudaglsink::CudaGlSink` behind a new `cuda-gl` feature
+  (implies `cuda`; Linux + NVIDIA). The zero-copy-ish display payoff: keeps
+  `Backend::NvdecCuda` decoded NV12 on the GPU and presents it via CUDA-GL
+  interop (device->texture copy + NV12->RGB fragment shader) on a Wayland EGL
+  surface, removing both the device->host copy `CudaDownload` pays and the CPU
+  colour convert `WaylandSink` pays (DESIGN-C3-cuda.md §3.2, §4 step 2).
+- `CudaGlInterop` (in `g2g-plugins::cuda`, gated `cuda-gl`) is the CUDA side:
+  registers the two GL textures once (`cuGraphicsGLRegisterImage`,
+  write-discard), then per frame maps them, `cuMemcpy2D`s each NV12 plane
+  device->`cudaArray`, and unmaps; unregisters on drop. This consumes the
+  step-2a interop FFI. `make_context_current` pushes the ffmpeg CUDA context
+  onto the sink's GL worker thread.
+- Sink structure mirrors the proven `WaylandSink`: a dedicated worker thread
+  owns the Wayland connection + EGL/GL context (both thread-affine); the sink
+  struct holds only `Send` handles (a `calloop` channel + atomics). The
+  decoded `OwnedCudaBuffer` is `Send`, so it crosses to the worker and the
+  device frame stays pinned until presented. NV12-in-CUDA only (a
+  system-memory frame is rejected `UnsupportedDomain`); per-frame ack gives
+  compositor-paced backpressure; mid-stream geometry change respawns the
+  worker (M16 5j).
+- New deps under the `cuda-gl` feature (Linux-gated, verified current):
+  `khronos-egl` 6 (`static`, links libEGL), `glow` 0.17 (GL ES wrapper),
+  `wayland-egl` 0.32 (`wl_egl_window` from the SCTK surface). The Appendix A
+  vertex + fragment shaders (from step 2a) drive a fullscreen quad with two
+  NV12 textures (luma `R8`, chroma `RG8`), GL ES 3 for the single/two-channel
+  formats.
+- THREE GPU-free unit tests (intercept pass-through, non-NV12 reject, odd-dim
+  reject) lock the negotiation surface.
+- VERIFICATION: this is a FIRST DRAFT. The module is `cuda-gl` + Linux +
+  NVIDIA-gated and is NOT compiled on the Windows dev host; the EGL/GL/Wayland
+  worker is owed a first compile and an e2e on the Linux+GPU box. The crate-API
+  spots most likely to need a small fixup carry inline `// VERIFY:` notes (the
+  `wl_display` / `wl_surface` raw-pointer accessors on `wayland-client` 0.31,
+  glow 0.17's `tex_image_2d` pixel-source parameter, and the
+  `eglGetProcAddress` cast for glow's loader). Acceptance test: a
+  `wayland_smoke`-style benchmark `rtspsrc -> h264parse ->
+  ffmpegdec[NvdecCuda] -> CudaGlSink`, p50/p95 versus the `NvdecCuvid ->
+  WaylandSink` system-memory baseline. Default workspace build/test/clippy and
+  no_std core baseline remain green.
+
 ### C3 (Phase 3, step 2a): CUDA-GL interop foundation
 
 - Groundwork for `CudaGlSink` (DESIGN-C3-cuda.md §3.2, §4 step 2), the real

@@ -1,0 +1,893 @@
+//! CUDA-GL display sink (C3 Phase 3, step 2): the zero-copy-ish payoff.
+//!
+//! Keeps `Backend::NvdecCuda` decoded NV12 resident on the GPU and presents it
+//! without a PCIe round-trip or CPU colour convert. Per frame: CUDA copies the
+//! two NV12 planes device->`cudaArray` into two registered GL textures
+//! (`CudaGlInterop`), then a fragment shader converts NV12->RGB on the GPU and
+//! presents via `eglSwapBuffers` (DESIGN-C3-cuda.md §3.2, Appendix A). Not
+//! literally zero-copy (one device->device copy into the texture), but it
+//! removes the device->host copy `CudaDownload` pays and the CPU convert
+//! `WaylandSink` pays.
+//!
+//! ## Pipeline shape
+//!
+//! ```text
+//! RtspSrc ─► H264Parse ─► FfmpegH264Dec(NvdecCuda) ─► CudaGlSink
+//!                                                          │
+//!                                                          └─► EGL/GL window
+//! ```
+//!
+//! ## Threading
+//!
+//! GL and Wayland are both single-thread-affine, so (like [`WaylandSink`]) all
+//! of it lives on a dedicated worker thread spun up at `configure_pipeline`.
+//! The sink struct holds only `Send` handles (a `calloop` channel sender plus
+//! shared atomics), so the runner can move it between executor tasks. The
+//! decoded `OwnedCudaBuffer` is `Send` (its keep-alive owner is), so the frame
+//! crosses to the worker and the device memory stays pinned until the worker
+//! drops it after upload.
+//!
+//! ## Verification status
+//!
+//! This module is `cuda-gl` + Linux + NVIDIA-gated and is NOT compiled on the
+//! Windows dev host, the same constraint as the rest of C3. It is a first
+//! draft owed a first compile and an e2e on the Linux+GPU box; the spots most
+//! likely to need a small adjustment to the exact crate APIs are flagged with
+//! `// VERIFY:` notes (the wl_display / wl_surface raw-pointer accessors on
+//! `wayland-client` 0.31, glow 0.17's `tex_image_2d` pixel-source parameter,
+//! and the `eglGetProcAddress` cast for glow's loader).
+//!
+//! ## Constraints (v1)
+//!
+//! - NV12 in CUDA device memory only (`MemoryDomain::Cuda`); a system-memory
+//!   frame is rejected loud (use `CudaDownload` + `WaylandSink` for that).
+//! - No scaling: the window opens at the video dimensions; the compositor
+//!   letterboxes/clips if it resizes us.
+//! - BT.601 limited range (Appendix A shader); BT.709 awaits colour metadata.
+
+use core::future::Future;
+use core::pin::Pin;
+use core::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+
+use glow::HasContext;
+use khronos_egl as egl;
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_output, delegate_registry, delegate_xdg_shell,
+    delegate_xdg_window,
+    output::{OutputHandler, OutputState},
+    reexports::calloop::{
+        channel::{channel, Channel, Event as ChanEvent, Sender as CalloopSender},
+        EventLoop,
+    },
+    reexports::calloop_wayland_source::WaylandSource,
+    reexports::client::{
+        globals::registry_queue_init,
+        protocol::{wl_output, wl_surface},
+        Connection, Proxy, QueueHandle,
+    },
+    registry::{ProvidesRegistryState, RegistryState},
+    registry_handlers,
+    shell::{
+        xdg::{
+            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
+            XdgShell,
+        },
+        WaylandSurface,
+    },
+};
+use wayland_egl::WlEglSurface;
+
+use g2g_core::memory::OwnedCudaBuffer;
+use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
+use g2g_core::{
+    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, Frame, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, RawVideoFormat,
+};
+
+use crate::cuda::{
+    make_context_current, CudaGlInterop, FRAGMENT_SHADER_NV12, VERTEX_SHADER,
+};
+
+/// Worker-thread command. `Frame` carries the decoded CUDA buffer (still
+/// device-resident) plus the source-side `arrival_ns` for latency and a
+/// one-shot `ack` the worker signals once the frame is presented.
+enum WorkerCmd {
+    Frame {
+        buf: OwnedCudaBuffer,
+        arrival_ns: u64,
+        ack: tokio::sync::oneshot::Sender<()>,
+    },
+    Shutdown,
+}
+
+/// Sink-side handle set. Only `Send + Sync` state lives here so the
+/// multi-thread runner can move the sink between tasks.
+pub struct CudaGlSink {
+    title: String,
+    app_id: String,
+    cmd_tx: Option<CalloopSender<WorkerCmd>>,
+    worker: Option<JoinHandle<()>>,
+    width: u32,
+    height: u32,
+    frames_presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
+}
+
+impl core::fmt::Debug for CudaGlSink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CudaGlSink")
+            .field("title", &self.title)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field(
+                "frames_presented",
+                &self.frames_presented.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl Default for CudaGlSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CudaGlSink {
+    pub fn new() -> Self {
+        Self {
+            title: String::from("glass2glass"),
+            app_id: String::from("io.glass2glass.CudaGlSink"),
+            cmd_tx: None,
+            worker: None,
+            width: 0,
+            height: 0,
+            frames_presented: Arc::new(AtomicU64::new(0)),
+            latency: Arc::new(LatencyHistogram::new()),
+        }
+    }
+
+    pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
+        self.title = title.into();
+        self
+    }
+
+    pub fn with_app_id<S: Into<String>>(mut self, app_id: S) -> Self {
+        self.app_id = app_id.into();
+        self
+    }
+
+    pub fn frames_presented(&self) -> u64 {
+        self.frames_presented.load(Ordering::Relaxed)
+    }
+
+    /// Glass-to-glass latency snapshot: source-side `arrival_ns` to the
+    /// `eglSwapBuffers` that presents the frame. Untimed pipelines report
+    /// `count = 0`.
+    pub fn latency_snapshot(&self) -> LatencySnapshot {
+        self.latency.snapshot()
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(tx) = self.cmd_tx.take() {
+            let _ = tx.send(WorkerCmd::Shutdown);
+        }
+        if let Some(join) = self.worker.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for CudaGlSink {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Monotonic clock the sink offers, matching the source-side `arrival_ns`
+/// epoch so the latency histogram is meaningful. Same role as `WaylandClock`.
+#[derive(Debug)]
+struct CudaGlClock;
+impl PipelineClock for CudaGlClock {
+    fn now_ns(&self) -> u64 {
+        monotonic_ns()
+    }
+}
+
+impl AsyncElement for CudaGlSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        Some(ClockCandidate::new(
+            ClockPriority::Provider,
+            alloc::sync::Arc::new(CudaGlClock),
+        ))
+    }
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // Pass-through at negotiation; NV12 is enforced in configure_pipeline.
+        // The native decoder lands NV12 on this link via its DerivedOutput.
+        Ok(upstream_caps.clone())
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // NV12 only. Caps do not encode the memory domain, so the Cuda-vs-
+        // System distinction is checked per frame in `process`.
+        let (w, h) = match absolute_caps {
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => (*w, *h),
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        if w % 2 != 0 || h % 2 != 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+
+        // Mid-stream geometry change: same dims is a no-op; new dims tear down
+        // the worker and respawn (M16 5j), as WaylandSink does.
+        if self.worker.is_some() {
+            if w == self.width && h == self.height {
+                return Ok(ConfigureOutcome::Accepted);
+            }
+            self.shutdown();
+        }
+
+        let (tx, rx) = channel::<WorkerCmd>();
+        let presented = Arc::clone(&self.frames_presented);
+        let latency = Arc::clone(&self.latency);
+        let title = self.title.clone();
+        let app_id = self.app_id.clone();
+
+        let ready = Arc::new(Handshake::new());
+        let ready_for_worker = Arc::clone(&ready);
+
+        let join = thread::Builder::new()
+            .name(String::from("g2g-cudaglsink"))
+            .spawn(move || {
+                if let Err(e) =
+                    worker_main(w, h, title, app_id, rx, presented, latency, ready_for_worker)
+                {
+                    std::eprintln!("g2g-cudaglsink worker error: {e:?}");
+                }
+            })
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+
+        if !ready.wait(Duration::from_secs(5)) {
+            let _ = tx.send(WorkerCmd::Shutdown);
+            let _ = join.join();
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+
+        self.cmd_tx = Some(tx);
+        self.worker = Some(join);
+        self.width = w;
+        self.height = h;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                    // This sink consumes CUDA device memory only; a system
+                    // frame means the chain forgot the NvdecCuda backend.
+                    let MemoryDomain::Cuda(buf) = domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    tx.send(WorkerCmd::Frame {
+                        buf,
+                        arrival_ns: timing.arrival_ns,
+                        ack: ack_tx,
+                    })
+                    .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    // Block until the worker presents this frame (vsync-paced
+                    // by the compositor's release of the EGL back buffer).
+                    ack_rx
+                        .await
+                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                    Ok(())
+                }
+                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
+                PipelinePacket::Eos => {
+                    self.shutdown();
+                    Ok(())
+                }
+            }
+        })
+    }
+}
+
+// =================================================================
+// Worker thread: Wayland window + EGL/GL + CUDA-GL upload
+// =================================================================
+
+/// GL render state, built once the EGL context is current. Holds the program,
+/// the two NV12 textures, the fullscreen-quad buffer, and (lazily, on the
+/// first frame, once the decoder's CUDA context is known) the CUDA-GL interop.
+struct GlState {
+    gl: glow::Context,
+    program: glow::Program,
+    y_tex: glow::Texture,
+    uv_tex: glow::Texture,
+    vbo: glow::Buffer,
+    width: u32,
+    height: u32,
+    /// Registered on the first frame, when `OwnedCudaBuffer::context` is known.
+    interop: Option<CudaGlInterop>,
+    /// True once the decoder's CUDA context has been pushed current here.
+    cuda_current: bool,
+}
+
+struct WorkerState {
+    registry_state: RegistryState,
+    output_state: OutputState,
+    window: Window,
+    qh: QueueHandle<WorkerState>,
+    // EGL handles: kept alive for the worker's lifetime; the WlEglSurface must
+    // outlive the EGL surface, which must outlive the wl_surface.
+    egl: egl::Instance<egl::Static>,
+    egl_display: egl::Display,
+    egl_surface: egl::Surface,
+    egl_context: egl::Context,
+    _wl_egl: WlEglSurface,
+    gl: GlState,
+    configured: bool,
+    exit: bool,
+    ready: Option<Arc<Handshake>>,
+    presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
+    /// Frame that arrived before the surface was mappable.
+    pending: Option<(OwnedCudaBuffer, u64, tokio::sync::oneshot::Sender<()>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn worker_main(
+    width: u32,
+    height: u32,
+    title: String,
+    app_id: String,
+    rx: Channel<WorkerCmd>,
+    presented: Arc<AtomicU64>,
+    latency: Arc<LatencyHistogram>,
+    ready: Arc<Handshake>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::connect_to_env()?;
+    let (globals, event_queue) = registry_queue_init(&conn)?;
+    let qh = event_queue.handle();
+
+    let mut event_loop: EventLoop<WorkerState> = EventLoop::try_new()?;
+    let loop_handle = event_loop.handle();
+    WaylandSource::new(conn.clone(), event_queue).insert(loop_handle.clone())?;
+
+    let compositor = CompositorState::bind(&globals, &qh)?;
+    let xdg_shell = XdgShell::bind(&globals, &qh)?;
+
+    let surface = compositor.create_surface(&qh);
+    let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
+    window.set_title(&title);
+    window.set_app_id(&app_id);
+    window.set_min_size(Some((width, height)));
+    window.commit();
+
+    // --- EGL on the Wayland surface ---
+    let egl = egl::Instance::new(egl::Static);
+
+    // VERIFY: the wl_display raw pointer on wayland-client 0.31. The display is
+    // a special global; `backend().display_ptr()` returns the libwayland
+    // `*mut wl_display` EGL wants as its native display handle.
+    let display_ptr = conn.backend().display_ptr() as *mut core::ffi::c_void;
+    let egl_display = egl.get_display(display_ptr).ok_or("eglGetDisplay failed")?;
+    egl.initialize(egl_display)?;
+    egl.bind_api(egl::OPENGL_ES_API)?;
+
+    let config_attribs = [
+        egl::SURFACE_TYPE,
+        egl::WINDOW_BIT,
+        egl::RENDERABLE_TYPE,
+        egl::OPENGL_ES3_BIT, // GLES 3 for R8/RG8 single/two-channel textures
+        egl::RED_SIZE,
+        8,
+        egl::GREEN_SIZE,
+        8,
+        egl::BLUE_SIZE,
+        8,
+        egl::NONE,
+    ];
+    let config = egl
+        .choose_first_config(egl_display, &config_attribs)?
+        .ok_or("no matching EGL config")?;
+
+    let context_attribs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::NONE];
+    let egl_context = egl.create_context(egl_display, config, None, &context_attribs)?;
+
+    // wl_egl_window from the SCTK surface; EGL window surface on top of it.
+    // VERIFY: `WlSurface::id()` -> ObjectId on wayland-client 0.31.
+    let wl_egl = WlEglSurface::new(window.wl_surface().id(), width as i32, height as i32)?;
+    let egl_surface = unsafe {
+        egl.create_window_surface(egl_display, config, wl_egl.ptr() as *mut core::ffi::c_void, None)
+    }?;
+    egl.make_current(
+        egl_display,
+        Some(egl_surface),
+        Some(egl_surface),
+        Some(egl_context),
+    )?;
+
+    // glow loads GL ES entry points through eglGetProcAddress.
+    // VERIFY: get_proc_address returns Option<extern "system" fn()>; cast to
+    // the *const c_void glow's loader expects.
+    let gl = unsafe {
+        glow::Context::from_loader_function(|s| match egl.get_proc_address(s) {
+            Some(p) => p as *const core::ffi::c_void,
+            None => core::ptr::null(),
+        })
+    };
+
+    let gl_state = unsafe { build_gl_state(gl, width, height) }?;
+
+    let mut state = WorkerState {
+        registry_state: RegistryState::new(&globals),
+        output_state: OutputState::new(&globals, &qh),
+        window,
+        qh: qh.clone(),
+        egl,
+        egl_display,
+        egl_surface,
+        egl_context,
+        _wl_egl: wl_egl,
+        gl: gl_state,
+        configured: false,
+        exit: false,
+        ready: Some(ready),
+        presented,
+        latency,
+        pending: None,
+    };
+
+    loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
+        ChanEvent::Msg(WorkerCmd::Frame { buf, arrival_ns, ack }) => {
+            if state.configured {
+                state.draw(buf, arrival_ns, ack);
+            } else {
+                state.pending = Some((buf, arrival_ns, ack));
+            }
+        }
+        ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
+            state.exit = true;
+        }
+    })?;
+
+    while !state.exit {
+        event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+    }
+    Ok(())
+}
+
+/// Compile the NV12 shaders, link the program, create the fullscreen-quad
+/// buffer and the two NV12 textures (luma `R8` full-res, chroma `RG8`
+/// half-res), allocated at the plane dimensions ready for CUDA to write.
+///
+/// # Safety
+/// `gl` must wrap a current GL ES 3 context.
+unsafe fn build_gl_state(
+    gl: glow::Context,
+    width: u32,
+    height: u32,
+) -> Result<GlState, Box<dyn std::error::Error>> {
+    unsafe {
+        let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER_NV12)?;
+
+        // Fullscreen quad: two triangles, interleaved (x, y, u, v). Flip V so
+        // the top row of the frame maps to the top of the window.
+        #[rustfmt::skip]
+        let verts: [f32; 24] = [
+            -1.0, -1.0, 0.0, 1.0,
+             1.0, -1.0, 1.0, 1.0,
+             1.0,  1.0, 1.0, 0.0,
+            -1.0, -1.0, 0.0, 1.0,
+             1.0,  1.0, 1.0, 0.0,
+            -1.0,  1.0, 0.0, 0.0,
+        ];
+        let vbo = gl.create_buffer().map_err(|e| e.to_string())?;
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            bytemuck_cast(&verts),
+            glow::STATIC_DRAW,
+        );
+
+        let cw = width.div_ceil(2);
+        let ch = height.div_ceil(2);
+        let y_tex = make_texture(&gl, glow::R8 as i32, glow::RED, width, height)?;
+        let uv_tex = make_texture(&gl, glow::RG8 as i32, glow::RG, cw, ch)?;
+
+        Ok(GlState {
+            gl,
+            program,
+            y_tex,
+            uv_tex,
+            vbo,
+            width,
+            height,
+            interop: None,
+            cuda_current: false,
+        })
+    }
+}
+
+/// Allocate a 2D texture with the given internal/source format at `w` x `h`,
+/// `LINEAR` filtered and clamped, with no initial pixel data (CUDA writes it).
+///
+/// # Safety
+/// A GL context must be current.
+unsafe fn make_texture(
+    gl: &glow::Context,
+    internal_format: i32,
+    format: u32,
+    w: u32,
+    h: u32,
+) -> Result<glow::Texture, Box<dyn std::error::Error>> {
+    unsafe {
+        let tex = gl.create_texture().map_err(|e| e.to_string())?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        // VERIFY: glow 0.17 `tex_image_2d` takes the pixel source as
+        // `PixelUnpackData::Slice(Option<&[u8]>)`; `None` = allocate storage
+        // without uploading. Older glow took `Option<&[u8]>` directly.
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            internal_format,
+            w as i32,
+            h as i32,
+            0,
+            format,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        Ok(tex)
+    }
+}
+
+/// Compile + link the vertex and fragment shaders into a program.
+///
+/// # Safety
+/// A GL context must be current.
+unsafe fn link_program(
+    gl: &glow::Context,
+    vertex_src: &str,
+    fragment_src: &str,
+) -> Result<glow::Program, Box<dyn std::error::Error>> {
+    unsafe {
+        let program = gl.create_program().map_err(|e| e.to_string())?;
+        let shaders = [
+            (glow::VERTEX_SHADER, vertex_src),
+            (glow::FRAGMENT_SHADER, fragment_src),
+        ];
+        let mut compiled = alloc::vec::Vec::new();
+        for (kind, src) in shaders {
+            let shader = gl.create_shader(kind).map_err(|e| e.to_string())?;
+            gl.shader_source(shader, src);
+            gl.compile_shader(shader);
+            if !gl.get_shader_compile_status(shader) {
+                return Err(gl.get_shader_info_log(shader).into());
+            }
+            gl.attach_shader(program, shader);
+            compiled.push(shader);
+        }
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            return Err(gl.get_program_info_log(program).into());
+        }
+        for shader in compiled {
+            gl.detach_shader(program, shader);
+            gl.delete_shader(shader);
+        }
+        Ok(program)
+    }
+}
+
+/// Reinterpret an `f32` slice as the `&[u8]` GL wants, without pulling in the
+/// `bytemuck` crate for one call. The vertex array is `'static`-lifetime local
+/// and tightly packed, so the cast is sound.
+fn bytemuck_cast(verts: &[f32]) -> &[u8] {
+    // SAFETY: `f32` has no padding and any bit pattern is a valid `u8`; the
+    // resulting slice covers exactly the same bytes.
+    unsafe { core::slice::from_raw_parts(verts.as_ptr() as *const u8, core::mem::size_of_val(verts)) }
+}
+
+impl WorkerState {
+    /// Upload the decoded NV12 planes into the GL textures via CUDA, draw the
+    /// fullscreen quad through the NV12->RGB shader, and present. Signals
+    /// `ack` after `eglSwapBuffers` returns (compositor-paced backpressure).
+    fn draw(&mut self, buf: OwnedCudaBuffer, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
+        if let Err(e) = self.draw_inner(&buf) {
+            std::eprintln!("g2g-cudaglsink draw error: {e:?}");
+            // Release the producer so a transient GPU error doesn't deadlock
+            // the pipeline; the frame just didn't paint.
+            let _ = ack.send(());
+            return;
+        }
+        self.presented.fetch_add(1, Ordering::Relaxed);
+        if arrival_ns != 0 {
+            let now = monotonic_ns();
+            if now >= arrival_ns {
+                self.latency.record(now - arrival_ns);
+            }
+        }
+        let _ = ack.send(());
+    }
+
+    fn draw_inner(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        // Lazily make the decoder's CUDA context current on this GL thread and
+        // register the textures with CUDA, now that the context is known.
+        if !self.gl.cuda_current {
+            // SAFETY: worker owns this thread; `buf.context` is the ffmpeg
+            // CUDA context the frame's pointers are valid in.
+            unsafe { make_context_current(buf.context)? };
+            self.gl.cuda_current = true;
+        }
+        if self.gl.interop.is_none() {
+            let y = self.gl.y_tex.0.get();
+            let uv = self.gl.uv_tex.0.get();
+            // SAFETY: both textures are live GL_TEXTURE_2D names allocated in
+            // `build_gl_state`; the CUDA context is current (above).
+            self.gl.interop = Some(unsafe { CudaGlInterop::register(y, uv)? });
+        }
+
+        // SAFETY: textures registered, CUDA context current, planes valid.
+        unsafe { self.gl.interop.as_ref().unwrap().upload(buf)? };
+
+        // SAFETY: GL context is current on this thread for the worker's life.
+        unsafe {
+            let gl = &self.gl.gl;
+            gl.viewport(0, 0, self.gl.width as i32, self.gl.height as i32);
+            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.use_program(Some(self.gl.program));
+
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.gl.y_tex));
+            if let Some(loc) = gl.get_uniform_location(self.gl.program, "y_tex") {
+                gl.uniform_1_i32(Some(&loc), 0);
+            }
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.gl.uv_tex));
+            if let Some(loc) = gl.get_uniform_location(self.gl.program, "uv_tex") {
+                gl.uniform_1_i32(Some(&loc), 1);
+            }
+
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.gl.vbo));
+            let pos = gl.get_attrib_location(self.gl.program, "a_pos").unwrap_or(0);
+            let uv = gl.get_attrib_location(self.gl.program, "a_uv").unwrap_or(1);
+            let stride = 4 * core::mem::size_of::<f32>() as i32;
+            gl.enable_vertex_attrib_array(pos);
+            gl.vertex_attrib_pointer_f32(pos, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(uv);
+            gl.vertex_attrib_pointer_f32(
+                uv,
+                2,
+                glow::FLOAT,
+                false,
+                stride,
+                2 * core::mem::size_of::<f32>() as i32,
+            );
+
+            gl.draw_arrays(glow::TRIANGLES, 0, 6);
+        }
+
+        // Subscribe to the next frame callback (compositor pacing) and present.
+        let surface = self.window.wl_surface().clone();
+        surface.frame(&self.qh, surface.clone());
+        self.egl
+            .swap_buffers(self.egl_display, self.egl_surface)
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        Ok(())
+    }
+}
+
+impl CompositorHandler for WorkerState {
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        // Compositor released the buffer; pacing is handled by the per-frame
+        // ack in `draw`, so nothing extra is needed here in v1.
+    }
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl WindowHandler for WorkerState {
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
+        self.exit = true;
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &Window,
+        _configure: WindowConfigure,
+        _serial: u32,
+    ) {
+        let was_first = !self.configured;
+        self.configured = true;
+        if was_first {
+            if let Some(ready) = self.ready.take() {
+                ready.notify();
+            }
+            if let Some((buf, arrival_ns, ack)) = self.pending.take() {
+                self.draw(buf, arrival_ns, ack);
+            }
+        }
+    }
+}
+
+impl OutputHandler for WorkerState {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+}
+
+impl ProvidesRegistryState for WorkerState {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    registry_handlers![OutputState,];
+}
+
+delegate_compositor!(WorkerState);
+delegate_output!(WorkerState);
+delegate_xdg_shell!(WorkerState);
+delegate_xdg_window!(WorkerState);
+delegate_registry!(WorkerState);
+
+// =================================================================
+// Worker-readiness handshake (identical primitive to WaylandSink)
+// =================================================================
+
+struct Handshake {
+    flag: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl Handshake {
+    fn new() -> Self {
+        Self {
+            flag: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+    fn notify(&self) {
+        *self.flag.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+    fn wait(&self, timeout: Duration) -> bool {
+        let guard = self.flag.lock().unwrap();
+        let (guard, _) = self
+            .cv
+            .wait_timeout_while(guard, timeout, |notified| !*notified)
+            .unwrap();
+        *guard
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::{Rate, VideoCodec};
+
+    fn nv12(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+        }
+    }
+
+    #[test]
+    fn intercept_passes_through() {
+        let sink = CudaGlSink::new();
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        assert_eq!(sink.intercept_caps(&h264), Ok(h264));
+    }
+
+    #[test]
+    fn configure_rejects_non_nv12() {
+        let mut sink = CudaGlSink::new();
+        let i420 = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        assert_eq!(
+            sink.configure_pipeline(&i420).err(),
+            Some(G2gError::CapsMismatch)
+        );
+        assert!(sink.worker.is_none());
+    }
+
+    #[test]
+    fn configure_rejects_odd_dims() {
+        let mut sink = CudaGlSink::new();
+        match sink.configure_pipeline(&nv12(641, 480)) {
+            Err(G2gError::CapsMismatch) => {}
+            other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
+        }
+    }
+}

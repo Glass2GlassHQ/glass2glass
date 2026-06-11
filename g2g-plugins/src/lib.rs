@@ -59,3 +59,8 @@ pub mod waylandsink;
 // stream reaches the CPU sinks. Hand-rolled libcuda FFI; Linux + NVIDIA only.
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 pub mod cuda;
+
+// CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
+// presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.
+#[cfg(all(target_os = "linux", feature = "cuda-gl"))]
+pub mod cudaglsink;
