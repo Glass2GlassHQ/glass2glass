@@ -16,11 +16,12 @@
 //! up; the MS software decoder packs tightly). `copy_sample` strips that
 //! padding via `pack_nv12` so downstream always sees tightly-packed NV12.
 //!
-//! Deferred:
-//! - D3D11 zero-copy output (would need a new `MemoryDomain` variant); this
-//!   element always copies decoded pixels into a `System` slice.
-//! - DXVA hardware-accelerated decode (would set `MF_SA_D3D11_AWARE`); the MS
-//!   software decoder path is used.
+//! DXVA / D3D11 (`with_d3d11`): opts into GPU decode. A hardware D3D11 device +
+//! DXGI manager is handed to the sync MFT (`MFT_MESSAGE_SET_D3D_MANAGER`), so
+//! decode runs on the GPU and the MFT allocates D3D11-backed output samples.
+//! Each frame is emitted as `MemoryDomain::D3D11Texture` (zero-copy: the
+//! texture stays on the GPU, the owning `IMFSample` is its keep-alive). The
+//! default software path is unchanged (system NV12).
 
 use core::future::Future;
 use core::mem::ManuallyDrop;
@@ -30,7 +31,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager,
+    MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, CLSID_MSH264DecoderMFT,
     MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
     MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
@@ -40,8 +42,9 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::System::Com::{
@@ -52,8 +55,9 @@ use windows::core::Interface;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, D3D11KeepAlive, Dim, FrameTiming,
+    G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PipelinePacket, Rate,
+    VideoCodec, RawVideoFormat,
 };
 
 /// Live MFT plus the negotiated output geometry. Recreated nowhere — the
@@ -77,6 +81,10 @@ struct DecoderState {
     /// with a (D3D11-backed) sample we take ownership of. The software path
     /// clears this and we pre-allocate a system-memory output sample.
     provides_samples: bool,
+    /// `ID3D11Device` (as `u64`) for the DXVA path, stamped onto every emitted
+    /// [`OwnedD3D11Texture`] so a consumer uses the right device. `0` on the
+    /// software path.
+    device_ptr: u64,
     /// D3D11 device backing the DXVA decode, kept alive for the decoder's
     /// lifetime. `None` on the software path. Held so the device (and the
     /// DXGI manager that references it) outlive every output texture.
@@ -86,10 +94,18 @@ struct DecoderState {
     _dxgi_manager: Option<IMFDXGIDeviceManager>,
 }
 
-/// One decoded picture, pixels already copied out of the MFT buffer.
+/// One decoded picture: either copied out to packed system NV12 (software /
+/// Phase-2 readback) or left in a D3D11 texture (DXVA zero-copy, Phase 3).
 #[derive(Debug)]
-struct DecodedNv12 {
-    bytes: Box<[u8]>,
+enum DecodedPayload {
+    System(Box<[u8]>),
+    D3D11(OwnedD3D11Texture),
+}
+
+/// One decoded picture plus its geometry and timestamp.
+#[derive(Debug)]
+struct DecodedPicture {
+    payload: DecodedPayload,
     width: u32,
     height: u32,
     pts_ns: u64,
@@ -98,7 +114,7 @@ struct DecodedNv12 {
 /// Result of a single `ProcessOutput` attempt.
 #[derive(Debug)]
 enum OutputStep {
-    Frame(DecodedNv12),
+    Frame(DecodedPicture),
     NeedInput,
     StreamChange,
 }
@@ -155,10 +171,10 @@ impl MfDecode {
 
     /// Enable DXVA / D3D11 hardware decode. `configure_pipeline` then creates a
     /// hardware D3D11 device and hands the MFT a DXGI device manager, so decode
-    /// runs on the GPU. The MFT allocates D3D11-backed output samples; this
-    /// (Phase 2) reads them back to packed system NV12 so every existing sink
-    /// keeps working. The zero-copy `MemoryDomain::D3D11Texture` output is the
-    /// next phase. Falls back loud (`Hardware`) if no D3D11 device is available.
+    /// runs on the GPU and each frame is emitted as `MemoryDomain::D3D11Texture`
+    /// (zero-copy: the decoded NV12 stays in a GPU texture). Fails loud
+    /// (`Hardware`) if no D3D11 device is available. The default is the MS
+    /// software decoder emitting system-memory NV12.
     pub fn with_d3d11(mut self) -> Self {
         self.use_d3d11 = true;
         self
@@ -181,7 +197,7 @@ impl MfDecode {
         &mut self,
         data: &[u8],
         pts_ns: u64,
-        decoded: &mut Vec<DecodedNv12>,
+        decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let sample = make_input_sample(data, pts_ns)?;
         let mut guard = 0u32;
@@ -211,7 +227,7 @@ impl MfDecode {
 
     /// Pull outputs until the MFT needs more input, renegotiating the output
     /// type on a stream change.
-    fn drain(&mut self, decoded: &mut Vec<DecodedNv12>) -> Result<(), G2gError> {
+    fn drain(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         loop {
             match self.process_output()? {
                 OutputStep::Frame(f) => decoded.push(f),
@@ -223,7 +239,7 @@ impl MfDecode {
 
     /// Drain on end-of-stream: send the MFT a DRAIN command so it flushes
     /// reordered pictures, then collect them.
-    fn drain_eos(&mut self, decoded: &mut Vec<DecodedNv12>) -> Result<(), G2gError> {
+    fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         {
             let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
             // SAFETY: drain message on the owning thread.
@@ -281,11 +297,24 @@ impl MfDecode {
                         .GetSampleTime()
                         .map(|hns| (hns.max(0) as u64).saturating_mul(100))
                         .unwrap_or(0);
-                    // Phase 2: read the (possibly D3D11-backed) sample back to
-                    // packed system NV12. The zero-copy texture path is Phase 3.
-                    let bytes = copy_sample(&sample, st.width, st.height, st.stride)?;
-                    Ok(OutputStep::Frame(DecodedNv12 {
-                        bytes,
+                    let payload = if st.device_ptr != 0 {
+                        // DXVA zero-copy (Phase 3): hand the decoded D3D11
+                        // texture downstream, keeping the sample alive so the
+                        // texture stays valid until the consumer drops it.
+                        DecodedPayload::D3D11(extract_texture(
+                            sample,
+                            st.width,
+                            st.height,
+                            st.device_ptr,
+                        )?)
+                    } else {
+                        // Software / readback path: copy to packed system NV12.
+                        DecodedPayload::System(copy_sample(
+                            &sample, st.width, st.height, st.stride,
+                        )?)
+                    };
+                    Ok(OutputStep::Frame(DecodedPicture {
+                        payload,
                         width: st.width,
                         height: st.height,
                         pts_ns,
@@ -438,8 +467,14 @@ impl AsyncElement for MfDecode {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps.clone());
                 }
+                let domain = match d.payload {
+                    DecodedPayload::System(bytes) => {
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes))
+                    }
+                    DecodedPayload::D3D11(texture) => MemoryDomain::D3D11Texture(texture),
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(d.bytes)),
+                    domain,
                     timing: FrameTiming {
                         pts_ns: d.pts_ns,
                         dts_ns: d.pts_ns,
@@ -520,6 +555,7 @@ fn init_decoder(width: u32, height: u32, use_d3d11: bool) -> Result<DecoderState
     let (w, h, stride) = set_nv12_output(&transform)?;
     let out_size = output_buffer_size(&transform, w, h)?;
     let provides_samples = output_provides_samples(&transform)?;
+    let device_ptr = d3d_device.as_ref().map(|d| d.as_raw() as u64).unwrap_or(0);
 
     // SAFETY: streaming-mode messages on the owning thread.
     unsafe {
@@ -538,6 +574,7 @@ fn init_decoder(width: u32, height: u32, use_d3d11: bool) -> Result<DecoderState
         out_size,
         stride,
         provides_samples,
+        device_ptr,
         _d3d_device: d3d_device,
         _dxgi_manager: dxgi_manager,
     })
@@ -701,6 +738,69 @@ fn pack_nv12(src: &[u8], width: usize, height: usize, stride: usize) -> Result<B
     }
     Ok(dst)
 }
+
+/// Extract the decoded D3D11 texture from a DXVA output sample (whose first
+/// buffer is an `IMFDXGIBuffer` over the decoder's output texture array) into
+/// an [`OwnedD3D11Texture`]. The keep-alive owns the `IMFSample`, so the
+/// texture stays valid until the downstream consumer drops the frame. NV12
+/// (the negotiated output format) is the texture's `DXGI_FORMAT`.
+fn extract_texture(
+    sample: IMFSample,
+    width: u32,
+    height: u32,
+    device_ptr: u64,
+) -> Result<OwnedD3D11Texture, G2gError> {
+    // SAFETY: COM calls on the owning thread. The DXVA path guarantees the
+    // sample's first buffer is an `IMFDXGIBuffer`; `GetResource` hands back an
+    // owned ref to the `ID3D11Texture2D` and `GetSubresourceIndex` the slot
+    // within the decoder's texture array.
+    let (texture_ptr, subresource) = unsafe {
+        let buffer = sample.GetBufferByIndex(0).map_err(mf_err)?;
+        let dxgi: IMFDXGIBuffer = buffer.cast().map_err(mf_err)?;
+        let mut raw: *mut core::ffi::c_void = core::ptr::null_mut();
+        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw).map_err(mf_err)?;
+        if raw.is_null() {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+        // Take ownership of the AddRef'd ref just to read the pointer value,
+        // then drop it: the IMFSample (held by the keep-alive below) keeps the
+        // texture alive, so this extra ref is redundant.
+        let texture = ID3D11Texture2D::from_raw(raw);
+        let ptr = texture.as_raw() as u64;
+        let subresource = dxgi.GetSubresourceIndex().map_err(mf_err)?;
+        (ptr, subresource)
+    };
+    let keep_alive = Box::new(SampleOwner(sample));
+    Ok(OwnedD3D11Texture::new(
+        texture_ptr,
+        subresource,
+        width,
+        height,
+        DXGI_FORMAT_NV12.0 as u32,
+        device_ptr,
+        keep_alive,
+    ))
+}
+
+/// Keeps a DXVA output `IMFSample` alive so its D3D11 texture stays valid while
+/// the frame travels downstream. Boxed as the [`D3D11KeepAlive`] of an
+/// [`OwnedD3D11Texture`]; dropping it releases the sample back to the decoder's
+/// output texture pool.
+struct SampleOwner(#[allow(dead_code)] IMFSample);
+
+// SAFETY: an `IMFSample` is a COM object and `!Send` by default. We uphold
+// `Send` by the same contract as `MfDecode` itself: COM is initialised MTA
+// (free-threaded) and the sample is owned and moved, never aliased across
+// threads.
+unsafe impl Send for SampleOwner {}
+
+impl core::fmt::Debug for SampleOwner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SampleOwner(<IMFSample>)")
+    }
+}
+
+impl D3D11KeepAlive for SampleOwner {}
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
     Caps::RawVideo {

@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### W1 (Phase 3): `MfDecode` zero-copy D3D11 texture output
+
+- Completes the Windows zero-copy decode track. With `with_d3d11()`, `MfDecode`
+  now emits `MemoryDomain::D3D11Texture` frames instead of reading the decoded
+  pixels back to system memory: the decoded NV12 stays in the GPU texture, so a
+  DXGI / D3D11 consumer (a future swapchain present sink) takes the handoff
+  without a GPU->CPU copy. The Windows analog of C3's `NvdecCuda` output.
+- `extract_texture` pulls the `ID3D11Texture2D` and its subresource index out of
+  the DXVA output sample's `IMFDXGIBuffer` (`GetResource` +
+  `GetSubresourceIndex`) and wraps them in an `OwnedD3D11Texture`. The
+  keep-alive (`SampleOwner`) owns the `IMFSample`, so the texture stays valid
+  until the consumer drops the frame, then the sample returns to the decoder's
+  output texture pool. `Send` under the same MTA contract as the decoder.
+- `DecodedPicture` gained a `DecodedPayload` enum (`System(Box<[u8]>)` vs
+  `D3D11(OwnedD3D11Texture)`); `process_output` branches on the active device
+  (texture extraction on the DXVA path, the Phase-2 system readback otherwise),
+  and `process` maps the payload to the frame's `MemoryDomain`. The software
+  path is byte-identical.
+- VERIFIED on the Windows dev host: `cargo test -p g2g-plugins --features
+  mf-decode` (27 passed, the full D3D11 texture path COMPILES) and
+  `cargo clippy --features mf-decode` green. The DXVA decode runtime (GPU decode
+  of a real H.264 stream into textures, and a D3D11 consumer to display them) is
+  owed as a user-side run on a GPU machine; the dev host can do it. The present
+  sink (the D3D11 consumer, analog of `CudaGlSink`) is the next phase.
+
 ### W1 (Phase 2): `MfDecode` DXVA / D3D11 hardware decode
 
 - `MfDecode::with_d3d11()` opts the Windows decoder into DXVA hardware decode.
