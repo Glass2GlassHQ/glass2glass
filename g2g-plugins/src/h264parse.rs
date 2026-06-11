@@ -548,12 +548,6 @@ mod tests {
     fn frame_with_bytes(seq: u64, bytes: Vec<u8>) -> Frame {
         Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            caps: Caps::Video {
-                format: VideoFormat::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            },
             timing: FrameTiming::default(),
             sequence: seq,
         }

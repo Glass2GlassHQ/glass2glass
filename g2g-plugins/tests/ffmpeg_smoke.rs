@@ -85,7 +85,6 @@ async fn decode_once(output: OutputFormat) {
     // multi-frame test belongs alongside the real `H264Parse` element.
     let frame = Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),
-        caps: narrowed,
         timing: FrameTiming::default(),
         sequence: 0,
     };

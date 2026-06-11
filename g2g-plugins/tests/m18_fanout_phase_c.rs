@@ -58,10 +58,9 @@ fn rgba_any() -> Caps {
     }
 }
 
-fn frame(seq: u64, caps: Caps) -> Frame {
+fn frame(seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-        caps,
         timing: FrameTiming::default(),
         sequence: seq,
     }
@@ -91,17 +90,16 @@ impl SourceLoop for ReconfigSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         assert!(self.configured, "runner must configure source before run");
-        let initial = self.initial.clone();
         let switch_to = self.switch_to.clone();
         let before = self.before;
         let after = self.after;
         Box::pin(async move {
             for i in 0..before {
-                out.push(PipelinePacket::DataFrame(frame(i, initial.clone()))).await?;
+                out.push(PipelinePacket::DataFrame(frame(i))).await?;
             }
             out.push(PipelinePacket::CapsChanged(switch_to.clone())).await?;
             for j in 0..after {
-                out.push(PipelinePacket::DataFrame(frame(before + j, switch_to.clone())))
+                out.push(PipelinePacket::DataFrame(frame(before + j)))
                     .await?;
             }
             out.push(PipelinePacket::Eos).await?;

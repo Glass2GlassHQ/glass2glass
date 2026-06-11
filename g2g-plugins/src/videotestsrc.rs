@@ -114,8 +114,6 @@ impl SourceLoop for VideoTestSrc {
                 .and_then(|n| n.checked_mul(4))
                 .ok_or(G2gError::CapsMismatch)?;
 
-            let caps = self.caps();
-
             for seq in 0..self.target_frames {
                 let domain = if let Some(pool) = &self.pool {
                     let mut buf = pool.acquire().await;
@@ -149,7 +147,6 @@ impl SourceLoop for VideoTestSrc {
                 let arrival_ns: u64 = 0;
                 let frame = Frame {
                     domain,
-                    caps: caps.clone(),
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,

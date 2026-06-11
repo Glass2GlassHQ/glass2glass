@@ -79,7 +79,6 @@ impl SourceLoop for PoolSrc {
             let buf = pool.acquire().await;
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_pool(buf)),
-                caps: caps(),
                 timing: FrameTiming::default(),
                 sequence: 0,
             };

@@ -418,12 +418,10 @@ async fn run_session(
         let pts_ns = pts_base_ns.saturating_add(rel_pts_ns);
         session_max_pts = session_max_pts.max(pts_ns);
 
-        let frame_caps = current_caps.clone().unwrap_or_else(any_h264_caps);
         let bytes = vf.into_data().into_boxed_slice();
 
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
-            caps: frame_caps,
             timing: FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -556,11 +554,3 @@ mod tests {
     }
 }
 
-fn any_h264_caps() -> Caps {
-    Caps::Video {
-        format: VideoFormat::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-    }
-}

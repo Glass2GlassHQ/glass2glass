@@ -448,7 +448,6 @@ mod tests {
     fn data(seq: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-            caps: caps(),
             timing: FrameTiming::default(),
             sequence: seq,
         })

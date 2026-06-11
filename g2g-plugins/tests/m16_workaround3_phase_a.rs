@@ -118,7 +118,6 @@ impl SourceLoop for ScriptedSource {
                             domain: MemoryDomain::System(SystemSlice::from_boxed(
                                 vec![tag].into_boxed_slice(),
                             )),
-                            caps: self.current_caps.clone(),
                             timing: FrameTiming::default(),
                             sequence: emitted,
                         };
@@ -187,8 +186,12 @@ impl AsyncElement for FakeReorderDecoder {
         }
     }
 
-    fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured.set(true);
+        // Seed input_caps from the negotiated caps so the first DataFrame
+        // (which arrives before any runtime CapsChanged) has the
+        // correct input caps to attach.
+        *self.input_caps.borrow_mut() = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -226,7 +229,7 @@ impl AsyncElement for FakeReorderDecoder {
                         .input_caps
                         .borrow()
                         .clone()
-                        .unwrap_or_else(|| frame.caps.clone());
+                        .expect("CapsChanged must precede first DataFrame");
                     self.queue.borrow_mut().push_back((caps_at_arrival, tag));
 
                     // Drain only once the buffer is "full." Real decoders
@@ -259,7 +262,6 @@ impl AsyncElement for FakeReorderDecoder {
                             domain: MemoryDomain::System(SystemSlice::from_boxed(
                                 vec![tag].into_boxed_slice(),
                             )),
-                            caps: out_caps,
                             timing: FrameTiming::default(),
                             sequence: seq,
                         };
@@ -290,7 +292,6 @@ impl AsyncElement for FakeReorderDecoder {
                             domain: MemoryDomain::System(SystemSlice::from_boxed(
                                 vec![tag].into_boxed_slice(),
                             )),
-                            caps: out_caps,
                             timing: FrameTiming::default(),
                             sequence: seq,
                         };
@@ -459,7 +460,6 @@ impl SourceLoop for ScriptedSourceBadCaps {
                             domain: MemoryDomain::System(SystemSlice::from_boxed(
                                 vec![tag].into_boxed_slice(),
                             )),
-                            caps: self.inner.current_caps.clone(),
                             timing: FrameTiming::default(),
                             sequence: emitted,
                         };

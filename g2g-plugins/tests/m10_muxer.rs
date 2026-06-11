@@ -25,10 +25,9 @@ fn vcaps(width: Dim) -> Caps {
     Caps::Video { format: VideoFormat::Rgba8, width, height: Dim::Fixed(480), framerate: Rate::Fixed(30 << 16) }
 }
 
-fn make_frame(seq: u64, caps: Caps) -> Frame {
+fn make_frame(seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-        caps,
         timing: FrameTiming::default(),
         sequence: seq,
     }
@@ -62,11 +61,10 @@ impl SourceLoop for CapSrc {
         let start = self.start_seq;
         let count = self.count;
         let configured = self.configured;
-        let frame_caps = self.advertise.clone();
         Box::pin(async move {
             assert!(configured, "runner must configure source before run");
             for i in 0..count {
-                out.push(PipelinePacket::DataFrame(make_frame(start + i, frame_caps.clone())))
+                out.push(PipelinePacket::DataFrame(make_frame(start + i)))
                     .await?;
             }
             out.push(PipelinePacket::Eos).await?;

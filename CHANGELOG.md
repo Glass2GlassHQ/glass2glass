@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### caps-nego: drop per-frame `Frame.caps`
+
+- Removed the `caps: Caps` field from `Frame` in `g2g-core/src/frame.rs`.
+  Element-level caps state (set in `configure_pipeline`, updated on
+  `PipelinePacket::CapsChanged`) is the single source of truth;
+  `CapsChanged` events delimit caps epochs before the first affected
+  `DataFrame`. The field was write-only on every hot path (grep
+  confirmed zero readers in production code), so every produced frame
+  was paying a `Caps::clone` for no consumer. Matches the lesson
+  modern GStreamer applied when it moved caps off `GstBuffer` onto the
+  pad.
+- Updated all `Frame` constructors (sources, decoders, tests) to drop
+  the field. `make_frame` test helpers that took a `caps: Caps` lost
+  that parameter; call sites updated.
+- `PickyByWidthSink` in `m8_negotiation` now tracks the current width
+  via accepted `configure_pipeline` and `CapsChanged` events through
+  `process()` instead of reading `frame.caps`. The
+  `mid_stream_reconfigure_round_trip` data-widths assertion changed
+  from `[640, 1280, 640]` to `[640, 640, 640]`: the rejected 1280
+  `CapsChanged` never reaches the sink (the runner intercepts and
+  converts to a `Reconfigure`), so the sink's tracked width never
+  advances to 1280. The configure_widths assertion still proves the
+  reconfigure round trip.
+- `FakeReorderDecoder` in `m16_workaround3_phase_a` seeds `input_caps`
+  from `configure_pipeline`'s `absolute_caps` so the first
+  `DataFrame` (which arrives before any runtime `CapsChanged`) still
+  has the correct input caps tagged for queue reorder accounting.
+- Removed now-orphan `any_h264_caps()` in `rtspsrc.rs`.
+
 ### NVDEC backend low-latency defaults + `wayland_smoke` knobs
 
 - `FfmpegH264Dec::with_backend(Backend::NvdecCuvid)` now enables

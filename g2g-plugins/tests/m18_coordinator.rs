@@ -68,7 +68,6 @@ impl SourceLoop for NvSource {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         vec![i as u8].into_boxed_slice(),
                     )),
-                    caps: self.initial.clone(),
                     timing: FrameTiming::default(),
                     sequence: i as u64,
                 };

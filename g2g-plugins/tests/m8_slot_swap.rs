@@ -45,10 +45,9 @@ fn fixed_caps() -> Caps {
     }
 }
 
-fn make_frame(seq: u64, caps: Caps) -> Frame {
+fn make_frame(seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-        caps,
         timing: FrameTiming::default(),
         sequence: seq,
     }
@@ -125,13 +124,12 @@ impl SourceLoop for GatedSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             assert!(self.configured, "runner must configure source before run");
-            let caps = self.caps.clone();
 
-            out.push(PipelinePacket::DataFrame(make_frame(0, caps.clone()))).await?;
+            out.push(PipelinePacket::DataFrame(make_frame(0))).await?;
             // Block until the test has swapped A -> B.
             self.gate.notified().await;
             for seq in 1..self.total {
-                out.push(PipelinePacket::DataFrame(make_frame(seq, caps.clone()))).await?;
+                out.push(PipelinePacket::DataFrame(make_frame(seq))).await?;
             }
             out.push(PipelinePacket::Eos).await?;
             Ok(self.total)

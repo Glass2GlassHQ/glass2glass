@@ -15,7 +15,6 @@ pub enum PipelinePacket {
 #[derive(Debug)]
 pub struct Frame {
     pub domain: MemoryDomain,
-    pub caps: Caps,
     pub timing: FrameTiming,
     pub sequence: u64,
 }

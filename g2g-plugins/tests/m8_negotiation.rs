@@ -60,14 +60,13 @@ impl SourceLoop for CapsChangingTestSrc {
         Box::pin(async move {
             assert!(self.configured, "runner must configure source before run");
 
-            let initial = self.initial.clone();
             let refined = self.refined.clone();
 
-            out.push(PipelinePacket::DataFrame(make_frame(0, initial)))
+            out.push(PipelinePacket::DataFrame(make_frame(0)))
                 .await?;
             out.push(PipelinePacket::CapsChanged(refined.clone()))
                 .await?;
-            out.push(PipelinePacket::DataFrame(make_frame(1, refined)))
+            out.push(PipelinePacket::DataFrame(make_frame(1)))
                 .await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(2)
@@ -75,10 +74,9 @@ impl SourceLoop for CapsChangingTestSrc {
     }
 }
 
-fn make_frame(seq: u64, caps: Caps) -> Frame {
+fn make_frame(seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-        caps,
         timing: FrameTiming::default(),
         sequence: seq,
     }
@@ -293,6 +291,7 @@ struct PickyByWidthSink {
     accept_width: u32,
     counter: Caps,
     configures: Mutex<Vec<u32>>, // widths seen, in order
+    current_width: Mutex<u32>,
     received_data_widths: Mutex<Vec<u32>>,
 }
 
@@ -302,6 +301,7 @@ impl PickyByWidthSink {
             accept_width,
             counter,
             configures: Mutex::new(Vec::new()),
+            current_width: Mutex::new(0),
             received_data_widths: Mutex::new(Vec::new()),
         }
     }
@@ -332,6 +332,7 @@ impl AsyncElement for PickyByWidthSink {
         };
         self.configures.lock().unwrap().push(w);
         if w == self.accept_width {
+            *self.current_width.lock().unwrap() = w;
             Ok(ConfigureOutcome::Accepted)
         } else {
             Ok(ConfigureOutcome::ReFixate(self.counter.clone()))
@@ -343,10 +344,17 @@ impl AsyncElement for PickyByWidthSink {
         packet: PipelinePacket,
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        if let PipelinePacket::DataFrame(f) = &packet {
-            if let Caps::Video { width: Dim::Fixed(w), .. } = &f.caps {
-                self.received_data_widths.lock().unwrap().push(*w);
+        match &packet {
+            PipelinePacket::CapsChanged(c) => {
+                if let Caps::Video { width: Dim::Fixed(w), .. } = c {
+                    *self.current_width.lock().unwrap() = *w;
+                }
             }
+            PipelinePacket::DataFrame(_) => {
+                let w = *self.current_width.lock().unwrap();
+                self.received_data_widths.lock().unwrap().push(w);
+            }
+            _ => {}
         }
         Box::pin(async { Ok(()) })
     }
@@ -393,26 +401,24 @@ impl SourceLoop for ReconfigurableTestSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            let initial = self.initial.clone();
             let rejected = self.rejected_proposal.clone();
 
-            // 1. Frame under initial caps — sink configured for initial, accepts.
-            out.push(PipelinePacket::DataFrame(make_frame(0, initial.clone())))
+            // 1. Frame under initial caps , sink configured for initial, accepts.
+            out.push(PipelinePacket::DataFrame(make_frame(0)))
                 .await?;
 
             // 2. CapsChanged the sink will reject. Runner fires
             //    Reconfigure(Propose(counter)) on this link's reverse
-            //    channel. We don't see the signal yet — push N+1 does.
+            //    channel. We don't see the signal yet , push N+1 does.
             out.push(PipelinePacket::CapsChanged(rejected.clone())).await?;
 
-            // 3. Next push observes the Reconfigure. The packet itself
-            //    gets enqueued under the (rejected) `rejected` caps,
-            //    which the sink processes regardless — caps tagging is
-            //    advisory at the frame level. We immediately handle the
-            //    reconfigure and emit a fresh CapsChanged the sink will
-            //    accept.
+            // 3. Next push observes the Reconfigure. The sink tracks the
+            //    current caps via CapsChanged events, so the rejected caps
+            //    are what the sink "sees" for this frame. We immediately
+            //    handle the reconfigure and emit a fresh CapsChanged the
+            //    sink will accept.
             let outcome = out
-                .push(PipelinePacket::DataFrame(make_frame(1, rejected)))
+                .push(PipelinePacket::DataFrame(make_frame(1)))
                 .await?;
             let agreed = match outcome {
                 PushOutcome::Reconfigure(r) => self.reconfigure(r)?,
@@ -420,8 +426,8 @@ impl SourceLoop for ReconfigurableTestSrc {
             };
             out.push(PipelinePacket::CapsChanged(agreed.clone())).await?;
 
-            // 4. Frame under agreed caps — sink accepts these.
-            out.push(PipelinePacket::DataFrame(make_frame(2, agreed))).await?;
+            // 4. Frame under agreed caps , sink accepts these.
+            out.push(PipelinePacket::DataFrame(make_frame(2))).await?;
             out.push(PipelinePacket::Eos).await?;
             Ok(3)
         })
@@ -462,11 +468,13 @@ async fn mid_stream_reconfigure_round_trip() {
     // (mid-stream re-accepted after source applied the counter).
     assert_eq!(snk.configure_widths(), vec![640, 1280, 640]);
 
-    // Data frames consumed: under widths 640, 1280 (the rejected-caps
-    // frame is queued before the Reconfigure signal is observed; it
-    // still flows downstream — caps tagging is advisory at the frame
-    // level), and 640 after renegotiation.
-    assert_eq!(snk.data_widths(), vec![640, 1280, 640]);
+    // Data frames consumed: 640 throughout, from the sink's perspective.
+    // The rejected CapsChanged(1280) is intercepted by the runner before
+    // reaching the sink (it triggers a Reconfigure instead), so the
+    // sink's tracked width never advances to 1280. The in-flight data
+    // frame that arrives between rejection and re-acceptance is observed
+    // under the last-accepted width (640).
+    assert_eq!(snk.data_widths(), vec![640, 640, 640]);
 }
 
 /// Sink that narrows incoming caps against its own supported `Range` in

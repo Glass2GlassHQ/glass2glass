@@ -242,12 +242,6 @@ mod tests {
     fn dummy_frame() -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
-            caps: Caps::Video {
-                format: VideoFormat::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            },
             timing: FrameTiming::default(),
             sequence: 0,
         })

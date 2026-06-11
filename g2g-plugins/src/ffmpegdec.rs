@@ -514,7 +514,6 @@ impl AsyncElement for FfmpegH264Dec {
                 }
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(d.bytes)),
-                    caps: new_caps,
                     timing: FrameTiming {
                         pts_ns: d.pts_ns,
                         dts_ns: d.pts_ns,
