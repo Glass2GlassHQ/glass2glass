@@ -55,9 +55,9 @@ use windows::core::Interface;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, D3D11KeepAlive, Dim, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PipelinePacket, Rate,
-    VideoCodec, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, D3D11KeepAlive,
+    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture,
+    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Live MFT plus the negotiated output geometry. Recreated nowhere — the
@@ -137,6 +137,12 @@ pub struct MfDecode {
     /// geometry. See `ffmpegdec.rs` for the same field with full notes.
     input_caps: Option<Caps>,
     emitted: u64,
+    /// M12 / W1: the downstream consumer's allocation proposal, recorded in
+    /// `configure_allocation`. A `MemoryDomainKind::D3D11Texture` request from a
+    /// GPU sink (`D3D11Sink`) is satisfied by construction on the `with_d3d11`
+    /// path (it already emits texture-resident frames). Mirrors
+    /// `FfmpegH264Dec::requested_alloc`.
+    requested_alloc: Option<AllocationParams>,
 }
 
 // SAFETY: `IMFTransform` is a COM interface and thus `!Send` by default. The
@@ -166,7 +172,14 @@ impl MfDecode {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+            requested_alloc: None,
         }
+    }
+
+    /// The downstream consumer's recorded M12 allocation proposal, if any
+    /// (see [`AsyncElement::configure_allocation`]).
+    pub fn requested_alloc(&self) -> Option<AllocationParams> {
+        self.requested_alloc
     }
 
     /// Enable DXVA / D3D11 hardware decode. `configure_pipeline` then creates a
@@ -368,6 +381,16 @@ impl AsyncElement for MfDecode {
     /// NV12, so there is no output-format choice.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps(input)))
+    }
+
+    /// M12 / W1: record the downstream consumer's allocation proposal. A
+    /// `MemoryDomainKind::D3D11Texture` request (from `D3D11Sink`) is honoured
+    /// by construction on the `with_d3d11` path, which already emits
+    /// texture-resident frames; the software path emits system memory, so a
+    /// texture request there is unsatisfiable and stays recorded for
+    /// diagnostics rather than silently changing the output domain.
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        self.requested_alloc = Some(*params);
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -910,6 +933,23 @@ mod tests {
     fn d3d11_opt_in_defaults_off() {
         assert!(!MfDecode::new().uses_d3d11());
         assert!(MfDecode::new().with_d3d11().uses_d3d11());
+    }
+
+    #[test]
+    fn records_downstream_d3d11_allocation_proposal() {
+        // W1: a D3D11Sink proposes texture-resident buffers; the runner conveys
+        // that to the decoder's configure_allocation. The with_d3d11 path emits
+        // D3D11 textures, so the request is honoured by construction; here we
+        // assert the proposal is recorded (the GPU path's allocation handshake).
+        use g2g_core::MemoryDomainKind;
+        let mut dec = MfDecode::new().with_d3d11();
+        assert_eq!(dec.requested_alloc(), None);
+        let proposal = AllocationParams::d3d11(1920 * 1080 * 3 / 2, 3, 256);
+        AsyncElement::configure_allocation(&mut dec, &proposal);
+        let recorded = dec.requested_alloc().expect("proposal recorded");
+        assert_eq!(recorded.domain, MemoryDomainKind::D3D11Texture);
+        assert_eq!(recorded.min_buffers, 3);
+        assert_eq!(recorded.align, 256);
     }
 
     #[test]

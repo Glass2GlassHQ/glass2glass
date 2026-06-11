@@ -76,10 +76,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PipelineClock, PipelinePacket,
-    RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim,
+    G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PipelineClock,
+    PipelinePacket, RawVideoFormat,
 };
+
+/// Texture-pool headroom the sink asks the decoder to keep resident: the frame
+/// in flight on the present thread plus the one the runner link holds, so the
+/// MFT's output texture pool does not starve under live pacing.
+const D3D11_POOL_HEADROOM: usize = 3;
+
+/// GPU surface alignment the sink requests (256 bytes is the common D3D11 /
+/// DXVA texture alignment).
+const D3D11_ALIGN: usize = 256;
 
 /// Worker-thread command. `Frame` carries the decoded D3D11 texture (still
 /// GPU-resident) plus the source-side `arrival_ns` and a one-shot `ack`
@@ -190,6 +199,20 @@ impl AsyncElement for D3D11Sink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
+    }
+
+    /// M12 / W1: ask the decoder to keep buffers in D3D11 textures so the
+    /// `MfDecode(with_d3d11)` -> sink handoff stays on the GPU. The runner
+    /// conveys this `MemoryDomainKind::D3D11Texture` proposal to the decoder's
+    /// `configure_allocation`. Returns `None` until the geometry is fixed.
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        let (w, h, _) = caps.dims()?;
+        let (&Dim::Fixed(w), &Dim::Fixed(h)) = (w, h) else {
+            return None;
+        };
+        // Even NV12 (the sink rejects odd dims): packed size is w*h*3/2.
+        let size = w as usize * h as usize * 3 / 2;
+        Some(AllocationParams::d3d11(size, D3D11_POOL_HEADROOM, D3D11_ALIGN))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -631,5 +654,18 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn proposes_d3d11_texture_memory() {
+        use g2g_core::MemoryDomainKind;
+        let sink = D3D11Sink::new();
+        let p = sink
+            .propose_allocation(&nv12(1920, 1080))
+            .expect("fixed-geometry NV12 yields a proposal");
+        assert_eq!(p.domain, MemoryDomainKind::D3D11Texture);
+        assert_eq!(p.size_bytes, 1920 * 1080 * 3 / 2);
+        assert_eq!(p.align, D3D11_ALIGN);
+        assert_eq!(p.min_buffers, D3D11_POOL_HEADROOM);
     }
 }

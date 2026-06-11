@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### W1: allocation-query handshake for the D3D11 path
+
+- Mirrors C3 step 3 on the Windows side, completing the W1 <-> C3 symmetry.
+  `D3D11Sink::propose_allocation` returns `AllocationParams::d3d11(...)`: a
+  `MemoryDomainKind::D3D11Texture` proposal sized to the NV12 frame
+  (`w*h*3/2`, even dims guaranteed by the sink), with pool headroom
+  (`min_buffers = 3`) and 256-byte alignment. The runner conveys it to the
+  upstream decoder's `configure_allocation`.
+- `MfDecode::configure_allocation` records the proposal (`requested_alloc()`
+  accessor), like `FfmpegH264Dec`. On the `with_d3d11` path a texture request
+  is honoured by construction (it already emits `D3D11Texture` frames); the
+  software path can't satisfy it, so the request stays recorded for diagnostics
+  rather than silently changing the output domain.
+- Two GPU-free unit tests (`D3D11Sink` proposes the right size/align/headroom;
+  `MfDecode` records a conveyed D3D11 proposal). VERIFIED on the Windows dev
+  host: `cargo test -p g2g-plugins --features "mf-decode d3d11-sink"` (32
+  passed) and clippy green; the platform-agnostic conveyance stays covered by
+  `m12_allocation.rs`.
+
 ### W1 (Phase 4): `D3D11Sink` present sink
 
 - Completes the Windows zero-copy decode -> display track. `D3D11Sink`
