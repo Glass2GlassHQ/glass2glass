@@ -7,6 +7,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
+- **Item 6: pad templates (declarative, pre-instantiation metadata).**
+  New `pad_template` module (g2g-core, runtime feature): `PadDirection`,
+  `PadCaps` (`Fixed(CapsSet)` / `Any`), `PadTemplate`, and a `PadTemplates`
+  trait whose `pad_templates()` is an associated function (no `&self`), so
+  a tool inspects an element *type* without constructing it, the analog of
+  GStreamer's `gst_element_factory_get_static_pad_templates`. A template is
+  the static superset of what the type can do; a constructed instance's
+  `caps_constraint_as_*` is a subset. `pad_link(producer, consumer)` runs
+  the negotiation `solve_linear` against two templates and returns the
+  fixated caps or a structured `NegotiationFailure` (`EmptyLink` =
+  incompatible, `Unfixable` = compatible but geometry/framerate still
+  open); `types_can_link::<A, B>()` is the convenience boolean (treating
+  `Unfixable` as compatible, since static templates routinely leave
+  geometry open until instance time). `PadTemplates` implemented for
+  `VideoTestSrc` (RGBA source), `FakeSink` (wildcard sink), and `H264Parse`
+  (H.264 sink + source). Unit tests in the module plus integration test
+  `m18_pad_templates.rs` (introspection without construction;
+  `VideoTestSrc -> FakeSink` compatible, `VideoTestSrc -> H264Parse`
+  `EmptyLink`, direction-awareness). no_std default core build, core
+  runtime suite, full workspace tests, and workspace clippy all green.
+
 - **Item 3 (Phase C): fan-out per-branch re-solve (FO-2) with FO-1
   strict default.** A mid-stream `CapsChanged` broadcast across the
   fan-out is now re-solved per branch against that branch's declared

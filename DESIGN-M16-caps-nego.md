@@ -440,11 +440,13 @@ remains.
   camera dims. The full fix needs `SourceLoop::intercept_caps` to be
   async so the source can do an SDP DESCRIBE before negotiation.
   GStreamer's `rtspsrc` does this.
-- **Pad templates as declarative metadata.** GStreamer's
-  `gst_element_factory_get_static_pad_templates` lets tools query an
-  element's accepted caps without instantiating it. Our
-  `caps_constraint_as_*` is a runtime method on a constructed
-  element. Tooling implications.
+- **Pad templates as declarative metadata.** *Done (M18, item 6).* The
+  `pad_template` module adds `PadTemplate` + a `PadTemplates` trait whose
+  `pad_templates()` is an associated function, so tools query an element
+  *type*'s pads without constructing it. `pad_link` / `types_can_link` run
+  the solver against two types' static templates for pre-instantiation
+  compatibility checks. The runtime `caps_constraint_as_*` remains the
+  instance-level (possibly narrower) view.
 - **Dynamic pads / request pads.** GStreamer's `tee::request-pad` and
   `mux::request-pad` allow adding branches / inputs at runtime. Our
   fan-out and muxer are static.
@@ -482,8 +484,10 @@ remains.
    to item 1 cleanly.
 5. **Async `SourceLoop::intercept_caps`.** Closes workaround #1's
    remaining gap. Trait change touches every source.
-6. **Pad templates declarative metadata.** Tools and pre-instantiation
-   solver queries.
+6. **Pad templates declarative metadata.** *Done (M18).* `PadTemplates`
+   trait (type-level `pad_templates()`), `pad_link` / `types_can_link`
+   pre-instantiation solver queries; implemented for `VideoTestSrc`,
+   `FakeSink`, `H264Parse`.
 7. **Bus integration for negotiation failures.** Quick win once item 1
    has restructured the runner.
 8. **Preference algebra.** Concrete trigger required (a competing-

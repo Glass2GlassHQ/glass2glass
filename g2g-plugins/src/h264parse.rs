@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PipelinePacket, Rate, VideoFormat,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoFormat,
 };
 
 #[derive(Debug, Default)]
@@ -133,6 +133,23 @@ impl AsyncElement for H264Parse {
             }
             Ok(())
         })
+    }
+}
+
+impl PadTemplates for H264Parse {
+    /// Consumes and produces H.264 at any geometry (the parser refines
+    /// geometry mid-stream from the SPS but never changes media type).
+    fn pad_templates() -> Vec<PadTemplate> {
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264.clone())),
+            PadTemplate::source(CapsSet::one(h264)),
+        ])
     }
 }
 

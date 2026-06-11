@@ -6,13 +6,14 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, VideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoFormat,
 };
 
 #[derive(Debug)]
@@ -165,5 +166,19 @@ impl SourceLoop for VideoTestSrc {
             out.push(PipelinePacket::Eos).await?;
             Ok(self.target_frames)
         })
+    }
+}
+
+impl PadTemplates for VideoTestSrc {
+    /// Static superset: the type always produces RGBA at any geometry /
+    /// framerate. A constructed instance narrows to its configured dims via
+    /// `SourceLoop::caps_constraint`.
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::source(CapsSet::one(Caps::Video {
+            format: VideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))])
     }
 }

@@ -33,6 +33,9 @@ pub mod fanout;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 
+#[cfg(feature = "runtime")]
+pub mod pad_template;
+
 #[cfg(feature = "dyn-slot")]
 pub mod slot;
 
@@ -64,6 +67,11 @@ pub use bus::{Bus, BusHandle, BusMessage};
 
 #[cfg(feature = "runtime")]
 pub use runtime::{LinkInterceptor, ProbeAction, ProbeSlot};
+
+#[cfg(feature = "runtime")]
+pub use pad_template::{
+    pad_link, types_can_link, PadCaps, PadDirection, PadTemplate, PadTemplates,
+};
 
 #[cfg(feature = "runtime")]
 pub use fanout::{

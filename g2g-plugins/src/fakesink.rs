@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, OutputSink,
-    PipelinePacket,
+    PadTemplate, PadTemplates, PipelinePacket,
 };
 
 #[cfg(feature = "std")]
@@ -157,5 +157,13 @@ impl AsyncElement for FakeSink {
             }
             Ok(())
         })
+    }
+}
+
+impl PadTemplates for FakeSink {
+    /// Wildcard sink: accepts any caps, matching the runtime
+    /// `caps_constraint_as_sink` of `AcceptsAny`.
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::sink_any()])
     }
 }
