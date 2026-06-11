@@ -19,6 +19,18 @@
 //!
 //! A window titled "glass2glass" should appear on the active output
 //! showing the test pattern for ~2 seconds.
+//!
+//! Decoder backend is selectable via `G2G_DECODER`: `software` (default,
+//! libavcodec built-in) or `nvdec` (h264_cuvid on NVIDIA, requires
+//! libnvcuvid + a libavcodec build with cuvid). Example:
+//!
+//! ```sh
+//! G2G_LINK_CAP=1 G2G_DECODER=nvdec \
+//!     G2G_RTSP_TEST_URL=rtsp://localhost:8554/pattern \
+//!     cargo test -p g2g-plugins \
+//!     --features "rtsp ffmpeg wayland-sink" \
+//!     --test wayland_smoke -- --ignored --nocapture
+//! ```
 
 #![cfg(all(
     target_os = "linux",
@@ -29,7 +41,7 @@
 
 use g2g_core::runtime::run_source_transform_sink;
 use g2g_core::PipelineClock;
-use g2g_plugins::ffmpegdec::{FfmpegH264Dec, OutputFormat};
+use g2g_plugins::ffmpegdec::{Backend, FfmpegH264Dec, OutputFormat};
 use g2g_plugins::rtspsrc::RtspSrc;
 use g2g_plugins::waylandsink::WaylandSink;
 
@@ -52,7 +64,16 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
         .unwrap_or_else(|_| "rtsp://localhost:8554/pattern".to_string());
     eprintln!("connecting to {url}");
 
-    const TARGET: u64 = 60;
+    // Frames the source pushes before EOS. NVDEC has a noticeable
+    // startup tax (libnvcuvid load, CUDA context, surface pool alloc);
+    // 60 frames is fine for sw but doesn't amortize cuvid's startup, so
+    // expose this as an env knob. Steady-state latency numbers (p50/p95)
+    // only get meaningful with TARGET >= ~300.
+    let target: u64 = std::env::var("G2G_TARGET_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    eprintln!("target frames = {target}");
     // Each of the two pipeline links holds this many in-flight packets.
     // Latency at steady state is dominated by `2 * cap * frame_period`,
     // so this is the key knob for the glass-to-glass latency hunt.
@@ -62,18 +83,38 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
         .unwrap_or(8);
     eprintln!("link capacity = {link_cap}");
 
-    let mut src = RtspSrc::new(url).with_frame_limit(TARGET);
-    let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+    // G2G_DECODER selects the libavcodec backend: `software` (default,
+    // built-in H.264 decoder) or `nvdec` (h264_cuvid, requires NVIDIA
+    // driver + libnvcuvid + a libavcodec build with cuvid).
+    let backend = match std::env::var("G2G_DECODER")
+        .unwrap_or_else(|_| "software".into())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "software" | "sw" => Backend::Software,
+        "nvdec" | "cuvid" | "nvidia" => Backend::NvdecCuvid,
+        other => panic!("unknown G2G_DECODER={other:?} (expected software|nvdec)"),
+    };
+    eprintln!("decoder backend = {backend:?}");
+
+    let mut src = RtspSrc::new(url).with_frame_limit(target);
+    let mut dec = FfmpegH264Dec::new()
+        .with_output_format(OutputFormat::Nv12)
+        .with_backend(backend);
     let mut snk = WaylandSink::new().with_title("glass2glass smoke test");
     let clock = ZeroClock;
 
     let start = std::time::Instant::now();
+    // Budget: 30 s of fixed setup tax (cuvid startup can be 1-2 s alone)
+    // plus 100 ms per requested frame. 60 frames -> 36 s; 600 frames ->
+    // 90 s; matches sw and NVDEC steady-state throughput with headroom.
+    let timeout_s = 30 + (target * 100 / 1000).max(30);
     let stats = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(timeout_s),
         run_source_transform_sink(&mut src, &mut dec, &mut snk, &clock, link_cap),
     )
     .await
-    .expect("pipeline should complete within 60s")
+    .unwrap_or_else(|_| panic!("pipeline should complete within {timeout_s}s"))
     .expect("end-to-end Wayland pipeline should succeed");
     let elapsed = start.elapsed();
 

@@ -11,9 +11,23 @@
 //! cannot allocate decoder output surfaces on AMD desktop GPUs (see
 //! `vaapidec.rs` module header for the full diagnosis). libavcodec's
 //! software H.264 decoder works on every Linux system out of the box; this
-//! is the production-ready baseline. VAAPI hwaccel through ffmpeg
-//! (`h264_vaapi` codec + AV_HWDEVICE_TYPE_VAAPI) is a follow-up that
-//! preserves the same `AsyncElement` shape.
+//! is the production-ready baseline.
+//!
+//! NVDEC (NVIDIA) hardware decode is available via the same element by
+//! constructing with [`Backend::NvdecCuvid`]: libavcodec ships an
+//! `h264_cuvid` standalone codec (not a hwaccel hook), so we just swap the
+//! codec lookup. The decoder emits `Pixel::NV12` straight to system memory,
+//! so no `AVHWDeviceContext` setup or `av_hwframe_transfer_data` plumbing is
+//! needed. The `AsyncElement` shape is identical to the software backend;
+//! output caps are still NV12 / I420 from the caller's chosen
+//! [`OutputFormat`]. Requires the libavcodec build to include `h264_cuvid`
+//! (Fedora `ffmpeg-free` includes it; check `ffmpeg -decoders | grep cuvid`)
+//! and a working NVIDIA driver + `libnvcuvid.so` at runtime.
+//!
+//! VAAPI hwaccel through ffmpeg (`h264_vaapi` + `AV_HWDEVICE_TYPE_VAAPI`)
+//! follows the same pattern as a future fourth backend variant, but does
+//! need an `AVHWDeviceContext` and a `get_format` hook (it is a true
+//! hwaccel, not a standalone codec like cuvid).
 //!
 //! Pipeline:
 //!
@@ -50,10 +64,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ffmpeg_next as ffmpeg;
-use ffmpeg::codec::{self, Id};
+use ffmpeg::codec::{self, Flags, Id};
 use ffmpeg::format::Pixel;
 use ffmpeg::frame::Video as FfVideo;
 use ffmpeg::packet::Packet;
+use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
 
 use g2g_core::frame::Frame;
@@ -82,6 +97,23 @@ impl OutputFormat {
     }
 }
 
+/// libavcodec decoder backend. The element shape (input H.264 Annex-B,
+/// output NV12 / I420 in system memory) is identical across variants —
+/// only the codec used internally and the path through libavcodec change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// libavcodec's built-in software H.264 decoder. Works everywhere
+    /// libavcodec is present. Default.
+    Software,
+    /// NVIDIA NVDEC via the `h264_cuvid` standalone codec. Requires the
+    /// libavcodec build to include `h264_cuvid` and a working NVIDIA
+    /// driver (`libnvcuvid.so`) at runtime. cuvid emits NV12 directly to
+    /// system memory, so no AVHWDeviceContext / hwframe transfer is
+    /// needed; the only difference from the software path is the source
+    /// `AVFrame`'s pixel format.
+    NvdecCuvid,
+}
+
 /// One decoded picture, pixels already copied out of the libavcodec frame
 /// in the configured `OutputFormat` layout.
 struct DecodedPicture {
@@ -101,6 +133,21 @@ pub struct FfmpegH264Dec {
     configured: bool,
     emitted: u64,
     output_format: OutputFormat,
+    backend: Backend,
+    /// Number of internal output surfaces requested from `h264_cuvid`.
+    /// `None` keeps the cuvid default (25 — throughput-oriented, adds
+    /// ~25 frames of in-decoder latency). The `NvdecCuvid` constructor
+    /// path defaults this to `Some(4)` for low-latency live use; callers
+    /// who need throughput at the cost of latency can override via
+    /// [`FfmpegH264Dec::with_cuvid_surfaces`]. Ignored on the software
+    /// backend.
+    cuvid_surfaces: Option<u32>,
+    /// Set `AV_CODEC_FLAG_LOW_DELAY` at codec-open time. Tells the
+    /// decoder to emit each picture as soon as it's decoded rather than
+    /// holding it for reorder. Defaulted on for NVDEC (cuvid otherwise
+    /// happily pipelines several frames before releasing the first), off
+    /// for software (correctness on B-frame streams).
+    low_delay: bool,
     /// M16 workaround #3 Phase A: most recent input caps received via
     /// `PipelinePacket::CapsChanged`. Used to validate the format on
     /// mid-stream changes and to debug-assert that the decode-time
@@ -144,6 +191,9 @@ impl FfmpegH264Dec {
             configured: false,
             emitted: 0,
             output_format: OutputFormat::I420,
+            backend: Backend::Software,
+            cuvid_surfaces: None,
+            low_delay: false,
             input_caps: None,
             pts_to_arrival: alloc::collections::BTreeMap::new(),
         }
@@ -159,6 +209,65 @@ impl FfmpegH264Dec {
 
     pub fn output_format(&self) -> OutputFormat {
         self.output_format
+    }
+
+    /// Select the libavcodec backend. Defaults to [`Backend::Software`].
+    /// [`Backend::NvdecCuvid`] opens `h264_cuvid` at `configure_pipeline`
+    /// time and fails loud (`HardwareError::Other`) if the libavcodec
+    /// build doesn't include it or the NVIDIA driver isn't reachable.
+    ///
+    /// Switching *to* `NvdecCuvid` from the default also enables
+    /// latency-oriented tuning: `surfaces=4` (down from cuvid's default
+    /// 25, which costs ~25 frames of in-decoder buffering) and the
+    /// `AV_CODEC_FLAG_LOW_DELAY` codec flag (release each picture as
+    /// soon as it's decoded). Switching back to `Software` clears those
+    /// defaults. Override either explicitly via
+    /// [`Self::with_cuvid_surfaces`] or [`Self::with_low_delay`] *after*
+    /// `with_backend`.
+    pub fn with_backend(mut self, backend: Backend) -> Self {
+        self.backend = backend;
+        match backend {
+            Backend::Software => {
+                self.cuvid_surfaces = None;
+                self.low_delay = false;
+            }
+            Backend::NvdecCuvid => {
+                self.cuvid_surfaces = Some(4);
+                self.low_delay = true;
+            }
+        }
+        self
+    }
+
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// Override the `h264_cuvid` `surfaces` AVOption. Higher = more
+    /// throughput headroom but more in-decoder latency (each extra
+    /// surface is one extra frame the decoder may hold before releasing
+    /// output). `None` reverts to the cuvid default (25). Ignored on the
+    /// software backend.
+    pub fn with_cuvid_surfaces(mut self, surfaces: Option<u32>) -> Self {
+        self.cuvid_surfaces = surfaces;
+        self
+    }
+
+    pub fn cuvid_surfaces(&self) -> Option<u32> {
+        self.cuvid_surfaces
+    }
+
+    /// Set `AV_CODEC_FLAG_LOW_DELAY`. Defaults: on for NVDEC (the only
+    /// way to keep cuvid from holding several frames before output),
+    /// off for software. Setting this on a sw path with reordered
+    /// streams (B-frames) is normally not what you want.
+    pub fn with_low_delay(mut self, on: bool) -> Self {
+        self.low_delay = on;
+        self
+    }
+
+    pub fn low_delay(&self) -> bool {
+        self.low_delay
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -283,9 +392,40 @@ impl AsyncElement for FfmpegH264Dec {
         // repeatedly is safe and cheap.
         ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
-        let codec = codec::decoder::find(Id::H264).ok_or(G2gError::Hardware(HardwareError::Other))?;
-        let decoder = codec::decoder::new()
-            .open_as(codec)
+        let codec = match self.backend {
+            Backend::Software => codec::decoder::find(Id::H264),
+            // `h264_cuvid` is a standalone codec entry, not a hwaccel hook,
+            // so it's found by name rather than by AVCodecID. If absent, the
+            // libavcodec build wasn't compiled with `--enable-cuvid` or
+            // libnvcuvid isn't loadable at runtime; either way the right
+            // answer is to fail loud so the caller picks Software explicitly.
+            Backend::NvdecCuvid => codec::decoder::find_by_name("h264_cuvid"),
+        }
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
+
+        let mut decoder_ctx = codec::decoder::new();
+        if self.low_delay {
+            // `AV_CODEC_FLAG_LOW_DELAY` tells the codec to release each
+            // picture as soon as it's decoded rather than holding it for
+            // reorder. Essential on cuvid (otherwise the internal pipeline
+            // depth dominates p50); set explicitly here so the policy is
+            // visible alongside the surface count.
+            decoder_ctx.set_flags(Flags::LOW_DELAY);
+        }
+        // cuvid's tunables live as AVOptions on the codec's private data,
+        // applied at `avcodec_open2` via an `AVDictionary`. The `surfaces`
+        // option is the dominant latency knob — default 25 ~= 25 frames
+        // of in-decoder buffering. The software backend ignores cuvid
+        // options, so it's harmless to leave the dictionary empty there.
+        let mut opts = Dictionary::new();
+        if self.backend == Backend::NvdecCuvid {
+            if let Some(n) = self.cuvid_surfaces {
+                let v = alloc::format!("{n}");
+                opts.set("surfaces", &v);
+            }
+        }
+        let decoder = decoder_ctx
+            .open_as_with(codec, opts)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
             .video()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
@@ -436,18 +576,24 @@ fn yuv420_caps(format: OutputFormat, w: u32, h: u32) -> Caps {
 /// exceed the visible width due to libavcodec's alignment, so rows are
 /// copied individually.
 ///
-/// Rejects any pixel format the H.264 decoder may emit that isn't an
-/// 8-bit 4:2:0 YUV layout — those streams need a `ColorConvert` element
-/// upstream of any I420/NV12 consumer.
+/// Two source pixel layouts are accepted: planar `YUV420P` (the software
+/// H.264 decoder's native output) and semi-planar `NV12` (h264_cuvid's
+/// native output). Any other format is rejected loud — those streams need
+/// a `ColorConvert` element upstream of any I420/NV12 consumer.
 fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
-    match frame.format() {
+    let src = match frame.format() {
         // YUVJ420P is YUV420P with JPEG (full) range. Same plane layout, so
         // accept it; range fidelity is preserved in the pixel values and can
         // be advertised by a future colour-metadata field on `Caps::Video`.
-        Pixel::YUV420P | Pixel::YUVJ420P => {}
+        Pixel::YUV420P | Pixel::YUVJ420P => SourceLayout::Planar420,
+        Pixel::NV12 => SourceLayout::SemiPlanar420,
         _ => return Err(G2gError::CapsMismatch),
-    }
-    if frame.planes() < 3 {
+    };
+    let required_planes = match src {
+        SourceLayout::Planar420 => 3,
+        SourceLayout::SemiPlanar420 => 2,
+    };
+    if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
     let w = frame.width() as usize;
@@ -468,13 +614,13 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
         let dst_off = row * w;
         out[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
     }
-    let u_src = frame.data(1);
-    let u_pitch = frame.stride(1);
-    let v_src = frame.data(2);
-    let v_pitch = frame.stride(2);
-    match format {
-        OutputFormat::I420 => {
-            // U plane then V plane, each half-res.
+    match (src, format) {
+        // Planar source -> planar I420: copy U then V at half-res.
+        (SourceLayout::Planar420, OutputFormat::I420) => {
+            let u_src = frame.data(1);
+            let u_pitch = frame.stride(1);
+            let v_src = frame.data(2);
+            let v_pitch = frame.stride(2);
             for row in 0..ch {
                 let dst_off = y_size + row * cw;
                 out[dst_off..dst_off + cw]
@@ -486,9 +632,12 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                     .copy_from_slice(&v_src[row * v_pitch..row * v_pitch + cw]);
             }
         }
-        OutputFormat::Nv12 => {
-            // Interleave U and V: dst[y_size + 2*i] = U, dst[y_size + 2*i + 1] = V.
-            // 2*c_size bytes total, same as I420.
+        // Planar source -> semi-planar NV12: interleave U and V.
+        (SourceLayout::Planar420, OutputFormat::Nv12) => {
+            let u_src = frame.data(1);
+            let u_pitch = frame.stride(1);
+            let v_src = frame.data(2);
+            let v_pitch = frame.stride(2);
             for row in 0..ch {
                 let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
                 let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
@@ -499,9 +648,41 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                 }
             }
         }
+        // Semi-planar source (NV12) -> NV12 output: row copy of the
+        // interleaved UV plane, honouring source pitch.
+        (SourceLayout::SemiPlanar420, OutputFormat::Nv12) => {
+            let uv_src = frame.data(1);
+            let uv_pitch = frame.stride(1);
+            let uv_row_bytes = 2 * cw;
+            for row in 0..ch {
+                let dst_base = y_size + row * uv_row_bytes;
+                out[dst_base..dst_base + uv_row_bytes]
+                    .copy_from_slice(&uv_src[row * uv_pitch..row * uv_pitch + uv_row_bytes]);
+            }
+        }
+        // Semi-planar source -> planar I420: de-interleave UV into U then V.
+        (SourceLayout::SemiPlanar420, OutputFormat::I420) => {
+            let uv_src = frame.data(1);
+            let uv_pitch = frame.stride(1);
+            for row in 0..ch {
+                let uv_row = &uv_src[row * uv_pitch..row * uv_pitch + 2 * cw];
+                let u_dst_base = y_size + row * cw;
+                let v_dst_base = y_size + c_size + row * cw;
+                for col in 0..cw {
+                    out[u_dst_base + col] = uv_row[2 * col];
+                    out[v_dst_base + col] = uv_row[2 * col + 1];
+                }
+            }
+        }
     }
 
     Ok(out.into_boxed_slice())
+}
+
+#[derive(Clone, Copy)]
+enum SourceLayout {
+    Planar420,
+    SemiPlanar420,
 }
 
 #[cfg(test)]
@@ -603,6 +784,82 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
+    }
+
+    #[test]
+    fn default_backend_is_software() {
+        assert_eq!(FfmpegH264Dec::new().backend(), Backend::Software);
+    }
+
+    #[test]
+    fn with_backend_overrides_default() {
+        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuvid);
+        assert_eq!(dec.backend(), Backend::NvdecCuvid);
+    }
+
+    #[test]
+    fn caps_constraint_independent_of_backend() {
+        // The NVDEC backend changes the libavcodec codec used internally,
+        // not the negotiation surface: input is still H.264, output is
+        // still the configured OutputFormat at the same geometry. Solver
+        // sees no difference, so chains compose identically.
+        let sw = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let nv = FfmpegH264Dec::new()
+            .with_output_format(OutputFormat::Nv12)
+            .with_backend(Backend::NvdecCuvid);
+        let h264 = Caps::Video {
+            format: VideoFormat::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let CapsConstraint::DerivedOutput(f_sw) = sw.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let CapsConstraint::DerivedOutput(f_nv) = nv.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        assert_eq!(f_sw(&h264).alternatives(), f_nv(&h264).alternatives());
+    }
+
+    #[test]
+    fn software_backend_does_not_set_cuvid_defaults() {
+        // The latency tuning only makes sense for NVDEC; the software
+        // path keeps libavcodec's defaults so existing behavior and
+        // existing CHANGELOG entries are unchanged.
+        let dec = FfmpegH264Dec::new();
+        assert!(!dec.low_delay());
+        assert_eq!(dec.cuvid_surfaces(), None);
+    }
+
+    #[test]
+    fn nvdec_backend_defaults_to_low_latency_tuning() {
+        // surfaces=4 (down from cuvid's 25) and AV_CODEC_FLAG_LOW_DELAY
+        // are the two settings that recover the ~80 ms of in-decoder
+        // buffering otherwise visible in glass-to-glass numbers. Locking
+        // the defaults here so a refactor can't silently revert.
+        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuvid);
+        assert!(dec.low_delay());
+        assert_eq!(dec.cuvid_surfaces(), Some(4));
+    }
+
+    #[test]
+    fn switching_back_to_software_clears_nvdec_tuning() {
+        let dec = FfmpegH264Dec::new()
+            .with_backend(Backend::NvdecCuvid)
+            .with_backend(Backend::Software);
+        assert!(!dec.low_delay());
+        assert_eq!(dec.cuvid_surfaces(), None);
+    }
+
+    #[test]
+    fn cuvid_surfaces_override_survives_after_with_backend() {
+        // Override order: with_backend first, then with_cuvid_surfaces
+        // (so the override wins over the NVDEC default).
+        let dec = FfmpegH264Dec::new()
+            .with_backend(Backend::NvdecCuvid)
+            .with_cuvid_surfaces(Some(2));
+        assert_eq!(dec.cuvid_surfaces(), Some(2));
     }
 
     #[test]

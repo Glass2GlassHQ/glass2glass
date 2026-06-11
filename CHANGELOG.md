@@ -5,6 +5,66 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### NVDEC backend low-latency defaults + `wayland_smoke` knobs
+
+- `FfmpegH264Dec::with_backend(Backend::NvdecCuvid)` now enables
+  low-latency tuning by default: `h264_cuvid surfaces=4` (down from
+  cuvid's default 25, which adds ~25 frames of in-decoder buffering)
+  and the `AV_CODEC_FLAG_LOW_DELAY` codec flag (release each picture as
+  soon as it's decoded, no reorder hold). Switching back to
+  `Backend::Software` clears the tuning so the sw path stays at
+  libavcodec defaults. Override either knob via
+  `with_cuvid_surfaces(Some(n))` / `with_low_delay(bool)` *after*
+  `with_backend`. Wired in `configure_pipeline` via `open_as_with` +
+  `Dictionary` + `Context::set_flags`. Closes the gap where the first
+  `wayland_smoke` run with `NvdecCuvid` saw p50 = 163 ms (~80 ms over
+  the link-cap floor) — almost entirely cuvid's `surfaces=25` pipeline
+  depth, recoverable without a CUDA memory domain.
+- Four new unit tests:
+  `software_backend_does_not_set_cuvid_defaults`,
+  `nvdec_backend_defaults_to_low_latency_tuning`,
+  `switching_back_to_software_clears_nvdec_tuning`,
+  `cuvid_surfaces_override_survives_after_with_backend`. Defaults are
+  policy, not implementation detail; locking them so a refactor can't
+  silently revert.
+- `wayland_smoke` gains `G2G_TARGET_FRAMES` (default 60) so a NVDEC
+  benchmark can amortize cuvid's startup tax (libnvcuvid load + CUDA
+  context + surface pool can be 1-2 s). Test timeout now scales:
+  `30 + max(30, target * 100 ms / 1000)` so a 600-frame steady-state
+  run fits cleanly. Steady-state p50/p95 only become meaningful for
+  `target >= ~300`.
+
+### NVDEC backend for `FfmpegH264Dec` (NVIDIA hardware H.264 decode)
+
+- New `Backend` enum and `FfmpegH264Dec::with_backend(Backend)`. Defaults
+  to `Backend::Software` (existing libavcodec built-in H.264 decoder, no
+  behavior change). `Backend::NvdecCuvid` opens the `h264_cuvid` standalone
+  codec via `codec::decoder::find_by_name("h264_cuvid")`; if libavcodec
+  wasn't built with cuvid or `libnvcuvid.so` isn't reachable at runtime,
+  `configure_pipeline` fails loud with `Hardware(Other)` so the caller's
+  backend choice is honoured rather than silently downgraded.
+- No new Cargo feature: cuvid is a runtime libavcodec lookup, not a
+  link-time dep. No raw `ffmpeg-sys` hwaccel plumbing
+  (`AVHWDeviceContext`, `get_format`, `av_hwframe_transfer_data`) is
+  needed because cuvid is a standalone codec that emits NV12 directly to
+  system memory.
+- Caps surface unchanged: the `DerivedOutput` constraint (H.264 in →
+  NV12/I420 out, same geometry, framerate forwarded) is identical
+  across backends, so existing solver wiring, mixed-chain tests, and the
+  M16 workaround #3 Phase A consistency check apply verbatim.
+- `copy_yuv420` extended to accept `Pixel::NV12` source frames (cuvid's
+  native output) in addition to `YUV420P`/`YUVJ420P` (software path).
+  Four (source-layout × output-layout) branches, each honouring source
+  pitch. NV12-source → I420-output de-interleaves; NV12-source →
+  NV12-output is a row copy.
+- New unit tests `default_backend_is_software`,
+  `with_backend_overrides_default`, and
+  `caps_constraint_independent_of_backend` (NVDEC and software backends
+  produce identical solver constraints — chains compose the same way).
+- Visual e2e (`rtspsrc → h264parse → ffmpegdec[NvdecCuvid] →
+  wayland/kms`) is user-side: CI has no GPU, and the existing rtsp
+  sandbox block already constrains live tests to manual verification.
+
 ### M18: GStreamer parity push (item-by-item from DESIGN-M16-caps-nego.md §13.4)
 
 - **Item 6: pad templates (declarative, pre-instantiation metadata).**
