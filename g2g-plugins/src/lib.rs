@@ -55,6 +55,11 @@ pub mod mfencode;
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
 
+// WASAPI render sink: plays PCM on the default audio endpoint (shared mode).
+// Windows-only; the audible-output end of the M25 audio path.
+#[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
+pub mod wasapisink;
+
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]

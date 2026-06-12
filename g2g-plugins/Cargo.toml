@@ -21,6 +21,10 @@ mf-decode = ["std", "dep:windows"]
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.
 mf-encode = ["std", "dep:windows"]
+# Windows WASAPI render sink (M29): plays interleaved PCM (PcmS16Le/PcmF32Le)
+# on the default audio endpoint via WASAPI shared mode. The audible-output end
+# of the M25 audio path. Pulls the windows crate; Windows-only, implies std.
+wasapi-sink = ["std", "dep:windows"]
 # Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
 # frames in a Win32 window via a DXGI swapchain + D3D11 video processor
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
@@ -78,6 +82,12 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
     "Win32_Media_KernelStreaming",
+    # WASAPI render sink (wasapi-sink): Core Audio endpoint enumeration +
+    # IAudioClient/IAudioRenderClient shared-mode render. StructuredStorage is
+    # needed for the PROPVARIANT type in IMMDevice::Activate's signature.
+    "Win32_Media_Audio",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
     # DXVA / D3D11 zero-copy decode output (W1): D3D11 device + texture types,
     # the D3D_DRIVER_TYPE enum, and DXGI (adapter type in D3D11CreateDevice's
     # signature; DXGI_FORMAT for the texture domain).

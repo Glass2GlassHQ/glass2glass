@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M29: `WasapiSink` WASAPI render sink
+
+- The audible-output end of the M25 audio path (`AudioTestSrc`/`WavSink`):
+  `WasapiSink` plays interleaved PCM (`PcmS16Le`/`PcmF32Le`) on the default
+  render endpoint via WASAPI shared mode, so an audio pipeline makes sound
+  instead of only writing a file. Windows-only behind the `wasapi-sink`
+  feature; pulls the `windows` crate (`Win32_Media_Audio` +
+  `Win32_System_Com_StructuredStorage`/`_Variant` for `IMMDevice::Activate`).
+- Threading mirrors `D3D11Sink`: COM/WASAPI run on a dedicated worker thread
+  spun up at `configure_pipeline`; the sink struct holds only `Send` handles
+  (mpsc sender + a frame counter), PCM bytes cross by value. The worker tops
+  up the shared-mode endpoint buffer at the device rate, queuing the source's
+  faster-than-real-time output; on `Eos` it drains the queue and waits for
+  playout (guarded) so the tail is not cut off.
+- A headless host (no render endpoint) fails loud in `configure_pipeline`
+  rather than silently dropping audio: the worker reports endpoint-open
+  success over a ready channel.
+- Tests: four unit tests (PCM caps mapping + compressed rejection,
+  `WAVEFORMATEX` field derivation, intercept, pad template) plus
+  `m29_wasapi.rs`: `AudioTestSrc -> WasapiSink` renders 200 ms of tone and
+  asserts every produced sample frame reached the endpoint, skipping
+  gracefully when no audio device is present. VERIFIED on a host with audio
+  out: `wasapi-sink` suite green (2/2 incl. real render, 4/4 unit),
+  `cargo check --workspace` green, feature clippy clean.
+
 ### M28: `Mp4Src` fragmented-MP4 demuxer source
 
 - The read-side counterpart of `Mp4Sink`, closing the container loop:
