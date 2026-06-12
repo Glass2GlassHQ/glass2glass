@@ -27,6 +27,8 @@ pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
 #[cfg(feature = "std")]
+pub mod mp4sink;
+#[cfg(feature = "std")]
 pub mod syncsink;
 
 #[cfg(feature = "rtsp")]

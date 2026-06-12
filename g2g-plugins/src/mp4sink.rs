@@ -1,0 +1,524 @@
+//! Fragmented-MP4 muxer sink (M24). Wraps an H.264 elementary stream in a
+//! standard fMP4/CMAF-style container: `ftyp` + `moov` once, then one
+//! `moof`+`mdat` fragment per access unit, so the recording is playable
+//! (ffplay/VLC/browsers via MSE) and durable: a truncated live recording
+//! stays valid up to the last complete fragment, which is exactly the
+//! property a glass-to-glass recorder wants. Pairs with `MfEncode` /
+//! `H264Parse` upstream; `FileSink` remains the raw-bitstream alternative.
+//!
+//! Input is Annex-B access units (`MemoryDomain::System`), converted to
+//! AVCC (4-byte length-prefixed NALUs) for the `mdat`. The `moov` needs the
+//! stream's SPS/PPS, which arrive in-band with the first IDR, so the header
+//! is written on the first access unit; dims come from the negotiated caps.
+//! One fragment per access unit favours latency/durability over container
+//! overhead (~100 bytes per frame); a batching knob is a follow-up.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
+
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+};
+
+use crate::filesink::io_err;
+
+/// 90 kHz media timescale, the conventional choice for video tracks.
+const TIMESCALE: u64 = 90_000;
+/// Fallback per-frame duration when the stream carries no timing: 1/30 s.
+const DEFAULT_DURATION_NS: u64 = 33_333_333;
+
+#[derive(Debug)]
+pub struct Mp4Sink {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+    width: u32,
+    height: u32,
+    header_written: bool,
+    fragments: u64,
+    /// Accumulated decode time in media-timescale units (`tfdt`).
+    decode_time: u64,
+    prev_pts_ns: Option<u64>,
+    eos_seen: bool,
+}
+
+impl Mp4Sink {
+    /// The file is created in `configure_pipeline`; construction has no
+    /// filesystem side effects.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            writer: None,
+            width: 0,
+            height: 0,
+            header_written: false,
+            fragments: 0,
+            decode_time: 0,
+            prev_pts_ns: None,
+            eos_seen: false,
+        }
+    }
+
+    /// Count of `moof`+`mdat` fragments written. Useful in tests.
+    pub fn fragments_written(&self) -> u64 {
+        self.fragments
+    }
+
+    pub fn eos_seen(&self) -> bool {
+        self.eos_seen
+    }
+
+    fn accept_caps(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width,
+            height,
+            ..
+        } = caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
+            self.width = *w;
+            self.height = *h;
+        }
+        Ok(())
+    }
+}
+
+impl AsyncElement for Mp4Sink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        let supported = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        upstream_caps.intersect(&supported)
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.accept_caps(absolute_caps)?;
+        let file = File::create(&self.path).map_err(io_err)?;
+        self.writer = Some(BufWriter::new(file));
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if self.writer.is_none() {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let nalus = split_annexb(slice.as_slice());
+                    if nalus.is_empty() {
+                        return Err(G2gError::CapsMismatch);
+                    }
+
+                    if !self.header_written {
+                        // moov needs the in-band SPS/PPS of the first AU.
+                        let sps = find_nalu(&nalus, 7).ok_or(G2gError::CapsMismatch)?;
+                        let pps = find_nalu(&nalus, 8).ok_or(G2gError::CapsMismatch)?;
+                        let header = [
+                            ftyp(),
+                            moov(self.width, self.height, sps, pps),
+                        ]
+                        .concat();
+                        let w = self.writer.as_mut().expect("checked above");
+                        w.write_all(&header).map_err(io_err)?;
+                        self.header_written = true;
+                    }
+
+                    // duration: explicit, else pts delta, else the default.
+                    let duration_ns = if frame.timing.duration_ns != 0 {
+                        frame.timing.duration_ns
+                    } else {
+                        match self.prev_pts_ns {
+                            Some(prev) if frame.timing.pts_ns > prev => {
+                                frame.timing.pts_ns - prev
+                            }
+                            _ => DEFAULT_DURATION_NS,
+                        }
+                    };
+                    self.prev_pts_ns = Some(frame.timing.pts_ns);
+                    let duration = ns_to_timescale(duration_ns);
+
+                    let sample = avcc_sample(&nalus);
+                    let is_sync = find_nalu(&nalus, 5).is_some();
+                    let frag = fragment(
+                        self.fragments + 1,
+                        self.decode_time,
+                        duration as u32,
+                        &sample,
+                        is_sync,
+                    );
+                    let w = self.writer.as_mut().expect("checked above");
+                    w.write_all(&frag).map_err(io_err)?;
+                    self.fragments += 1;
+                    self.decode_time += duration;
+                }
+                PipelinePacket::Eos => {
+                    let w = self.writer.as_mut().expect("checked above");
+                    w.flush().map_err(io_err)?;
+                    self.eos_seen = true;
+                }
+                PipelinePacket::CapsChanged(c) => {
+                    // mid-stream H.264 geometry changes carry new in-band
+                    // SPS/PPS; the existing avcC keeps decoding via the
+                    // in-band sets. A non-H.264 change is a hard error.
+                    self.accept_caps(&c)?;
+                }
+                // a raw fragment stream has no seek index to reset.
+                PipelinePacket::Flush => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+impl PadTemplates for Mp4Sink {
+    /// Terminal H.264 sink pad; no source pad.
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))])
+    }
+}
+
+fn ns_to_timescale(ns: u64) -> u64 {
+    // 90 kHz: ns * 90000 / 1e9, reduced to avoid overflow.
+    ns.saturating_mul(TIMESCALE / 1000) / 1_000_000
+}
+
+/// Split an Annex-B buffer into NALUs (3- and 4-byte start codes).
+fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
+    let mut nalus = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let code_start = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
+            if let Some(s) = start {
+                nalus.push(&data[s..code_start]);
+            }
+            start = Some(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(s) = start {
+        if s < data.len() {
+            nalus.push(&data[s..]);
+        }
+    }
+    nalus
+}
+
+fn nalu_type(nalu: &[u8]) -> u8 {
+    nalu.first().map(|b| b & 0x1F).unwrap_or(0)
+}
+
+fn find_nalu<'a>(nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u8]> {
+    nalus.iter().copied().find(|n| nalu_type(n) == ty)
+}
+
+/// AVCC sample payload: every NALU prefixed with its 4-byte big-endian
+/// length (parameter sets stay in-band, which fMP4 players accept).
+fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for n in nalus {
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        out.extend_from_slice(n);
+    }
+    out
+}
+
+// --- box writers ----------------------------------------------------------
+
+fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + payload.len());
+    b.extend_from_slice(&((payload.len() as u32 + 8).to_be_bytes()));
+    b.extend_from_slice(kind);
+    b.extend_from_slice(payload);
+    b
+}
+
+fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(4 + payload.len());
+    p.push(version);
+    p.extend_from_slice(&flags.to_be_bytes()[1..]);
+    p.extend_from_slice(payload);
+    mp4_box(kind, &p)
+}
+
+fn ftyp() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(b"iso5"); // major brand
+    p.extend_from_slice(&512u32.to_be_bytes()); // minor version
+    p.extend_from_slice(b"iso5");
+    p.extend_from_slice(b"isom");
+    mp4_box(b"ftyp", &p)
+}
+
+const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
+
+fn moov(width: u32, height: u32, sps: &[u8], pps: &[u8]) -> Vec<u8> {
+    let mvhd = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&[0u8; 8]); // creation/modification time
+        p.extend_from_slice(&1000u32.to_be_bytes()); // timescale
+        p.extend_from_slice(&0u32.to_be_bytes()); // duration (fragmented)
+        p.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
+        p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0
+        p.extend_from_slice(&[0u8; 10]); // reserved
+        for m in MATRIX {
+            p.extend_from_slice(&m.to_be_bytes());
+        }
+        p.extend_from_slice(&[0u8; 24]); // pre_defined
+        p.extend_from_slice(&2u32.to_be_bytes()); // next track id
+        full_box(b"mvhd", 0, 0, &p)
+    };
+
+    let tkhd = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&[0u8; 8]); // times
+        p.extend_from_slice(&1u32.to_be_bytes()); // track id
+        p.extend_from_slice(&[0u8; 4]); // reserved
+        p.extend_from_slice(&0u32.to_be_bytes()); // duration
+        p.extend_from_slice(&[0u8; 16]); // reserved/layer/group/volume
+        for m in MATRIX {
+            p.extend_from_slice(&m.to_be_bytes());
+        }
+        p.extend_from_slice(&(width << 16).to_be_bytes()); // 16.16 width
+        p.extend_from_slice(&(height << 16).to_be_bytes()); // 16.16 height
+        full_box(b"tkhd", 0, 3, &p) // enabled | in_movie
+    };
+
+    let mdhd = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&[0u8; 8]);
+        p.extend_from_slice(&(TIMESCALE as u32).to_be_bytes());
+        p.extend_from_slice(&0u32.to_be_bytes());
+        p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language "und"
+        p.extend_from_slice(&[0u8; 2]);
+        full_box(b"mdhd", 0, 0, &p)
+    };
+
+    let hdlr = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&[0u8; 4]); // pre_defined
+        p.extend_from_slice(b"vide");
+        p.extend_from_slice(&[0u8; 12]); // reserved
+        p.extend_from_slice(b"g2g\0");
+        full_box(b"hdlr", 0, 0, &p)
+    };
+
+    let avcc = {
+        let mut p = Vec::new();
+        p.push(1); // configuration version
+        p.extend_from_slice(&sps[1..4.min(sps.len())]); // profile/compat/level
+        p.push(0xFC | 3); // 4-byte NALU lengths
+        p.push(0xE0 | 1); // 1 SPS
+        p.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        p.extend_from_slice(sps);
+        p.push(1); // 1 PPS
+        p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+        p.extend_from_slice(pps);
+        mp4_box(b"avcC", &p)
+    };
+
+    let avc1 = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&[0u8; 6]); // reserved
+        p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+        p.extend_from_slice(&[0u8; 16]); // pre_defined/reserved
+        p.extend_from_slice(&(width as u16).to_be_bytes());
+        p.extend_from_slice(&(height as u16).to_be_bytes());
+        p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
+        p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
+        p.extend_from_slice(&[0u8; 4]); // reserved
+        p.extend_from_slice(&1u16.to_be_bytes()); // frame count
+        p.extend_from_slice(&[0u8; 32]); // compressor name
+        p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
+        p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
+        p.extend_from_slice(&avcc);
+        mp4_box(b"avc1", &p)
+    };
+
+    let stbl = {
+        let stsd = {
+            let mut p = Vec::new();
+            p.extend_from_slice(&1u32.to_be_bytes()); // entry count
+            p.extend_from_slice(&avc1);
+            full_box(b"stsd", 0, 0, &p)
+        };
+        let empty4 = 0u32.to_be_bytes();
+        let stts = full_box(b"stts", 0, 0, &empty4);
+        let stsc = full_box(b"stsc", 0, 0, &empty4);
+        let stsz = full_box(b"stsz", 0, 0, &[0u8; 8]); // sample size + count
+        let stco = full_box(b"stco", 0, 0, &empty4);
+        mp4_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
+    };
+
+    let minf = {
+        let vmhd = full_box(b"vmhd", 0, 1, &[0u8; 8]);
+        let dref = {
+            let url = full_box(b"url ", 0, 1, &[]); // self-contained
+            let mut p = Vec::new();
+            p.extend_from_slice(&1u32.to_be_bytes());
+            p.extend_from_slice(&url);
+            full_box(b"dref", 0, 0, &p)
+        };
+        let dinf = mp4_box(b"dinf", &dref);
+        mp4_box(b"minf", &[vmhd, dinf, stbl].concat())
+    };
+
+    let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
+    let trak = mp4_box(b"trak", &[tkhd, mdia].concat());
+
+    let mvex = {
+        let mut p = Vec::new();
+        p.extend_from_slice(&1u32.to_be_bytes()); // track id
+        p.extend_from_slice(&1u32.to_be_bytes()); // default sample description
+        p.extend_from_slice(&[0u8; 12]); // default duration/size/flags
+        let trex = full_box(b"trex", 0, 0, &p);
+        mp4_box(b"mvex", &trex)
+    };
+
+    mp4_box(b"moov", &[mvhd, trak, mvex].concat())
+}
+
+/// One `moof`+`mdat` fragment holding a single sample.
+fn fragment(
+    sequence: u64,
+    decode_time: u64,
+    duration: u32,
+    sample: &[u8],
+    is_sync: bool,
+) -> Vec<u8> {
+    // I-frame: depends on nothing; otherwise depends-on + non-sync.
+    let sample_flags: u32 = if is_sync { 0x0200_0000 } else { 0x0101_0000 };
+
+    let build_moof = |data_offset: u32| -> Vec<u8> {
+        let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
+        let tfhd = {
+            let p = 1u32.to_be_bytes(); // track id
+            full_box(b"tfhd", 0, 0x020000, &p) // default-base-is-moof
+        };
+        let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
+        let trun = {
+            let mut p = Vec::new();
+            p.extend_from_slice(&1u32.to_be_bytes()); // sample count
+            p.extend_from_slice(&data_offset.to_be_bytes());
+            p.extend_from_slice(&duration.to_be_bytes());
+            p.extend_from_slice(&(sample.len() as u32).to_be_bytes());
+            p.extend_from_slice(&sample_flags.to_be_bytes());
+            // data-offset | duration | size | flags present
+            full_box(b"trun", 0, 0x000701, &p)
+        };
+        let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
+        mp4_box(b"moof", &[mfhd, traf].concat())
+    };
+
+    // the trun data offset points past the moof and the mdat header, both
+    // size-stable, so one rebuild with the measured size is exact.
+    let moof_len = build_moof(0).len() as u32;
+    let moof = build_moof(moof_len + 8);
+    let mdat = mp4_box(b"mdat", sample);
+    [moof, mdat].concat()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn annexb_splitter_handles_both_start_codes() {
+        // 4-byte code, 3-byte code, trailing NALU
+        let data = [
+            0, 0, 0, 1, 0x67, 0xAA, // SPS
+            0, 0, 1, 0x68, 0xBB, // PPS
+            0, 0, 0, 1, 0x65, 0xCC, 0xDD, // IDR
+        ];
+        let nalus = split_annexb(&data);
+        assert_eq!(nalus.len(), 3);
+        assert_eq!(nalu_type(nalus[0]), 7);
+        assert_eq!(nalu_type(nalus[1]), 8);
+        assert_eq!(nalu_type(nalus[2]), 5);
+        assert_eq!(nalus[2], &[0x65, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn avcc_sample_length_prefixes_every_nalu() {
+        let nalus: Vec<&[u8]> = vec![&[0x67, 1, 2], &[0x65, 3]];
+        let s = avcc_sample(&nalus);
+        assert_eq!(
+            s,
+            vec![0, 0, 0, 3, 0x67, 1, 2, 0, 0, 0, 2, 0x65, 3],
+            "4-byte BE length before each NALU"
+        );
+    }
+
+    #[test]
+    fn ns_to_timescale_is_90khz() {
+        assert_eq!(ns_to_timescale(1_000_000_000), 90_000);
+        assert_eq!(ns_to_timescale(33_333_333), 2999);
+    }
+
+    #[test]
+    fn boxes_carry_size_and_type() {
+        let b = mp4_box(b"mdat", &[1, 2, 3]);
+        assert_eq!(&b[..4], &11u32.to_be_bytes());
+        assert_eq!(&b[4..8], b"mdat");
+        assert_eq!(&b[8..], &[1, 2, 3]);
+    }
+
+    #[test]
+    fn trun_data_offset_points_at_the_mdat_payload() {
+        let frag = fragment(1, 0, 3000, &[9, 9, 9, 9], true);
+        // moof size from its own header
+        let moof_len = u32::from_be_bytes(frag[..4].try_into().unwrap()) as usize;
+        // mdat payload begins after the mdat 8-byte header
+        let payload_at = moof_len + 8;
+        assert_eq!(&frag[payload_at..payload_at + 4], &[9, 9, 9, 9]);
+        // the trun's data_offset (relative to moof start) must equal that.
+        // locate trun: search for the fourcc and read its data_offset field.
+        let pos = frag.windows(4).position(|w| w == b"trun").unwrap();
+        let data_offset =
+            u32::from_be_bytes(frag[pos + 12..pos + 16].try_into().unwrap()) as usize;
+        assert_eq!(data_offset, payload_at);
+    }
+}

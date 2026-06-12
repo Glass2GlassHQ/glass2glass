@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M24: `Mp4Sink` fragmented-MP4 muxer sink
+
+- H.264 recordings become standard playable files: `Mp4Sink` wraps an
+  Annex-B H.264 stream in a fragmented MP4 (`ftyp` + `moov` once, then one
+  `moof`+`mdat` per access unit, CMAF-style). A truncated live recording
+  stays valid up to the last complete fragment, the durability property a
+  glass-to-glass recorder wants; `FileSink` remains the raw-bitstream
+  alternative. std-gated, no new deps (hand-written box serializers).
+- Access units convert to AVCC (4-byte length-prefixed NALUs, parameter
+  sets kept in-band) for the `mdat`. The `moov` needs SPS/PPS, which arrive
+  in-band with the first IDR, so the header is written on the first AU;
+  dims come from the negotiated caps (`Accepts(H264 any geometry)`,
+  terminal sink pad template). 90 kHz media timescale; per-fragment
+  duration from `duration_ns`, else pts delta, else 1/30 s; `tfdt`
+  accumulates decode time; IDR fragments are marked sync samples.
+- Tests: five unit tests (Annex-B splitting across 3- and 4-byte start
+  codes, AVCC length prefixing, 90 kHz conversion, box framing, and the
+  `trun` data offset landing exactly on the `mdat` payload) plus
+  `m24_mp4sink.rs`: a synthetic-AU recording walks back as
+  `ftyp moov (moof mdat)x4` with the exact SPS/PPS bytes inside `avcC` and
+  incrementing `mfhd` sequence numbers; non-H.264 caps are rejected; and
+  on Windows a real `MfEncode` stream records to a structurally valid
+  10-fragment file. VERIFIED: `cargo test --workspace` green,
+  `cargo test -p g2g-plugins --features mf-encode --test m24_mp4sink`
+  green (3/3, real-encoder case included), workspace clippy clean.
+
 ### M23: `VideoConvert` software raw-format converter
 
 - Closes the raw-format gap between element families: chains like
