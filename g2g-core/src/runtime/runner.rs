@@ -18,6 +18,8 @@ use crate::runtime::coordinator::{
     report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
+use crate::runtime::coordinator::coordinator_with_recascade_n;
+#[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
@@ -845,22 +847,60 @@ where
         rxs.push(Some(rx));
     }
 
+    // M18 β N-hop: a coordinator owns one re-cascade control leg per interior
+    // arm. On a mid-stream `CapsChanged` the sink reports its proposal; the
+    // coordinator forwards it to the last interior arm, which applies
+    // `configure_allocation`, re-derives its own proposal from its output
+    // caps, and reports it back so the coordinator forwards one hop further
+    // up. The cascade applies during data flow; one triggered in the final
+    // frames before EOS is best-effort (arms exit on EOS), which is correct
+    // for a live stream that never reaches a final frame.
+    let (coord, coord_handle, arm_rxs) = coordinator_with_recascade_n(link_capacity, n_tx);
+
     let src_tx = txs[0].take().expect("link 0 sender");
     let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let mut adapter = SenderSink::new(src_tx);
         source.run(&mut adapter).await
     });
 
-    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(n_tx + 2);
+    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(n_tx + 3);
     arms.push(source_fut);
 
-    for (i, t) in transforms.into_iter().enumerate() {
+    for ((i, t), arm_rx) in transforms.into_iter().enumerate().zip(arm_rxs) {
         let in_rx = rxs[i].take().expect("transform input rx");
         let out_tx = txs[i + 1].take().expect("transform output tx");
+        let arm_coord = coord_handle.clone();
+        // The arm's output-link caps, used to re-derive its proposal on a
+        // re-cascade. Tracks the caps it forwards downstream (exact for a
+        // pass-through interior element; a format-changing one would differ).
+        let mut out_caps = links[i + 1].clone();
         let arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
             let mut adapter = SenderSink::new(out_tx);
+            let mut control_open = true;
             loop {
-                match in_rx.recv().await {
+                let packet = if control_open {
+                    match select2(arm_rx.recv(), in_rx.recv()).await {
+                        Either::Left(Some(ArmDirective::Recascade(params))) => {
+                            // β N-hop: absorb the downstream proposal, then
+                            // re-derive and report our own so the cascade
+                            // continues to our upstream neighbour.
+                            t.configure_allocation(&params);
+                            let proposal = t.propose_allocation(&out_caps);
+                            arm_coord
+                                .report(CoordinatorEvent::ArmProposal { index: i, proposal })
+                                .await;
+                            continue;
+                        }
+                        Either::Left(None) => {
+                            control_open = false;
+                            continue;
+                        }
+                        Either::Right(packet) => packet,
+                    }
+                } else {
+                    in_rx.recv().await
+                };
+                match packet {
                     Some(PipelinePacket::Eos) => {
                         t.process(PipelinePacket::Eos, &mut adapter).await?;
                         adapter.push(PipelinePacket::Eos).await?;
@@ -871,6 +911,7 @@ where
                             ConfigureOutcome::Accepted => {
                                 // M18 α: interior element re-derives its own pool.
                                 realloc_local_dyn(t, &new_caps);
+                                out_caps = new_caps.clone();
                                 t.process(PipelinePacket::CapsChanged(new_caps), &mut adapter)
                                     .await?;
                             }
@@ -893,6 +934,9 @@ where
     let bus_for_sink = bus.cloned();
     let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let bus_for_sink = bus_for_sink;
+        // Move the original handle in (the interior arms each hold a clone);
+        // when every arm finishes, all handles drop and the coordinator ends.
+        let coord = coord_handle;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -912,7 +956,15 @@ where
                     };
                     match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
-                            realloc_local(sink, &sink_caps);
+                            let proposal = realloc_local(sink, &sink_caps);
+                            // β N-hop: kick off the upstream re-cascade with the
+                            // sink's re-derived proposal.
+                            coord
+                                .report(CoordinatorEvent::CapsChanged {
+                                    caps: sink_caps.clone(),
+                                    proposal,
+                                })
+                                .await;
                             sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
                                 .await?;
                         }
@@ -933,13 +985,19 @@ where
     });
     arms.push(sink_fut);
 
+    // The coordinator drains the control channel until every arm drops its
+    // handle. Joined as the last arm; its `run` returns an event count.
+    arms.push(Box::pin(async move { Ok(coord.run().await) }));
+
     let results = join_all(arms).await;
     let mut counts = Vec::with_capacity(results.len());
     for r in results {
         counts.push(r?);
     }
+    // Arm order: [source, t0, .., t_{n-1}, sink, coordinator].
     let emitted = counts[0];
-    let consumed = *counts.last().expect("source and sink arms always present");
+    let consumed = counts[n_tx + 1];
+    let coordinator_events = counts[n_tx + 2];
 
     Ok(RunStats {
         frames_emitted: emitted,
@@ -948,7 +1006,7 @@ where
         allocation,
         clock_priority,
         base_time_ns,
-        coordinator_events: 0,
+        coordinator_events,
     })
 }
 

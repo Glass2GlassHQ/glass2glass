@@ -5,6 +5,47 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 4 follow-up: β allocation re-cascade over N hops
+
+- Extends the single-hop β (sink -> lone transform) to the full interior of
+  `run_linear_chain`: a mid-stream `CapsChanged` now re-cascades the allocation
+  demand through *every* interior element, sink -> t_{n-1} -> ... -> t0
+  (DESIGN-M16-caps-nego.md §13.3, §13.4 item 4).
+- The cascade is **reactive**, which is what keeps it deadlock-free. A direct
+  upstream control chain would deadlock (the sink blocks sending the directive
+  while the last transform is backpressured pushing data to the not-yet-draining
+  sink). Instead the `Coordinator` is a separate task: the sink reports its
+  proposal and immediately resumes draining; the coordinator forwards a
+  `Recascade` to the last interior arm; that arm applies `configure_allocation`,
+  re-derives its own proposal from its output caps, and replies
+  `CoordinatorEvent::ArmProposal { index, .. }`; the coordinator forwards one
+  hop further up (to `index - 1`), terminating at index 0 (the source is not an
+  interruptible arm). No blocking walk, so no interleaving hazard.
+- `Coordinator` generalized from one `transform_ctrl` to a `Vec` of per-arm
+  control channels; `coordinator_with_recascade_n(capacity, n)` builds the N-arm
+  variant. `run_source_transform_sink` is unchanged: it still uses the 1-arm
+  `coordinator_with_recascade`, whose lone transform never replies, so its
+  cascade stays exactly one hop. Interior arms became interruptible (`select2`
+  over the control receiver + data link) and track their output-link caps to
+  re-derive proposals; the sink arm reports `CapsChanged { proposal }`; the
+  coordinator joins as the last arm and its observed count surfaces on
+  `RunStats.coordinator_events`.
+- Scope: the cascade applies during data flow; one triggered in the final
+  frames before EOS is best-effort (interior arms exit on EOS), which is correct
+  for a live stream that never reaches a final frame. The α (element-local)
+  re-allocation still fires independently when an interior element forwards a
+  `CapsChanged`, so a received change configures an interior element three
+  times: startup (M12 fold) + α (own pool) + β (downstream neighbour's proposal).
+- Tests: two coordinator unit tests (`n_hop_cascade_walks_upstream_one_hop_per_reply`,
+  `..._stops_when_a_reply_has_no_proposal`) drive the reactive routing directly;
+  `m18_beta_nhop.rs` proves the end-to-end walk with distinct per-element
+  allocation markers (sink=100, t1=200, t0=300), so the recorded
+  `[startup, α, β]` sequence pins which neighbour's proposal arrived when (t1
+  ends on the sink's 100, t0 on t1's 200). Verified deterministic across 6
+  runs. VERIFIED: `cargo test --workspace` green, single-hop β
+  (`m18_beta_recascade`) and the data-plane (`m18_multi_element`) unaffected,
+  no_std + runtime build, core clippy clean.
+
 ### M18 item 7 (complete): bus wiring across every runner
 
 - Finishes item 7. Every runner that routes negotiation through `solve_linear`

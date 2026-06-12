@@ -17,6 +17,8 @@
 //! moves startup negotiation in; Session D adds α hooks; Session E turns
 //! `CoordinatorEvent` into a real `Recascade` cascade.
 
+use alloc::vec::Vec;
+
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::Caps;
 use crate::element::{AsyncElement, ConfigureOutcome};
@@ -54,14 +56,26 @@ pub(crate) const MAX_FIXATION_ATTEMPTS: u32 = 3;
 #[derive(Debug, Clone)]
 pub enum CoordinatorEvent {
     /// A boundary element forwarded a mid-stream `CapsChanged` downstream
-    /// and the sink accepted it. β (Session E): the coordinator forwards
-    /// the sink's re-derived allocation `proposal` one hop upstream to the
-    /// transform's `configure_allocation`, re-running the allocation
-    /// cascade over the affected subgraph (the link the sink reads from).
-    /// `proposal` is `None` when the sink declares no allocation needs, in
-    /// which case there is nothing to cascade and the event is observe-only.
+    /// and the sink accepted it. β: the coordinator forwards the sink's
+    /// re-derived allocation `proposal` one hop upstream to the *last*
+    /// interior element's `configure_allocation`, kicking off the upstream
+    /// re-cascade. `proposal` is `None` when the sink declares no allocation
+    /// needs, in which case there is nothing to cascade and the event is
+    /// observe-only.
     CapsChanged {
         caps: Caps,
+        proposal: Option<AllocationParams>,
+    },
+
+    /// β N-hop: an interior arm (index `index` among the interior elements)
+    /// applied a `Recascade` directive, re-derived its own proposal, and
+    /// reports it so the coordinator forwards it one hop further upstream to
+    /// element `index - 1`. Index 0 is the first interior element; its reply
+    /// terminates the cascade (the source is not an interruptible arm). The
+    /// single-transform runner never emits this (its lone transform doesn't
+    /// reply), so its cascade stays one hop.
+    ArmProposal {
+        index: usize,
         proposal: Option<AllocationParams>,
     },
 }
@@ -99,16 +113,21 @@ impl CoordinatorHandle {
 
 /// The coordinator task. Drains the control channel until every
 /// [`CoordinatorHandle`] has dropped (channel close), counting observed
-/// events for [`RunStats`](crate::runtime::RunStats). β: on a
-/// [`CoordinatorEvent::CapsChanged`] carrying a proposal, it forwards an
-/// [`ArmDirective::Recascade`] one hop upstream over `transform_ctrl` (the
-/// single-hop allocation cascade for a `source -> transform -> sink`
-/// chain; the source leg and the N-hop cascade belong to the multi-element
-/// runner). `transform_ctrl` is `None` for an observe-only coordinator.
+/// events for [`RunStats`](crate::runtime::RunStats).
+///
+/// β: it owns one [`ArmDirective`] sender per interior arm (`arm_ctrl`,
+/// ordered source-to-sink). The cascade is purely reactive, so it never
+/// blocks on a walk: a [`CoordinatorEvent::CapsChanged`] kicks it off by
+/// forwarding the sink's proposal to the *last* interior arm; each interior
+/// arm then replies with [`CoordinatorEvent::ArmProposal`], which the
+/// coordinator forwards one hop further upstream (to `index - 1`) until index
+/// 0 terminates it. A single-transform chain passes one sender and its arm
+/// never replies, so the cascade is exactly one hop (the prior single-hop β).
+/// `arm_ctrl` is empty for an observe-only coordinator.
 #[derive(Debug)]
 pub struct Coordinator {
     rx: Receiver<CoordinatorEvent>,
-    transform_ctrl: Option<Sender<ArmDirective>>,
+    arm_ctrl: Vec<Sender<ArmDirective>>,
 }
 
 impl Coordinator {
@@ -119,14 +138,22 @@ impl Coordinator {
             observed += 1;
             match event {
                 CoordinatorEvent::CapsChanged { proposal, .. } => {
-                    // β single-hop: forward the sink's re-derived proposal
-                    // to the transform's `configure_allocation`. Serial: at
-                    // most one directive is in flight, so the bounded
-                    // control channel never blocks here. Best-effort: a
-                    // closed channel means the transform arm already drained
-                    // and exited, so the directive is moot.
-                    if let (Some(ctrl), Some(p)) = (&self.transform_ctrl, proposal) {
+                    // β: start the cascade at the last interior arm. Serial,
+                    // so the bounded control channel never blocks; a closed
+                    // channel means that arm already drained and exited.
+                    if let (Some(ctrl), Some(p)) = (self.arm_ctrl.last(), proposal) {
                         let _ = ctrl.send(ArmDirective::Recascade(p)).await;
+                    }
+                }
+                CoordinatorEvent::ArmProposal { index, proposal } => {
+                    // β N-hop: forward the arm's re-derived proposal one hop
+                    // further upstream. Index 0's reply terminates the cascade.
+                    if index > 0 {
+                        if let (Some(ctrl), Some(p)) =
+                            (self.arm_ctrl.get(index - 1), proposal)
+                        {
+                            let _ = ctrl.send(ArmDirective::Recascade(p)).await;
+                        }
                     }
                 }
             }
@@ -142,26 +169,43 @@ impl Coordinator {
 pub fn coordinator(capacity: usize) -> (Coordinator, CoordinatorHandle) {
     let (tx, rx) = bounded(capacity);
     (
-        Coordinator { rx, transform_ctrl: None },
+        Coordinator { rx, arm_ctrl: Vec::new() },
         CoordinatorHandle { tx },
     )
 }
 
-/// β: build the control channel with an upstream re-cascade leg to the
-/// transform arm. Returns the [`ArmDirective`] receiver the transform arm
-/// selects on alongside its data link. Separate from [`coordinator`] so the
-/// 2-element [`run_simple_pipeline`](crate::runtime::run_simple_pipeline)
-/// (no transform to re-cascade into) keeps the observe-only coordinator.
+/// β single-hop: build the control channel with one upstream re-cascade leg
+/// (the `source -> transform -> sink` runner). Returns the [`ArmDirective`]
+/// receiver the transform arm selects on alongside its data link.
 pub(crate) fn coordinator_with_recascade(
     capacity: usize,
 ) -> (Coordinator, CoordinatorHandle, Receiver<ArmDirective>) {
     let (tx, rx) = bounded(capacity);
     let (ctrl_tx, ctrl_rx) = bounded(capacity);
     (
-        Coordinator { rx, transform_ctrl: Some(ctrl_tx) },
+        Coordinator { rx, arm_ctrl: alloc::vec![ctrl_tx] },
         CoordinatorHandle { tx },
         ctrl_rx,
     )
+}
+
+/// β N-hop: build the control channel with one re-cascade leg per interior
+/// element of an `N`-element linear chain (`run_linear_chain`). Returns the
+/// per-arm [`ArmDirective`] receivers, ordered source-to-sink, that each
+/// interior arm selects on. `n == 0` yields an observe-only coordinator.
+pub(crate) fn coordinator_with_recascade_n(
+    capacity: usize,
+    n: usize,
+) -> (Coordinator, CoordinatorHandle, Vec<Receiver<ArmDirective>>) {
+    let (tx, rx) = bounded(capacity);
+    let mut arm_ctrl = Vec::with_capacity(n);
+    let mut arm_rx = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (ctrl_tx, ctrl_rx) = bounded(capacity);
+        arm_ctrl.push(ctrl_tx);
+        arm_rx.push(ctrl_rx);
+    }
+    (Coordinator { rx, arm_ctrl }, CoordinatorHandle { tx }, arm_rx)
 }
 
 /// Per-link fixated caps from the linear startup negotiation the
@@ -422,5 +466,64 @@ mod tests {
         }));
         drop(handle);
         assert_eq!(block_on(coord.run()), 1);
+    }
+
+    fn taken_size(rx: &Receiver<ArmDirective>) -> Option<usize> {
+        match rx.try_recv() {
+            Some(ArmDirective::Recascade(p)) => Some(p.size_bytes),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn n_hop_cascade_walks_upstream_one_hop_per_reply() {
+        // Three interior arms. The sink's CapsChanged starts the cascade at
+        // the last arm; each arm's reply forwards one hop further upstream;
+        // the first arm's reply (index 0) terminates it. Capacity 8 holds the
+        // four pre-queued events (the coordinator isn't draining yet).
+        let (coord, handle, arm_rx) = coordinator_with_recascade_n(8, 3);
+        block_on(handle.report(CoordinatorEvent::CapsChanged {
+            caps: nv12(1920, 1080),
+            proposal: Some(AllocationParams::system(10, 1)),
+        }));
+        block_on(handle.report(CoordinatorEvent::ArmProposal {
+            index: 2,
+            proposal: Some(AllocationParams::system(20, 1)),
+        }));
+        block_on(handle.report(CoordinatorEvent::ArmProposal {
+            index: 1,
+            proposal: Some(AllocationParams::system(30, 1)),
+        }));
+        block_on(handle.report(CoordinatorEvent::ArmProposal {
+            index: 0,
+            proposal: Some(AllocationParams::system(40, 1)),
+        }));
+        drop(handle);
+
+        assert_eq!(block_on(coord.run()), 4);
+        // Last arm got the sink's proposal; each upstream arm got its
+        // downstream neighbour's re-derived proposal; index 0's reply is a
+        // no-op (the source is not an interruptible arm).
+        assert_eq!(taken_size(&arm_rx[2]), Some(10));
+        assert_eq!(taken_size(&arm_rx[1]), Some(20));
+        assert_eq!(taken_size(&arm_rx[0]), Some(30));
+    }
+
+    #[test]
+    fn n_hop_cascade_stops_when_a_reply_has_no_proposal() {
+        // A middle arm with no allocation needs (proposal None) ends the
+        // cascade: nothing reaches the arms above it.
+        let (coord, handle, arm_rx) = coordinator_with_recascade_n(8, 3);
+        block_on(handle.report(CoordinatorEvent::CapsChanged {
+            caps: nv12(640, 480),
+            proposal: Some(AllocationParams::system(10, 1)),
+        }));
+        block_on(handle.report(CoordinatorEvent::ArmProposal { index: 2, proposal: None }));
+        drop(handle);
+
+        assert_eq!(block_on(coord.run()), 2);
+        assert_eq!(taken_size(&arm_rx[2]), Some(10));
+        assert_eq!(taken_size(&arm_rx[1]), None, "None proposal stops the cascade");
+        assert_eq!(taken_size(&arm_rx[0]), None);
     }
 }

@@ -434,15 +434,16 @@ remains.
 
 ### 13.3 What M16 doesn't specify or cover
 
-- **Multi-element subgraph re-solve.** *Runner generalized (item 4).*
-  `run_linear_chain` drives an arbitrary-length `source -> t0 -> ... ->
-  sink` (interior elements `&mut dyn DynAsyncElement`), so chains with 4+
-  elements (boundary → capsfilter → converter → sink) are now expressible,
-  with whole-chain startup negotiation + the M12 allocation fold. *Owed:*
-  the mid-stream re-solve still reconfigures element-locally per interior
-  element plus the Phase-B sink re-solve; the full cross-element
-  downstream-subgraph re-solve and β re-cascade over N hops extend the
-  single-hop coordinator path of `run_source_transform_sink`.
+- **Multi-element subgraph re-solve.** *Runner generalized + β N-hop landed
+  (item 4).* `run_linear_chain` drives an arbitrary-length `source -> t0 ->
+  ... -> sink` (interior elements `&mut dyn DynAsyncElement`), with whole-chain
+  startup negotiation + the M12 allocation fold. A mid-stream `CapsChanged`
+  re-cascades the allocation demand through *every* interior element via the
+  reactive coordinator (sink reports → forward to last arm → each arm replies
+  its re-derived proposal → forward one hop up). *Owed:* the mid-stream caps
+  re-solve itself is still element-local per interior element plus the Phase-B
+  sink re-solve (the *allocation* re-cascade is N-hop; a full caps
+  re-negotiation over the downstream subgraph is not).
 - **Async source caps discovery.** Workaround #1 has the opt-in
   `RtspSrc::with_expected_dims(w, h)` for callers who know the
   camera dims. The full fix needs `SourceLoop::intercept_caps` to be
@@ -497,16 +498,17 @@ remains.
 3. **Fan-out Phase C with FO-1 strict default.** *Done (M18).* Per-branch
    re-solve (FO-2) concurrent across branch arms, strict failure (FO-1),
    plus per-branch α. `tee` to display + recording is now supported.
-4. **Multi-element runner.** *Landed (startup + data plane).*
+4. **Multi-element runner.** *Landed (startup + data plane + β N-hop).*
    `run_linear_chain(source, Vec<&mut dyn DynAsyncElement>, sink, ..)` drives
    any-length linear chains: whole-chain `solve_linear`, per-element
-   configure, the M12 allocation fold, and `N + 2` arms over `N + 1` links
-   (`m18_multi_element.rs`). `DynAsyncElement` gained
-   `caps_constraint_as_transform` for erased interior elements. *Owed,
-   couples to item 1:* the mid-stream re-solve is element-local per interior
-   element plus the Phase-B sink re-solve; covering the full downstream
-   subgraph with the β re-cascade over N hops extends the single-hop
-   coordinator path.
+   configure, the M12 allocation fold, and `N + 2` data arms over `N + 1`
+   links (`m18_multi_element.rs`). `DynAsyncElement` gained
+   `caps_constraint_as_transform` for erased interior elements. The β
+   allocation re-cascade now walks all interior hops via the reactive
+   coordinator (`coordinator_with_recascade_n`, `CoordinatorEvent::ArmProposal`;
+   `m18_beta_nhop.rs`). *Owed:* a full mid-stream caps re-*negotiation* over
+   the downstream subgraph (today it's element-local per interior element plus
+   the Phase-B sink re-solve).
 5. **Async `SourceLoop::intercept_caps`.** *Done (M18).* Trait gains
    `type CapsFuture<'a>` + `fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>`;
    default `caps_constraint` awaits it. `DynSourceLoop` returns
