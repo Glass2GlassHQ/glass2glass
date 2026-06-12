@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M23: `VideoConvert` software raw-format converter
+
+- Closes the raw-format gap between element families: chains like
+  `VideoTestSrc (RGBA) -> MfEncode (NV12)` or `decoder (NV12) ->
+  OrtInference (RGBA)` previously failed the whole-chain solve with no
+  in-tree bridge. `VideoConvert::new(target)` converts any supported raw
+  format (`Rgba8`, `Bgra8`, `Nv12`, `I420`) to the target at the same
+  geometry. CPU-only, integer-only math, `no_std`: lives in the plugin
+  baseline with no feature gate.
+- Conversion paths: BT.601 limited-range integer transforms for
+  RGB <-> 4:2:0 YUV (chroma from 2x2 block averages); lossless fast paths
+  for same-family pairs (RGBA<->BGRA channel swizzle, NV12<->I420 chroma
+  repack); same-format passthrough. 4:2:0 endpoints require even dims,
+  rejected loud at negotiation. Caps surface is a native
+  `DerivedOutput(any supported raw -> target at same dims/rate)`;
+  `PadTemplates` declare the full format set on both pads.
+- Tests: six unit tests (BT.601 primary colors round-trip within integer
+  tolerance, grey maps to exactly neutral chroma, lossless swizzle and
+  NV12<->I420 repack, odd-dim rejection, derived-output mapping) plus
+  `m23_videoconvert.rs`: an RGBA test source reaches an NV12-only sink
+  through the converter via the real solver, and the control chain without
+  the converter fails the same negotiation. VERIFIED:
+  `cargo test --workspace` green, workspace clippy clean.
+
 ### M22: `TensorBatcher` bootstraps `g2g-enterprise`; per-input Eos contract
 
 - Bootstraps the last empty crate with the DESIGN.md §5.3 bounded batcher:

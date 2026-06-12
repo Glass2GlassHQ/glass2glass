@@ -1,0 +1,473 @@
+//! Software raw-video format converter (M23). Converts between the packed
+//! raw formats (`Rgba8`, `Bgra8`) and the 4:2:0 planar/semi-planar formats
+//! (`Nv12`, `I420`) at the same geometry, so chains compose across format
+//! boundaries: `VideoTestSrc (RGBA) -> VideoConvert -> MfEncode (NV12)`, or
+//! `decoder (NV12) -> VideoConvert -> OrtInference (RGBA)`.
+//!
+//! Color math is integer-only BT.601 limited range (the convention the
+//! display sinks use). Same-family conversions skip it: RGBA<->BGRA is a
+//! channel swizzle and NV12<->I420 a chroma-plane repack, both lossless.
+//! 4:2:0 formats require even dims (chroma is subsampled 2x2); odd dims
+//! fail negotiation loud. CPU-only and `no_std`: this element lives in the
+//! crate baseline.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+};
+
+const FORMATS: [RawVideoFormat; 4] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+];
+
+#[derive(Debug)]
+pub struct VideoConvert {
+    target: RawVideoFormat,
+    /// Geometry and input format of the configured stream, updated by a
+    /// mid-stream `CapsChanged`.
+    input: Option<(RawVideoFormat, u32, u32)>,
+    configured: bool,
+    last_caps: Option<Caps>,
+    emitted: u64,
+}
+
+impl VideoConvert {
+    pub fn new(target: RawVideoFormat) -> Self {
+        Self {
+            target,
+            input: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
+    pub fn target(&self) -> RawVideoFormat {
+        self.target
+    }
+
+    /// Validate a raw-video caps as a convertible input and return its
+    /// format and dims. 4:2:0 endpoints need even dims on either side.
+    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate,
+        } = caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if (is_yuv420(*format) || is_yuv420(self.target)) && (*w % 2 != 0 || *h % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok((*format, *w, *h, framerate.clone()))
+    }
+}
+
+impl AsyncElement for VideoConvert {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // any supported raw format at any geometry; per-format alternatives
+        // intersected in declaration order.
+        for format in FORMATS {
+            let candidate = Caps::RawVideo {
+                format,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            };
+            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
+    }
+
+    /// Native `DerivedOutput`: any supported raw input maps to the target
+    /// format at the same dims/framerate.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let target = self.target;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            match input {
+                Caps::RawVideo {
+                    format,
+                    width,
+                    height,
+                    framerate,
+                } if FORMATS.contains(format) => CapsSet::one(Caps::RawVideo {
+                    format: target,
+                    width: width.clone(),
+                    height: height.clone(),
+                    framerate: framerate.clone(),
+                }),
+                _ => CapsSet::from_alternatives(Vec::new()),
+            }
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let (format, w, h, _) = self.accept_input(absolute_caps)?;
+        self.input = Some((format, w, h));
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let src = slice.as_slice();
+                    if src.len() < frame_byte_size(format, w, h) {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                    let converted = convert(src, format, self.target, w as usize, h as usize);
+
+                    let new_caps = Caps::RawVideo {
+                        format: self.target,
+                        width: Dim::Fixed(w),
+                        height: Dim::Fixed(h),
+                        framerate: Rate::Any,
+                    };
+                    if self.last_caps.as_ref() != Some(&new_caps) {
+                        out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                        self.last_caps = Some(new_caps);
+                    }
+                    let out_frame = Frame {
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(converted)),
+                        timing: frame.timing,
+                        sequence: self.emitted,
+                    };
+                    self.emitted += 1;
+                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                }
+                PipelinePacket::CapsChanged(c) => {
+                    let (format, w, h, _) = self.accept_input(&c)?;
+                    self.input = Some((format, w, h));
+                }
+                PipelinePacket::Flush => {
+                    self.last_caps = None;
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                PipelinePacket::Eos => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+impl PadTemplates for VideoConvert {
+    /// Static superset: any supported raw format in, any out (an instance
+    /// narrows the source pad to its configured target).
+    fn pad_templates() -> Vec<PadTemplate> {
+        let any_geometry = |format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
+        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+    }
+}
+
+fn is_yuv420(format: RawVideoFormat) -> bool {
+    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
+}
+
+fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
+    let (w, h) = (w as usize, h as usize);
+    match format {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
+        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
+    }
+}
+
+/// Dispatch one frame conversion. `src` is validated to hold at least the
+/// input frame; dims are even whenever a 4:2:0 format is involved.
+fn convert(src: &[u8], from: RawVideoFormat, to: RawVideoFormat, w: usize, h: usize) -> Box<[u8]> {
+    use RawVideoFormat::*;
+    match (from, to) {
+        (a, b) if a == b => src[..frame_byte_size(a, w as u32, h as u32)].into(),
+        (Rgba8, Bgra8) | (Bgra8, Rgba8) => swizzle_rb(src, w, h),
+        (Nv12, I420) => nv12_to_i420(src, w, h),
+        (I420, Nv12) => i420_to_nv12(src, w, h),
+        (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true),
+        (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false),
+        (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true),
+        (Bgra8, I420) => rgb_to_yuv420(src, w, h, 2, 0, false),
+        (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2),
+        (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2),
+        (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0),
+        (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0),
+        // every distinct pair is enumerated; identical pairs hit the guard.
+        _ => unreachable!("unhandled raw-video conversion {from:?} -> {to:?}"),
+    }
+}
+
+/// RGBA<->BGRA: swap the R and B channels.
+fn swizzle_rb(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let mut dst = src[..w * h * 4].to_vec();
+    for px in dst.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    dst.into_boxed_slice()
+}
+
+/// NV12 -> I420: split the interleaved UV plane into separate U and V.
+fn nv12_to_i420(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let luma = w * h;
+    let chroma = luma / 4;
+    let mut dst = vec![0u8; luma + 2 * chroma];
+    dst[..luma].copy_from_slice(&src[..luma]);
+    for i in 0..chroma {
+        dst[luma + i] = src[luma + 2 * i];
+        dst[luma + chroma + i] = src[luma + 2 * i + 1];
+    }
+    dst.into_boxed_slice()
+}
+
+/// I420 -> NV12: interleave the U and V planes.
+fn i420_to_nv12(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
+    let luma = w * h;
+    let chroma = luma / 4;
+    let mut dst = vec![0u8; luma + 2 * chroma];
+    dst[..luma].copy_from_slice(&src[..luma]);
+    for i in 0..chroma {
+        dst[luma + 2 * i] = src[luma + i];
+        dst[luma + 2 * i + 1] = src[luma + chroma + i];
+    }
+    dst.into_boxed_slice()
+}
+
+/// Packed 4-byte RGB(A) -> 4:2:0 YUV, BT.601 limited range, integer math.
+/// `r_off`/`b_off` select the source channel order (RGBA: 0/2, BGRA: 2/0);
+/// `interleaved` picks NV12 (true) vs I420 (false) chroma layout. Chroma is
+/// the average of each 2x2 block.
+fn rgb_to_yuv420(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    r_off: usize,
+    b_off: usize,
+    interleaved: bool,
+) -> Box<[u8]> {
+    let luma = w * h;
+    let mut dst = vec![0u8; luma + luma / 2];
+    for y in 0..h {
+        for x in 0..w {
+            let p = (y * w + x) * 4;
+            let (r, g, b) = (
+                src[p + r_off] as i32,
+                src[p + 1] as i32,
+                src[p + b_off] as i32,
+            );
+            dst[y * w + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+        }
+    }
+    let (cw, ch) = (w / 2, h / 2);
+    for cy in 0..ch {
+        for cx in 0..cw {
+            // average the 2x2 block's RGB before the chroma transform.
+            let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let p = ((cy * 2 + dy) * w + cx * 2 + dx) * 4;
+                    r += src[p + r_off] as i32;
+                    g += src[p + 1] as i32;
+                    b += src[p + b_off] as i32;
+                }
+            }
+            let (r, g, b) = (r / 4, g / 4, b / 4);
+            let u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            let v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            let ci = cy * cw + cx;
+            if interleaved {
+                dst[luma + 2 * ci] = u;
+                dst[luma + 2 * ci + 1] = v;
+            } else {
+                dst[luma + ci] = u;
+                dst[luma + luma / 4 + ci] = v;
+            }
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+/// 4:2:0 YUV -> packed 4-byte RGB(A), BT.601 limited range, integer math.
+/// Alpha is set opaque. `interleaved` selects NV12 vs I420 chroma layout;
+/// `r_off`/`b_off` the destination channel order.
+fn yuv420_to_rgb(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    interleaved: bool,
+    r_off: usize,
+    b_off: usize,
+) -> Box<[u8]> {
+    let luma = w * h;
+    let cw = w / 2;
+    let mut dst = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let ci = (y / 2) * cw + x / 2;
+            let (u, v) = if interleaved {
+                (src[luma + 2 * ci] as i32, src[luma + 2 * ci + 1] as i32)
+            } else {
+                (
+                    src[luma + ci] as i32,
+                    src[luma + luma / 4 + ci] as i32,
+                )
+            };
+            let c = src[y * w + x] as i32 - 16;
+            let d = u - 128;
+            let e = v - 128;
+            let p = (y * w + x) * 4;
+            dst[p + r_off] = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+            dst[p + 1] = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+            dst[p + b_off] = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+            dst[p + 3] = 255;
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgba_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+        }
+    }
+
+    #[test]
+    fn derived_output_maps_any_supported_raw_to_target() {
+        let conv = VideoConvert::new(RawVideoFormat::Nv12);
+        let CapsConstraint::DerivedOutput(f) = conv.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let out = f(&rgba_caps(64, 48));
+        assert_eq!(
+            out.alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(64),
+                height: Dim::Fixed(48),
+                framerate: Rate::Any,
+            }]
+        );
+        // compressed input is not convertible
+        let h264 = Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(48),
+            framerate: Rate::Any,
+        };
+        assert!(f(&h264).is_empty());
+    }
+
+    #[test]
+    fn yuv420_targets_reject_odd_dims() {
+        let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
+        let err = conv
+            .configure_pipeline(&rgba_caps(3, 2))
+            .expect_err("odd dims into a 4:2:0 target must fail");
+        assert_eq!(err, G2gError::CapsMismatch);
+        // packed -> packed has no subsampling, odd dims are fine
+        let mut swz = VideoConvert::new(RawVideoFormat::Bgra8);
+        assert!(swz.configure_pipeline(&rgba_caps(3, 3)).is_ok());
+    }
+
+    #[test]
+    fn swizzle_swaps_r_and_b() {
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let out = swizzle_rb(&src, 2, 1);
+        assert_eq!(&out[..], &[3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn nv12_i420_repack_round_trips_losslessly() {
+        // 2x2: 4 luma bytes + 1 U + 1 V
+        let nv12 = [10u8, 20, 30, 40, 100, 200];
+        let i420 = nv12_to_i420(&nv12, 2, 2);
+        assert_eq!(&i420[..], &[10, 20, 30, 40, 100, 200]);
+        let back = i420_to_nv12(&i420, 2, 2);
+        assert_eq!(&back[..], &nv12[..]);
+        // a chroma layout where U != V proves the deinterleave
+        let nv12b = [0u8, 0, 0, 0, 7, 9];
+        let i420b = nv12_to_i420(&nv12b, 2, 2);
+        assert_eq!(&i420b[4..], &[7, 9], "U plane then V plane");
+    }
+
+    #[test]
+    fn bt601_primaries_round_trip_within_tolerance() {
+        // uniform 2x2 blocks survive 4:2:0 subsampling, so RGBA -> NV12 ->
+        // RGBA must come back close (BT.601 integer rounding only).
+        for &(r, g, b) in &[
+            (255u8, 255u8, 255u8),
+            (0, 0, 0),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (128, 64, 32),
+        ] {
+            let src: Vec<u8> = (0..4).flat_map(|_| [r, g, b, 255]).collect();
+            let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true);
+            let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2);
+            for px in rgba.chunks_exact(4) {
+                assert!(
+                    (px[0] as i32 - r as i32).abs() <= 4
+                        && (px[1] as i32 - g as i32).abs() <= 4
+                        && (px[2] as i32 - b as i32).abs() <= 4,
+                    "({r},{g},{b}) round-tripped to ({},{},{})",
+                    px[0],
+                    px[1],
+                    px[2]
+                );
+                assert_eq!(px[3], 255, "alpha is opaque");
+            }
+        }
+    }
+
+    #[test]
+    fn grey_maps_to_neutral_chroma() {
+        // pure grey has no chroma: U = V = 128 exactly in BT.601.
+        let src: Vec<u8> = (0..4).flat_map(|_| [128u8, 128, 128, 255]).collect();
+        let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true);
+        assert_eq!(&nv12[4..], &[128, 128], "neutral chroma for grey");
+    }
+}

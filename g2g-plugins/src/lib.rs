@@ -14,6 +14,7 @@ pub mod fakesink;
 pub mod h264parse;
 pub mod identity;
 pub mod mux;
+pub mod videoconvert;
 pub mod videotestsrc;
 
 #[cfg(feature = "std")]
