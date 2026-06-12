@@ -203,3 +203,114 @@ async fn successful_negotiation_posts_nothing() {
         "a successful negotiation posts no failure"
     );
 }
+
+fn nv12(w: u32, h: u32) -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Fixed(30 << 16),
+    }
+}
+
+/// Source emitting NV12 caps then `frames` frames + EOS.
+struct Nv12Source {
+    frames: u32,
+}
+
+impl SourceLoop for Nv12Source {
+    type RunFuture<'a> = std::pin::Pin<Box<dyn core::future::Future<Output = Result<u64, G2gError>> + 'a>>;
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(nv12(640, 480)))
+    }
+    fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            for i in 0..self.frames {
+                out.push(PipelinePacket::DataFrame(Frame {
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+                    timing: FrameTiming::default(),
+                    sequence: i as u64,
+                }))
+                .await?;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(self.frames as u64)
+        })
+    }
+}
+
+/// Pass-through transform that injects one RGBA `CapsChanged` after the first
+/// frame, which the downstream NV12-only sink rejects.
+struct RgbaInjector {
+    injected: bool,
+}
+
+impl AsyncElement for RgbaInjector {
+    type ProcessFuture<'a> = std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(f) => {
+                    out.push(PipelinePacket::DataFrame(f)).await?;
+                    if !self.injected {
+                        self.injected = true;
+                        out.push(PipelinePacket::CapsChanged(Caps::RawVideo {
+                            format: RawVideoFormat::Rgba8,
+                            width: Dim::Fixed(640),
+                            height: Dim::Fixed(480),
+                            framerate: Rate::Fixed(30 << 16),
+                        }))
+                        .await?;
+                    }
+                }
+                PipelinePacket::Eos => {}
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The mid-stream case the bus matters most for: a boundary emits a
+/// `CapsChanged` the sink can't accept. There is no synchronous return to
+/// carry the detail, so the structured failure only reaches the application
+/// through the bus. The run still drains to EOS (the rejected change never
+/// takes effect).
+#[tokio::test]
+async fn mid_stream_rejected_capschange_posts_to_bus() {
+    let (bus, handle) = Bus::new(4);
+    let mut src = Nv12Source { frames: 4 };
+    let mut tx = RgbaInjector { injected: false };
+    let mut snk = Nv12Sink;
+    let clock = ZeroClock;
+
+    run_source_transform_sink_with_bus(&mut src, &mut tx, &mut snk, &clock, 4, &handle)
+        .await
+        .expect("stream drains despite the rejected mid-stream change");
+
+    match bus.try_recv() {
+        Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
+        other => panic!("expected mid-stream NegotiationFailed(EmptyLink), got {other:?}"),
+    }
+}

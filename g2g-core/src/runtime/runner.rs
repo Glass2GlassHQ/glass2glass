@@ -2,7 +2,7 @@ use core::future::Future;
 
 use alloc::boxed::Box;
 
-use crate::bus::BusHandle;
+use crate::bus::{BusHandle, BusMessage};
 use crate::caps::Caps;
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
@@ -1036,8 +1036,10 @@ where
         }
     };
 
+    let bus_for_sink = bus.cloned();
     let sink_fut = async move {
         let coord_handle = coord_handle;
+        let bus_for_sink = bus_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -1059,7 +1061,14 @@ where
                     // not propagate past the source).
                     let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
                         Ok(caps) => caps,
-                        Err(_) => {
+                        Err(failure) => {
+                            // M18 item 7: the mid-stream re-solve is the case
+                            // the bus matters most for, there is no synchronous
+                            // return to carry the detail. Post the structured
+                            // failure, then drive the reverse Reconfigure.
+                            if let Some(b) = &bus_for_sink {
+                                b.try_post(BusMessage::NegotiationFailed(failure));
+                            }
                             link2_rx
                                 .request_reconfigure(Reconfigure::Renegotiate);
                             continue;

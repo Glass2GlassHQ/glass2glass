@@ -460,13 +460,14 @@ remains.
   fan-out and muxer are static.
 - **Mid-stream element hot-swap.** M8's `ElementSlot` scaffolding
   exists but mid-stream swap of a real element isn't supported.
-- **Bus events for negotiation failures.** *Partially landed (item 7).*
+- **Bus events for negotiation failures.** *Mostly landed (item 7).*
   `BusMessage::NegotiationFailed(NegotiationFailure)` plus
   `run_source_transform_sink_with_bus` route the structured failure to the
-  bus for the linear runner's startup negotiation (the run still returns the
-  opaque `G2gError::CapsMismatch`). Owed: the mid-stream re-solve path and
-  the other runners (simple / fan-out / fan-in / mux), which discard their
-  `NegotiationFailure` identically.
+  bus for the linear runner's startup *and* mid-stream re-solve (the run
+  still returns the opaque `G2gError::CapsMismatch` / drains to EOS
+  respectively). Owed: the same opt-in wiring on `run_simple_pipeline`,
+  `run_linear_chain`, and the non-linear runners (fan-out / fan-in / mux),
+  which discard their `NegotiationFailure` identically.
 - **Preference algebra.** `CapsPreferences` is a placeholder. The
   solver uses constraint-internal order for tie-breaks. GStreamer's
   more elaborate "best fit" caps selection across competing
@@ -517,13 +518,12 @@ remains.
    trait (type-level `pad_templates()`), `pad_link` / `types_can_link`
    pre-instantiation solver queries; implemented for `VideoTestSrc`,
    `FakeSink`, `H264Parse`.
-7. **Bus integration for negotiation failures.** *Partially landed.*
+7. **Bus integration for negotiation failures.** *Mostly landed.*
    `BusMessage::NegotiationFailed(NegotiationFailure)` +
    `run_source_transform_sink_with_bus` carry the structured failure for the
-   linear startup path (`m18_bus_negotiation.rs`). Owed: the mid-stream
-   re-solve path and the simple / fan-out / fan-in / mux runners (each
-   discards its `NegotiationFailure` the same way), which fold in once their
-   runners take the bus.
+   linear startup *and* mid-stream re-solve paths (`m18_bus_negotiation.rs`).
+   Owed: the same opt-in wiring on the simple / multi-element / fan-out /
+   fan-in / mux runners (each discards its `NegotiationFailure` the same way).
 8. **Preference algebra.** Concrete trigger required (a competing-
    constraint scenario that forces it).
 9. **Dynamic pads / hot-swap.** Lowest priority. No production driver.

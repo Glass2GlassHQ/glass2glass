@@ -65,10 +65,17 @@ Nothing is published yet; all versions are `0.1.0`.
   `CapsMismatch`; a clean NV12->NV12 negotiation posts nothing. VERIFIED:
   `cargo test --workspace` green, `cargo test -p g2g-core --features runtime`
   (115) green, no_std + runtime build, core runtime clippy clean.
-- Scope: the linear runner's startup path. The mid-stream re-solve
-  (`re_solve_downstream_sink` in the sink arm) and the other runners
-  (`run_simple_pipeline`, fan-out, fan-in/mux) discard their `NegotiationFailure`
-  the same way and are owed the identical wiring; mechanical follow-up.
+- Mid-stream completion: `run_source_transform_sink_with_bus` now also posts
+  `NegotiationFailed` when the sink arm's mid-stream `re_solve_downstream_sink`
+  rejects a boundary's `CapsChanged`. This is the case the bus matters most
+  for, an async failure deep in an arm with no synchronous return to carry the
+  detail; the run still drains to EOS (the rejected change never takes
+  effect). New `mid_stream_rejected_capschange_posts_to_bus` test (an RGBA
+  `CapsChanged` into an NV12-only sink posts `EmptyLink`).
+- Still owed: `run_simple_pipeline`, `run_linear_chain`, and the non-linear
+  runners (fan-out, fan-in/mux) discard their `NegotiationFailure` the same
+  way; each needs the identical opt-in `_with_bus` wiring (mechanical, their
+  startup failures already return `Err` synchronously).
 
 ### M18 item 1 (Session E): β allocation re-cascade (single hop)
 
