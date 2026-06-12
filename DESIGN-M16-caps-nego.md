@@ -444,10 +444,10 @@ remains.
   (DESIGN-M18-caps-resolve.md):* a mid-stream `CapsChanged` now re-fixates each
   interior element's output against a startup downstream-feasibility snapshot,
   so a format-changing element is steered toward a downstream-acceptable output
-  (and rejects loud when none exists) instead of forwarding greedily. *Owed:*
-  Caps-β, a forward coordinator re-solve walk for a downstream `DerivedOutput`
-  element that must re-derive mid-stream (driver-gated), and the single-transform
-  `run_source_transform_sink` mirror.
+  (and rejects loud when none exists) instead of forwarding greedily. Landed for
+  both `run_linear_chain` and the single-transform `run_source_transform_sink`.
+  *Owed:* Caps-β, a forward coordinator re-solve walk for a downstream
+  `DerivedOutput` element that must re-derive mid-stream (driver-gated).
 - **Async source caps discovery.** Workaround #1 has the opt-in
   `RtspSrc::with_expected_dims(w, h)` for callers who know the
   camera dims. The full fix needs `SourceLoop::intercept_caps` to be
@@ -515,10 +515,10 @@ remains.
    each interior element's output against a source-independent downstream
    feasibility snapshot (`solver::downstream_feasibility` +
    `resolve_forward_output`), steering format-changers toward a
-   downstream-acceptable output and rejecting loud when none exists. *Owed:*
-   Caps-β (a forward coordinator re-solve walk for a downstream `DerivedOutput`
-   that re-derives mid-stream, driver-gated) and the single-transform
-   `run_source_transform_sink` mirror.
+   downstream-acceptable output and rejecting loud when none exists. Landed for
+   both `run_linear_chain` and the single-transform `run_source_transform_sink`.
+   *Owed:* Caps-β (a forward coordinator re-solve walk for a downstream
+   `DerivedOutput` that re-derives mid-stream, driver-gated).
 5. **Async `SourceLoop::intercept_caps`.** *Done (M18).* Trait gains
    `type CapsFuture<'a>` + `fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>`;
    default `caps_constraint` awaits it. `DynSourceLoop` returns

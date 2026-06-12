@@ -401,7 +401,6 @@ fn forward_propagate(
 /// (`DESIGN-M18-caps-resolve.md` §3, D3). The runner derives the element's
 /// forwarded output from its declared constraint, steered by the downstream
 /// feasibility snapshot, instead of letting the element fixate greedily.
-#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ForwardResolve {
     /// Runner-derived, downstream-aware output caps to forward.
@@ -483,7 +482,6 @@ fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<C
 /// a concrete downstream set exists; otherwise defers to the element's own
 /// `process` (status quo), so pass-through and unconstrained chains keep
 /// their prior behavior.
-#[cfg(feature = "std")]
 pub(crate) fn resolve_forward_output(
     constraint: &CapsConstraint<'_>,
     input: &Caps,
@@ -1092,7 +1090,6 @@ mod tests {
     /// format-only converter is a `DerivedOutput` so it carries the input's
     /// concrete geometry into its output (a static `Mapping` with `Any` dims
     /// can't fixate and would `Defer`).
-    #[cfg(feature = "std")]
     #[test]
     fn resolve_forward_output_steers_defers_and_rejects() {
         // Converter: any raw input -> {same format, NV12} at the input's dims.

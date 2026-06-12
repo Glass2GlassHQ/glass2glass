@@ -18,7 +18,9 @@ use std::vec::Vec;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_linear_chain, run_linear_chain_with_bus, SourceLoop};
+use g2g_core::runtime::{
+    run_linear_chain, run_linear_chain_with_bus, run_source_transform_sink, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Bus, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, MemoryDomain, NegotiationFailure, OutputSink, PipelineClock,
@@ -240,5 +242,34 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
     assert!(
         caps_log.lock().unwrap().is_empty(),
         "no NV12 reached the sink: the infeasible change was rejected, not forwarded"
+    );
+}
+
+/// The single-transform runner mirrors Caps-α: `run_source_transform_sink`
+/// steers the same converter to NV12 on the mid-stream switch, so the legacy
+/// fixed-arity path and the N-hop `run_linear_chain` agree.
+#[tokio::test]
+async fn single_transform_runner_also_steers_to_sink_acceptable_output() {
+    let caps_log = Arc::new(Mutex::new(Vec::new()));
+    let mut src = ConvSource {
+        start: video(RawVideoFormat::Rgba8, 640, 480),
+        change_to: video(RawVideoFormat::I420, 640, 480),
+        total: 8,
+    };
+    let mut conv = FormatConverter {
+        nv12_from: std::vec![RawVideoFormat::Rgba8, RawVideoFormat::I420],
+    };
+    let mut sink = RecordingSink { caps_log: Arc::clone(&caps_log) };
+    let clock = ZeroClock;
+
+    let stats = run_source_transform_sink(&mut src, &mut conv, &mut sink, &clock, 4)
+        .await
+        .expect("chain runs");
+
+    assert_eq!(stats.frames_consumed, 8);
+    assert_eq!(
+        *caps_log.lock().unwrap(),
+        std::vec![RawVideoFormat::Nv12],
+        "single-transform runner steered the converter to NV12 too"
     );
 }

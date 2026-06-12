@@ -27,22 +27,27 @@ Nothing is published yet; all versions are `0.1.0`.
   loud (reverse `Reconfigure` into the boundary + structured `EmptyLink` on the
   bus). This needs no central solve and no ownership move: each arm reaches only
   its own constraint, which the spawned-arm topology already allows.
-- Scope: `run_linear_chain` (the N-hop runner). The helpers are `std`-gated
-  with it. Steering activates only when a concrete downstream `Accepts` set
-  exists, so pass-through chains (`IdentityAny`) and `AcceptsAny` sinks are
-  byte-identical to before. Owed: the single-transform `run_source_transform_sink`
-  mirror, and Caps-β (a forward coordinator re-solve walk) for a downstream
-  `DerivedOutput` element that must re-derive mid-stream, gated on a real driver.
+- Scope: both `run_linear_chain` (N-hop) and the single-transform
+  `run_source_transform_sink`. The single-transform path needs no multi-hop
+  sweep (its downstream subgraph is one sink link), so it reads the sink's
+  `Accepts` set inline; `resolve_forward_output` / `ForwardResolve` are no_std
+  (that runner is a no_std runtime path), while `downstream_feasibility` stays
+  `std`-gated with `run_linear_chain`. Steering activates only when a concrete
+  downstream `Accepts` set exists, so pass-through chains (`IdentityAny`) and
+  `AcceptsAny` sinks are byte-identical to before. Owed: Caps-β (a forward
+  coordinator re-solve walk) for a downstream `DerivedOutput` element that must
+  re-derive mid-stream, gated on a real driver.
 - Tests: `m18_caps_resolve.rs` drives a `DerivedOutput` converter through a
   mid-stream RGBA -> I420 change into an NV12-only sink: Caps-α steers the
   converter to NV12 (`midstream_change_steers_converter_to_sink_acceptable_output`),
-  and a converter with no NV12 path fails loud to the bus
-  (`..._no_acceptable_output_fails_loud_to_bus`). Plus two solver unit tests
-  (`downstream_feasibility_is_source_independent`,
+  a converter with no NV12 path fails loud to the bus
+  (`..._no_acceptable_output_fails_loud_to_bus`), and the single-transform
+  runner steers identically (`single_transform_runner_also_steers_to_sink_acceptable_output`).
+  Plus two solver unit tests (`downstream_feasibility_is_source_independent`,
   `resolve_forward_output_steers_defers_and_rejects`). VERIFIED:
   `cargo test --workspace` green (g2g-core 125, g2g-plugins suites incl. the new
-  2), β N-hop and multi-element runners unaffected, no_std + runtime build,
-  core clippy clean.
+  3), β N-hop and multi-element runners unaffected, no_std / runtime / runtime+std
+  builds, core clippy clean.
 
 ### M18 item 4 follow-up: β allocation re-cascade over N hops
 

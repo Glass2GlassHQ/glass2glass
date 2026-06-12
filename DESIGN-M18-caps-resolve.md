@@ -5,11 +5,11 @@
 > §4 D3 / Phase B). The β *allocation* re-cascade is N-hop; the *caps*
 > re-solve was not.
 >
-> **Status: Caps-α landed** for `run_linear_chain` (D3 signed off). The
-> runner now derives each interior element's forwarded output from its
-> constraint, steered by a startup downstream-feasibility snapshot. Caps-β
-> (forward coordinator re-solve walk) remains specified and driver-gated.
-> Owed: the single-transform `run_source_transform_sink` mirror.
+> **Status: Caps-α landed** for both `run_linear_chain` (N-hop) and the
+> single-transform `run_source_transform_sink` (D3 signed off). The runner now
+> derives each interior element's forwarded output from its constraint, steered
+> by a downstream-feasibility snapshot. Caps-β (forward coordinator re-solve
+> walk) remains specified and driver-gated.
 
 ## 1. The defect
 
@@ -161,10 +161,11 @@ unaffected (pass-through chains hit the `Defer` path).
 
 ## 6. Scope
 
-Landed in: `run_linear_chain` (N-hop linear); the Caps-α helpers are
-`std`-gated with it. Owed: the single-transform `run_source_transform_sink`
-mirror (the helpers are no_std-capable but currently `std`-gated, so wiring
-them into that no_std runtime path means ungating them, or computing the sink's
-accept set inline). Out: fan-out / muxer mid-stream caps re-solve (Phase C
-caps, separate), the Caps-β build, the codec-vs-raw `Caps` split (§12,
-independent).
+Landed in: `run_linear_chain` (N-hop linear) and the single-transform
+`run_source_transform_sink`. `resolve_forward_output` / `ForwardResolve` are
+no_std (the single-transform runner is a no_std runtime path); the multi-hop
+`downstream_feasibility` sweep stays `std`-gated with `run_linear_chain`. The
+single-transform path needs no sweep: its downstream subgraph is one sink link,
+so the feasibility snapshot is just the sink's `Accepts` set, read inline. Out:
+fan-out / muxer mid-stream caps re-solve (Phase C caps, separate), the Caps-β
+build, the codec-vs-raw `Caps` split (§12, independent).

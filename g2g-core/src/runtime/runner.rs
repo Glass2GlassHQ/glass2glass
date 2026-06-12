@@ -22,9 +22,11 @@ use crate::runtime::coordinator::coordinator_with_recascade_n;
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::join::{select2, Either, Join2};
-use crate::runtime::solver::{solve_linear, NegotiationFailure};
+use crate::runtime::solver::{
+    resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
+};
 #[cfg(feature = "std")]
-use crate::runtime::solver::{downstream_feasibility, resolve_forward_output, ForwardResolve};
+use crate::runtime::solver::downstream_feasibility;
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -1142,6 +1144,16 @@ where
     let negotiation = negotiate_source_transform_sink(source, transform, sink, bus).await?;
     let allocation = negotiation.allocation;
 
+    // Caps-α: the transform's downstream subgraph is the single sink link, so
+    // its feasibility snapshot is just the sink's accept set (the N-hop sweep
+    // in `run_linear_chain` reduces to this for one transform). A wildcard or
+    // legacy sink leaves it unconstrained, so the transform keeps forwarding
+    // greedily (Defer).
+    let downstream_feasible = match sink.caps_constraint_as_sink() {
+        CapsConstraint::Accepts(s) => Some(s.clone()),
+        _ => None,
+    };
+
     // M12 latency query: fold the configured chain source → transform → sink.
     let latency = LatencyReport::aggregate([
         source.latency(),
@@ -1181,6 +1193,7 @@ where
         source.run(&mut adapter).await
     };
 
+    let bus_for_transform = bus.cloned();
     let transform_fut = async move {
         let ctrl_rx = transform_ctrl_rx;
         let mut adapter = SenderSink::new(link2_tx);
@@ -1228,14 +1241,37 @@ where
                     return Ok::<(), G2gError>(());
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    // Caps-α (D3): derive the forwarded output from the
+                    // transform's constraint, steered by the sink's accept set,
+                    // instead of forwarding greedily. Mirrors `run_linear_chain`;
+                    // here the downstream subgraph is the single sink link.
+                    // `Infeasible` means the sink positively rejects every
+                    // output the transform can produce: surface it loud as a
+                    // reverse reconfigure into this boundary.
+                    let forward_caps = {
+                        let constraint = transform.caps_constraint_as_transform();
+                        match resolve_forward_output(
+                            &constraint,
+                            &new_caps,
+                            downstream_feasible.as_ref(),
+                        ) {
+                            ForwardResolve::Fixed(caps) => caps,
+                            ForwardResolve::Defer => new_caps.clone(),
+                            ForwardResolve::Infeasible(failure) => {
+                                report_nego_failure(bus_for_transform.as_ref(), failure);
+                                link1_rx.request_reconfigure(Reconfigure::Renegotiate);
+                                continue;
+                            }
+                        }
+                    };
                     match transform.configure_pipeline(&new_caps)? {
                         ConfigureOutcome::Accepted => {
                             // M18 α: element-local re-allocation under the
-                            // new caps before forwarding the notification.
-                            realloc_local(transform, &new_caps);
+                            // re-fixated output caps before forwarding.
+                            realloc_local(transform, &forward_caps);
                             transform
                                 .process(
-                                    PipelinePacket::CapsChanged(new_caps),
+                                    PipelinePacket::CapsChanged(forward_caps),
                                     &mut adapter,
                                 )
                                 .await?;
