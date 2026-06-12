@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M33: Async-MFT support in `MfEncode` (hardware encoders)
+
+- Completes the M30 deferral: `MfEncode` now drives asynchronous (event-based)
+  encoder MFTs, the common shape of a hardware H.264/HEVC encoder, not just
+  synchronous ones. `enumerate_encoder` includes async MFTs and unlocks them
+  (`MF_TRANSFORM_ASYNC_UNLOCK`); the new `with_hardware()` builder also routes
+  H.264 through enumeration (the default H.264 path keeps the fixed-CLSID MS
+  software encoder).
+- Async encoders are driven by an `IMFMediaEventGenerator` event loop:
+  `METransformNeedInput` feeds a queued input sample (or banks a credit),
+  `METransformHaveOutput` pulls an encoded frame; on `Eos` the queued input is
+  flushed, then `END_OF_STREAM` + `DRAIN` run until `METransformDrainComplete`.
+  The sync `ProcessInput`/`ProcessOutput` path is unchanged and selected per
+  MFT. `is_async()` reports which path the live MFT uses. Flush clears pending
+  input.
+- Tests: unit test for the builder/`is_async` shape plus `m33_async_encode.rs`,
+  which drives a real hardware encoder via `with_hardware()` and asserts every
+  picture encodes out as Annex-B H.264, skipping when no hardware encoder is
+  registered. VERIFIED on the dev host: it selected an asynchronous hardware
+  H.264 MFT (`async_mode = true`) and encoded all 30 frames through the event
+  loop; m19 (sync H.264) and m30 (HEVC) unregressed; combined `mf-encode` +
+  `mf-decode` clippy clean; `cargo check --workspace` green.
+
 ### M32: `WasapiSrc` WASAPI capture source
 
 - The input mirror of M29's `WasapiSink`: `WasapiSrc` captures interleaved PCM

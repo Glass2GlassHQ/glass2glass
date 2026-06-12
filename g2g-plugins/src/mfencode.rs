@@ -40,22 +40,27 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, IMFActivate, IMFSample, IMFTransform, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, MFTEnumEx, CLSID_MSH264EncoderMFT,
-    MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    eAVEncH264VProfile_Main, IMFActivate, IMFMediaEventGenerator, IMFSample, IMFTransform,
+    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, MFTEnumEx,
+    CLSID_MSH264EncoderMFT, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformDrainComplete,
+    METransformHaveOutput, METransformNeedInput, MFMediaType_Video, MFVideoFormat_H264,
+    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC, MF_VERSION,
+    MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NOTACCEPTING, MF_E_NO_EVENTS_AVAILABLE,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE,
+    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
+    MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_MULTITHREADED,
 };
+use windows::core::Interface;
+
+use alloc::collections::VecDeque;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -87,6 +92,18 @@ struct EncoderState {
     /// True when the MFT allocates its own output samples; the MS software
     /// encoder does not, but a substituted hardware encoder MFT might.
     provides_samples: bool,
+    /// True for an asynchronous (event-driven) MFT, the common shape of a
+    /// hardware encoder. When set, input/output is driven by the event
+    /// generator below instead of the sync `ProcessInput`/`ProcessOutput` poll.
+    async_mode: bool,
+    /// Event generator for the async path (`Some` iff `async_mode`).
+    event_gen: Option<IMFMediaEventGenerator>,
+    /// Input samples handed in but not yet accepted by the async MFT, fed on
+    /// the next `METransformNeedInput`.
+    pending_input: VecDeque<IMFSample>,
+    /// Outstanding `METransformNeedInput` events with no input queued to
+    /// satisfy them: the next handed-in sample is fed immediately.
+    need_input_credits: u32,
 }
 
 /// One encoded access unit plus the caps fields it was produced under, so
@@ -110,6 +127,17 @@ enum OutputStep {
     StreamChange,
 }
 
+/// Outcome of handling one async MFT event.
+#[derive(Debug, PartialEq, Eq)]
+enum PumpResult {
+    /// An event was handled (input fed, output pulled, or ignored).
+    Pumped,
+    /// Non-blocking pump found the event queue empty.
+    NoEvents,
+    /// The MFT signalled `METransformDrainComplete`.
+    DrainComplete,
+}
+
 #[derive(Debug)]
 pub struct MfEncode {
     /// Output codec the MFT produces (`H264` default, or `H265`). Selects the
@@ -119,6 +147,11 @@ pub struct MfEncode {
     com_started: bool,
     configured: bool,
     bitrate: u32,
+    /// Prefer a hardware encoder MFT (enumerated via `MFTEnumEx`) even for
+    /// H.264, which otherwise uses the fixed-CLSID MS software encoder. A
+    /// hardware encoder is commonly an asynchronous MFT, driven by the
+    /// event-based path. H.265 always enumerates regardless.
+    prefer_hardware: bool,
     /// Negotiated input framerate, echoed on the H.264 output caps and used
     /// to derive the per-frame sample duration.
     framerate: Rate,
@@ -155,6 +188,7 @@ impl MfEncode {
             com_started: false,
             configured: false,
             bitrate: DEFAULT_BITRATE,
+            prefer_hardware: false,
             framerate: Rate::Any,
             last_caps: None,
             input_caps: None,
@@ -174,6 +208,22 @@ impl MfEncode {
     /// The configured output codec.
     pub fn codec(&self) -> VideoCodec {
         self.codec
+    }
+
+    /// Prefer a hardware encoder MFT (enumerated via `MFTEnumEx`) even for
+    /// H.264. Hardware encoders are commonly asynchronous MFTs, driven by the
+    /// event-based path; the default H.264 route uses the fixed-CLSID MS
+    /// software encoder. Call before `configure_pipeline`.
+    pub fn with_hardware(mut self) -> Self {
+        self.prefer_hardware = true;
+        self
+    }
+
+    /// Whether the live encoder MFT is asynchronous (event-driven). `None`
+    /// before `configure_pipeline`. Useful in tests to confirm the async path
+    /// is exercised.
+    pub fn is_async(&self) -> Option<bool> {
+        self.state.as_ref().map(|s| s.async_mode)
     }
 
     /// Target average bitrate in bits/s (`MF_MT_AVG_BITRATE`). Applies at the
@@ -206,12 +256,14 @@ impl MfEncode {
         pts_ns: u64,
         encoded: &mut Vec<EncodedChunk>,
     ) -> Result<(), G2gError> {
-        let duration_hns = self
-            .state
-            .as_ref()
-            .ok_or(G2gError::NotConfigured)?
-            .duration_hns;
+        let (duration_hns, async_mode) = {
+            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+            (st.duration_hns, st.async_mode)
+        };
         let sample = make_input_sample(data, pts_ns, duration_hns)?;
+        if async_mode {
+            return self.feed_async(sample, encoded);
+        }
         let mut guard = 0u32;
         // ProcessInput returns MF_E_NOTACCEPTING when the MFT must release
         // outputs before it can take more input; drain, then retry.
@@ -251,6 +303,9 @@ impl MfEncode {
     /// Drain on end-of-stream (or before a geometry rebuild): send the MFT a
     /// DRAIN command so it flushes buffered pictures, then collect them.
     fn drain_eos(&mut self, encoded: &mut Vec<EncodedChunk>) -> Result<(), G2gError> {
+        if self.state.as_ref().ok_or(G2gError::NotConfigured)?.async_mode {
+            return self.drain_eos_async(encoded);
+        }
         {
             let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
             // SAFETY: drain message on the owning thread.
@@ -261,6 +316,108 @@ impl MfEncode {
             }
         }
         self.drain(encoded)
+    }
+
+    /// Async path: queue an input sample, feeding it now if the MFT has already
+    /// asked for input, then drain whatever events are immediately ready.
+    fn feed_async(
+        &mut self,
+        sample: IMFSample,
+        encoded: &mut Vec<EncodedChunk>,
+    ) -> Result<(), G2gError> {
+        {
+            let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+            if st.need_input_credits > 0 {
+                st.need_input_credits -= 1;
+                // SAFETY: ProcessInput on the owning thread; `sample` is valid.
+                unsafe { st.transform.ProcessInput(0, &sample, 0) }.map_err(mf_err)?;
+            } else {
+                st.pending_input.push_back(sample);
+            }
+        }
+        while matches!(self.pump_one(encoded, false)?, PumpResult::Pumped) {}
+        Ok(())
+    }
+
+    /// Async path drain: feed any still-queued input (blocking for the MFT's
+    /// input requests), then DRAIN and pump until `METransformDrainComplete`.
+    fn drain_eos_async(&mut self, encoded: &mut Vec<EncodedChunk>) -> Result<(), G2gError> {
+        // Push out queued input first; the MFT signals NeedInput as it accepts.
+        while !self
+            .state
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .pending_input
+            .is_empty()
+        {
+            if matches!(self.pump_one(encoded, true)?, PumpResult::DrainComplete) {
+                return Ok(());
+            }
+        }
+        {
+            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+            // SAFETY: end-of-stream + drain messages on the owning thread.
+            unsafe {
+                st.transform
+                    .ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)
+                    .map_err(mf_err)?;
+                st.transform
+                    .ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)
+                    .map_err(mf_err)?;
+            }
+        }
+        loop {
+            if matches!(self.pump_one(encoded, true)?, PumpResult::DrainComplete) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Handle one async event. `block` waits for the next event; otherwise a
+    /// drained queue returns `NoEvents`. `NeedInput` feeds a queued sample (or
+    /// banks a credit), `HaveOutput` pulls an encoded frame.
+    fn pump_one(
+        &mut self,
+        encoded: &mut Vec<EncodedChunk>,
+        block: bool,
+    ) -> Result<PumpResult, G2gError> {
+        let event = {
+            let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
+            let gen = st.event_gen.as_ref().ok_or(G2gError::NotConfigured)?;
+            let flags = if block {
+                MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)
+            } else {
+                MF_EVENT_FLAG_NO_WAIT
+            };
+            // SAFETY: event query on the owning thread.
+            match unsafe { gen.GetEvent(flags) } {
+                Ok(ev) => ev,
+                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                    return Ok(PumpResult::NoEvents)
+                }
+                Err(e) => return Err(mf_err(e)),
+            }
+        };
+        // SAFETY: reading the event type off a valid event.
+        let ty = unsafe { event.GetType() }.map_err(mf_err)? as i32;
+        if ty == METransformNeedInput.0 {
+            let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
+            if let Some(s) = st.pending_input.pop_front() {
+                // SAFETY: ProcessInput on the owning thread.
+                unsafe { st.transform.ProcessInput(0, &s, 0) }.map_err(mf_err)?;
+            } else {
+                st.need_input_credits += 1;
+            }
+        } else if ty == METransformHaveOutput.0 {
+            match self.process_output()? {
+                OutputStep::Frame(c) => encoded.push(c),
+                OutputStep::NeedInput => {}
+                OutputStep::StreamChange => self.renegotiate()?,
+            }
+        } else if ty == METransformDrainComplete.0 {
+            return Ok(PumpResult::DrainComplete);
+        }
+        Ok(PumpResult::Pumped)
     }
 
     fn process_output(&self) -> Result<OutputStep, G2gError> {
@@ -400,6 +557,7 @@ impl AsyncElement for MfEncode {
             h,
             rate_to_ratio(&framerate),
             self.bitrate,
+            self.prefer_hardware,
         )?);
         self.framerate = framerate;
         self.configured = true;
@@ -453,19 +611,23 @@ impl AsyncElement for MfEncode {
                             h,
                             rate_to_ratio(&framerate),
                             self.bitrate,
+                            self.prefer_hardware,
                         )?);
                         self.framerate = framerate;
                     }
                     self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
-                    if let Some(st) = self.state.as_ref() {
+                    if let Some(st) = self.state.as_mut() {
                         // SAFETY: flush message on the owning thread.
                         unsafe {
                             st.transform
                                 .ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0)
                                 .map_err(mf_err)?;
                         }
+                        // Drop any input the async MFT never accepted.
+                        st.pending_input.clear();
+                        st.need_input_credits = 0;
                     }
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
@@ -566,34 +728,46 @@ fn encoder_subtype(codec: VideoCodec) -> Result<windows::core::GUID, G2gError> {
     }
 }
 
-/// Instantiate the encoder MFT for a codec. H.264 has a fixed CLSID; H.265 is
-/// enumerated by output subtype (no fixed CLSID). Only a synchronous MFT is
-/// returned; an enumerated async (hardware) MFT is rejected, since the
-/// sync drain loop here cannot drive it.
-fn create_encoder_transform(codec: VideoCodec) -> Result<IMFTransform, G2gError> {
+/// Instantiate the encoder MFT for a codec, returning `(transform, is_async)`.
+/// H.264 uses the fixed-CLSID MS software encoder (synchronous) unless
+/// `prefer_hardware`; H.265 (no fixed CLSID) and the hardware H.264 path are
+/// enumerated by output subtype. An enumerated asynchronous MFT is unlocked
+/// for use and driven by the event-based path.
+fn create_encoder_transform(
+    codec: VideoCodec,
+    prefer_hardware: bool,
+) -> Result<(IMFTransform, bool), G2gError> {
     match codec {
-        VideoCodec::H264 => {
+        VideoCodec::H264 if !prefer_hardware => {
             // SAFETY: COM object creation on the owning thread.
-            unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
-                .map_err(mf_err)
+            let t = unsafe {
+                CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
+            }
+            .map_err(mf_err)?;
+            Ok((t, false))
         }
-        VideoCodec::H265 => enumerate_sync_encoder(MFVideoFormat_HEVC),
+        VideoCodec::H264 => enumerate_encoder(MFVideoFormat_H264),
+        VideoCodec::H265 => enumerate_encoder(MFVideoFormat_HEVC),
         _ => Err(G2gError::CapsMismatch),
     }
 }
 
-/// Find a synchronous encoder MFT that outputs `output_subtype` via
-/// `MFTEnumEx`, and activate it. Skips asynchronous MFTs (the event-driven
-/// model the sync loop here does not implement). Fails `Hardware` when no
-/// usable encoder is registered.
-fn enumerate_sync_encoder(
+/// Find and activate an encoder MFT that outputs `output_subtype` via
+/// `MFTEnumEx`, preferring the first match (sort-and-filter orders hardware
+/// first). An asynchronous MFT is unlocked (`MF_TRANSFORM_ASYNC_UNLOCK`) so it
+/// can be driven by the event loop. Returns `(transform, is_async)`; fails
+/// `Hardware` when no encoder is registered.
+fn enumerate_encoder(
     output_subtype: windows::core::GUID,
-) -> Result<IMFTransform, G2gError> {
+) -> Result<(IMFTransform, bool), G2gError> {
     let out_info = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: output_subtype,
     };
-    let flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    let flags = MFT_ENUM_FLAG_SYNCMFT
+        | MFT_ENUM_FLAG_ASYNCMFT
+        | MFT_ENUM_FLAG_HARDWARE
+        | MFT_ENUM_FLAG_SORTANDFILTER;
 
     let mut activates: *mut Option<IMFActivate> = core::ptr::null_mut();
     let mut count = 0u32;
@@ -612,19 +786,17 @@ fn enumerate_sync_encoder(
         .map_err(mf_err)?;
     }
 
-    let mut chosen: Option<Result<IMFTransform, G2gError>> = None;
+    let mut chosen: Option<Result<(IMFTransform, bool), G2gError>> = None;
     // SAFETY: `activates` points to `count` initialised `Option<IMFActivate>`
     // entries when count > 0. We take ownership of each entry (releasing the
-    // COM ref on drop), activating the first synchronous one.
+    // COM ref on drop), activating the first one.
     unsafe {
         for i in 0..count as usize {
             let entry = core::ptr::read(activates.add(i));
             if let Some(activate) = entry {
                 if chosen.is_none() {
                     let is_async = activate.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0;
-                    if !is_async {
-                        chosen = Some(activate.ActivateObject::<IMFTransform>().map_err(mf_err));
-                    }
+                    chosen = Some(activate_encoder(&activate, is_async));
                 }
                 // `activate` drops here, releasing the enumerated ref.
             }
@@ -637,6 +809,26 @@ fn enumerate_sync_encoder(
     chosen.unwrap_or(Err(G2gError::Hardware(HardwareError::Other)))
 }
 
+/// Activate one enumerated encoder, unlocking it first when asynchronous so the
+/// event-driven path may drive it.
+fn activate_encoder(
+    activate: &IMFActivate,
+    is_async: bool,
+) -> Result<(IMFTransform, bool), G2gError> {
+    // SAFETY: object activation + attribute set on the owning thread.
+    let transform = unsafe { activate.ActivateObject::<IMFTransform>() }.map_err(mf_err)?;
+    if is_async {
+        // SAFETY: unlocking the async MFT before any media type is set.
+        unsafe {
+            let attrs = transform.GetAttributes().map_err(mf_err)?;
+            attrs
+                .SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)
+                .map_err(mf_err)?;
+        }
+    }
+    Ok((transform, is_async))
+}
+
 /// Create the encoder MFT for `codec`, set the output type then the NV12 input
 /// type (the encoder contract requires output before input), and put it into
 /// streaming mode.
@@ -646,9 +838,10 @@ fn init_encoder(
     height: u32,
     fps: (u32, u32),
     bitrate: u32,
+    prefer_hardware: bool,
 ) -> Result<EncoderState, G2gError> {
     let out_subtype = encoder_subtype(codec)?;
-    let transform = create_encoder_transform(codec)?;
+    let (transform, async_mode) = create_encoder_transform(codec, prefer_hardware)?;
 
     // Low-latency mode (the attribute alias of CODECAPI_AVLowLatencyMode):
     // no B-frames / lookahead, one output per input. Best-effort, set before
@@ -716,6 +909,13 @@ fn init_encoder(
     let out_size = output_buffer_size(&transform, width, height)?;
     let provides_samples = output_provides_samples(&transform)?;
 
+    // An async MFT is driven through its event generator.
+    let event_gen = if async_mode {
+        Some(transform.cast::<IMFMediaEventGenerator>().map_err(mf_err)?)
+    } else {
+        None
+    };
+
     // SAFETY: streaming-mode messages on the owning thread.
     unsafe {
         transform
@@ -734,6 +934,10 @@ fn init_encoder(
         out_size,
         duration_hns: frame_duration_hns(num, den),
         provides_samples,
+        async_mode,
+        event_gen,
+        pending_input: VecDeque::new(),
+        need_input_credits: 0,
     })
 }
 
@@ -985,6 +1189,13 @@ mod tests {
             MfEncode::new().with_codec(VideoCodec::H265).codec(),
             VideoCodec::H265
         );
+    }
+
+    #[test]
+    fn async_state_is_unknown_before_configure() {
+        // is_async() reports the live MFT's mode; None until configured.
+        assert_eq!(MfEncode::new().is_async(), None);
+        assert_eq!(MfEncode::new().with_hardware().is_async(), None);
     }
 
     #[test]
