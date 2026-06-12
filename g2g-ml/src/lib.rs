@@ -11,3 +11,7 @@
 // in-crate paths can't collide with the `ort` dependency crate.
 #[cfg(feature = "ort")]
 pub mod ortinfer;
+
+// tensor post-processing (softmax / argmax classification head); pure Rust,
+// no feature gate.
+pub mod postprocess;

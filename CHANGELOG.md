@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M27: `TensorPostprocess` classification head
+
+- Completes the in-graph classification chain:
+  `... -> OrtInference -> TensorPostprocess`. Two operations over f32
+  tensors (treated as one flat vector, the conventional reading of
+  `[1, N]` logits): `softmax()` (numerically stable, shift-by-max; output
+  caps echo the input caps) and `argmax()` (emits a `[1, 2]` f32
+  `[winning index, winning value]` tensor, first occurrence wins ties).
+  Pure Rust, no dependencies, always available in `g2g-ml` (no feature
+  gate). Native `DerivedOutput` constraint; non-f32 tensors rejected at
+  negotiation; timing passes through so latency stays traceable.
+- The hand-encoded ONNX fixture builder moved to a shared
+  `tests/util/onnx_fixture.rs` (included by both g2g-ml integration test
+  crates) instead of living inline in `ort_inference.rs`.
+- Tests: four unit tests (softmax sums to 1 and orders correctly, stays
+  finite for 1000-scale logits, argmax first-max semantics, derived-output
+  shapes incl. non-f32 rejection) plus `postprocess.rs` integration:
+  element-level softmax/argmax with caps emission, U8 caps rejected, and,
+  under `ort`, the full real-runtime chain where identity-model inference
+  into argmax finds the brightest input pixel's flat NCHW index and
+  normalized value exactly. VERIFIED: `cargo test -p g2g-ml --features
+  ort` green (5 unit + 7 integration across both files),
+  `cargo test --workspace` green, workspace + ort-feature clippy clean.
+
 ### M26: DirectML execution provider for `OrtInference`
 
 - First GPU inference path on Windows: a new g2g-ml `directml` feature
