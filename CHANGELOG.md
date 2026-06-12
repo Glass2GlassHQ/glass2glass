@@ -5,6 +5,43 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M19: `MfEncode` Windows H.264 encode element
+
+- First encoder element in the tree, completing the encode side of the
+  Windows platform track. `MfEncode` (`mf-encode` feature, Windows-only)
+  wraps the Media Foundation H.264 Encoder MFT (`CLSID_MSH264EncoderMFT`):
+  packed NV12 `System` frames in, Annex-B H.264 access units out (one
+  encoded sample per input picture, SPS/PPS attached to each IDR). Mirrors
+  the `MfDecode` structure verbatim: same COM/MTA `Send` contract, same
+  ProcessInput/ProcessOutput drain with the NOTACCEPTING retry, same DRAIN
+  on EOS.
+- Low latency by default: `MF_LOW_LATENCY` (the attribute alias of
+  `CODECAPI_AVLowLatencyMode`) is set on the MFT's attribute store before
+  the media types, so the encoder runs without B-frames / lookahead and
+  releases one output per input. `with_bitrate(bits_per_sec)` sets
+  `MF_MT_AVG_BITRATE` (default 4 Mb/s).
+- Geometry contract differs from the decoder: an encoder's media types need
+  concrete dims up front (no bitstream to derive them from), so
+  `configure_pipeline` requires fixed, even NV12 dims and fails loud
+  otherwise. A mid-stream `CapsChanged` to new dims drains the current MFT
+  (buffered pictures emit under the caps they were encoded with, carried
+  per-chunk) and rebuilds it at the new geometry. Caps surface is the
+  inverse of the decoder: `DerivedOutput(NV12 -> H264, same dims/rate)`,
+  `PadTemplates` NV12 sink pad / H.264 source pad.
+- All COM (encoder CLSID, `MF_LOW_LATENCY`, the encode-side media-type
+  attributes `MF_MT_AVG_BITRATE` / `MF_MT_FRAME_RATE` / `MF_MT_INTERLACE_MODE`
+  / `MF_MT_MPEG2_PROFILE`, `SetSampleDuration`) verified against the fetched
+  `windows-0.62.2` source per AGENTS.md.
+- Tests: seven GPU-free unit tests (caps narrowing/rejection, derived
+  output, pad templates, bitrate builder, Q16 framerate -> MF ratio, frame
+  duration), plus `m19_mfencode.rs` against the real MS software encoder
+  MFT: 10 synthetic NV12 pictures encode to 10 Annex-B access units with
+  one H.264 `CapsChanged`, and the encode -> decode round trip through
+  `MfDecode` recovers all 10 frames at the original geometry. VERIFIED on
+  the Windows dev host: `cargo test -p g2g-plugins --features "mf-encode
+  mf-decode"` green (36 lib + 2 integration), matching clippy green,
+  `cargo test --workspace` (default) green.
+
 ### M18 item 4 follow-up: dyn interior elements contribute clock + latency
 
 - `run_linear_chain` folded `RunStats.latency` and `clock_priority` from only

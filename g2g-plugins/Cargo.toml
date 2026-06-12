@@ -17,6 +17,10 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
+# Windows H.264 encode via the Media Foundation H.264 Encoder MFT
+# (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
+# Pulls the windows crate; Windows-only, implies std.
+mf-encode = ["std", "dep:windows"]
 # Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
 # frames in a Win32 window via a DXGI swapchain + D3D11 video processor
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,

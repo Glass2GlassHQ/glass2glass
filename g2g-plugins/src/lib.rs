@@ -33,6 +33,11 @@ pub mod rtspsrc;
 #[cfg(all(target_os = "windows", feature = "mf-decode"))]
 pub mod mfdecode;
 
+// Media Foundation H.264 encode, the encode-side mirror of mfdecode. Same
+// Windows-only target gate; enabling the feature elsewhere is a no-op.
+#[cfg(all(target_os = "windows", feature = "mf-encode"))]
+pub mod mfencode;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
