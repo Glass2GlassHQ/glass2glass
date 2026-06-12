@@ -5,6 +5,51 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 1 (Session E): β allocation re-cascade (single hop)
+
+- First cross-element mid-stream allocation cascade. Previously the M12
+  allocation cascade ran only at startup, and mid-stream only α
+  (element-local) re-derived an element's own pool. β now flows the sink's
+  re-derived `propose_allocation` answer one hop upstream to the transform's
+  `configure_allocation` on a mid-stream `CapsChanged`, the same step the
+  startup cascade does once at setup, re-run when geometry changes. This is
+  what GPU pool chains (D3D11 / CUDA / DMABUF / VAAPI) need to re-size the
+  upstream pool before the first frame under the new caps
+  (DESIGN-M16-workaround3-reconfigure.md §9.4 β, §9.4.1).
+- New `select2` no_std combinator (`runtime::join`): polls two futures,
+  resolves on the first ready, drops the loser. Sound because a channel
+  `recv()` future holds no dequeued message, so dropping a pending recv
+  loses nothing (unit-tested as the drop-safety proof). This is the
+  interruptibility primitive §9.4.1 named as missing: a runner arm can race
+  its data link against an out-of-band control channel, so a directive
+  reaches it while it is parked on `recv().await`. Without it the runtime
+  could only `join` (wait for all), never `select` (wait for first).
+- The coordinator (R2 single task) now owns the re-cascade.
+  `CoordinatorEvent::CapsChanged` carries the sink's `proposal`;
+  `coordinator_with_recascade` adds a control channel to the transform arm;
+  `Coordinator::run` forwards an `ArmDirective::Recascade(params)` for each
+  proposal (serial, so the bounded control channel never blocks). The
+  transform arm selects on that control receiver alongside its data link and
+  applies `configure_allocation` on receipt. On EOS the arm drains the
+  control channel until the coordinator closes it, so a tail-end directive
+  still in flight at shutdown is applied deterministically (in a live stream
+  these apply inline as they arrive). `realloc_local` now returns the
+  element's proposal so the sink arm forwards the same value α stored.
+- Scope: single hop (sink -> transform), the correct re-cascade for a
+  `source -> transform -> sink` chain because a link2 `CapsChanged` (post-
+  decode geometry) affects only the transform's output pool; link1
+  (pre-decode) is unchanged. The source leg and the general N-hop downstream
+  subgraph re-cascade belong to the multi-element runner (§13.4 item 4).
+- Tests: three coordinator unit tests (forwards a proposal as a directive;
+  no proposal forwards nothing; observe-only coordinator never forwards)
+  driving the real `Coordinator::run` on a no_std busy-poll executor; four
+  `select2` unit tests including the drop-safety proof; and
+  `m18_beta_recascade.rs` end-to-end (a fake transform records
+  `[startup_proposal, β_proposal]` on a mid-stream geometry change, and
+  `[startup_proposal]` only without one). VERIFIED: `cargo test --workspace`
+  green, `cargo test -p g2g-core --features runtime` (115) green, no_std +
+  runtime build, and core runtime clippy clean.
+
 ### M16 step 5: migrate the display sinks to native `caps_constraint`
 
 - Completes the §8 step-5 element migration. The three present sinks,

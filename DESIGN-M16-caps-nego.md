@@ -419,9 +419,13 @@ remains.
 - **Allocation re-cascade (§9).** M12 `propose_allocation` ran only at
   startup. Phased plan α (element-local) → β (coordinator restructure).
   *α landed* (mid-stream element-local re-allocation in the linear and
-  fan-out runners). *β (cross-element cascade) remains* trigger-gated
-  (§9.4.1): it needs a real downstream-pool consumer and a no_std
-  `select` primitive.
+  fan-out runners). *β single-hop landed* (Session E): the no_std
+  `select2` primitive plus a coordinator control channel let the transform
+  arm apply the sink's re-derived proposal one hop upstream on a mid-stream
+  `CapsChanged`. *Still open:* the source leg / N-hop downstream subgraph
+  cascade (multi-element runner, §13.4 item 4) and a real downstream
+  consumer that re-sizes its pool on the proposal (the in-tree GPU decoders
+  record but don't yet act on it, so β is exercised by a fake transform).
 - **Phase C fan-out (§10).** *Landed.* Per-branch re-solve (FO-2) with
   strict failure default (FO-1), branches re-solved concurrently in their
   own arms, plus per-branch α.
@@ -467,12 +471,16 @@ remains.
    cleanly enables items 3 and 4 (Phase C, multi-element re-solve)
    and a future mid-stream clock-change mechanism. The restructure
    pays off across many capabilities; it's a foundation, not a feature.
-   *Status (M18 B–D):* scaffolding landed (coordinator control channel,
+   *Status (M18 B–E):* scaffolding landed (coordinator control channel,
    negotiation relocated to the coordinator, α element-local
-   re-allocation); the β cascade itself is deferred, trigger-gated per
-   `DESIGN-M16-workaround3-reconfigure.md` §9.4 R1 and §9.4.1. It needs a
-   real cross-element pool consumer and a no_std `select` primitive (or
-   the element-ownership move) before it's worth building.
+   re-allocation); **β single-hop landed (Session E)** via the no_std
+   `select2` combinator + a coordinator->transform control channel, so the
+   sink's re-derived proposal re-cascades one hop upstream on a mid-stream
+   `CapsChanged` (`m18_beta_recascade.rs`). The remaining gap is the
+   N-hop / source-leg downstream subgraph cascade, which folds into item 4
+   (multi-element runner), plus a real downstream pool consumer that acts on
+   the mid-stream proposal (the in-tree GPU decoders record but don't yet
+   re-size on it; the MFT/CUDA output pools are fixed at open).
 2. **`mux` migration + Phase C muxer.** *Done (M18).* Trait migration
    (MX-3) plus per-input re-solve (MX-1) and eager output re-emit (MX-2)
    inside the muxer task; no β needed (workaround3 §10.4, §10.7).

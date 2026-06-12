@@ -245,15 +245,31 @@ still trigger-gated per R1.
   `DynAsyncElement` does not expose the allocation hooks (lands with the
   FO-2 dyn-trait extension).
 
-**What β still needs, beyond a real cross-element consumer (R1):** the
-upstream allocation cascade requires the upstream arms to be
-*interruptible* at their `recv().await` points so a `Recascade` directive
-can reach `transform`/`source` `configure_allocation` mid-stream. The
-no_std runtime has `Join2`/`join_all` but no `select`; β needs either a
-select-style combinator plus per-arm control channels, or the ownership
-move (coordinator owns the elements). R2 (single-task coordinator, no
-`Arc<Mutex>` per element) rules out the shortcut. Build this when the
-first DMABUF/VAAPI pool consumer forces it, not before.
+- **β single hop (Session E).** *Landed.* The `select2` combinator
+  (`runtime::join`) gives the interruptibility the bullet below called for;
+  the transform arm now selects its data link against a coordinator control
+  channel and applies `configure_allocation` on an `ArmDirective::Recascade`.
+  `CoordinatorEvent::CapsChanged` carries the sink's proposal;
+  `Coordinator::run` forwards it one hop to the transform.
+  `coordinator_with_recascade` wires the control channel; the transform's
+  EOS-drain makes a tail-end directive deterministic at shutdown. Covered by
+  `m18_beta_recascade.rs` plus coordinator and `select2` unit tests. Scope is
+  the single sink->transform hop, the correct re-cascade for the 3-element
+  chain (a link2 `CapsChanged` affects only the transform's output pool);
+  the source leg and the N-hop downstream subgraph re-cascade are the
+  multi-element runner (§13.4 item 4).
+
+**What β single-hop chose, and what is still open:** the upstream cascade
+needed the upstream arm *interruptible* at its `recv().await` so a
+`Recascade` directive could reach `configure_allocation` mid-stream. That is
+now the `select2` + per-arm control-channel route (R2 single-task
+coordinator, not the ownership move, not `Arc<Mutex>` per element). Still
+open: a *real* downstream consumer that re-sizes its pool on the mid-stream
+proposal (the in-tree GPU decoders record it but the MFT/CUDA pools are
+fixed at open, so the cascade is exercised by a fake transform, α-style);
+the source leg / N-hop subgraph cascade (multi-element runner); and the
+reverse per-input/per-branch structured `Renegotiate` (still β-gated for
+fan-out/mux, §10).
 
 ### 9.5 Why β is the long-term shape, not just a bigger α
 
