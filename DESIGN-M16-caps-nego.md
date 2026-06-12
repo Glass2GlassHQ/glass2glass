@@ -460,14 +460,15 @@ remains.
   fan-out and muxer are static.
 - **Mid-stream element hot-swap.** M8's `ElementSlot` scaffolding
   exists but mid-stream swap of a real element isn't supported.
-- **Bus events for negotiation failures.** *Mostly landed (item 7).*
-  `BusMessage::NegotiationFailed(NegotiationFailure)` plus
-  `run_source_transform_sink_with_bus` route the structured failure to the
-  bus for the linear runner's startup *and* mid-stream re-solve (the run
-  still returns the opaque `G2gError::CapsMismatch` / drains to EOS
-  respectively). Owed: the same opt-in wiring on `run_simple_pipeline`,
-  `run_linear_chain`, and the non-linear runners (fan-out / fan-in / mux),
-  which discard their `NegotiationFailure` identically.
+- **Bus events for negotiation failures.** *Done (item 7).*
+  `BusMessage::NegotiationFailed(NegotiationFailure)` plus an opt-in
+  `_with_bus` twin on every `solve_linear`-routed runner
+  (`run_simple_pipeline`, `run_source_transform_sink`, `run_linear_chain`,
+  `run_source_fanout`, `run_muxer_sink`) route the structured failure to the
+  bus at both startup and mid-stream re-solve sites (the run still returns the
+  opaque `G2gError::CapsMismatch` / drives a reverse `Reconfigure`). Shared
+  `report_nego_failure` helper. `run_fanin_sink` self-fixates with no chain,
+  so it has no `NegotiationFailure` to route.
 - **Preference algebra.** `CapsPreferences` is a placeholder. The
   solver uses constraint-internal order for tie-breaks. GStreamer's
   more elaborate "best fit" caps selection across competing
@@ -518,12 +519,13 @@ remains.
    trait (type-level `pad_templates()`), `pad_link` / `types_can_link`
    pre-instantiation solver queries; implemented for `VideoTestSrc`,
    `FakeSink`, `H264Parse`.
-7. **Bus integration for negotiation failures.** *Mostly landed.*
-   `BusMessage::NegotiationFailed(NegotiationFailure)` +
-   `run_source_transform_sink_with_bus` carry the structured failure for the
-   linear startup *and* mid-stream re-solve paths (`m18_bus_negotiation.rs`).
-   Owed: the same opt-in wiring on the simple / multi-element / fan-out /
-   fan-in / mux runners (each discards its `NegotiationFailure` the same way).
+7. **Bus integration for negotiation failures.** *Done.*
+   `BusMessage::NegotiationFailed(NegotiationFailure)` + an opt-in `_with_bus`
+   twin on every `solve_linear`-routed runner (simple / transform-sink /
+   multi-element / fan-out / mux) carry the structured failure at startup and
+   mid-stream (`m18_bus_negotiation.rs`, `m18_multi_element.rs`), via the
+   shared `report_nego_failure` helper. `run_fanin_sink` self-fixates (no
+   chain, no `NegotiationFailure`).
 8. **Preference algebra.** Concrete trigger required (a competing-
    constraint scenario that forces it).
 9. **Dynamic pads / hot-swap.** Lowest priority. No production driver.

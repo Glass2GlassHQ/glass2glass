@@ -17,6 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::PipelineClock;
 use crate::element::{
@@ -30,6 +31,7 @@ use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
 use crate::query::LatencyReport;
 use crate::runtime::channel::{bounded, link, SenderSink};
+use crate::runtime::coordinator::report_nego_failure;
 use crate::runtime::join::join_all;
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 
@@ -254,13 +256,21 @@ where
 /// `AcceptsAny`) still hit the all-native solver path on the muxer side.
 /// Expose the method on `DynSourceLoop` when a migrated source needs to
 /// feed a muxer.
-fn solve_mux_input<Mux>(source_caps: Caps, mux: &Mux, idx: usize) -> Result<Caps, G2gError>
+fn solve_mux_input<Mux>(
+    source_caps: Caps,
+    mux: &Mux,
+    idx: usize,
+    bus: Option<&BusHandle>,
+) -> Result<Caps, G2gError>
 where
     Mux: MultiInputElement,
 {
     let src_c = CapsConstraint::LegacySource(source_caps);
     let mux_c = mux.caps_constraint_as_input(idx);
-    let links = solve_linear(&[&src_c, &mux_c]).map_err(|_| G2gError::CapsMismatch)?;
+    let links = solve_linear(&[&src_c, &mux_c]).map_err(|f| {
+        report_nego_failure(bus, f);
+        G2gError::CapsMismatch
+    })?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)
 }
 
@@ -272,13 +282,16 @@ where
 /// call re-derives the output from the freshly-reconfigured per-input
 /// caps. The sink side is `AcceptsAny`: the muxer's aggregated output is
 /// the canonical merged caps and is not narrowed by the sink.
-fn solve_mux_output<Mux>(mux: &Mux) -> Result<Caps, G2gError>
+fn solve_mux_output<Mux>(mux: &Mux, bus: Option<&BusHandle>) -> Result<Caps, G2gError>
 where
     Mux: MultiInputElement,
 {
     let mux_c = mux.caps_constraint_for_output()?;
     let sink_c = CapsConstraint::AcceptsAny;
-    let links = solve_linear(&[&mux_c, &sink_c]).map_err(|_| G2gError::CapsMismatch)?;
+    let links = solve_linear(&[&mux_c, &sink_c]).map_err(|f| {
+        report_nego_failure(bus, f);
+        G2gError::CapsMismatch
+    })?;
     links.last().cloned().ok_or(G2gError::CapsMismatch)
 }
 
@@ -296,8 +309,43 @@ pub async fn run_muxer_sink<Mux, Snk, Clk>(
     sources: Vec<&mut dyn DynSourceLoop>,
     mux: &mut Mux,
     sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Mux: MultiInputElement,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, None).await
+}
+
+/// As [`run_muxer_sink`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
+/// `bus` on a startup or per-input mid-stream negotiation failure (item 7).
+pub async fn run_muxer_sink_with_bus<Mux, Snk, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    mux: &mut Mux,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError>
+where
+    Mux: MultiInputElement,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_muxer_sink_inner(sources, mux, sink, clock, link_capacity, Some(bus)).await
+}
+
+async fn run_muxer_sink_inner<Mux, Snk, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    mux: &mut Mux,
+    sink: &mut Snk,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
 ) -> Result<RunStats, G2gError>
 where
     Mux: MultiInputElement,
@@ -317,7 +365,7 @@ where
     let mut sources = sources;
     for (i, source) in sources.iter_mut().enumerate() {
         let proposal = source.intercept_caps().await?;
-        let fixated = solve_mux_input(proposal, mux, i)?;
+        let fixated = solve_mux_input(proposal, mux, i, bus)?;
         if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
             return Err(G2gError::FixationFailed);
         }
@@ -330,7 +378,7 @@ where
     // M18 step 1: muxer output negotiation via `solve_mux_output` (Phase C
     // MX-2 reuses it to re-derive the output mid-stream). `output` is the
     // initial merged caps the muxer task tracks for MX-2 change detection.
-    let output = solve_mux_output(mux)?;
+    let output = solve_mux_output(mux, bus)?;
     if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&output)? {
         return Err(G2gError::FixationFailed);
     }
@@ -383,7 +431,9 @@ where
     // Only the forwarders keep the tagged channel open.
     drop(tagged_tx);
 
+    let bus_for_mux = bus.cloned();
     let muxer_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let bus_for_mux = bus_for_mux;
         let mut out = SenderSink::new(out_tx);
         let mut ended = 0usize;
         // MX-2 change detection: the merged output caps the muxer last
@@ -407,7 +457,7 @@ where
                     // (The β-clean variant signals a structured reverse
                     // `Renegotiate` into source `i` instead; the muxer task
                     // can't reach input `i`'s reconfigure slot pre-β.)
-                    let input_caps = solve_mux_input(new_caps, mux, i)?;
+                    let input_caps = solve_mux_input(new_caps, mux, i, bus_for_mux.as_ref())?;
                     if let ConfigureOutcome::ReFixate(_) =
                         MultiInputElement::configure_pipeline(mux, i, &input_caps)?
                     {
@@ -421,7 +471,7 @@ where
                     // invariant keeps in-flight old-caps frames correct).
                     // Static muxers leave the output unchanged, so nothing
                     // is emitted.
-                    let new_output = solve_mux_output(mux)?;
+                    let new_output = solve_mux_output(mux, bus_for_mux.as_ref())?;
                     if new_output != current_output {
                         current_output = new_output.clone();
                         out.push(PipelinePacket::CapsChanged(new_output)).await?;

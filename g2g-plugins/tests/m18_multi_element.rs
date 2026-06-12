@@ -7,8 +7,8 @@
 //! the whole chain at once, and frames flow across every interior hop.
 
 use g2g_core::element::DynAsyncElement;
-use g2g_core::runtime::run_linear_chain;
-use g2g_core::{Caps, Dim, G2gError, PipelineClock, Rate, RawVideoFormat};
+use g2g_core::runtime::{run_linear_chain, run_linear_chain_with_bus};
+use g2g_core::{Bus, BusMessage, Caps, Dim, G2gError, NegotiationFailure, PipelineClock, Rate, RawVideoFormat};
 
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
@@ -114,4 +114,31 @@ async fn incompatible_capsfilter_fails_negotiation() {
         Some(G2gError::CapsMismatch),
         "an RGBA source cannot negotiate through an NV12-only filter"
     );
+}
+
+/// `run_linear_chain_with_bus` routes the whole-chain solve failure to the
+/// bus (M18 item 7): the same incompatible NV12 filter posts a structured
+/// `EmptyLink` while the run still errors `CapsMismatch`.
+#[tokio::test]
+async fn incompatible_chain_posts_negotiation_failure_to_bus() {
+    let mut src = VideoTestSrc::new(64, 64, 30, 4);
+    let mut filter = CapsFilter::new(Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    });
+    let mut sink = FakeSink::new();
+    let clock = ZeroClock;
+    let (bus, handle) = Bus::new(4);
+
+    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut filter];
+    let result =
+        run_linear_chain_with_bus(&mut src, transforms, &mut sink, &clock, 4, &handle).await;
+
+    assert_eq!(result.err(), Some(G2gError::CapsMismatch));
+    match bus.try_recv() {
+        Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
+        other => panic!("expected NegotiationFailed(EmptyLink), got {other:?}"),
+    }
 }

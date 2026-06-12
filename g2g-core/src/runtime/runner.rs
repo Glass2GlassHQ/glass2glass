@@ -2,7 +2,7 @@ use core::future::Future;
 
 use alloc::boxed::Box;
 
-use crate::bus::{BusHandle, BusMessage};
+use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
@@ -14,8 +14,8 @@ use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
-    coordinator_with_recascade, negotiate_source_transform_sink, realloc_local, ArmDirective,
-    CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+    coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
+    report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
@@ -295,6 +295,39 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    run_simple_pipeline_inner(source, sink, clock, link_capacity, None).await
+}
+
+/// As [`run_simple_pipeline`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
+/// `bus` on a startup or mid-stream negotiation failure (M18 item 7).
+pub async fn run_simple_pipeline_with_bus<Src, Snk, Clk>(
+    source: &mut Src,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_simple_pipeline_inner(source, sink, clock, link_capacity, Some(bus)).await
+}
+
+async fn run_simple_pipeline_inner<Src, Snk, Clk>(
+    source: &mut Src,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
     let link_capacity: usize = link_capacity.into().get();
     // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
     // so migrated native sources (e.g. `VideoTestSrc::Produces(...)`)
@@ -316,8 +349,10 @@ where
                 None => source.caps_constraint().await?,
             };
             let sink_c = sink.caps_constraint_as_sink();
-            let links = solve_linear(&[&src_c, &sink_c])
-                .map_err(|_| G2gError::CapsMismatch)?;
+            let links = solve_linear(&[&src_c, &sink_c]).map_err(|f| {
+                report_nego_failure(bus, f);
+                G2gError::CapsMismatch
+            })?;
             links.last().cloned().ok_or(G2gError::CapsMismatch)?
         };
         match source.configure_pipeline(&fixated)? {
@@ -361,7 +396,9 @@ where
         Ok::<u64, G2gError>(emitted)
     };
 
+    let bus_for_sink = bus.cloned();
     let sink_fut = async move {
+        let bus_for_sink = bus_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -383,7 +420,8 @@ where
                     // `CapsMismatch`.
                     let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
                         Ok(caps) => caps,
-                        Err(_) => {
+                        Err(failure) => {
+                            report_nego_failure(bus_for_sink.as_ref(), failure);
                             link_rx
                                 .request_reconfigure(Reconfigure::Renegotiate);
                             continue;
@@ -456,8 +494,45 @@ pub async fn run_source_fanout<Src, Tx, Clk>(
     source: &mut Src,
     fanout: &mut Tx,
     sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: MultiOutputElement,
+    Clk: PipelineClock,
+{
+    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, None).await
+}
+
+/// As [`run_source_fanout`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
+/// `bus` on a startup or per-branch mid-stream negotiation failure (item 7).
+#[cfg(feature = "std")]
+pub async fn run_source_fanout_with_bus<Src, Tx, Clk>(
+    source: &mut Src,
+    fanout: &mut Tx,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: MultiOutputElement,
+    Clk: PipelineClock,
+{
+    run_source_fanout_inner(source, fanout, sinks, clock, link_capacity, Some(bus)).await
+}
+
+#[cfg(feature = "std")]
+async fn run_source_fanout_inner<Src, Tx, Clk>(
+    source: &mut Src,
+    fanout: &mut Tx,
+    sinks: Vec<&mut dyn DynAsyncElement>,
     _clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
@@ -481,8 +556,10 @@ where
     let fixated = {
         let src_c = source.caps_constraint().await?;
         let fanout_c = fanout.caps_constraint_as_input();
-        let links = solve_linear(&[&src_c, &fanout_c])
-            .map_err(|_| G2gError::CapsMismatch)?;
+        let links = solve_linear(&[&src_c, &fanout_c]).map_err(|f| {
+            report_nego_failure(bus, f);
+            G2gError::CapsMismatch
+        })?;
         links.last().cloned().ok_or(G2gError::CapsMismatch)?
     };
 
@@ -540,7 +617,9 @@ where
     arms.push(router_fut);
 
     for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+        let bus_for_branch = bus.cloned();
         let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+            let bus_for_branch = bus_for_branch;
             let mut null = NullSink;
             let mut consumed: u64 = 0;
             loop {
@@ -559,9 +638,11 @@ where
                         // fails the fan-out loud (matches GStreamer's
                         // `tee`-with-rejecting-downstream). `AllowBranchDrop`
                         // graceful degradation is a future opt-in.
-                        let branch_caps =
-                            re_solve_downstream_dyn_sink(&new_caps, &*sink)
-                                .map_err(|_| G2gError::CapsMismatch)?;
+                        let branch_caps = re_solve_downstream_dyn_sink(&new_caps, &*sink)
+                            .map_err(|f| {
+                                report_nego_failure(bus_for_branch.as_ref(), f);
+                                G2gError::CapsMismatch
+                            })?;
                         match sink.configure_pipeline(&branch_caps)? {
                             ConfigureOutcome::Accepted => {
                                 // M18 α: element-local re-allocation of this
@@ -649,6 +730,43 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    run_linear_chain_inner(source, transforms, sink, clock, link_capacity, None).await
+}
+
+/// As [`run_linear_chain`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
+/// `bus` on a startup or mid-stream negotiation failure (M18 item 7).
+#[cfg(feature = "std")]
+pub async fn run_linear_chain_with_bus<Src, Snk, Clk>(
+    source: &mut Src,
+    transforms: Vec<&mut dyn DynAsyncElement>,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_linear_chain_inner(source, transforms, sink, clock, link_capacity, Some(bus)).await
+}
+
+#[cfg(feature = "std")]
+async fn run_linear_chain_inner<Src, Snk, Clk>(
+    source: &mut Src,
+    transforms: Vec<&mut dyn DynAsyncElement>,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
     let link_capacity: usize = link_capacity.into().get();
     let mut transforms = transforms;
     let n_tx = transforms.len();
@@ -670,7 +788,10 @@ where
         refs.push(&src_c);
         refs.extend(tx_cs.iter());
         refs.push(&sink_c);
-        solve_linear(&refs).map_err(|_| G2gError::CapsMismatch)?
+        solve_linear(&refs).map_err(|f| {
+            report_nego_failure(bus, f);
+            G2gError::CapsMismatch
+        })?
     };
     if links.len() != n_links {
         return Err(G2gError::CapsMismatch);
@@ -769,7 +890,9 @@ where
     }
 
     let sink_rx = rxs[n_tx].take().expect("sink input rx");
+    let bus_for_sink = bus.cloned();
     let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let bus_for_sink = bus_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -781,7 +904,8 @@ where
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
                     let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
                         Ok(caps) => caps,
-                        Err(_) => {
+                        Err(failure) => {
+                            report_nego_failure(bus_for_sink.as_ref(), failure);
                             sink_rx.request_reconfigure(Reconfigure::Renegotiate);
                             continue;
                         }
@@ -1066,9 +1190,7 @@ where
                             // the bus matters most for, there is no synchronous
                             // return to carry the detail. Post the structured
                             // failure, then drive the reverse Reconfigure.
-                            if let Some(b) = &bus_for_sink {
-                                b.try_post(BusMessage::NegotiationFailed(failure));
-                            }
+                            report_nego_failure(bus_for_sink.as_ref(), failure);
                             link2_rx
                                 .request_reconfigure(Reconfigure::Renegotiate);
                             continue;

@@ -25,7 +25,20 @@ use crate::format_element::CapsConstraint;
 use crate::query::AllocationParams;
 use crate::runtime::channel::{bounded, Receiver, Sender};
 use crate::runtime::runner::SourceLoop;
-use crate::runtime::solver::solve_linear;
+use crate::runtime::solver::{solve_linear, NegotiationFailure};
+
+/// M18 item 7: post a structured negotiation failure to the bus when one is
+/// wired, so the application learns which link conflicted on what. The runner
+/// still surfaces the opaque `G2gError::CapsMismatch` to its caller (startup)
+/// or drives a reverse `Reconfigure` (mid-stream); this only adds the detail
+/// the error type can't carry. Non-blocking: a control message must never
+/// stall a runner on a full bus. Shared by every solve site across the
+/// runners (`runner.rs`, `fanin.rs`, and here).
+pub(crate) fn report_nego_failure(bus: Option<&BusHandle>, failure: NegotiationFailure) {
+    if let Some(b) = bus {
+        b.try_post(BusMessage::NegotiationFailed(failure));
+    }
+}
 
 /// Maximum number of Phase 1 + Phase 2 negotiation passes before a setup
 /// gives up with `FixationFailed`. Three is enough for any reasonable
@@ -222,20 +235,12 @@ where
             };
             let tx_c = transform.caps_constraint_as_transform();
             let sink_c = sink.caps_constraint_as_sink();
-            let links = match solve_linear(&[&src_c, &tx_c, &sink_c]) {
-                Ok(links) => links,
-                Err(failure) => {
-                    // M18 item 7: surface the structured failure (which link
-                    // conflicted on what) to the bus before collapsing it to
-                    // the opaque `CapsMismatch` the caller receives.
-                    // Non-blocking: a startup negotiation failure must not
-                    // stall on a full bus.
-                    if let Some(bus) = bus {
-                        bus.try_post(BusMessage::NegotiationFailed(failure));
-                    }
-                    return Err(G2gError::CapsMismatch);
-                }
-            };
+            let links = solve_linear(&[&src_c, &tx_c, &sink_c]).map_err(|f| {
+                // M18 item 7: surface the structured failure to the bus before
+                // collapsing it to the opaque `CapsMismatch` the caller gets.
+                report_nego_failure(bus, f);
+                G2gError::CapsMismatch
+            })?;
             // M16 step 5d: per-link configure. For a 3-element chain
             // links has length 2: [source-output / transform-input,
             // transform-output / sink-input]. The transform's

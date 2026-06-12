@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 7 (complete): bus wiring across every runner
+
+- Finishes item 7. Every runner that routes negotiation through `solve_linear`
+  now posts `BusMessage::NegotiationFailed` on failure, via the opt-in
+  `_with_bus` twin: `run_simple_pipeline_with_bus`,
+  `run_linear_chain_with_bus`, `run_source_fanout_with_bus`,
+  `run_muxer_sink_with_bus` (joining the existing
+  `run_source_transform_sink_with_bus`), covering both their startup and
+  mid-stream re-solve sites (the fan-out branch FO-1 strict failure and the
+  muxer per-input MX-1 path included). `run_fanin_sink` is exempt: it
+  self-fixates per source (`proposal.fixate()`) with no `solve_linear` chain,
+  so it produces no `NegotiationFailure`.
+- Shared `report_nego_failure(bus, failure)` helper (coordinator module)
+  centralizes the post so every solve site reads
+  `solve_linear(..).map_err(|f| { report_nego_failure(bus, f); CapsMismatch })`.
+  The earlier inline posts (startup + transform-sink mid-stream) were
+  refactored onto it. Each runner keeps a clean non-`bus` public signature; the
+  body is an inner fn taking `Option<&BusHandle>`, and a `bus.cloned()` clone
+  moves into the relevant arm / muxer task for the mid-stream sites.
+- New tests: `simple_pipeline_startup_failure_posts_to_bus` (m18_bus_negotiation)
+  and `incompatible_chain_posts_negotiation_failure_to_bus` (m18_multi_element)
+  exercise the helper through two more runners; the fan-out / mux startup paths
+  share the identical one-line call. VERIFIED: `cargo test --workspace` green,
+  no_std + runtime build, core clippy clean.
+
 ### M18 item 4: arbitrary-length linear runner (`run_linear_chain`)
 
 - Lifts the "runner caps at 3 elements" limit. The fixed-arity runners

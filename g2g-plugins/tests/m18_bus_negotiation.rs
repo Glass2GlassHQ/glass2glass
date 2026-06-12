@@ -18,7 +18,9 @@ use std::boxed::Box;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_source_transform_sink_with_bus, SourceLoop};
+use g2g_core::runtime::{
+    run_simple_pipeline_with_bus, run_source_transform_sink_with_bus, SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Bus, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, MemoryDomain, NegotiationFailure, OutputSink, PipelineClock,
@@ -312,5 +314,23 @@ async fn mid_stream_rejected_capschange_posts_to_bus() {
     match bus.try_recv() {
         Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
         other => panic!("expected mid-stream NegotiationFailed(EmptyLink), got {other:?}"),
+    }
+}
+
+/// `run_simple_pipeline_with_bus` routes the same structured startup failure:
+/// an RGBA source straight into an NV12-only sink (no transform) has no
+/// common link, so the solver returns `EmptyLink`.
+#[tokio::test]
+async fn simple_pipeline_startup_failure_posts_to_bus() {
+    let (bus, handle) = Bus::new(4);
+    let mut src = RgbaSource;
+    let mut snk = Nv12Sink;
+    let clock = ZeroClock;
+
+    let result = run_simple_pipeline_with_bus(&mut src, &mut snk, &clock, 4, &handle).await;
+    assert_eq!(result.err(), Some(G2gError::CapsMismatch));
+    match bus.try_recv() {
+        Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
+        other => panic!("expected NegotiationFailed(EmptyLink), got {other:?}"),
     }
 }
