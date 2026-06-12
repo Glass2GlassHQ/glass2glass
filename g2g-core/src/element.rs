@@ -208,6 +208,20 @@ pub trait DynAsyncElement: ElementBound {
 
     /// Dyn-safe mirror of [`AsyncElement::configure_allocation`].
     fn configure_allocation(&mut self, params: &AllocationParams);
+
+    /// Dyn-safe mirror of [`AsyncElement::latency`], so a buffering interior
+    /// element of an N-element chain (`run_linear_chain`) contributes to the
+    /// runner's latency fold. Defaults to zero, matching `AsyncElement`.
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::ZERO
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
+    /// element that paces to hardware joins the runner's clock election.
+    /// Defaults to none.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        None
+    }
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
@@ -250,5 +264,13 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
         AsyncElement::configure_allocation(self, params)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        AsyncElement::latency(self)
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        AsyncElement::provide_clock(self)
     }
 }

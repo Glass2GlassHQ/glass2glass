@@ -713,16 +713,17 @@ where
 /// Negotiation runs the solver over all `N + 2` constraints at once and
 /// configures each element with its input-side caps (the source with link 0).
 /// Data flows over `N + 1` bounded links across `N + 2` concurrently-joined
-/// arms. Each interior element handles a mid-stream `CapsChanged`
-/// element-locally (re-configure + α re-allocation + forward); the sink runs
-/// the Phase-B downstream re-solve.
+/// arms. On a mid-stream `CapsChanged` each interior element re-fixates its
+/// output against a downstream feasibility snapshot (Caps-α), re-allocates its
+/// own pool (α), and the β allocation re-cascade walks the demand back through
+/// every interior hop. Clock election and latency aggregation fold the source,
+/// every interior element, and the sink (via the dyn-safe `DynAsyncElement`
+/// mirrors).
 ///
-/// Scope (owed, extends the single-hop coordinator path of
-/// `run_source_transform_sink`): the cross-element β allocation re-cascade and
-/// the full downstream-subgraph re-solve over `N` hops; clock election and
-/// latency aggregation across the `dyn` interior elements (only the source and
-/// sink contribute today). ReFixate at startup fails loud (`FixationFailed`),
-/// as in `run_source_fanout`.
+/// Owed: Caps-β, a forward coordinator re-solve walk for a downstream
+/// `DerivedOutput` element that must re-derive mid-stream (driver-gated,
+/// DESIGN-M18-caps-resolve.md §3). ReFixate at startup fails loud
+/// (`FixationFailed`), as in `run_source_fanout`.
 #[cfg(feature = "std")]
 pub async fn run_linear_chain<Src, Snk, Clk>(
     source: &mut Src,
@@ -837,10 +838,23 @@ where
     }
     let allocation = proposal;
 
-    // Clock / latency: only the statically-typed source and sink contribute;
-    // the `dyn` interior elements don't expose `provide_clock` / `latency`.
-    let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
-    let elected = elect_clock([source.provide_clock(), AsyncElement::provide_clock(sink)]);
+    // Clock / latency: fold source, every interior element, then sink in path
+    // order. Interior elements are `dyn`, so their contributions come through
+    // the dyn-safe `DynAsyncElement::latency` / `provide_clock` mirrors, so a
+    // buffering interior transform or one that paces to hardware now
+    // participates (before, only the source and sink did).
+    let mut latencies = Vec::with_capacity(n_tx + 2);
+    let mut clocks = Vec::with_capacity(n_tx + 2);
+    latencies.push(source.latency());
+    clocks.push(source.provide_clock());
+    for t in transforms.iter() {
+        latencies.push(t.latency());
+        clocks.push(t.provide_clock());
+    }
+    latencies.push(AsyncElement::latency(sink));
+    clocks.push(AsyncElement::provide_clock(sink));
+    let latency = LatencyReport::aggregate(latencies);
+    let elected = elect_clock(clocks);
     let (clock_priority, base_time_ns) = match &elected {
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),

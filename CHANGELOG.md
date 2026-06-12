@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 4 follow-up: dyn interior elements contribute clock + latency
+
+- `run_linear_chain` folded `RunStats.latency` and `clock_priority` from only
+  the statically-typed source and sink; its `dyn` interior transforms were
+  skipped because `DynAsyncElement` didn't expose `latency` / `provide_clock`.
+  A buffering interior element (jitter buffer, reorder queue) under-reported
+  pipeline latency, and an interior clock provider was ignored in election.
+- `DynAsyncElement` gains dyn-safe `latency` / `provide_clock` mirrors
+  (defaulting to zero / none, matching `AsyncElement`; the blanket impl
+  delegates to the concrete element). `run_linear_chain` now folds source, every
+  interior element, then sink in path order for both the latency aggregate and
+  the clock election. Closes the last "owed" bullet on the `run_linear_chain`
+  doc (β re-cascade and the N-hop caps re-solve already landed).
+- Test: `m18_dyn_latency_clock.rs` runs `VideoTestSrc -> buffering+clock
+  transform -> FakeSink` (source/sink contribute nothing), asserting the path
+  latency (5 ms..10 ms) and elected `Provider` clock priority come from the
+  interior element. VERIFIED: `cargo test --workspace` green, no_std + runtime +
+  runtime/std builds, core clippy clean.
+
 ### M18 item 4 follow-up: Caps-α mid-stream caps re-solve over the downstream subgraph
 
 - Closes the caps half of the multi-element re-solve gap (the allocation half
