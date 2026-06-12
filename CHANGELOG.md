@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M32: `WasapiSrc` WASAPI capture source
+
+- The input mirror of M29's `WasapiSink`: `WasapiSrc` captures interleaved PCM
+  from the default audio capture endpoint (WASAPI shared mode) and emits
+  `DataFrame`s, so a live mic / line-in feeds a pipeline the way `AudioTestSrc`
+  feeds a synthetic tone. Windows-only behind the `wasapi-src` feature.
+- Caps come from the endpoint mix format, probed during negotiation
+  (`intercept_caps` on a short COM thread): `PcmF32Le` (the usual shared-mode
+  format) or `PcmS16Le`, at the device's channel count and rate. A headless
+  host (no capture endpoint) fails the probe loud so negotiation rejects the
+  pipeline rather than hanging.
+- Capture runs on a dedicated COM worker; buffers cross to the async `run` loop
+  over a tokio channel where they are stamped with device-clock timing and
+  pushed. Emits a fixed buffer count then `Eos` (the bounded test-source shape),
+  with a wall-clock guard so a silent/stalled endpoint can't run forever.
+- Tests: three unit tests (mix-format -> config mapping incl. EXTENSIBLE,
+  unsupported bit-depth rejection, source-only pad template) plus
+  `m32_wasapi_capture.rs`, which drives the source loop against a real endpoint
+  and asserts the requested buffers of non-empty PCM arrive with `Eos`, skipping
+  when no capture device is present. VERIFIED on a host with audio in: captured
+  5 buffers; unit suite green; `cargo check --workspace` green; feature clippy
+  clean.
+
 ### M31: HEVC in the fMP4 container (`Mp4Sink` / `Mp4Src`)
 
 - The container is now codec-aware, matching the M30 encoders. `Mp4Sink` muxes

@@ -60,6 +60,11 @@ pub mod d3d11sink;
 #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
 pub mod wasapisink;
 
+// WASAPI capture source: captures PCM from the default audio endpoint.
+// Windows-only; the input mirror of WasapiSink.
+#[cfg(all(target_os = "windows", feature = "wasapi-src"))]
+pub mod wasapisrc;
+
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]

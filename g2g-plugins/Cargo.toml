@@ -25,6 +25,10 @@ mf-encode = ["std", "dep:windows"]
 # on the default audio endpoint via WASAPI shared mode. The audible-output end
 # of the M25 audio path. Pulls the windows crate; Windows-only, implies std.
 wasapi-sink = ["std", "dep:windows"]
+# Windows WASAPI capture source (M32): captures interleaved PCM from the
+# default audio capture endpoint (shared mode), the input mirror of
+# WasapiSink. Pulls the windows crate; Windows-only, implies std.
+wasapi-src = ["std", "dep:windows"]
 # Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
 # frames in a Win32 window via a DXGI swapchain + D3D11 video processor
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
