@@ -23,6 +23,8 @@ use crate::runtime::coordinator::coordinator_with_recascade_n;
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
+#[cfg(feature = "std")]
+use crate::runtime::solver::{downstream_feasibility, resolve_forward_output, ForwardResolve};
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -779,7 +781,7 @@ where
     // borrows they hold on their elements (the source future, the legacy
     // bridge closures) are released before the per-element configure below
     // takes mutable access.
-    let links: Vec<Caps> = {
+    let (links, feasibility) = {
         let src_c = source.caps_constraint().await?;
         let tx_cs: Vec<CapsConstraint<'_>> = transforms
             .iter()
@@ -790,10 +792,15 @@ where
         refs.push(&src_c);
         refs.extend(tx_cs.iter());
         refs.push(&sink_c);
-        solve_linear(&refs).map_err(|f| {
+        let links = solve_linear(&refs).map_err(|f| {
             report_nego_failure(bus, f);
             G2gError::CapsMismatch
-        })?
+        })?;
+        // Caps-α: snapshot the downstream feasibility per output link so each
+        // interior arm can steer a mid-stream caps change toward a
+        // downstream-acceptable output without reaching its peers at runtime.
+        let feasibility = downstream_feasibility(&refs);
+        (links, feasibility)
     };
     if links.len() != n_links {
         return Err(G2gError::CapsMismatch);
@@ -871,9 +878,14 @@ where
         let out_tx = txs[i + 1].take().expect("transform output tx");
         let arm_coord = coord_handle.clone();
         // The arm's output-link caps, used to re-derive its proposal on a
-        // re-cascade. Tracks the caps it forwards downstream (exact for a
-        // pass-through interior element; a format-changing one would differ).
+        // re-cascade. Tracks the caps it forwards downstream (now exact for a
+        // format-changing element too, since Caps-α derives the forwarded
+        // output below).
         let mut out_caps = links[i + 1].clone();
+        // Caps-α: this arm's output-link downstream feasibility snapshot, and
+        // a bus clone for surfacing a mid-stream re-solve failure.
+        let downstream_feasible = feasibility[i + 1].clone();
+        let bus_for_arm = bus.cloned();
         let arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
             let mut adapter = SenderSink::new(out_tx);
             let mut control_open = true;
@@ -907,12 +919,38 @@ where
                         return Ok::<u64, G2gError>(0);
                     }
                     Some(PipelinePacket::CapsChanged(new_caps)) => {
+                        // Caps-α (D3): the runner derives the forwarded output
+                        // from the element's constraint, steered by the
+                        // downstream feasibility snapshot, so a format-changing
+                        // element is pushed toward a downstream-acceptable
+                        // output instead of a greedy local choice. `Defer`
+                        // keeps the prior behavior (forward the incoming caps,
+                        // let `process` derive); `Infeasible` means downstream
+                        // positively rejects, surfaced loud as a reverse
+                        // reconfigure into this boundary.
+                        let forward_caps = {
+                            let constraint = t.caps_constraint_as_transform();
+                            match resolve_forward_output(
+                                &constraint,
+                                &new_caps,
+                                downstream_feasible.as_ref(),
+                            ) {
+                                ForwardResolve::Fixed(caps) => caps,
+                                ForwardResolve::Defer => new_caps.clone(),
+                                ForwardResolve::Infeasible(failure) => {
+                                    report_nego_failure(bus_for_arm.as_ref(), failure);
+                                    in_rx.request_reconfigure(Reconfigure::Renegotiate);
+                                    continue;
+                                }
+                            }
+                        };
                         match t.configure_pipeline(&new_caps)? {
                             ConfigureOutcome::Accepted => {
-                                // M18 α: interior element re-derives its own pool.
-                                realloc_local_dyn(t, &new_caps);
-                                out_caps = new_caps.clone();
-                                t.process(PipelinePacket::CapsChanged(new_caps), &mut adapter)
+                                // M18 α: interior element re-derives its own pool
+                                // from its re-fixated output caps.
+                                realloc_local_dyn(t, &forward_caps);
+                                out_caps = forward_caps.clone();
+                                t.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
                                     .await?;
                             }
                             ConfigureOutcome::ReFixate(counter) => {

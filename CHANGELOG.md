@@ -5,6 +5,45 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 4 follow-up: Caps-α mid-stream caps re-solve over the downstream subgraph
+
+- Closes the caps half of the multi-element re-solve gap (the allocation half
+  landed as β N-hop; DESIGN-M16-caps-nego.md §13.3, §13.4 item 4). On a
+  mid-stream `CapsChanged`, `run_linear_chain` now derives each interior
+  element's forwarded output from its declared constraint, **steered by a
+  downstream feasibility snapshot**, instead of letting the element fixate
+  greedily and forward a doomed caps the sink then rejects (D3 from
+  DESIGN-M16-workaround3-reconfigure.md §4; full rationale in the new
+  DESIGN-M18-caps-resolve.md).
+- Mechanism (Caps-α): a backward feasibility sweep computed once at startup
+  (`solver::downstream_feasibility`) snapshots, per output link, the set the
+  downstream subgraph can still fixate, **independent of the (mid-stream
+  changing) upstream**. Each interior arm keeps its snapshot and, on a
+  `CapsChanged`, calls `solver::resolve_forward_output`: it derives the
+  element's output candidates from its constraint, narrows by the snapshot, and
+  fixates. `Fixed` forwards the steered output; `Defer` keeps prior behavior
+  (no concrete downstream set, or a `DerivedOutput`/ranged output the runner
+  can't fixate, so the element's own `process` derives); `Infeasible` fails
+  loud (reverse `Reconfigure` into the boundary + structured `EmptyLink` on the
+  bus). This needs no central solve and no ownership move: each arm reaches only
+  its own constraint, which the spawned-arm topology already allows.
+- Scope: `run_linear_chain` (the N-hop runner). The helpers are `std`-gated
+  with it. Steering activates only when a concrete downstream `Accepts` set
+  exists, so pass-through chains (`IdentityAny`) and `AcceptsAny` sinks are
+  byte-identical to before. Owed: the single-transform `run_source_transform_sink`
+  mirror, and Caps-β (a forward coordinator re-solve walk) for a downstream
+  `DerivedOutput` element that must re-derive mid-stream, gated on a real driver.
+- Tests: `m18_caps_resolve.rs` drives a `DerivedOutput` converter through a
+  mid-stream RGBA -> I420 change into an NV12-only sink: Caps-α steers the
+  converter to NV12 (`midstream_change_steers_converter_to_sink_acceptable_output`),
+  and a converter with no NV12 path fails loud to the bus
+  (`..._no_acceptable_output_fails_loud_to_bus`). Plus two solver unit tests
+  (`downstream_feasibility_is_source_independent`,
+  `resolve_forward_output_steers_defers_and_rejects`). VERIFIED:
+  `cargo test --workspace` green (g2g-core 125, g2g-plugins suites incl. the new
+  2), β N-hop and multi-element runners unaffected, no_std + runtime build,
+  core clippy clean.
+
 ### M18 item 4 follow-up: β allocation re-cascade over N hops
 
 - Extends the single-hop β (sink -> lone transform) to the full interior of

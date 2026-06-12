@@ -397,6 +397,120 @@ fn forward_propagate(
     }
 }
 
+/// Caps-α mid-stream re-fixation outcome for one interior element
+/// (`DESIGN-M18-caps-resolve.md` §3, D3). The runner derives the element's
+/// forwarded output from its declared constraint, steered by the downstream
+/// feasibility snapshot, instead of letting the element fixate greedily.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ForwardResolve {
+    /// Runner-derived, downstream-aware output caps to forward.
+    Fixed(Caps),
+    /// The output can't be derived/fixated from the constraint, or there is
+    /// no concrete downstream set to steer against. Fall back to the status
+    /// quo: forward the incoming caps and let the element's own `process`
+    /// derive its output (covers `DerivedOutput` / legacy / ranged outputs).
+    Defer,
+    /// The element's possible outputs positively can't satisfy what the
+    /// downstream subgraph accepts. Loud: the caller drives a reverse
+    /// reconfigure and posts the structured failure.
+    Infeasible(NegotiationFailure),
+}
+
+/// Backward feasibility sweep: per output link, the set it can carry such
+/// that the elements *downstream* of that link can still fixate to the sink,
+/// ignoring the (mid-stream-changing) upstream. `None` on a link means
+/// "downstream imposes no expressible constraint here" (an `AcceptsAny`
+/// sink, or a non-invertible `DerivedOutput` / legacy element below it).
+/// Computed once at startup and snapshotted per interior arm so the
+/// mid-stream re-solve can steer an element's output without reaching the
+/// downstream elements at runtime (`DESIGN-M18-caps-resolve.md` §3).
+#[cfg(feature = "std")]
+pub(crate) fn downstream_feasibility(constraints: &[&CapsConstraint<'_>]) -> Vec<Option<CapsSet>> {
+    let n = constraints.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let n_links = n - 1;
+    let mut feas: Vec<Option<CapsSet>> = alloc::vec![None; n_links];
+    // Seed the sink link from the sink's accept set; a wildcard or legacy
+    // sink leaves it unconstrained.
+    feas[n_links - 1] = match constraints[n - 1] {
+        CapsConstraint::Accepts(s) => Some(s.clone()),
+        _ => None,
+    };
+    // Propagate upstream through each interior transform: the element at
+    // position k+1 sits between link k and link k+1.
+    for k in (0..n_links - 1).rev() {
+        feas[k] = backward_feasible(constraints[k + 1], feas[k + 1].as_ref());
+    }
+    feas
+}
+
+/// One reverse hop of [`downstream_feasibility`]: given the feasible set on
+/// an element's output link, the set its input link can carry.
+#[cfg(feature = "std")]
+fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<CapsSet> {
+    match c {
+        CapsConstraint::Identity(s) => Some(match down {
+            Some(d) => s.intersect(d),
+            None => s.clone(),
+        }),
+        CapsConstraint::IdentityAny => down.cloned(),
+        CapsConstraint::Mapping(pairs) => {
+            let mut acc = CapsSet::from_alternatives(Vec::new());
+            for (in_set, out_set) in pairs {
+                let out_ok = match down {
+                    Some(d) => !out_set.intersect(d).is_empty(),
+                    None => true,
+                };
+                if out_ok {
+                    acc = acc.union(in_set);
+                }
+            }
+            Some(acc)
+        }
+        // Non-invertible (DerivedOutput / legacy) or non-transform shape:
+        // impose no constraint on the input link.
+        _ => None,
+    }
+}
+
+/// Caps-α: derive the forwarded output for an interior element on a
+/// mid-stream caps change (`DESIGN-M18-caps-resolve.md` §3, D3). `input` is
+/// the new fixated caps the element receives; `downstream_feasible` is its
+/// output link's snapshot from [`downstream_feasibility`]. Steers only when
+/// a concrete downstream set exists; otherwise defers to the element's own
+/// `process` (status quo), so pass-through and unconstrained chains keep
+/// their prior behavior.
+#[cfg(feature = "std")]
+pub(crate) fn resolve_forward_output(
+    constraint: &CapsConstraint<'_>,
+    input: &Caps,
+    downstream_feasible: Option<&CapsSet>,
+) -> ForwardResolve {
+    let Some(d) = downstream_feasible else {
+        return ForwardResolve::Defer;
+    };
+    // Index 1 is a placeholder: the link position is meaningful only inside
+    // a full-chain solve. Mid-stream the failure is link-local to this arm.
+    let candidates = match forward_propagate(constraint, &CapsSet::one(input.clone()), 1) {
+        Ok(c) => c,
+        Err(_) => return ForwardResolve::Defer,
+    };
+    let narrowed = candidates.intersect(d);
+    if narrowed.is_empty() {
+        return ForwardResolve::Infeasible(NegotiationFailure::EmptyLink {
+            upstream: 0,
+            downstream: 1,
+        });
+    }
+    match narrowed.fixate() {
+        Some(c) => ForwardResolve::Fixed(c),
+        None => ForwardResolve::Defer,
+    }
+}
+
 fn apply_constraint(
     i: usize,
     c: &CapsConstraint<'_>,
@@ -942,6 +1056,74 @@ mod tests {
         assert!(matches!(
             solve_linear(&[&src, &map, &sink]),
             Err(NegotiationFailure::EmptyLink { .. })
+        ));
+    }
+
+    /// Caps-α downstream feasibility ignores the source: link 0's set is the
+    /// pass-through transform's own set narrowed by the sink, independent of
+    /// what the source happens to produce, so a mid-stream source change can
+    /// be re-fixated against the real downstream capability.
+    #[cfg(feature = "std")]
+    #[test]
+    fn downstream_feasibility_is_source_independent() {
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 64, 64, 30)));
+        let id = CapsConstraint::IdentityAny;
+        let sink = CapsConstraint::Accepts(CapsSet::one(video(
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+        )));
+        let feas = downstream_feasibility(&[&src, &id, &sink]);
+        // Two links. Both carry the sink's NV12 set (IdentityAny couples them);
+        // neither is narrowed to the source's RGBA.
+        assert_eq!(feas.len(), 2);
+        assert!(feas[1].as_ref().unwrap().accepts(&video(
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+        )));
+        assert!(feas[0].as_ref().unwrap().accepts(&video(
+            RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any,
+        )));
+        assert!(!feas[0].as_ref().unwrap().accepts(&video(
+            RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any,
+        )));
+    }
+
+    /// `resolve_forward_output` steers a format converter toward the one
+    /// output its downstream accepts, defers when there is no concrete
+    /// downstream set, and rejects loud when no output can satisfy it. A
+    /// format-only converter is a `DerivedOutput` so it carries the input's
+    /// concrete geometry into its output (a static `Mapping` with `Any` dims
+    /// can't fixate and would `Defer`).
+    #[cfg(feature = "std")]
+    #[test]
+    fn resolve_forward_output_steers_defers_and_rejects() {
+        // Converter: any raw input -> {same format, NV12} at the input's dims.
+        let conv = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
+            let Caps::RawVideo { format, width, height, framerate } = input else {
+                return CapsSet::from_alternatives(vec![]);
+            };
+            CapsSet::from_alternatives(vec![
+                video(*format, width.clone(), height.clone(), framerate.clone()),
+                video(RawVideoFormat::Nv12, width.clone(), height.clone(), framerate.clone()),
+            ])
+        }));
+        let i420 = fixed_video(RawVideoFormat::I420, 64, 64, 30);
+        let nv12_set = CapsSet::one(video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any));
+
+        // Steered: downstream accepts only NV12, so the runner picks NV12.
+        match resolve_forward_output(&conv, &i420, Some(&nv12_set)) {
+            ForwardResolve::Fixed(c) => {
+                assert_eq!(c, video(RawVideoFormat::Nv12, Dim::Fixed(64), Dim::Fixed(64), Rate::Fixed(30 << 16)));
+            }
+            other => panic!("expected Fixed(NV12), got {other:?}"),
+        }
+
+        // No concrete downstream set: defer to the element's own process.
+        assert_eq!(resolve_forward_output(&conv, &i420, None), ForwardResolve::Defer);
+
+        // Downstream accepts only Bgra8, which the converter cannot emit: loud.
+        let bgra_set = CapsSet::one(video(RawVideoFormat::Bgra8, Dim::Any, Dim::Any, Rate::Any));
+        assert!(matches!(
+            resolve_forward_output(&conv, &i420, Some(&bgra_set)),
+            ForwardResolve::Infeasible(NegotiationFailure::EmptyLink { .. })
         ));
     }
 }

@@ -440,10 +440,14 @@ remains.
   startup negotiation + the M12 allocation fold. A mid-stream `CapsChanged`
   re-cascades the allocation demand through *every* interior element via the
   reactive coordinator (sink reports → forward to last arm → each arm replies
-  its re-derived proposal → forward one hop up). *Owed:* the mid-stream caps
-  re-solve itself is still element-local per interior element plus the Phase-B
-  sink re-solve (the *allocation* re-cascade is N-hop; a full caps
-  re-negotiation over the downstream subgraph is not).
+  its re-derived proposal → forward one hop up). *Caps-α landed
+  (DESIGN-M18-caps-resolve.md):* a mid-stream `CapsChanged` now re-fixates each
+  interior element's output against a startup downstream-feasibility snapshot,
+  so a format-changing element is steered toward a downstream-acceptable output
+  (and rejects loud when none exists) instead of forwarding greedily. *Owed:*
+  Caps-β, a forward coordinator re-solve walk for a downstream `DerivedOutput`
+  element that must re-derive mid-stream (driver-gated), and the single-transform
+  `run_source_transform_sink` mirror.
 - **Async source caps discovery.** Workaround #1 has the opt-in
   `RtspSrc::with_expected_dims(w, h)` for callers who know the
   camera dims. The full fix needs `SourceLoop::intercept_caps` to be
@@ -506,9 +510,15 @@ remains.
    `caps_constraint_as_transform` for erased interior elements. The β
    allocation re-cascade now walks all interior hops via the reactive
    coordinator (`coordinator_with_recascade_n`, `CoordinatorEvent::ArmProposal`;
-   `m18_beta_nhop.rs`). *Owed:* a full mid-stream caps re-*negotiation* over
-   the downstream subgraph (today it's element-local per interior element plus
-   the Phase-B sink re-solve).
+   `m18_beta_nhop.rs`). The mid-stream caps re-solve landed as **Caps-α**
+   (DESIGN-M18-caps-resolve.md, `m18_caps_resolve.rs`): the runner re-fixates
+   each interior element's output against a source-independent downstream
+   feasibility snapshot (`solver::downstream_feasibility` +
+   `resolve_forward_output`), steering format-changers toward a
+   downstream-acceptable output and rejecting loud when none exists. *Owed:*
+   Caps-β (a forward coordinator re-solve walk for a downstream `DerivedOutput`
+   that re-derives mid-stream, driver-gated) and the single-transform
+   `run_source_transform_sink` mirror.
 5. **Async `SourceLoop::intercept_caps`.** *Done (M18).* Trait gains
    `type CapsFuture<'a>` + `fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a>`;
    default `caps_constraint` awaits it. `DynSourceLoop` returns
