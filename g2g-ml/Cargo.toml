@@ -14,10 +14,16 @@ std = ["g2g-core/std"]
 # Pure-Rust Burn backend with wgpu. Targets embedded / Wasm / RTOS.
 burn = ["std"]
 # ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
-ort = ["std"]
+# ort's default features download the platform's ONNX Runtime binaries at
+# build time (network required on the first build).
+ort = ["std", "dep:ort"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
+ort = { version = "2.0.0-rc.12", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [lints]
 workspace = true

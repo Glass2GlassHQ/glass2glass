@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M21: first `g2g-ml` element, `OrtInference` (ONNX Runtime)
+
+- Bootstraps the `g2g-ml` crate (previously an empty stub) with its first
+  inference element, per DESIGN.md §5: `OrtInference` (`ort` feature) is an
+  `AsyncElement` transform negotiating `Caps::RawVideo` on the input pad
+  and `Caps::Tensor` on the output pad, sitting in the graph like any other
+  element. Each RGBA frame converts to a normalized f32 NCHW RGB tensor
+  (`value / 255`), runs through the session (ONNX Runtime default CPU EP;
+  CUDA / TensorRT / DirectML EPs are an in-module builder follow-up), and
+  the model's output is emitted as a `DataFrame` of f32 LE bytes under
+  `Caps::Tensor { F32, shape, Nchw }`, inheriting the source frame's timing
+  so glass-to-glass latency stays traceable.
+- v1 model contract validated loud at construction: one f32 tensor input
+  `[N, 3, H, W]` (static H/W, batch 1 or dynamic-as-1) and one f32 tensor
+  output with static dims (dynamic leading batch coerced to 1). The element
+  then pins negotiation to RGBA at exactly `W x H`
+  (`DerivedOutput(RGBA@WxH -> tensor caps)`), so a geometry mismatch fails
+  at solve time, not at inference time.
+- Dependency: `ort` 2.0.0-rc.12 (pykeio's ONNX Runtime binding, verified
+  current and maintainer-recommended; API checked against the fetched crate
+  source). Default ort features download the platform's ONNX Runtime
+  binaries on first build (network required). The module is named
+  `ortinfer` so in-crate paths can't collide with the `ort` dependency.
+- Tests run against real ONNX Runtime with no checked-in blob or network
+  fixture: `ort_inference.rs` hand-encodes a minimal ONNX ModelProto (one
+  `Identity` node) in ~80 lines of protobuf wire format. Contract
+  validation (4-channel and rank-2 models rejected), geometry-pinned
+  negotiation, exactly-once `CapsChanged` emission, and byte-exact output
+  (Identity model output == the normalized RGB planes) are all asserted;
+  plus a unit test for the dynamic-dim coercion. VERIFIED:
+  `cargo test -p g2g-ml --features ort` green (1 unit + 2 integration),
+  matching clippy green, default `cargo test --workspace` green
+  (the new dep is feature-gated off the default graph).
+
 ### M20: file I/O elements (`FileSink` / `FileSrc`)
 
 - Closes the record / playback loop M19 opened: `FileSink` writes every
