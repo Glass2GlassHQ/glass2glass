@@ -1108,11 +1108,11 @@ where
 
 /// As [`run_source_transform_sink`], but posts a structured
 /// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed)
-/// to `bus` when startup negotiation fails, so the application learns *which*
-/// link conflicted (the returned error stays the opaque `CapsMismatch`).
-/// M18 item 7. The bus is opt-in to keep the common call site unchanged;
-/// the other runners and the mid-stream re-solve path are owed the same
-/// wiring.
+/// to `bus` so the application learns *which* link conflicted (the returned
+/// error stays the opaque `CapsMismatch`). M18 item 7. Covers both startup
+/// negotiation and the mid-stream re-solve sites (the sink's Phase-B re-solve
+/// and the transform's Caps-α `Infeasible`). The bus is opt-in to keep the
+/// common call site unchanged.
 pub async fn run_source_transform_sink_with_bus<Src, Tx, Snk, Clk>(
     source: &mut Src,
     transform: &mut Tx,
