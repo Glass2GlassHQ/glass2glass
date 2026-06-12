@@ -77,9 +77,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    Dim, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate,
-    PadTemplates, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
+    ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink, OwnedD3D11Texture,
+    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Texture-pool headroom the sink asks the decoder to keep resident: the frame
@@ -200,6 +200,21 @@ impl AsyncElement for D3D11Sink {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5: native NV12-only sink constraint. With every decoder a
+    /// native `DerivedOutput`, the solver intersects this against the
+    /// decoder's NV12 output and lands fixed NV12 on the link at startup,
+    /// so a non-NV12 display chain fails loud in negotiation rather than
+    /// reaching `configure_pipeline`. Geometry stays open (`Dim::Any`);
+    /// the decoder fixates it.
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))
     }
 
     /// M12 / W1: ask the decoder to keep buffers in D3D11 textures so the
@@ -644,6 +659,26 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
+    }
+
+    #[test]
+    fn caps_constraint_is_accepts_nv12_any() {
+        // M16 step 5: native sink constraint accepts NV12 at any geometry,
+        // so a fully-native decoder->sink chain rejects non-NV12 in the
+        // solver rather than via the dynamic intercept callback.
+        let sink = D3D11Sink::new();
+        let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
+            panic!("expected Accepts");
+        };
+        assert_eq!(
+            set.alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            }]
+        );
     }
 
     #[test]

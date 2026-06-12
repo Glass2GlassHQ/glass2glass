@@ -5,6 +5,45 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M16 step 5: migrate the display sinks to native `caps_constraint`
+
+- Completes the §8 step-5 element migration. The three present sinks,
+  `WaylandSink`, `KmsSink`, and `D3D11Sink`, previously rode the `LegacySink`
+  bridge (pass-through `intercept_caps`, NV12 enforced only in
+  `configure_pipeline`). Each now overrides
+  `caps_constraint_as_sink() -> Accepts(CapsSet::one(NV12 / any geometry))`,
+  so a fully-native decoder -> sink chain narrows NV12 in the solver's arc
+  consistency rather than via the dynamic intercept callback. Geometry stays
+  open (`Dim::Any`); the upstream decoder's `DerivedOutput` fixates it.
+- Side effect: the ACCEPT_CAPS query is now truthful for these sinks. As
+  `LegacySink(passthrough)` their `CapsConstraint::accepts` always returned
+  `true` (the intercept clones any input), so a query wrongly reported an
+  NV12-only sink would accept H.264. `Accepts(NV12)` reports it correctly.
+- `InterleaveMux` was already native (`caps_constraint_as_input` /
+  `caps_constraint_for_output`, M18 step 1), so no legacy `MultiInputElement`
+  remains. The legacy bridge variants (`LegacySource` / `LegacyTransform` /
+  `LegacySink`) stay in `CapsConstraint` as the default for any
+  not-yet-overridden element, but no in-tree element relies on them now.
+- One GPU-free unit test per sink (`caps_constraint_is_accepts_nv12_any`)
+  locks the native shape. VERIFIED on the Windows dev host:
+  `cargo test --workspace` (default) green, and
+  `cargo test -p g2g-plugins --features "mf-decode d3d11-sink"` green with the
+  new `D3D11Sink` test passing. `WaylandSink` / `KmsSink` are Linux-gated and
+  not compiled here; their edits mirror the `D3D11Sink` pattern verbatim and
+  are owed a Linux compile, same as the rest of that path.
+
+### M16 step 6 audit: CapsFilter + ACCEPT_CAPS confirmed fully wired
+
+- No code change. Verified §8 step 6 is complete and correct:
+  `CapsConstraint::accepts` / `CapsSet::accepts` (the §7 ACCEPT_CAPS predicate)
+  have real consumers (`CapsFilter::configure_pipeline` + mid-stream
+  validation, `CudaDownload::configure_pipeline`), not just tests; the
+  `accepts` match is exhaustive over all ten `CapsConstraint` variants
+  (`DerivedOutput` checks the derived output is non-empty, the legacy bridges
+  defer to their wrapped callbacks). `CapsFilter` is the native `Identity(set)`
+  pass-through and is integration-tested in a real solver chain
+  (`pipeline_smoke.rs`: matching filter negotiates, disjoint filter fails).
+
 ### M12: allocation query runs before `configure_pipeline` (pool sizing)
 
 - The M12 allocation query for a `source -> transform -> sink` chain now runs

@@ -100,8 +100,9 @@ use smithay_client_toolkit::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, VideoCodec, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    Dim, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -284,6 +285,21 @@ impl AsyncElement for WaylandSink {
         // the solver assigns this link NV12 directly, so configure receives
         // NV12 at startup rather than the decoder's pre-decode H.264 caps.
         Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5: native NV12-only sink constraint. The solver intersects
+    /// this against the upstream decoder's NV12 `DerivedOutput` and lands
+    /// fixed NV12 on the link at startup, so a non-NV12 (undecoded) display
+    /// chain fails loud in negotiation rather than reaching
+    /// `configure_pipeline`. Geometry stays open (`Dim::Any`); the decoder
+    /// fixates it, and a mid-stream change rebuilds the worker (5j).
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -838,6 +854,26 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
+    }
+
+    #[test]
+    fn caps_constraint_is_accepts_nv12_any() {
+        // M16 step 5: native sink constraint accepts NV12 at any geometry,
+        // so a fully-native decoder->sink chain rejects non-NV12 in the
+        // solver rather than via the dynamic intercept callback.
+        let sink = WaylandSink::new();
+        let CapsConstraint::Accepts(set) = sink.caps_constraint_as_sink() else {
+            panic!("expected Accepts");
+        };
+        assert_eq!(
+            set.alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            }]
+        );
     }
 
     #[test]
