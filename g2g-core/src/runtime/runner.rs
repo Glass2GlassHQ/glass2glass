@@ -13,12 +13,12 @@ use crate::frame::PipelinePacket;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
-    coordinator, negotiate_source_transform_sink, realloc_local, CoordinatorEvent,
-    MAX_FIXATION_ATTEMPTS,
+    coordinator_with_recascade, negotiate_source_transform_sink, realloc_local, ArmDirective,
+    CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
-use crate::runtime::join::Join2;
+use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{solve_linear, NegotiationFailure};
 
 #[cfg(feature = "std")]
@@ -685,15 +685,17 @@ where
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
 
-    // M18 β scaffolding: a single coordinator task observes the
-    // control channel alongside the data-plane arms. The sink arm is the
-    // sole reporter for now (DESIGN-M16-workaround3-reconfigure.md §9.4
-    // R3: out-of-band channel, not in-band packets). No reconfiguration
-    // logic lives here yet — this validates the channel topology before
-    // Session E moves the real `Recascade` cascade onto it. The handle is
-    // moved into the sink arm; when that arm finishes, the last handle
-    // drops, the channel closes, and the coordinator task resolves.
-    let (coord, coord_handle) = coordinator(link_capacity);
+    // M18 β: a single coordinator task owns the cross-element re-cascade.
+    // The sink arm reports an applied mid-stream `CapsChanged` (with its
+    // re-derived allocation proposal) out-of-band
+    // (DESIGN-M16-workaround3-reconfigure.md §9.4 R3); the coordinator
+    // forwards the proposal one hop upstream over `transform_ctrl_rx` to the
+    // transform's `configure_allocation`. The transform arm selects on that
+    // control receiver alongside its data link, so the directive reaches it
+    // even while it is parked on `recv().await`. When the sink arm finishes,
+    // the handle drops, the coordinator drains and closes `transform_ctrl_rx`,
+    // and the transform arm's EOS-drain unblocks.
+    let (coord, coord_handle, transform_ctrl_rx) = coordinator_with_recascade(link_capacity);
 
     let source_fut = async move {
         let mut adapter = SenderSink::new(link1_tx);
@@ -701,12 +703,49 @@ where
     };
 
     let transform_fut = async move {
+        let ctrl_rx = transform_ctrl_rx;
         let mut adapter = SenderSink::new(link2_tx);
+        // β: while the coordinator is alive, race the data link against the
+        // re-cascade control channel so a directive is applied promptly. Once
+        // control closes (coordinator gone) we degrade to data-only so the
+        // closed arm can't spin.
+        let mut control_open = true;
         loop {
-            match link1_rx.recv().await {
+            let packet = if control_open {
+                match select2(ctrl_rx.recv(), link1_rx.recv()).await {
+                    Either::Left(Some(ArmDirective::Recascade(params))) => {
+                        // β: apply the sink's downstream-derived proposal to
+                        // our own output pool, then keep waiting for data.
+                        transform.configure_allocation(&params);
+                        continue;
+                    }
+                    Either::Left(None) => {
+                        control_open = false;
+                        continue;
+                    }
+                    Either::Right(packet) => packet,
+                }
+            } else {
+                link1_rx.recv().await
+            };
+            match packet {
                 Some(PipelinePacket::Eos) => {
                     transform.process(PipelinePacket::Eos, &mut adapter).await?;
                     adapter.push(PipelinePacket::Eos).await?;
+                    // β: the EOS we just forwarded will, once the sink applies
+                    // its final `CapsChanged` and the coordinator forwards the
+                    // matching re-cascade, close this control channel. Drain it
+                    // first so a tail-end proposal is applied before we exit
+                    // (in a live stream these apply inline above; this only
+                    // covers the directive still in flight at shutdown).
+                    while control_open {
+                        match ctrl_rx.recv().await {
+                            Some(ArmDirective::Recascade(params)) => {
+                                transform.configure_allocation(&params);
+                            }
+                            None => control_open = false,
+                        }
+                    }
                     return Ok::<(), G2gError>(());
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
@@ -770,13 +809,19 @@ where
                     match sink.configure_pipeline(&sink_caps)? {
                         ConfigureOutcome::Accepted => {
                             // M18 α: element-local re-allocation under the
-                            // new caps before the sink sees the packet.
-                            realloc_local(sink, &sink_caps);
-                            // M18 β: report the applied mid-stream caps
-                            // change to the coordinator before forwarding
-                            // it into the sink. Observe-only today.
+                            // new caps before the sink sees the packet. The
+                            // returned proposal is what the sink now wants
+                            // its upstream to allocate.
+                            let proposal = realloc_local(sink, &sink_caps);
+                            // M18 β: report the applied caps change plus the
+                            // sink's re-derived proposal so the coordinator
+                            // forwards it one hop upstream to the transform's
+                            // `configure_allocation` (the single-hop cascade).
                             coord_handle
-                                .report(CoordinatorEvent::CapsChanged(sink_caps.clone()))
+                                .report(CoordinatorEvent::CapsChanged {
+                                    caps: sink_caps.clone(),
+                                    proposal,
+                                })
                                 .await;
                             sink.process(
                                 PipelinePacket::CapsChanged(sink_caps),

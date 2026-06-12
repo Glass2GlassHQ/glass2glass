@@ -39,11 +39,30 @@ pub(crate) const MAX_FIXATION_ATTEMPTS: u32 = 3;
 /// data links already carry.
 #[derive(Debug, Clone)]
 pub enum CoordinatorEvent {
-    /// A boundary element forwarded a mid-stream `CapsChanged`
-    /// downstream and the next element accepted it. β turns this into a
-    /// `Recascade { caps }` that re-runs the allocation cascade over the
-    /// affected subgraph; the Session B stub only records it.
-    CapsChanged(Caps),
+    /// A boundary element forwarded a mid-stream `CapsChanged` downstream
+    /// and the sink accepted it. β (Session E): the coordinator forwards
+    /// the sink's re-derived allocation `proposal` one hop upstream to the
+    /// transform's `configure_allocation`, re-running the allocation
+    /// cascade over the affected subgraph (the link the sink reads from).
+    /// `proposal` is `None` when the sink declares no allocation needs, in
+    /// which case there is nothing to cascade and the event is observe-only.
+    CapsChanged {
+        caps: Caps,
+        proposal: Option<AllocationParams>,
+    },
+}
+
+/// A directive the coordinator sends to an interruptible upstream arm to
+/// apply a mid-stream allocation re-cascade (β). The arm calls
+/// `configure_allocation` on its element at its next [`select2`] await
+/// point, so a `recv().await` parked on data does not block the directive.
+///
+/// [`select2`]: crate::runtime::select2
+#[derive(Debug, Clone)]
+pub(crate) enum ArmDirective {
+    /// Apply this downstream-derived proposal to the element's own pool:
+    /// the upstream half of the cascade (`transform.configure_allocation`).
+    Recascade(AllocationParams),
 }
 
 /// Producer end of the control channel, handed (by clone) to a runner
@@ -58,40 +77,77 @@ pub struct CoordinatorHandle {
 impl CoordinatorHandle {
     /// Report an event to the coordinator. Best-effort: a closed channel
     /// means the coordinator already terminated (shutdown), so the event
-    /// is dropped. Session B never depends on delivery beyond the
-    /// observe-only count.
+    /// is dropped.
     pub async fn report(&self, event: CoordinatorEvent) {
         let _ = self.tx.send(event).await;
     }
 }
 
-/// The coordinator task. Session B behavior: drain the control channel,
-/// counting observed events, until every [`CoordinatorHandle`] has
-/// dropped (channel close). Returns the count so the runner can surface
-/// it in [`RunStats`](crate::runtime::RunStats) for topology validation.
+/// The coordinator task. Drains the control channel until every
+/// [`CoordinatorHandle`] has dropped (channel close), counting observed
+/// events for [`RunStats`](crate::runtime::RunStats). β: on a
+/// [`CoordinatorEvent::CapsChanged`] carrying a proposal, it forwards an
+/// [`ArmDirective::Recascade`] one hop upstream over `transform_ctrl` (the
+/// single-hop allocation cascade for a `source -> transform -> sink`
+/// chain; the source leg and the N-hop cascade belong to the multi-element
+/// runner). `transform_ctrl` is `None` for an observe-only coordinator.
 #[derive(Debug)]
 pub struct Coordinator {
     rx: Receiver<CoordinatorEvent>,
+    transform_ctrl: Option<Sender<ArmDirective>>,
 }
 
 impl Coordinator {
     /// Run to completion. Resolves once all handles drop.
     pub async fn run(self) -> u64 {
         let mut observed = 0u64;
-        while self.rx.recv().await.is_some() {
+        while let Some(event) = self.rx.recv().await {
             observed += 1;
+            match event {
+                CoordinatorEvent::CapsChanged { proposal, .. } => {
+                    // β single-hop: forward the sink's re-derived proposal
+                    // to the transform's `configure_allocation`. Serial: at
+                    // most one directive is in flight, so the bounded
+                    // control channel never blocks here. Best-effort: a
+                    // closed channel means the transform arm already drained
+                    // and exited, so the directive is moot.
+                    if let (Some(ctrl), Some(p)) = (&self.transform_ctrl, proposal) {
+                        let _ = ctrl.send(ArmDirective::Recascade(p)).await;
+                    }
+                }
+            }
         }
         observed
     }
 }
 
-/// Build the control channel: a [`Coordinator`] task and one
-/// [`CoordinatorHandle`] for the runner to clone to its arms. `capacity`
-/// bounds in-flight events; mid-stream caps changes are rare relative to
-/// data frames, so a small bound is ample.
+/// Build an observe-only control channel: a [`Coordinator`] with no
+/// upstream re-cascade and one [`CoordinatorHandle`] to clone to the arms.
+/// `capacity` bounds in-flight events; mid-stream caps changes are rare
+/// relative to data frames, so a small bound is ample.
 pub fn coordinator(capacity: usize) -> (Coordinator, CoordinatorHandle) {
     let (tx, rx) = bounded(capacity);
-    (Coordinator { rx }, CoordinatorHandle { tx })
+    (
+        Coordinator { rx, transform_ctrl: None },
+        CoordinatorHandle { tx },
+    )
+}
+
+/// β: build the control channel with an upstream re-cascade leg to the
+/// transform arm. Returns the [`ArmDirective`] receiver the transform arm
+/// selects on alongside its data link. Separate from [`coordinator`] so the
+/// 2-element [`run_simple_pipeline`](crate::runtime::run_simple_pipeline)
+/// (no transform to re-cascade into) keeps the observe-only coordinator.
+pub(crate) fn coordinator_with_recascade(
+    capacity: usize,
+) -> (Coordinator, CoordinatorHandle, Receiver<ArmDirective>) {
+    let (tx, rx) = bounded(capacity);
+    let (ctrl_tx, ctrl_rx) = bounded(capacity);
+    (
+        Coordinator { rx, transform_ctrl: Some(ctrl_tx) },
+        CoordinatorHandle { tx },
+        ctrl_rx,
+    )
 }
 
 /// Per-link fixated caps from the linear startup negotiation the
@@ -230,13 +286,20 @@ where
 /// Safe against double allocation by the per-`Frame.caps` invariant
 /// (§5): in-flight old-caps frames already hold old-pool buffers; only
 /// frames after this point key the new params.
-pub(crate) fn realloc_local<E>(element: &mut E, caps: &Caps)
+///
+/// Returns the element's re-derived proposal so the caller can also feed
+/// it to β's cross-element cascade (the sink's proposal flows one hop
+/// upstream to the transform). `None` when the element declares no
+/// allocation needs.
+pub(crate) fn realloc_local<E>(element: &mut E, caps: &Caps) -> Option<AllocationParams>
 where
     E: AsyncElement,
 {
-    if let Some(params) = element.propose_allocation(caps) {
-        element.configure_allocation(&params);
+    let params = element.propose_allocation(caps);
+    if let Some(p) = &params {
+        element.configure_allocation(p);
     }
+    params
 }
 
 /// [`DynAsyncElement`] counterpart of [`realloc_local`], for `Box`-erased
@@ -245,5 +308,100 @@ where
 pub(crate) fn realloc_local_dyn(element: &mut dyn crate::element::DynAsyncElement, caps: &Caps) {
     if let Some(params) = element.propose_allocation(caps) {
         element.configure_allocation(&params);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caps::{Caps, Dim, Rate, RawVideoFormat};
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+
+    fn noop_waker() -> Waker {
+        // SAFETY: every NOOP_VTABLE fn is a no-op that never dereferences the
+        // data pointer, so a null data pointer is sound.
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
+    }
+
+    /// Busy-poll a future to completion. Every channel op in these tests
+    /// resolves without truly parking (capacity is always available and the
+    /// senders close deterministically), so this never spins.
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = fut;
+        // SAFETY: `fut` lives on this stack frame and is not moved after
+        // pinning.
+        let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        loop {
+            if let Poll::Ready(v) = pinned.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    fn nv12(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        }
+    }
+
+    #[test]
+    fn forwards_proposal_as_recascade_directive() {
+        let (coord, handle, ctrl_rx) = coordinator_with_recascade(2);
+        block_on(handle.report(CoordinatorEvent::CapsChanged {
+            caps: nv12(1920, 1080),
+            proposal: Some(AllocationParams::system(4096, 2)),
+        }));
+        // Drop the handle so the coordinator terminates after draining.
+        drop(handle);
+
+        let observed = block_on(coord.run());
+        assert_eq!(observed, 1, "the one reported event is counted");
+        match ctrl_rx.try_recv() {
+            Some(ArmDirective::Recascade(p)) => assert_eq!(p.size_bytes, 4096),
+            other => panic!("expected Recascade(4096), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caps_change_without_proposal_forwards_nothing() {
+        let (coord, handle, ctrl_rx) = coordinator_with_recascade(2);
+        block_on(handle.report(CoordinatorEvent::CapsChanged {
+            caps: nv12(640, 480),
+            proposal: None,
+        }));
+        drop(handle);
+
+        let observed = block_on(coord.run());
+        assert_eq!(observed, 1, "the event is still counted");
+        assert!(
+            ctrl_rx.try_recv().is_none(),
+            "no proposal means no upstream re-cascade directive"
+        );
+    }
+
+    #[test]
+    fn observe_only_coordinator_never_forwards() {
+        // The 2-element pipeline's coordinator has no transform leg.
+        let (coord, handle) = coordinator(2);
+        block_on(handle.report(CoordinatorEvent::CapsChanged {
+            caps: nv12(1280, 720),
+            proposal: Some(AllocationParams::system(8192, 1)),
+        }));
+        drop(handle);
+        assert_eq!(block_on(coord.run()), 1);
     }
 }
