@@ -511,6 +511,8 @@ mod tests {
     }
 
     #[test]
+    // the binary grouping aligns to the Exp-Golomb code words, not byte nibbles.
+    #[allow(clippy::unusual_byte_groupings)]
     fn bit_reader_decodes_known_ue_codes() {
         // Bits: 1 010 011 00100 → ue values 0, 1, 2, 3
         let bytes = [0b1_010_011_0, 0b0100_0000];

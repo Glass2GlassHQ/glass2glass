@@ -15,6 +15,13 @@ use crate::caps::{Caps, CapsSet};
 use crate::element::{AsyncElement, ElementBound};
 use crate::error::G2gError;
 
+/// Boxed `intercept_caps`-style callback (input narrowing) for the legacy
+/// migration bridge. Deleted with the bridge.
+type InterceptFn<'a> = Box<dyn Fn(&Caps) -> Result<Caps, G2gError> + 'a>;
+/// Boxed `propose_output_caps`-style callback (forward derivation) for the
+/// legacy migration bridge. Deleted with the bridge.
+type ProposeFn<'a> = Box<dyn Fn(&Caps) -> Caps + 'a>;
+
 /// Per-element constraint surface read by the solver.
 ///
 /// Replaces today's `intercept_caps` (the input-narrowing half) and the
@@ -71,14 +78,14 @@ pub enum CapsConstraint<'a> {
     /// migration. The boxes are not `Send + Sync` because the solver
     /// consumes them synchronously on the runner thread.
     LegacyTransform {
-        intercept: Box<dyn Fn(&Caps) -> Result<Caps, G2gError> + 'a>,
-        propose_output: Box<dyn Fn(&Caps) -> Caps + 'a>,
+        intercept: InterceptFn<'a>,
+        propose_output: ProposeFn<'a>,
     },
 
     /// **Migration bridge.** Sink with today's
     /// `intercept_caps(upstream) -> Caps` callback. Deleted at the end
     /// of the migration.
-    LegacySink(Box<dyn Fn(&Caps) -> Result<Caps, G2gError> + 'a>),
+    LegacySink(InterceptFn<'a>),
 
     /// Sink-shape wildcard: accepts whatever upstream produces, of any
     /// media type, format, dims, or rate. Models debug / probe /

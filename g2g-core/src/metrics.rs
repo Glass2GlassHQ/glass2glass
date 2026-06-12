@@ -85,7 +85,7 @@ impl LatencyHistogram {
             bucket_counts[i] = b.load(Ordering::Relaxed);
         }
 
-        let mean_ns = if count > 0 { sum / count } else { 0 };
+        let mean_ns = sum.checked_div(count).unwrap_or(0);
         // Bucket-edge estimates can overshoot the actual max when many
         // samples cluster in one log2 bucket. Clamp so p99 <= max.
         let cap = if max > 0 { max } else { u64::MAX };
@@ -128,7 +128,7 @@ fn percentile_ns(buckets: &[u64; NUM_BUCKETS], overflow: u64, count: u64, pct: u
     if count == 0 {
         return 0;
     }
-    let target = (count.saturating_mul(pct as u64) + 99) / 100;
+    let target = count.saturating_mul(pct as u64).div_ceil(100);
     let mut acc: u64 = 0;
     for (i, &c) in buckets.iter().enumerate() {
         acc = acc.saturating_add(c);

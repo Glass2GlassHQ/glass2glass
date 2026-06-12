@@ -469,10 +469,7 @@ mod tests {
     }
 
     fn taken_size(rx: &Receiver<ArmDirective>) -> Option<usize> {
-        match rx.try_recv() {
-            Some(ArmDirective::Recascade(p)) => Some(p.size_bytes),
-            None => None,
-        }
+        rx.try_recv().map(|ArmDirective::Recascade(p)| p.size_bytes)
     }
 
     #[test]

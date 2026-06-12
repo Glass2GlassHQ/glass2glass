@@ -399,11 +399,9 @@ mod link_tests {
         // SAFETY: `fut` lives on the stack for the duration of this fn
         // and we never move it after pinning.
         let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        loop {
-            match pinned.as_mut().poll(&mut cx) {
-                Poll::Ready(v) => return v,
-                Poll::Pending => panic!("link_tests::run_to_ready saw Pending"),
-            }
+        match pinned.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("link_tests::run_to_ready saw Pending"),
         }
     }
 

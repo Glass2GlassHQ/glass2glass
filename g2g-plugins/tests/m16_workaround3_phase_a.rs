@@ -274,8 +274,12 @@ impl AsyncElement for FakeReorderDecoder {
                 }
                 PipelinePacket::Eos => {
                     // Drain remaining queue, then forward EOS. Same
-                    // boundary CapsChanged rule applies.
-                    while let Some((in_caps, tag)) = self.queue.borrow_mut().pop_front() {
+                    // boundary CapsChanged rule applies. Pop in its own
+                    // statement so the queue borrow is released before the
+                    // awaits below (a `while let` would hold it across them).
+                    loop {
+                        let next = self.queue.borrow_mut().pop_front();
+                        let Some((in_caps, tag)) = next else { break };
                         let out_caps = match in_caps {
                             Caps::CompressedVideo {
                                 codec: VideoCodec::H264,

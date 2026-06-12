@@ -354,7 +354,7 @@ mod tests {
             1920,
             1080,
             103, // DXGI_FORMAT_NV12
-            0xD3D1_CE,
+            0xD3D1CE,
             Box::new(FlagOnDrop(dropped.clone())),
         );
         let domain = MemoryDomain::D3D11Texture(tex);
@@ -370,7 +370,7 @@ mod tests {
             1920,
             1080,
             103,
-            0xD3D1_CE,
+            0xD3D1CE,
             Box::new(FlagOnDrop(dropped.clone())),
         );
         assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");

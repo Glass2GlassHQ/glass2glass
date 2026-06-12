@@ -266,11 +266,9 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         // SAFETY: pin to stack for duration of fn.
         let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
-        loop {
-            match pinned.as_mut().poll(&mut cx) {
-                Poll::Ready(v) => return v,
-                Poll::Pending => panic!("slot::tests::block_on saw Pending"),
-            }
+        match pinned.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("slot::tests::block_on saw Pending"),
         }
     }
 

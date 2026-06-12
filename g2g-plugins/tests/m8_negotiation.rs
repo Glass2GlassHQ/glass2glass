@@ -353,10 +353,8 @@ impl AsyncElement for PickyByWidthSink {
         _out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         match &packet {
-            PipelinePacket::CapsChanged(c) => {
-                if let Caps::RawVideo { width: Dim::Fixed(w), .. } = c {
-                    *self.current_width.lock().unwrap() = *w;
-                }
+            PipelinePacket::CapsChanged(Caps::RawVideo { width: Dim::Fixed(w), .. }) => {
+                *self.current_width.lock().unwrap() = *w;
             }
             PipelinePacket::DataFrame(_) => {
                 let w = *self.current_width.lock().unwrap();
