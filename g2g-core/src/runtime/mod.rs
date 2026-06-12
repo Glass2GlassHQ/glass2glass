@@ -24,7 +24,7 @@ pub use channel::{
     ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
-pub use join::{join_all, Join2, JoinAll};
+pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use runner::{
     run_simple_pipeline, run_source_transform_sink, LatencyProfile, LinkCapacity, RunStats,
     SourceLoop,

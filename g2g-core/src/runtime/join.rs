@@ -130,3 +130,148 @@ fn poll_arm<F: Future>(arm: &mut MaybeDone<F>, cx: &mut Context<'_>) {
         }
     }
 }
+
+/// Which arm of a [`Select2`] resolved first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Either<A, B> {
+    Left(A),
+    Right(B),
+}
+
+/// Polls two futures concurrently, resolving as soon as *either* is ready.
+/// Biased to the first arm: when both are ready in the same poll, `a` wins.
+///
+/// The losing future is **dropped** when the other resolves. This is only
+/// sound for futures that hold no state across a drop and are cheap to
+/// recreate, e.g. a channel [`recv()`](crate::runtime::Receiver::recv): a
+/// pending `recv` has dequeued nothing, so dropping it loses no message.
+/// Do not use it where dropping the un-ready arm would discard progress.
+///
+/// This is the β interruptibility primitive
+/// (`DESIGN-M16-workaround3-reconfigure.md` §9.4.1): a runner arm awaits its
+/// data `recv()` and an out-of-band control `recv()` together, so a
+/// coordinator directive reaches the arm at the same await point that
+/// otherwise blocks on data. Without it the no_std runtime can only `join`
+/// (wait for all), never `select` (wait for first), so an arm parked on
+/// `recv().await` is uninterruptible. Put the control arm first to bias the
+/// directive ahead of a simultaneously-ready data frame.
+#[allow(missing_debug_implementations)]
+pub struct Select2<A, B> {
+    a: A,
+    b: B,
+}
+
+/// Build a [`Select2`] over two futures. See the type docs for the
+/// drop-the-loser contract.
+pub fn select2<A: Future, B: Future>(a: A, b: B) -> Select2<A, B> {
+    Select2 { a, b }
+}
+
+impl<A: Future, B: Future> Future for Select2<A, B> {
+    type Output = Either<A::Output, B::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `a` and `b` are structurally pinned: `self` is pinned, we
+        // never move either field out, and each is polled in place through a
+        // freshly derived `Pin`. On `Ready` we return immediately and the
+        // caller drops `self` (and the losing future) without moving it.
+        let this = unsafe { self.get_unchecked_mut() };
+        // SAFETY: `a` is pinned because `this` is; the borrow lasts only for
+        // the poll.
+        let a = unsafe { Pin::new_unchecked(&mut this.a) };
+        if let Poll::Ready(v) = a.poll(cx) {
+            return Poll::Ready(Either::Left(v));
+        }
+        // SAFETY: same justification as `a`.
+        let b = unsafe { Pin::new_unchecked(&mut this.b) };
+        if let Poll::Ready(v) = b.poll(cx) {
+            return Poll::Ready(Either::Right(v));
+        }
+        Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::channel::bounded;
+    use core::future::ready;
+    use core::task::{RawWaker, RawWakerVTable, Waker};
+
+    // Hand-rolled noop waker: the futures under test resolve (or stay
+    // pending) within a single poll, so no real wake is ever needed.
+    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+
+    fn noop_waker() -> Waker {
+        // SAFETY: every NOOP_VTABLE fn is a no-op that never dereferences the
+        // data pointer, so a null data pointer is sound.
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
+    }
+
+    /// Poll a future exactly once. The drop of `fut` at return is the point
+    /// of the drop-safety test below.
+    fn poll_once<F: Future>(fut: F) -> Poll<F::Output> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = fut;
+        // SAFETY: `fut` lives on this stack frame and is not moved after
+        // pinning; it is dropped when the frame returns.
+        let pinned = unsafe { Pin::new_unchecked(&mut fut) };
+        pinned.poll(&mut cx)
+    }
+
+    #[test]
+    fn biased_to_left_when_both_ready() {
+        match poll_once(select2(ready(1u32), ready(2u32))) {
+            Poll::Ready(Either::Left(1)) => {}
+            other => panic!("expected Left(1), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_right_when_left_pending() {
+        // Empty, still-open channel: its `recv()` is Pending. The ready
+        // right arm wins.
+        let (_tx, rx) = bounded::<u32>(1);
+        match poll_once(select2(rx.recv(), ready(7u32))) {
+            Poll::Ready(Either::Right(7)) => {}
+            other => panic!("expected Right(7), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_when_neither_ready() {
+        let (_tx_a, rx_a) = bounded::<u32>(1);
+        let (_tx_b, rx_b) = bounded::<u32>(1);
+        assert!(poll_once(select2(rx_a.recv(), rx_b.recv())).is_pending());
+    }
+
+    #[test]
+    fn dropping_the_losing_recv_loses_no_message() {
+        // The core soundness claim of the drop-the-loser contract: when the
+        // right arm wins, the left `recv()` future is dropped, and because a
+        // pending recv has dequeued nothing, the left channel's message is
+        // still deliverable afterward.
+        let (tx_left, rx_left) = bounded::<u32>(1);
+        let (tx_right, rx_right) = bounded::<u32>(1);
+        tx_right.try_send(9).unwrap();
+
+        match poll_once(select2(rx_left.recv(), rx_right.recv())) {
+            Poll::Ready(Either::Right(Some(9))) => {}
+            other => panic!("expected Right(Some(9)), got {other:?}"),
+        }
+
+        // The left recv future was dropped by the select above. Its channel
+        // never had its message consumed, so a fresh recv still gets it.
+        tx_left.try_send(5).unwrap();
+        match poll_once(rx_left.recv()) {
+            Poll::Ready(Some(5)) => {}
+            other => panic!("left message lost across select drop: {other:?}"),
+        }
+    }
+}
