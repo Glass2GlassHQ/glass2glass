@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M28: `Mp4Src` fragmented-MP4 demuxer source
+
+- The read-side counterpart of `Mp4Sink`, closing the container loop:
+  `Mp4Src` parses a single-video-track fMP4 and emits Annex-B H.264 access
+  units with timing recovered from `tfdt`/`trun` (90 kHz -> ns), so a
+  recording plays back through a decoder exactly like a live stream.
+  std-gated, no new deps (hand-written box walker mirroring the sink's
+  writers).
+- Caps discovery rides the M18 async-source probe: `intercept_caps` reads
+  `moov` before negotiation (dims from `tkhd`, timescale from `mdhd`,
+  SPS/PPS from `avcC`), so downstream solves against the recording's real
+  geometry. If the first sample carries no in-band SPS, the `avcC`
+  parameter sets are prepended so a decoder can start (the in-tree writer
+  keeps them in-band).
+- Supported profile is what `Mp4Sink` writes and CMAF-style single-track
+  files share: `trun` v0 with explicit sample sizes, sequential samples in
+  the following `mdat`. Anything else (v1 trun, missing sizes, `mdat`
+  without `moof`, truncated NALUs, non-MP4 bytes) fails loud with
+  `CapsMismatch` instead of emitting a corrupt bitstream.
+- Tests: four unit tests (AVCC->Annex-B round trip incl. truncation, the
+  writer-profile `trun` layout, timescale inversion, SPS detection) plus
+  `m28_mp4src.rs`: a write -> read round trip recovers every access unit
+  byte-exactly with ~33.33 ms pts spacing, garbage/missing files fail the
+  probe loud, and on Windows the full circle
+  `MfEncode -> Mp4Sink -> Mp4Src -> MfDecode` returns all 10 frames as
+  packed NV12 through both real MFTs. VERIFIED: `cargo test --workspace`
+  green, the mf-feature suite green (3/3 incl. full circle), workspace and
+  feature clippy clean.
+
 ### M27: `TensorPostprocess` classification head
 
 - Completes the in-graph classification chain:
