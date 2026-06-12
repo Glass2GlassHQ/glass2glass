@@ -26,9 +26,10 @@ pub use channel::{
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use runner::{
-    run_simple_pipeline, run_source_transform_sink, LatencyProfile, LinkCapacity, RunStats,
-    SourceLoop,
+    run_simple_pipeline, run_source_transform_sink, run_source_transform_sink_with_bus,
+    LatencyProfile, LinkCapacity, RunStats, SourceLoop,
 };
+pub use solver::NegotiationFailure;
 
 #[cfg(feature = "std")]
 pub use runner::run_source_fanout;

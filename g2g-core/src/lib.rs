@@ -67,7 +67,7 @@ pub use pool::{BufferPool, PooledBuffer};
 pub use bus::{Bus, BusHandle, BusMessage};
 
 #[cfg(feature = "runtime")]
-pub use runtime::{LinkInterceptor, ProbeAction, ProbeSlot};
+pub use runtime::{LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};
 
 #[cfg(feature = "runtime")]
 pub use pad_template::{

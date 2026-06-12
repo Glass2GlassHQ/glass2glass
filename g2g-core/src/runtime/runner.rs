@@ -2,6 +2,7 @@ use core::future::Future;
 
 use alloc::boxed::Box;
 
+use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
@@ -649,6 +650,47 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
+    run_source_transform_sink_inner(source, transform, sink, clock, link_capacity, None).await
+}
+
+/// As [`run_source_transform_sink`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed)
+/// to `bus` when startup negotiation fails, so the application learns *which*
+/// link conflicted (the returned error stays the opaque `CapsMismatch`).
+/// M18 item 7. The bus is opt-in to keep the common call site unchanged;
+/// the other runners and the mid-stream re-solve path are owed the same
+/// wiring.
+pub async fn run_source_transform_sink_with_bus<Src, Tx, Snk, Clk>(
+    source: &mut Src,
+    transform: &mut Tx,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: AsyncElement,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_source_transform_sink_inner(source, transform, sink, clock, link_capacity, Some(bus)).await
+}
+
+async fn run_source_transform_sink_inner<Src, Tx, Snk, Clk>(
+    source: &mut Src,
+    transform: &mut Tx,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Tx: AsyncElement,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
     let link_capacity: usize = link_capacity.into().get();
     // M18 Session C: the startup negotiation loop (solver + per-link
     // configure cascade with bounded `ReFixate` retry) is owned by the
@@ -660,7 +702,7 @@ where
     // `configure_pipeline` cascade, so a transform (e.g. a hardware decoder)
     // sizes its buffer pool from the downstream `min_buffers` at open time.
     // The folded source-facing proposal comes back on `RunStats`.
-    let negotiation = negotiate_source_transform_sink(source, transform, sink).await?;
+    let negotiation = negotiate_source_transform_sink(source, transform, sink, bus).await?;
     let allocation = negotiation.allocation;
 
     // M12 latency query: fold the configured chain source → transform → sink.

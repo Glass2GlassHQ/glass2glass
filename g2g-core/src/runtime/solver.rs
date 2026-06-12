@@ -25,7 +25,7 @@ use crate::format_element::CapsConstraint;
 pub type LinkSolution = Vec<Caps>;
 
 /// Structured solver failure (DESIGN-M16 §5).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NegotiationFailure {
     /// Adjacent elements have no overlap on the link between them, or a
     /// constraint update emptied that link.

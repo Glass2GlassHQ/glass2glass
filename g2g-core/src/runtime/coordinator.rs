@@ -17,6 +17,7 @@
 //! moves startup negotiation in; Session D adds α hooks; Session E turns
 //! `CoordinatorEvent` into a real `Recascade` cascade.
 
+use crate::bus::{BusHandle, BusMessage};
 use crate::caps::Caps;
 use crate::element::{AsyncElement, ConfigureOutcome};
 use crate::error::G2gError;
@@ -193,6 +194,7 @@ pub(crate) async fn negotiate_source_transform_sink<Src, Tx, Snk>(
     source: &mut Src,
     transform: &mut Tx,
     sink: &mut Snk,
+    bus: Option<&BusHandle>,
 ) -> Result<LinearNegotiation, G2gError>
 where
     Src: SourceLoop,
@@ -220,8 +222,20 @@ where
             };
             let tx_c = transform.caps_constraint_as_transform();
             let sink_c = sink.caps_constraint_as_sink();
-            let links = solve_linear(&[&src_c, &tx_c, &sink_c])
-                .map_err(|_| G2gError::CapsMismatch)?;
+            let links = match solve_linear(&[&src_c, &tx_c, &sink_c]) {
+                Ok(links) => links,
+                Err(failure) => {
+                    // M18 item 7: surface the structured failure (which link
+                    // conflicted on what) to the bus before collapsing it to
+                    // the opaque `CapsMismatch` the caller receives.
+                    // Non-blocking: a startup negotiation failure must not
+                    // stall on a full bus.
+                    if let Some(bus) = bus {
+                        bus.try_post(BusMessage::NegotiationFailed(failure));
+                    }
+                    return Err(G2gError::CapsMismatch);
+                }
+            };
             // M16 step 5d: per-link configure. For a 3-element chain
             // links has length 2: [source-output / transform-input,
             // transform-output / sink-input]. The transform's

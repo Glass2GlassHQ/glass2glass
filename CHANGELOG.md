@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 7: structured negotiation failures on the bus
+
+- A failed startup caps negotiation no longer discards the solver's
+  structured `NegotiationFailure`. Previously every solve site did
+  `solve_linear(...).map_err(|_| G2gError::CapsMismatch)`, collapsing
+  "which link conflicted on what" to an opaque error (DESIGN-M16-caps-nego.md
+  §13.3). New `BusMessage::NegotiationFailed(NegotiationFailure)` carries the
+  detail (e.g. `EmptyLink { upstream, downstream }`) to the application while
+  the runner still returns `CapsMismatch` to its caller.
+- New `run_source_transform_sink_with_bus(.., bus: &BusHandle)`: as
+  `run_source_transform_sink` but posts the structured failure to `bus`
+  (non-blocking `try_post`, so a startup failure never stalls on a full bus).
+  Opt-in via a separate entry point so the existing runner signature and its
+  ~dozen call sites are untouched; the shared body is an inner fn taking
+  `Option<&BusHandle>`. `negotiate_source_transform_sink` threads the handle
+  and posts at the solve site.
+- `NegotiationFailure` gains `Eq` (all-`usize`/unit fields) so it composes
+  into `BusMessage`'s derives; re-exported at `g2g_core::NegotiationFailure`.
+- New `m18_bus_negotiation.rs`: an RGBA source into an NV12-only sink fails
+  with `EmptyLink`, the bus carries it, and the run still errors
+  `CapsMismatch`; a clean NV12->NV12 negotiation posts nothing. VERIFIED:
+  `cargo test --workspace` green, `cargo test -p g2g-core --features runtime`
+  (115) green, no_std + runtime build, core runtime clippy clean.
+- Scope: the linear runner's startup path. The mid-stream re-solve
+  (`re_solve_downstream_sink` in the sink arm) and the other runners
+  (`run_simple_pipeline`, fan-out, fan-in/mux) discard their `NegotiationFailure`
+  the same way and are owed the identical wiring; mechanical follow-up.
+
 ### M18 item 1 (Session E): β allocation re-cascade (single hop)
 
 - First cross-element mid-stream allocation cascade. Previously the M12

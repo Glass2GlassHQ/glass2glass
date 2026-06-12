@@ -11,6 +11,7 @@
 //! `try_recv` (non-blocking) or `recv` (awaiting).
 
 use crate::error::G2gError;
+use crate::runtime::solver::NegotiationFailure;
 use crate::runtime::{bounded, Receiver, Sender};
 
 /// An out-of-band message from an element to the application.
@@ -22,6 +23,12 @@ pub enum BusMessage {
     Error(G2gError),
     /// Non-fatal condition worth surfacing.
     Warning(G2gError),
+    /// A caps negotiation failed, carrying the structured
+    /// [`NegotiationFailure`] that names *which* link conflicted on *what*.
+    /// The runner still returns the (opaque) `G2gError::CapsMismatch` to its
+    /// caller; this preserves the detail the error type can't, so the
+    /// application can report the offending element pair (M18 item 7).
+    NegotiationFailed(NegotiationFailure),
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }
