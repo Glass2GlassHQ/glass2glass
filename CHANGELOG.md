@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M20: file I/O elements (`FileSink` / `FileSrc`)
+
+- Closes the record / playback loop M19 opened: `FileSink` writes every
+  `DataFrame`'s system-memory bytes to a file in arrival order (so
+  `testsrc -> MfEncode -> FileSink` records a playable Annex-B `.h264`
+  elementary stream), and `FileSrc` replays a file as `DataFrame` chunks
+  (`FileSrc -> H264Parse -> decoder` recovers access units). Both are
+  platform-agnostic, std-gated (`std::fs`, no new deps).
+- `FileSink` is a wildcard sink (`AcceptsAny`; a raw byte stream can record
+  anything). Caps are not representable in a raw stream, so `CapsChanged`
+  packets pass without effect; `Flush` is a no-op (no seek index to reset);
+  EOS flushes the writer. The file is created in `configure_pipeline`, not
+  at construction. `PadTemplates` sink-any.
+- `FileSrc` takes the stream's caps at construction (a raw recording
+  carries none) and declares exactly that to the solver
+  (`Produces(CapsSet::one(caps))`). Reads in `with_chunk_size` chunks
+  (default 64 KiB, clamped to 1), short-read tolerant, no timing on chunks
+  (recovered downstream by parser/decoder). No `PadTemplates`: its caps are
+  instance configuration and a source pad cannot be wildcard (like
+  `RtspSrc`).
+- New `HardwareError::Io(i32)` core variant carries the raw OS error code
+  from filesystem failures, mirroring `V4l2(i32)` / `Cuda(i32)` instead of
+  flattening to `Other`. no_std-safe.
+- Tests (`m20_file_io.rs`): `VideoTestSrc -> FileSink` through the real
+  runner records the exact deterministic byte stream; `FileSrc` chunking
+  (7-byte chunks over 20 bytes -> [7, 7, 6] + Eos, byte-exact reassembly);
+  a full record -> replay round trip through `run_simple_pipeline` with a
+  frame-boundary-misaligned chunk size; loud structured `Io` failures for
+  an uncreatable sink path, an unconfigured sink, and a missing source
+  file. VERIFIED: `cargo test --workspace` green, workspace clippy clean,
+  no_std core baseline and default (no_std) plugins build green.
+
 ### M19: `MfEncode` Windows H.264 encode element
 
 - First encoder element in the tree, completing the encode side of the

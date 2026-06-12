@@ -22,6 +22,10 @@ extern crate std;
 #[cfg(feature = "std")]
 pub mod clock;
 #[cfg(feature = "std")]
+pub mod filesink;
+#[cfg(feature = "std")]
+pub mod filesrc;
+#[cfg(feature = "std")]
 pub mod syncsink;
 
 #[cfg(feature = "rtsp")]

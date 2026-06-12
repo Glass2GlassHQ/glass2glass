@@ -30,6 +30,9 @@ pub enum HardwareError {
     MediaFoundation(i32),
     /// `CUresult` code from a CUDA Driver API call.
     Cuda(i32),
+    /// Raw OS error code from a filesystem operation (`FileSrc` /
+    /// `FileSink`), zero when the OS reported none.
+    Io(i32),
     /// Other backend-specific failure.
     Other,
 }
