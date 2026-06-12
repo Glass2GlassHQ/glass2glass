@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod audiotestsrc;
 pub mod capsfilter;
 pub mod fakesink;
 pub mod h264parse;
@@ -30,6 +31,8 @@ pub mod filesrc;
 pub mod mp4sink;
 #[cfg(feature = "std")]
 pub mod syncsink;
+#[cfg(feature = "std")]
+pub mod wavsink;
 
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;

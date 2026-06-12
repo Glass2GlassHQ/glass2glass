@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M25: first audio elements (`AudioTestSrc` / `WavSink`)
+
+- Bootstraps the audio track: `Caps::Audio` existed in core with zero
+  elements using it. `AudioTestSrc` (baseline, `no_std`) is the audio
+  analog of `VideoTestSrc`: deterministic interleaved S16LE PCM test tone
+  (sine / square / silence) in 10 ms buffers at a configured rate and
+  channel count, full `SourceLoop` with a native `Produces` constraint.
+  The sine is Bhaskara I's approximation in pure f32 arithmetic (core has
+  no `sin` intrinsic), accurate to ~0.2%: clean enough for a test tone
+  without a libm dependency.
+- `WavSink` (std) writes PCM (`PcmS16Le` / `PcmF32Le`) to a canonical
+  RIFF/WAVE file, patching the running sizes in place on `Eos`. Compressed
+  audio caps (`Aac` / `Opus`) are rejected at negotiation via a legacy-sink
+  intercept (`Caps::Audio` has no open dims for a native set). WAV is the
+  playable-anywhere convenience sink; fragmented/durable recording remains
+  `Mp4Sink`'s territory.
+- Tests: six unit tests (sine anchors and peak, square/silence waves, caps
+  shape, canonical 44-byte header fields, PCM param mapping) plus
+  `m25_audio.rs` through the real runner: 1 s of 1 kHz stereo sine lands as
+  a structurally valid WAV (patched RIFF/data sizes, 48 kHz/2ch/16-bit fmt,
+  byte-exact length, zero first sample, real peak amplitude); silence is
+  all-zero; AAC caps fail loud. VERIFIED: `cargo test --workspace` green,
+  workspace clippy clean, default (no_std) plugins build green.
+
 ### M24: `Mp4Sink` fragmented-MP4 muxer sink
 
 - H.264 recordings become standard playable files: `Mp4Sink` wraps an
