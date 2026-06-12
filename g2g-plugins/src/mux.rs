@@ -89,6 +89,11 @@ impl MultiInputElement for InterleaveMux {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
+            // M22: a per-input Eos is informational; the runner aggregates
+            // ends and emits the single merged Eos downstream.
+            if matches!(packet, PipelinePacket::Eos) {
+                return Ok(());
+            }
             out.push(packet).await?;
             Ok(())
         })

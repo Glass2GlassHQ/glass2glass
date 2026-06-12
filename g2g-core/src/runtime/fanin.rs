@@ -441,7 +441,12 @@ where
         let mut current_output = output;
         loop {
             match tagged_rx.recv().await {
-                Some((_, PipelinePacket::Eos)) => {
+                Some((i, PipelinePacket::Eos)) => {
+                    // M22: deliver the per-input end to the element first so
+                    // a stateful muxer (a batcher) can flush per-input state.
+                    // The element must not forward Eos downstream; the runner
+                    // owns the single aggregated Eos below.
+                    MultiInputElement::process(mux, i, PipelinePacket::Eos, &mut out).await?;
                     ended += 1;
                     if ended == input_count {
                         out.push(PipelinePacket::Eos).await?;

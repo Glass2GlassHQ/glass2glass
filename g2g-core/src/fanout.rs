@@ -151,6 +151,11 @@ pub trait MultiInputElement: ElementBound {
     fn output_caps(&self) -> Result<Caps, G2gError>;
 
     /// Combine one packet from `input` into the merged output.
+    ///
+    /// M22: a per-input `Eos` is delivered here when that input ends, so a
+    /// stateful muxer (a batcher) can flush per-input state. Implementations
+    /// must NOT forward `Eos` downstream: the runner aggregates input ends
+    /// and emits the single merged `Eos` itself.
     fn process<'a>(
         &'a mut self,
         input: usize,

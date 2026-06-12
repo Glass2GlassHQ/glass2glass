@@ -5,6 +5,37 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M22: `TensorBatcher` bootstraps `g2g-enterprise`; per-input Eos contract
+
+- Bootstraps the last empty crate with the DESIGN.md §5.3 bounded batcher:
+  `TensorBatcher` is a `MultiInputElement` gathering one tensor frame per
+  input stream and emitting the round as one batched frame, stacked along
+  the leading batch dim (`N` slots of `[1, d...]` -> `[N, d...]`; stacking
+  dim 0 of a dense row-major tensor is byte concatenation in input order).
+  Composes with M21's `OrtInference` family: feed a dynamic-batch model one
+  execution per N camera streams. Per-input negotiation pins every input to
+  the identical slot caps (`Accepts(slot)`); output is `Produces([N, d...])`.
+- Liveness over completeness: an input reaching end-of-stream stops gating
+  the gather (a dead camera must not stall the rest); its queued frames
+  still drain into batches, then batches shrink to the survivors with a
+  `CapsChanged` before the first smaller frame. Batch timing: pts is the
+  newest constituent, arrival the oldest non-zero stamp (worst-case
+  glass-to-glass). Owed: the §5.3 deadline-based partial flush ("Timeout"),
+  gated on a runtime timer primitive.
+- Core contract change (M22): `run_muxer_sink` now delivers each input's
+  `Eos` to `MultiInputElement::process(input, Eos, ..)` before aggregating,
+  so a stateful muxer can flush per-input state; elements must not forward
+  it (the runner still owns the single merged downstream `Eos`).
+  `InterleaveMux` updated to swallow per-input `Eos` accordingly; trait
+  docs updated.
+- Tests: three unit tests (slot validation, batch-dim stacking, non-tensor
+  reject) and four integration tests: byte-exact two-round gather with
+  out-of-order arrival, EOS shrink with exactly-once `CapsChanged`, an
+  ended input's queue draining into full batches, and a 2-source end-to-end
+  run through the real `run_muxer_sink` (3 full batches, single aggregated
+  EOS). VERIFIED: `cargo test --workspace` green (m10/m18 mux suites
+  unaffected by the Eos contract change), workspace clippy clean.
+
 ### M21: first `g2g-ml` element, `OrtInference` (ONNX Runtime)
 
 - Bootstraps the `g2g-ml` crate (previously an empty stub) with its first

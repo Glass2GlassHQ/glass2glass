@@ -5,3 +5,5 @@
 //! so commercial integrators can choose their licensing exposure.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
+
+pub mod batcher;

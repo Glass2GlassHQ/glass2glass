@@ -680,6 +680,7 @@ dependencies = [
  "g2g-core",
  "g2g-ml",
  "g2g-plugins",
+ "tokio",
 ]
 
 [[package]]

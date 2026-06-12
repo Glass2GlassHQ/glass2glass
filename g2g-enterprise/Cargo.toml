@@ -17,5 +17,10 @@ g2g-core = { path = "../g2g-core" }
 g2g-plugins = { path = "../g2g-plugins" }
 g2g-ml = { path = "../g2g-ml" }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+# the batcher integration test drives the real run_muxer_sink runner
+g2g-core = { path = "../g2g-core", features = ["runtime", "std"] }
+
 [lints]
 workspace = true
