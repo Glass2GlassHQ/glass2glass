@@ -17,6 +17,10 @@ burn = ["std"]
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).
 ort = ["std", "dep:ort"]
+# DirectML execution provider (Windows, any D3D12 GPU). Downloads a
+# DirectML-enabled ONNX Runtime build; registration falls back to CPU at
+# runtime when no device is available.
+directml = ["ort", "ort/directml"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }

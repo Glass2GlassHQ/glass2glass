@@ -63,6 +63,21 @@ impl OrtInference {
         Self::from_session(session)
     }
 
+    /// As [`from_memory`], with the DirectML execution provider (D3D12 GPU,
+    /// Windows) registered ahead of the CPU fallback. Registration is
+    /// best-effort per ort's dispatch default: on a host without a usable
+    /// DirectML device the session silently runs on the CPU, so the
+    /// pipeline keeps flowing either way.
+    #[cfg(feature = "directml")]
+    pub fn from_memory_with_directml(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::DirectML::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
     fn from_session(session: Session) -> Result<Self, G2gError> {
         let [input] = session.inputs() else {
             return Err(G2gError::CapsMismatch);
@@ -272,7 +287,9 @@ fn static_output_dims(dims: &[i64]) -> Result<Vec<u32>, G2gError> {
     Ok(out)
 }
 
-fn ort_err(_e: ::ort::Error) -> G2gError {
+// generic over the error's payload: builder-consuming ort calls return
+// `Error<SessionBuilder>` instead of the plain `Error<()>`.
+fn ort_err<T>(_e: ::ort::Error<T>) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 

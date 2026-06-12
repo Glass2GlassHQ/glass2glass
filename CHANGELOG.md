@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M26: DirectML execution provider for `OrtInference`
+
+- First GPU inference path on Windows: a new g2g-ml `directml` feature
+  (implies `ort`, adds `ort/directml`, which downloads a DirectML-enabled
+  ONNX Runtime build) and `OrtInference::from_memory_with_directml`, which
+  registers the DirectML EP (any D3D12 GPU) ahead of the CPU fallback.
+  Registration is best-effort per ort's dispatch default: on a host
+  without a usable DirectML device the session silently runs on the CPU,
+  so the pipeline keeps flowing either way. The element shape is
+  unchanged; the EP choice is a constructor variant.
+- `ort_err` generalized over the error payload (`Error<SessionBuilder>`
+  from builder-consuming calls vs the plain `Error<()>`).
+- Test (gated on `directml`, runs against the real DML-enabled runtime):
+  the identity-model inference through `from_memory_with_directml`
+  produces byte-identical results to the CPU path. VERIFIED:
+  `cargo test -p g2g-ml --features directml` green (3/3),
+  `--features ort` (CPU-only) still green, matching clippy clean,
+  `cargo test --workspace` green.
+
 ### M25: first audio elements (`AudioTestSrc` / `WavSink`)
 
 - Bootstraps the audio track: `Caps::Audio` existed in core with zero
