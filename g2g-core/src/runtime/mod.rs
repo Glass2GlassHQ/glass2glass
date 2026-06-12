@@ -32,7 +32,7 @@ pub use runner::{
 pub use solver::NegotiationFailure;
 
 #[cfg(feature = "std")]
-pub use runner::run_source_fanout;
+pub use runner::{run_linear_chain, run_source_fanout};
 
 #[cfg(feature = "std")]
 pub use fanin::{run_fanin_sink, run_muxer_sink, DynSourceLoop};

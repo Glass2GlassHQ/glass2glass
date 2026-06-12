@@ -5,6 +5,43 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M18 item 4: arbitrary-length linear runner (`run_linear_chain`)
+
+- Lifts the "runner caps at 3 elements" limit. The fixed-arity runners
+  (`run_simple_pipeline` = 2, `run_source_transform_sink` = 3) couldn't
+  express a `source -> decoder -> capsfilter -> converter -> sink` chain;
+  `run_linear_chain(source, Vec<&mut dyn DynAsyncElement>, sink, clock, cap)`
+  drives any length. Interior elements are `&mut dyn DynAsyncElement` (the
+  same erasure the fan-out runner uses), so the chain is heterogeneous;
+  source and sink stay statically typed. std-only, like the other dyn
+  runners. Closes DESIGN-M16-caps-nego.md §13.4 item 4 (startup + data
+  plane; the cross-element re-cascade over N hops is the documented follow-up).
+- Negotiation runs `solve_linear` over all `N + 2` constraints at once and
+  configures each element with its input-side caps (source with link 0,
+  transform `i` with link `i`, sink with the last link). The M12 allocation
+  query folds sink -> ... -> source across every hop. Data flows over `N + 1`
+  bounded links across `N + 2` arms joined by `join_all`. Each interior
+  element handles a mid-stream `CapsChanged` element-locally (re-configure +
+  α re-allocation + forward); the sink runs the Phase-B downstream re-solve.
+- `DynAsyncElement` gains `caps_constraint_as_transform` (dyn-safe mirror of
+  the `AsyncElement` method) so an erased interior element declares its
+  transform constraint to the solver; the blanket impl forwards it, and the
+  `dyn-slot` test element implements it as `IdentityAny`.
+- Scope / owed (extends the single-hop coordinator path of
+  `run_source_transform_sink`): the β allocation re-cascade and full
+  downstream-subgraph re-solve over N hops; clock election and latency
+  aggregation across the `dyn` interior elements (only source and sink
+  contribute today); the `ReFixate` startup retry (fails loud like
+  `run_source_fanout`).
+- New `m18_multi_element.rs` drives real plugins: a 4-element
+  `VideoTestSrc -> Identity -> Identity -> FakeSink` flows every frame + EOS;
+  a 5-element chain with a real `CapsFilter` mid-chain negotiates and flows;
+  zero transforms degenerates to source->sink; and an NV12-only `CapsFilter`
+  on an RGBA source fails the whole-chain solve loud (`CapsMismatch`).
+  VERIFIED: `cargo test --workspace` green, core `runtime`+`dyn-slot` green,
+  no_std baseline and no_std+runtime builds (the runner is std-gated so the
+  baseline is unaffected), core clippy clean.
+
 ### M18 item 7: structured negotiation failures on the bus
 
 - A failed startup caps negotiation no longer discards the solver's

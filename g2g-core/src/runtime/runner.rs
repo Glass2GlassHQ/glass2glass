@@ -29,6 +29,8 @@ use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
 use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiSenderSink};
 #[cfg(feature = "std")]
+use crate::runtime::channel::{LinkReceiver, LinkSender};
+#[cfg(feature = "std")]
 use crate::runtime::join::join_all;
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
@@ -607,6 +609,221 @@ where
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
+        coordinator_events: 0,
+    })
+}
+
+/// Drives an arbitrary-length linear pipeline:
+/// `source -> transforms[0] -> ... -> transforms[N-1] -> sink`.
+///
+/// M18 item 4. Generalizes [`run_source_transform_sink`] (one transform) and
+/// [`run_simple_pipeline`] (zero) past their fixed arity, lifting the
+/// "runner caps at 3 elements" limit so chains like
+/// `decoder -> capsfilter -> converter -> sink` are expressible. Interior
+/// elements are `&mut dyn DynAsyncElement` (heterogeneous, std-only, the same
+/// erasure the fan-out runner uses); source and sink stay statically typed.
+///
+/// Negotiation runs the solver over all `N + 2` constraints at once and
+/// configures each element with its input-side caps (the source with link 0).
+/// Data flows over `N + 1` bounded links across `N + 2` concurrently-joined
+/// arms. Each interior element handles a mid-stream `CapsChanged`
+/// element-locally (re-configure + α re-allocation + forward); the sink runs
+/// the Phase-B downstream re-solve.
+///
+/// Scope (owed, extends the single-hop coordinator path of
+/// `run_source_transform_sink`): the cross-element β allocation re-cascade and
+/// the full downstream-subgraph re-solve over `N` hops; clock election and
+/// latency aggregation across the `dyn` interior elements (only the source and
+/// sink contribute today). ReFixate at startup fails loud (`FixationFailed`),
+/// as in `run_source_fanout`.
+#[cfg(feature = "std")]
+pub async fn run_linear_chain<Src, Snk, Clk>(
+    source: &mut Src,
+    transforms: Vec<&mut dyn DynAsyncElement>,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let mut transforms = transforms;
+    let n_tx = transforms.len();
+    let n_links = n_tx + 1;
+
+    // Negotiation: solve over source + every interior transform + sink at
+    // once. All constraints are built and consumed inside this scope so the
+    // borrows they hold on their elements (the source future, the legacy
+    // bridge closures) are released before the per-element configure below
+    // takes mutable access.
+    let links: Vec<Caps> = {
+        let src_c = source.caps_constraint().await?;
+        let tx_cs: Vec<CapsConstraint<'_>> = transforms
+            .iter()
+            .map(|t| t.caps_constraint_as_transform())
+            .collect();
+        let sink_c = sink.caps_constraint_as_sink();
+        let mut refs: Vec<&CapsConstraint<'_>> = Vec::with_capacity(n_tx + 2);
+        refs.push(&src_c);
+        refs.extend(tx_cs.iter());
+        refs.push(&sink_c);
+        solve_linear(&refs).map_err(|_| G2gError::CapsMismatch)?
+    };
+    if links.len() != n_links {
+        return Err(G2gError::CapsMismatch);
+    }
+
+    // Per-element configure with the element's input-side caps. The source
+    // has only its output link[0]; transform `i` consumes link[i]; the sink
+    // consumes the last link.
+    if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&links[0])? {
+        return Err(G2gError::FixationFailed);
+    }
+    for (i, t) in transforms.iter_mut().enumerate() {
+        if let ConfigureOutcome::ReFixate(_) = t.configure_pipeline(&links[i])? {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+    if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&links[n_tx])? {
+        return Err(G2gError::FixationFailed);
+    }
+
+    // M12 allocation cascade: fold sink -> ... -> source. Each element absorbs
+    // the downstream proposal, then proposes from its own output-link caps.
+    let mut proposal = sink.propose_allocation(&links[n_tx]);
+    for i in (0..n_tx).rev() {
+        if let Some(p) = &proposal {
+            transforms[i].configure_allocation(p);
+        }
+        proposal = transforms[i].propose_allocation(&links[i + 1]);
+    }
+    if let Some(p) = &proposal {
+        source.configure_allocation(p);
+    }
+    let allocation = proposal;
+
+    // Clock / latency: only the statically-typed source and sink contribute;
+    // the `dyn` interior elements don't expose `provide_clock` / `latency`.
+    let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
+    let elected = elect_clock([source.provide_clock(), AsyncElement::provide_clock(sink)]);
+    let (clock_priority, base_time_ns) = match &elected {
+        Some(c) => (c.priority, c.clock.now_ns()),
+        None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
+
+    // Data plane: N+1 links distributed across N+2 arms. `Option::take` moves
+    // each endpoint into exactly one arm.
+    let mut txs: Vec<Option<LinkSender>> = Vec::with_capacity(n_links);
+    let mut rxs: Vec<Option<LinkReceiver>> = Vec::with_capacity(n_links);
+    for _ in 0..n_links {
+        let (tx, rx) = link(link_capacity);
+        txs.push(Some(tx));
+        rxs.push(Some(rx));
+    }
+
+    let src_tx = txs[0].take().expect("link 0 sender");
+    let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut adapter = SenderSink::new(src_tx);
+        source.run(&mut adapter).await
+    });
+
+    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(n_tx + 2);
+    arms.push(source_fut);
+
+    for (i, t) in transforms.into_iter().enumerate() {
+        let in_rx = rxs[i].take().expect("transform input rx");
+        let out_tx = txs[i + 1].take().expect("transform output tx");
+        let arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+            let mut adapter = SenderSink::new(out_tx);
+            loop {
+                match in_rx.recv().await {
+                    Some(PipelinePacket::Eos) => {
+                        t.process(PipelinePacket::Eos, &mut adapter).await?;
+                        adapter.push(PipelinePacket::Eos).await?;
+                        return Ok::<u64, G2gError>(0);
+                    }
+                    Some(PipelinePacket::CapsChanged(new_caps)) => {
+                        match t.configure_pipeline(&new_caps)? {
+                            ConfigureOutcome::Accepted => {
+                                // M18 α: interior element re-derives its own pool.
+                                realloc_local_dyn(t, &new_caps);
+                                t.process(PipelinePacket::CapsChanged(new_caps), &mut adapter)
+                                    .await?;
+                            }
+                            ConfigureOutcome::ReFixate(counter) => {
+                                in_rx.request_reconfigure(Reconfigure::Propose(counter));
+                            }
+                        }
+                    }
+                    Some(packet) => {
+                        t.process(packet, &mut adapter).await?;
+                    }
+                    None => return Ok(0),
+                }
+            }
+        });
+        arms.push(arm);
+    }
+
+    let sink_rx = rxs[n_tx].take().expect("sink input rx");
+    let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut null = NullSink;
+        let mut consumed: u64 = 0;
+        loop {
+            match sink_rx.recv().await {
+                Some(PipelinePacket::Eos) => {
+                    sink.process(PipelinePacket::Eos, &mut null).await?;
+                    return Ok::<u64, G2gError>(consumed);
+                }
+                Some(PipelinePacket::CapsChanged(new_caps)) => {
+                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
+                        Ok(caps) => caps,
+                        Err(_) => {
+                            sink_rx.request_reconfigure(Reconfigure::Renegotiate);
+                            continue;
+                        }
+                    };
+                    match sink.configure_pipeline(&sink_caps)? {
+                        ConfigureOutcome::Accepted => {
+                            realloc_local(sink, &sink_caps);
+                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
+                                .await?;
+                        }
+                        ConfigureOutcome::ReFixate(counter) => {
+                            sink_rx.request_reconfigure(Reconfigure::Propose(counter));
+                        }
+                    }
+                }
+                Some(packet) => {
+                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        consumed += 1;
+                    }
+                    sink.process(packet, &mut null).await?;
+                }
+                None => return Ok(consumed),
+            }
+        }
+    });
+    arms.push(sink_fut);
+
+    let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    let emitted = counts[0];
+    let consumed = *counts.last().expect("source and sink arms always present");
+
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        latency,
+        allocation,
+        clock_priority,
+        base_time_ns,
         coordinator_events: 0,
     })
 }

@@ -182,6 +182,10 @@ mod tests {
             crate::format_element::CapsConstraint::AcceptsAny
         }
 
+        fn caps_constraint_as_transform(&self) -> crate::format_element::CapsConstraint<'_> {
+            crate::format_element::CapsConstraint::IdentityAny
+        }
+
         fn propose_allocation(
             &self,
             _caps: &Caps,

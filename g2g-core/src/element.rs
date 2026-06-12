@@ -196,6 +196,11 @@ pub trait DynAsyncElement: ElementBound {
     /// against its declared constraint on a mid-stream `CapsChanged`.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_>;
 
+    /// Dyn-safe mirror of [`AsyncElement::caps_constraint_as_transform`], so
+    /// an interior element of an N-element linear chain (`run_linear_chain`)
+    /// declares its transform constraint to the solver while erased.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_>;
+
     /// Dyn-safe mirror of [`AsyncElement::propose_allocation`], so a
     /// `Box`-erased branch sink can re-derive its own pool on a mid-stream
     /// caps change (fan-out element-local α).
@@ -233,6 +238,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
         AsyncElement::caps_constraint_as_sink(self)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        AsyncElement::caps_constraint_as_transform(self)
     }
 
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
