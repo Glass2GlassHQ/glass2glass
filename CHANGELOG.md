@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M31: HEVC in the fMP4 container (`Mp4Sink` / `Mp4Src`)
+
+- The container is now codec-aware, matching the M30 encoders. `Mp4Sink` muxes
+  H.264 (`avc1`/`avcC`, SPS+PPS) or H.265 (`hvc1`/`hvcC`, VPS+SPS+PPS); the
+  codec comes from the negotiated caps. NAL parsing is codec-aware (H.265 type
+  in bits 1..6, IRAP keyframes 16..=23); the `hvcC` general profile_tier_level
+  is copied from the SPS, descriptive fields default to 4:2:0 8-bit (what the MS
+  HEVC encoder emits), and parameter sets stay in-band so a player re-parses
+  authoritative values.
+- `Mp4Src` detects the sample entry (`avc1` vs `hvc1`/`hev1`), parses the
+  matching config record for the parameter sets, and reports the real codec
+  from the caps probe. Out-of-band parameter sets are prepended per codec when
+  the first access unit carries none.
+- Negotiation surfaces (`intercept_caps`, `caps_constraint_as_sink`,
+  pad templates) accept H.264 or H.265; a mid-stream codec swap is rejected.
+- Tests: new unit tests on both elements (H.265 NAL type + keyframe detection,
+  `hvcC` build and parse, codec-aware param-set detection) plus `m31_hevc_mp4.rs`,
+  a cross-platform `Mp4Sink -> Mp4Src` HEVC round trip over hand-built NALUs
+  that recovers every access unit byte-exactly and probes back H.265 +
+  geometry. VERIFIED: full `cargo test --workspace` green (0 failures), H.264
+  m24/m28 unregressed, `std`-feature clippy clean.
+
 ### M30: HEVC support in the MF encode/decode elements
 
 - `MfEncode` and `MfDecode` are now codec-aware: `with_codec(VideoCodec::H265)`

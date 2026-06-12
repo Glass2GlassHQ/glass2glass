@@ -1,19 +1,20 @@
-//! Fragmented-MP4 demuxer source (M28), the read-side counterpart of
-//! `Mp4Sink`: parses a single-video-track fMP4 and emits Annex-B H.264
-//! access units with their recovered timing, so a recording plays back
+//! Fragmented-MP4 demuxer source (M28, HEVC in M31), the read-side counterpart
+//! of `Mp4Sink`: parses a single-video-track fMP4 and emits Annex-B H.264 or
+//! H.265 access units with their recovered timing, so a recording plays back
 //! through `MfDecode` / `FfmpegH264Dec` exactly like a live stream.
 //!
 //! Caps discovery is the M18 async-source path: `intercept_caps` reads the
-//! file's `ftyp`/`moov` (dims from `tkhd`, SPS/PPS from `avcC`, timescale
-//! from `mdhd`) before negotiation, so downstream solves against the real
-//! geometry. The fragment scan happens in `run`.
+//! file's `ftyp`/`moov` (dims from `tkhd`, codec + parameter sets from the
+//! `avc1`/`avcC` or `hvc1`/`hvcC` sample entry, timescale from `mdhd`) before
+//! negotiation, so downstream solves against the real geometry. The fragment
+//! scan happens in `run`.
 //!
 //! Supported profile: what `Mp4Sink` writes and CMAF-style single-track
 //! files generally share: one video track, `trun` v0 with explicit sample
 //! sizes, `default-base-is-moof` data offsets landing on the following
 //! `mdat`'s payload. Anything else fails loud rather than emitting a
-//! corrupt bitstream. If the first sample carries no in-band SPS, the
-//! `avcC` parameter sets are prepended so a decoder can start.
+//! corrupt bitstream. If the first sample carries no in-band parameter sets,
+//! the ones from the config record are prepended so a decoder can start.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -35,11 +36,13 @@ use crate::filesink::io_err;
 
 #[derive(Debug)]
 struct Header {
+    codec: VideoCodec,
     width: u32,
     height: u32,
     timescale: u32,
-    sps: Vec<u8>,
-    pps: Vec<u8>,
+    /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
+    /// for H.265), prepended to the first sample if it carries none in-band.
+    param_sets: Vec<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -67,7 +70,7 @@ impl Mp4Src {
         }
         let h = self.header.as_ref().expect("just parsed");
         Ok(Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: h.codec,
             width: Dim::Fixed(h.width),
             height: Dim::Fixed(h.height),
             framerate: Rate::Any,
@@ -119,11 +122,11 @@ impl SourceLoop for Mp4Src {
             let mut sequence = 0u64;
             for s in samples {
                 let mut annexb = s.annexb;
-                if sequence == 0 && !has_sps(&annexb) {
+                if sequence == 0 && !starts_with_param_set(&annexb, header.codec) {
                     // out-of-band parameter sets: prepend so a decoder can
                     // start (our own writer keeps them in-band).
                     let mut with_sets = Vec::new();
-                    for set in [&header.sps, &header.pps] {
+                    for set in &header.param_sets {
                         with_sets.extend_from_slice(&[0, 0, 0, 1]);
                         with_sets.extend_from_slice(set);
                     }
@@ -228,23 +231,70 @@ fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         return Err(G2gError::CapsMismatch);
     }
 
-    // stsd's first entry must be avc1; its avcC carries the parameter sets.
+    // stsd's first entry is the visual sample entry: avc1/avcC (H.264) or
+    // hvc1/hev1 with hvcC (H.265). Its config record carries the parameter sets.
     let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
     // full box: version/flags + entry count, then the first sample entry.
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
-    let avc1 = find_box(entries, b"avc1").ok_or(G2gError::CapsMismatch)?;
-    // avc1 sample entry: 78 bytes of fields before the nested boxes.
-    let avc1_children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-    let avcc = find_box(avc1_children, b"avcC").ok_or(G2gError::CapsMismatch)?;
-    let (sps, pps) = parse_avcc(avcc)?;
+    // visual sample entry: 78 bytes of fixed fields before the nested boxes.
+    let (codec, param_sets) = if let Some(avc1) = find_box(entries, b"avc1") {
+        let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+        let (sps, pps) = parse_avcc(avcc)?;
+        (VideoCodec::H264, Vec::from([sps, pps]))
+    } else if let Some(hvc1) =
+        find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1"))
+    {
+        let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+        (VideoCodec::H265, parse_hvcc(hvcc)?)
+    } else {
+        return Err(G2gError::CapsMismatch);
+    };
 
     Ok(Header {
+        codec,
         width,
         height,
         timescale,
-        sps,
-        pps,
+        param_sets,
     })
+}
+
+/// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
+/// PPS). Fixed 22-byte prefix (config version + 12-byte general PTL +
+/// descriptive fields), then `numOfArrays`, then per-array NAL lists.
+fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
+    let num_arrays = *hvcc.get(22).ok_or(G2gError::CapsMismatch)?;
+    let mut at = 23usize;
+    let mut sets = Vec::new();
+    for _ in 0..num_arrays {
+        // array header byte: array_completeness | reserved | NAL_unit_type.
+        at += 1;
+        let num_nalus = u16::from_be_bytes(
+            hvcc.get(at..at + 2)
+                .ok_or(G2gError::CapsMismatch)?
+                .try_into()
+                .expect("2 bytes"),
+        );
+        at += 2;
+        for _ in 0..num_nalus {
+            let len = u16::from_be_bytes(
+                hvcc.get(at..at + 2)
+                    .ok_or(G2gError::CapsMismatch)?
+                    .try_into()
+                    .expect("2 bytes"),
+            ) as usize;
+            at += 2;
+            let nalu = hvcc.get(at..at + len).ok_or(G2gError::CapsMismatch)?;
+            sets.push(nalu.to_vec());
+            at += len;
+        }
+    }
+    if sets.is_empty() {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(sets)
 }
 
 /// First SPS and PPS out of an `avcC` payload.
@@ -393,9 +443,16 @@ fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
     Ok(out)
 }
 
-fn has_sps(annexb: &[u8]) -> bool {
-    // a leading start code followed by an SPS NAL (type 7)
-    annexb.len() > 4 && annexb[..4] == [0, 0, 0, 1] && annexb[4] & 0x1F == 7
+/// Whether the access unit already opens with a parameter-set NAL (so the
+/// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32).
+fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
+    if annexb.len() <= 4 || annexb[..4] != [0, 0, 0, 1] {
+        return false;
+    }
+    match codec {
+        VideoCodec::H265 => (annexb[4] >> 1) & 0x3F == 32,
+        _ => annexb[4] & 0x1F == 7,
+    }
 }
 
 fn timescale_to_ns(t: u64, timescale: u32) -> u64 {
@@ -439,7 +496,31 @@ mod tests {
 
     #[test]
     fn sps_detection_reads_the_first_nal_type() {
-        assert!(has_sps(&[0, 0, 0, 1, 0x67, 0xAA]));
-        assert!(!has_sps(&[0, 0, 0, 1, 0x65, 0xAA]));
+        // H.264: SPS is type 7 (0x67), an IDR slice (0x65) is not a param set.
+        assert!(starts_with_param_set(&[0, 0, 0, 1, 0x67, 0xAA], VideoCodec::H264));
+        assert!(!starts_with_param_set(&[0, 0, 0, 1, 0x65, 0xAA], VideoCodec::H264));
+        // H.265: VPS is type 32 (0x40), an IDR (0x26) is not a param set.
+        assert!(starts_with_param_set(&[0, 0, 0, 1, 0x40, 0x01], VideoCodec::H265));
+        assert!(!starts_with_param_set(&[0, 0, 0, 1, 0x26, 0x01], VideoCodec::H265));
+    }
+
+    #[test]
+    fn hvcc_parser_recovers_arrays_in_order() {
+        // build an hvcC the way Mp4Sink does: 22-byte prefix, numOfArrays,
+        // then VPS/SPS/PPS arrays of one NALU each.
+        let vps: &[u8] = &[0x40, 0x01, 0xAA];
+        let sps: &[u8] = &[0x42, 0x01, 0xBB, 0xCC];
+        let pps: &[u8] = &[0x44, 0x01, 0xDD];
+        let mut p = vec![0u8; 22];
+        p[22 - 22] = 1; // configuration version at offset 0
+        p.push(3); // numOfArrays at offset 22
+        for (ty, nalu) in [(32u8, vps), (33u8, sps), (34u8, pps)] {
+            p.push(0x80 | ty);
+            p.extend_from_slice(&1u16.to_be_bytes());
+            p.extend_from_slice(&(nalu.len() as u16).to_be_bytes());
+            p.extend_from_slice(nalu);
+        }
+        let sets = parse_hvcc(&p).unwrap();
+        assert_eq!(sets, vec![vps.to_vec(), sps.to_vec(), pps.to_vec()]);
     }
 }
