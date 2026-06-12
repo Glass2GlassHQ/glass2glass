@@ -1,11 +1,19 @@
-//! Windows H.264 decode element wrapping the Media Foundation H.264 Decoder
-//! MFT (`CLSID_MSH264DecoderMFT`, an `IMFTransform`).
+//! Windows H.264 / H.265 decode element wrapping a Media Foundation decoder
+//! MFT (`CLSID_MSH264DecoderMFT` or `CLSID_MSH265DecoderMFT`, an
+//! `IMFTransform`). Codec is selected with [`MfDecode::with_codec`]; the
+//! default is H.264.
 //!
 //! M13: consumes Annex-B H.264 `DataFrame`s (the bitstream `RtspSrc` /
 //! `H264Parse` already emit, `MemoryDomain::System`) and produces decoded
 //! NV12 frames, also `MemoryDomain::System` (CPU copy out of the MFT's output
 //! buffer). A `CapsChanged(Nv12, w, h)` is emitted before the first decoded
 //! frame and again whenever the decoder signals a resolution change.
+//!
+//! M30: the same pipeline carries H.265/HEVC when constructed with
+//! `with_codec(VideoCodec::H265)`. The MS HEVC decoder MFT ships as the
+//! Store "HEVC Video Extensions" on many SKUs, so its `CoCreateInstance` can
+//! fail with `REGDB_E_CLASSNOTREG` when absent; that surfaces as a loud
+//! `Hardware` error at `configure_pipeline` rather than a silent fallback.
 //!
 //! Threading: COM is initialised multi-threaded (MTA) in `configure_pipeline`
 //! and every `IMFTransform` call runs on that same thread. `MfDecode` is
@@ -34,11 +42,12 @@ use windows::Win32::Media::MediaFoundation::{
     IMFDXGIBuffer, IMFDXGIDeviceManager, IMFSample, IMFTransform, MFCreateDXGIDeviceManager,
     MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, CLSID_MSH264DecoderMFT,
-    MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
-    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFVideoFormat_H264, MFVideoFormat_NV12,
-    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
+    CLSID_MSH265DecoderMFT, MFMediaType_Video, MFSTARTUP_FULL, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MF_E_NOTACCEPTING,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_DEFAULT_STRIDE,
+    MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_VERSION,
 };
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -121,6 +130,9 @@ enum OutputStep {
 
 #[derive(Debug)]
 pub struct MfDecode {
+    /// Bitstream codec the MFT decodes (`H264` default, or `H265`). Selects the
+    /// decoder CLSID and the input media subtype.
+    codec: VideoCodec,
     state: Option<DecoderState>,
     com_started: bool,
     configured: bool,
@@ -165,6 +177,7 @@ impl Default for MfDecode {
 impl MfDecode {
     pub fn new() -> Self {
         Self {
+            codec: VideoCodec::H264,
             state: None,
             com_started: false,
             configured: false,
@@ -174,6 +187,19 @@ impl MfDecode {
             emitted: 0,
             requested_alloc: None,
         }
+    }
+
+    /// Select the bitstream codec to decode. Only `H264` (the default) and
+    /// `H265` map to a Media Foundation decoder MFT; any other codec is
+    /// rejected loud at `configure_pipeline`. Call before `configure_pipeline`.
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// The configured bitstream codec.
+    pub fn codec(&self) -> VideoCodec {
+        self.codec
     }
 
     /// The downstream consumer's recorded M12 allocation proposal, if any
@@ -360,10 +386,10 @@ impl AsyncElement for MfDecode {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Consumes H.264 at any geometry; intersecting narrows the proposal
-        // and rejects non-H.264 inputs.
+        // Consumes the configured codec at any geometry; intersecting narrows
+        // the proposal and rejects a mismatched codec.
         let supported = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: self.codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -380,7 +406,8 @@ impl AsyncElement for MfDecode {
     /// sink. Mirrors `FfmpegH264Dec` (step 5k); the MFT only ever emits
     /// NV12, so there is no output-format choice.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps(input)))
+        let codec = self.codec;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
     }
 
     /// M12 / W1: record the downstream consumer's allocation proposal. A
@@ -396,11 +423,11 @@ impl AsyncElement for MfDecode {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (w, h) = match absolute_caps {
             Caps::CompressedVideo {
-                codec: VideoCodec::H264,
+                codec,
                 width,
                 height,
                 ..
-            } => (fixed_or_zero(width), fixed_or_zero(height)),
+            } if *codec == self.codec => (fixed_or_zero(width), fixed_or_zero(height)),
             _ => return Err(G2gError::CapsMismatch),
         };
 
@@ -414,7 +441,7 @@ impl AsyncElement for MfDecode {
         }
         self.com_started = true;
 
-        self.state = Some(init_decoder(w, h, self.use_d3d11)?);
+        self.state = Some(init_decoder(self.codec, w, h, self.use_d3d11)?);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -439,15 +466,12 @@ impl AsyncElement for MfDecode {
                 PipelinePacket::CapsChanged(c) => {
                     // M16 workaround #3 Phase A: validate + record.
                     // Reject an incompatible mid-stream format change
-                    // (e.g. H.264 -> VP9) loud; previously dropped
-                    // silently. Output `CapsChanged` is still emitted
+                    // (e.g. H.264 -> VP9, or a codec swap) loud; previously
+                    // dropped silently. Output `CapsChanged` is still emitted
                     // from decoded geometry at the decode boundary so
                     // the ordering invariant from §3 is preserved.
                     match &c {
-                        Caps::CompressedVideo {
-                            codec: VideoCodec::H264,
-                            ..
-                        } => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == self.codec => {}
                         _ => return Err(G2gError::CapsMismatch),
                     }
                     self.input_caps = Some(c);
@@ -479,7 +503,7 @@ impl AsyncElement for MfDecode {
                     // `ffmpegdec.rs` for the full rationale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input);
+                        let expected = derive_output_caps(self.codec, input);
                         debug_assert!(
                             !expected
                                 .intersect(&CapsSet::one(new_caps.clone()))
@@ -516,12 +540,15 @@ impl AsyncElement for MfDecode {
 }
 
 impl PadTemplates for MfDecode {
-    /// Consumes H.264 and produces NV12, both at any geometry (the MFT derives
-    /// the output dims from the stream). Memory domain (System vs D3D11Texture)
-    /// is not encoded in caps, so the templates are backend-independent.
+    /// Consumes H.264 or H.265 and produces NV12, both at any geometry (the
+    /// MFT derives the output dims from the stream). The static superset
+    /// advertises both codecs on the sink; the configured instance narrows to
+    /// one via `intercept_caps` / `caps_constraint_as_transform`. Memory domain
+    /// (System vs D3D11Texture) is not encoded in caps, so the templates are
+    /// backend-independent.
     fn pad_templates() -> Vec<PadTemplate> {
-        let h264 = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+        let compressed = |codec| Caps::CompressedVideo {
+            codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -533,7 +560,10 @@ impl PadTemplates for MfDecode {
             framerate: Rate::Any,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(h264)),
+            PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
+                compressed(VideoCodec::H264),
+                compressed(VideoCodec::H265),
+            ]))),
             PadTemplate::source(CapsSet::one(nv12)),
         ])
     }
@@ -554,15 +584,30 @@ impl Drop for MfDecode {
     }
 }
 
-/// Create the decoder MFT, set the H.264 input type and an NV12 output type,
-/// and put it into streaming mode. When `use_d3d11`, a hardware D3D11 device
-/// and DXGI manager are created and handed to the MFT first, so it decodes via
-/// DXVA and allocates its own (D3D11-backed) output samples.
-fn init_decoder(width: u32, height: u32, use_d3d11: bool) -> Result<DecoderState, G2gError> {
+/// Decoder MFT CLSID and input media subtype for a codec. Only H.264 and H.265
+/// map to a Media Foundation decoder; any other codec is rejected loud.
+fn decoder_ids(codec: VideoCodec) -> Result<(windows::core::GUID, windows::core::GUID), G2gError> {
+    match codec {
+        VideoCodec::H264 => Ok((CLSID_MSH264DecoderMFT, MFVideoFormat_H264)),
+        VideoCodec::H265 => Ok((CLSID_MSH265DecoderMFT, MFVideoFormat_HEVC)),
+        _ => Err(G2gError::CapsMismatch),
+    }
+}
+
+/// Create the decoder MFT, set the bitstream input type and an NV12 output
+/// type, and put it into streaming mode. When `use_d3d11`, a hardware D3D11
+/// device and DXGI manager are created and handed to the MFT first, so it
+/// decodes via DXVA and allocates its own (D3D11-backed) output samples.
+fn init_decoder(
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    use_d3d11: bool,
+) -> Result<DecoderState, G2gError> {
+    let (clsid, subtype) = decoder_ids(codec)?;
     // SAFETY: COM object creation on the owning thread.
     let transform: IMFTransform =
-        unsafe { CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER) }
-            .map_err(mf_err)?;
+        unsafe { CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER) }.map_err(mf_err)?;
 
     // DXVA: build the device + manager and hand it to the MFT before any media
     // type is set (the MFT switches to D3D11 output allocation on receipt).
@@ -589,7 +634,7 @@ fn init_decoder(width: u32, height: u32, use_d3d11: bool) -> Result<DecoderState
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
             .map_err(mf_err)?;
         input
-            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+            .SetGUID(&MF_MT_SUBTYPE, &subtype)
             .map_err(mf_err)?;
         if width != 0 && height != 0 {
             input
@@ -861,15 +906,16 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
 /// Single source of truth for the decoder's output-side caps derivation.
 /// Shared by the `DerivedOutput` constraint closure and the
 /// workaround-#3 Phase A debug assertion. The MFT only emits NV12, so
-/// there's no output-format choice (unlike `ffmpegdec`'s helper).
-fn derive_output_caps(input: &Caps) -> CapsSet {
+/// there's no output-format choice (unlike `ffmpegdec`'s helper); an input
+/// whose codec differs from the configured one yields an empty set.
+fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: c,
             width,
             height,
             framerate,
-        } => CapsSet::one(Caps::RawVideo {
+        } if *c == codec => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: width.clone(),
             height: height.clone(),
@@ -957,6 +1003,53 @@ mod tests {
     fn d3d11_opt_in_defaults_off() {
         assert!(!MfDecode::new().uses_d3d11());
         assert!(MfDecode::new().with_d3d11().uses_d3d11());
+    }
+
+    #[test]
+    fn codec_defaults_h264_and_selects_h265() {
+        assert_eq!(MfDecode::new().codec(), VideoCodec::H264);
+        assert_eq!(
+            MfDecode::new().with_codec(VideoCodec::H265).codec(),
+            VideoCodec::H265
+        );
+    }
+
+    #[test]
+    fn decoder_ids_map_supported_codecs() {
+        assert_eq!(
+            decoder_ids(VideoCodec::H264).unwrap(),
+            (CLSID_MSH264DecoderMFT, MFVideoFormat_H264)
+        );
+        assert_eq!(
+            decoder_ids(VideoCodec::H265).unwrap(),
+            (CLSID_MSH265DecoderMFT, MFVideoFormat_HEVC)
+        );
+        assert_eq!(decoder_ids(VideoCodec::Av1), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn hevc_instance_accepts_h265_rejects_h264() {
+        let dec = MfDecode::new().with_codec(VideoCodec::H265);
+        let h265 = Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Any,
+        };
+        assert_eq!(dec.intercept_caps(&h265), Ok(h265.clone()));
+        let h264 = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Any,
+        };
+        assert_eq!(dec.intercept_caps(&h264), Err(G2gError::CapsMismatch));
+        // The DerivedOutput closure derives NV12 from H.265 and rejects H.264.
+        let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        assert!(!f(&h265).is_empty());
+        assert!(f(&h264).is_empty());
     }
 
     #[test]

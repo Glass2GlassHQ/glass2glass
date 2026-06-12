@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M30: HEVC support in the MF encode/decode elements
+
+- `MfEncode` and `MfDecode` are now codec-aware: `with_codec(VideoCodec::H265)`
+  selects H.265/HEVC (default stays H.264). The codec threads through caps
+  negotiation (`intercept_caps`, the `DerivedOutput` constraint,
+  `configure_pipeline`, mid-stream `CapsChanged`) and the MFT setup; pad
+  templates advertise both codecs as the static superset, the instance narrows
+  to one.
+- Decode picks the MFT by fixed CLSID: `CLSID_MSH264DecoderMFT` or
+  `CLSID_MSH265DecoderMFT`, with the matching input subtype
+  (`MFVideoFormat_H264`/`_HEVC`). The MS HEVC decoder ships as a Store
+  extension, so an absent decoder surfaces as a loud `Hardware` error.
+- Encode has no fixed HEVC CLSID, so H.265 is found via `MFTEnumEx` for the
+  HEVC output subtype. Only a synchronous MFT is driven by the existing
+  `ProcessInput`/`ProcessOutput` loop; an enumerated asynchronous (hardware)
+  MFT is rejected loud rather than mis-driven. Async-MFT support is deferred.
+- Tests: new unit tests on both elements (codec default/select, CLSID/subtype
+  mapping, HEVC caps derivation, codec-mismatch rejection) plus `m30_hevc.rs`,
+  an `MfEncode(H265) -> MfDecode(H265)` round trip that skips gracefully when
+  either MFT is unavailable. VERIFIED: on the dev host the HEVC encoder MFT is
+  present and produced valid Annex-B H.265 (the test reached the decode stage
+  and skipped there, the HEVC decoder extension being absent); H.264 round trip
+  unregressed (`m19` green); `cargo test --workspace` green; combined
+  `mf-encode`+`mf-decode` clippy clean.
+
 ### M29: `WasapiSink` WASAPI render sink
 
 - The audible-output end of the M25 audio path (`AudioTestSrc`/`WavSink`):

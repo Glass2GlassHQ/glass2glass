@@ -1,6 +1,15 @@
-//! Windows H.264 encode element wrapping the Media Foundation H.264 Encoder
-//! MFT (`CLSID_MSH264EncoderMFT`, an `IMFTransform`). The encode-side mirror
-//! of `mfdecode`.
+//! Windows H.264 / H.265 encode element wrapping a Media Foundation encoder
+//! MFT. The encode-side mirror of `mfdecode`. Codec is selected with
+//! [`MfEncode::with_codec`]; the default is H.264.
+//!
+//! H.264 uses the MS H.264 Encoder MFT at a fixed CLSID
+//! (`CLSID_MSH264EncoderMFT`). H.265/HEVC has no fixed CLSID, so M30
+//! enumerates an encoder via `MFTEnumEx` for the HEVC output subtype. Only a
+//! synchronous MFT is driven by the `ProcessInput`/`ProcessOutput` loop below;
+//! hardware HEVC encoders are commonly asynchronous MFTs (event-driven), which
+//! this element rejects loud rather than mis-driving. A sync HEVC encoder is
+//! used when present, otherwise `configure_pipeline` fails with a `Hardware`
+//! error. Async-MFT support is deferred.
 //!
 //! M19: consumes raw NV12 `DataFrame`s (`MemoryDomain::System`, tightly
 //! packed) and produces Annex-B H.264 access units, also
@@ -31,17 +40,21 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_Main, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFShutdown, MFStartup, CLSID_MSH264EncoderMFT, MFMediaType_Video,
-    MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+    eAVEncH264VProfile_Main, IMFActivate, IMFSample, IMFTransform, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFShutdown, MFStartup, MFTEnumEx, CLSID_MSH264EncoderMFT,
+    MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
     MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_VERSION,
+    MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+    MF_TRANSFORM_ASYNC, MF_VERSION,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_MULTITHREADED,
 };
 
 use g2g_core::frame::Frame;
@@ -61,6 +74,9 @@ const DEFAULT_BITRATE: u32 = 4_000_000;
 #[derive(Debug)]
 struct EncoderState {
     transform: IMFTransform,
+    /// Negotiated output media subtype (`MFVideoFormat_H264`/`_HEVC`), reused
+    /// to re-pick the output type on a stream-change renegotiation.
+    out_subtype: windows::core::GUID,
     width: u32,
     height: u32,
     out_size: u32,
@@ -96,6 +112,9 @@ enum OutputStep {
 
 #[derive(Debug)]
 pub struct MfEncode {
+    /// Output codec the MFT produces (`H264` default, or `H265`). Selects the
+    /// encoder MFT and the output media subtype.
+    codec: VideoCodec,
     state: Option<EncoderState>,
     com_started: bool,
     configured: bool,
@@ -131,6 +150,7 @@ impl Default for MfEncode {
 impl MfEncode {
     pub fn new() -> Self {
         Self {
+            codec: VideoCodec::H264,
             state: None,
             com_started: false,
             configured: false,
@@ -141,6 +161,19 @@ impl MfEncode {
             emitted: 0,
             requested_alloc: None,
         }
+    }
+
+    /// Select the output codec. Only `H264` (the default) and `H265` map to a
+    /// Media Foundation encoder MFT; any other codec is rejected loud at
+    /// `configure_pipeline`. Call before `configure_pipeline`.
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// The configured output codec.
+    pub fn codec(&self) -> VideoCodec {
+        self.codec
     }
 
     /// Target average bitrate in bits/s (`MF_MT_AVG_BITRATE`). Applies at the
@@ -296,7 +329,7 @@ impl MfEncode {
     /// size from it.
     fn renegotiate(&mut self) -> Result<(), G2gError> {
         let st = self.state.as_mut().ok_or(G2gError::NotConfigured)?;
-        set_h264_output_from_available(&st.transform)?;
+        set_output_from_available(&st.transform, st.out_subtype)?;
         st.out_size = output_buffer_size(&st.transform, st.width, st.height)?;
         st.provides_samples = output_provides_samples(&st.transform)?;
         Ok(())
@@ -325,7 +358,8 @@ impl AsyncElement for MfEncode {
     /// constraint. The closure returns an empty set on a non-NV12 input, so
     /// the solver rejects incompatible upstream at negotiation time.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps(input)))
+        let codec = self.codec;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
     }
 
     /// M12: record the downstream consumer's allocation proposal. The encoder
@@ -360,7 +394,13 @@ impl AsyncElement for MfEncode {
         }
         self.com_started = true;
 
-        self.state = Some(init_encoder(w, h, rate_to_ratio(&framerate), self.bitrate)?);
+        self.state = Some(init_encoder(
+            self.codec,
+            w,
+            h,
+            rate_to_ratio(&framerate),
+            self.bitrate,
+        )?);
         self.framerate = framerate;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -407,8 +447,13 @@ impl AsyncElement for MfEncode {
                         .is_some_and(|st| (st.width, st.height) != (w, h));
                     if geometry_changed {
                         self.drain_eos(&mut encoded)?;
-                        self.state =
-                            Some(init_encoder(w, h, rate_to_ratio(&framerate), self.bitrate)?);
+                        self.state = Some(init_encoder(
+                            self.codec,
+                            w,
+                            h,
+                            rate_to_ratio(&framerate),
+                            self.bitrate,
+                        )?);
                         self.framerate = framerate;
                     }
                     self.input_caps = Some(c);
@@ -432,14 +477,14 @@ impl AsyncElement for MfEncode {
             }
 
             for c in encoded {
-                let new_caps = h264_caps(c.width, c.height, c.framerate.clone());
+                let new_caps = compressed_caps(self.codec, c.width, c.height, c.framerate.clone());
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // Encode-time output must overlap the closure's
                     // derivation of the recorded input (same Phase A
                     // assertion as the decoders).
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input);
+                        let expected = derive_output_caps(self.codec, input);
                         debug_assert!(
                             !expected
                                 .intersect(&CapsSet::one(new_caps.clone()))
@@ -470,8 +515,9 @@ impl AsyncElement for MfEncode {
 }
 
 impl PadTemplates for MfEncode {
-    /// Consumes NV12 and produces H.264, both at any geometry; the inverse of
-    /// `MfDecode`'s templates.
+    /// Consumes NV12 and produces H.264 or H.265, both at any geometry; the
+    /// inverse of `MfDecode`'s templates. The static superset advertises both
+    /// codecs on the source pad; the configured instance narrows to one.
     fn pad_templates() -> Vec<PadTemplate> {
         let nv12 = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -479,15 +525,18 @@ impl PadTemplates for MfEncode {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        let h264 = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+        let compressed = |codec| Caps::CompressedVideo {
+            codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(nv12)),
-            PadTemplate::source(CapsSet::one(h264)),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
+                compressed(VideoCodec::H264),
+                compressed(VideoCodec::H265),
+            ]))),
         ])
     }
 }
@@ -507,19 +556,99 @@ impl Drop for MfEncode {
     }
 }
 
-/// Create the encoder MFT, set the H.264 output type then the NV12 input type
-/// (the encoder contract requires output before input), and put it into
+/// The output media subtype an encoder produces for a codec. Only H.264 and
+/// H.265 map to a Media Foundation encoder; any other codec is rejected loud.
+fn encoder_subtype(codec: VideoCodec) -> Result<windows::core::GUID, G2gError> {
+    match codec {
+        VideoCodec::H264 => Ok(MFVideoFormat_H264),
+        VideoCodec::H265 => Ok(MFVideoFormat_HEVC),
+        _ => Err(G2gError::CapsMismatch),
+    }
+}
+
+/// Instantiate the encoder MFT for a codec. H.264 has a fixed CLSID; H.265 is
+/// enumerated by output subtype (no fixed CLSID). Only a synchronous MFT is
+/// returned; an enumerated async (hardware) MFT is rejected, since the
+/// sync drain loop here cannot drive it.
+fn create_encoder_transform(codec: VideoCodec) -> Result<IMFTransform, G2gError> {
+    match codec {
+        VideoCodec::H264 => {
+            // SAFETY: COM object creation on the owning thread.
+            unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
+                .map_err(mf_err)
+        }
+        VideoCodec::H265 => enumerate_sync_encoder(MFVideoFormat_HEVC),
+        _ => Err(G2gError::CapsMismatch),
+    }
+}
+
+/// Find a synchronous encoder MFT that outputs `output_subtype` via
+/// `MFTEnumEx`, and activate it. Skips asynchronous MFTs (the event-driven
+/// model the sync loop here does not implement). Fails `Hardware` when no
+/// usable encoder is registered.
+fn enumerate_sync_encoder(
+    output_subtype: windows::core::GUID,
+) -> Result<IMFTransform, G2gError> {
+    let out_info = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: output_subtype,
+    };
+    let flags = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+
+    let mut activates: *mut Option<IMFActivate> = core::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: MFTEnumEx allocates a CoTaskMem array of `count` activation
+    // objects, freed below. We pass our output type-info and no input
+    // constraint.
+    unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            flags,
+            None,
+            Some(&out_info),
+            &mut activates,
+            &mut count,
+        )
+        .map_err(mf_err)?;
+    }
+
+    let mut chosen: Option<Result<IMFTransform, G2gError>> = None;
+    // SAFETY: `activates` points to `count` initialised `Option<IMFActivate>`
+    // entries when count > 0. We take ownership of each entry (releasing the
+    // COM ref on drop), activating the first synchronous one.
+    unsafe {
+        for i in 0..count as usize {
+            let entry = core::ptr::read(activates.add(i));
+            if let Some(activate) = entry {
+                if chosen.is_none() {
+                    let is_async = activate.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) != 0;
+                    if !is_async {
+                        chosen = Some(activate.ActivateObject::<IMFTransform>().map_err(mf_err));
+                    }
+                }
+                // `activate` drops here, releasing the enumerated ref.
+            }
+        }
+        if !activates.is_null() {
+            CoTaskMemFree(Some(activates.cast()));
+        }
+    }
+
+    chosen.unwrap_or(Err(G2gError::Hardware(HardwareError::Other)))
+}
+
+/// Create the encoder MFT for `codec`, set the output type then the NV12 input
+/// type (the encoder contract requires output before input), and put it into
 /// streaming mode.
 fn init_encoder(
+    codec: VideoCodec,
     width: u32,
     height: u32,
     fps: (u32, u32),
     bitrate: u32,
 ) -> Result<EncoderState, G2gError> {
-    // SAFETY: COM object creation on the owning thread.
-    let transform: IMFTransform =
-        unsafe { CoCreateInstance(&CLSID_MSH264EncoderMFT, None, CLSCTX_INPROC_SERVER) }
-            .map_err(mf_err)?;
+    let out_subtype = encoder_subtype(codec)?;
+    let transform = create_encoder_transform(codec)?;
 
     // Low-latency mode (the attribute alias of CODECAPI_AVLowLatencyMode):
     // no B-frames / lookahead, one output per input. Best-effort, set before
@@ -541,7 +670,7 @@ fn init_encoder(
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
             .map_err(mf_err)?;
         output
-            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+            .SetGUID(&MF_MT_SUBTYPE, &out_subtype)
             .map_err(mf_err)?;
         output
             .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
@@ -555,9 +684,14 @@ fn init_encoder(
         output
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(mf_err)?;
-        output
-            .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)
-            .map_err(mf_err)?;
+        // H.264 pins Main profile via MF_MT_MPEG2_PROFILE; HEVC has no MS
+        // software encoder and an enumerated HW encoder picks its own profile,
+        // so leave it unset there.
+        if codec == VideoCodec::H264 {
+            output
+                .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)
+                .map_err(mf_err)?;
+        }
         transform.SetOutputType(0, &output, 0).map_err(mf_err)?;
 
         let input = MFCreateMediaType().map_err(mf_err)?;
@@ -594,6 +728,7 @@ fn init_encoder(
 
     Ok(EncoderState {
         transform,
+        out_subtype,
         width,
         height,
         out_size,
@@ -602,9 +737,12 @@ fn init_encoder(
     })
 }
 
-/// Re-select an H.264 output type from the MFT's available types (stream
-/// change recovery).
-fn set_h264_output_from_available(transform: &IMFTransform) -> Result<(), G2gError> {
+/// Re-select the configured output subtype from the MFT's available types
+/// (stream change recovery).
+fn set_output_from_available(
+    transform: &IMFTransform,
+    out_subtype: windows::core::GUID,
+) -> Result<(), G2gError> {
     let mut i = 0u32;
     loop {
         // SAFETY: type enumeration on the owning thread.
@@ -613,7 +751,7 @@ fn set_h264_output_from_available(transform: &IMFTransform) -> Result<(), G2gErr
             Ok(t) => {
                 // SAFETY: reading attributes off a valid media type.
                 let subtype = unsafe { t.GetGUID(&MF_MT_SUBTYPE) }.map_err(mf_err)?;
-                if subtype == MFVideoFormat_H264 {
+                if subtype == out_subtype {
                     // SAFETY: applying the chosen output type on the owning thread.
                     unsafe { transform.SetOutputType(0, &t, 0) }.map_err(mf_err)?;
                     return Ok(());
@@ -684,9 +822,9 @@ fn copy_sample(sample: &IMFSample) -> Result<Box<[u8]>, G2gError> {
     }
 }
 
-fn h264_caps(w: u32, h: u32, framerate: Rate) -> Caps {
+fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
@@ -695,8 +833,9 @@ fn h264_caps(w: u32, h: u32, framerate: Rate) -> Caps {
 
 /// Single source of truth for the encoder's output-side caps derivation,
 /// shared by the `DerivedOutput` constraint closure and the debug assertion.
-/// The inverse of `mfdecode::derive_output_caps`.
-fn derive_output_caps(input: &Caps) -> CapsSet {
+/// The inverse of `mfdecode::derive_output_caps`: NV12 in, the configured
+/// codec out.
+fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
     match input {
         Caps::RawVideo {
             format: RawVideoFormat::Nv12,
@@ -704,7 +843,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height,
             framerate,
         } => CapsSet::one(Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
@@ -837,6 +976,45 @@ mod tests {
     fn bitrate_builder_defaults_and_overrides() {
         assert_eq!(MfEncode::new().bitrate(), DEFAULT_BITRATE);
         assert_eq!(MfEncode::new().with_bitrate(750_000).bitrate(), 750_000);
+    }
+
+    #[test]
+    fn codec_defaults_h264_and_selects_h265() {
+        assert_eq!(MfEncode::new().codec(), VideoCodec::H264);
+        assert_eq!(
+            MfEncode::new().with_codec(VideoCodec::H265).codec(),
+            VideoCodec::H265
+        );
+    }
+
+    #[test]
+    fn encoder_subtype_maps_supported_codecs() {
+        assert_eq!(encoder_subtype(VideoCodec::H264).unwrap(), MFVideoFormat_H264);
+        assert_eq!(encoder_subtype(VideoCodec::H265).unwrap(), MFVideoFormat_HEVC);
+        assert_eq!(encoder_subtype(VideoCodec::Vp9), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn hevc_instance_derives_hevc_output_from_nv12() {
+        let enc = MfEncode::new().with_codec(VideoCodec::H265);
+        let CapsConstraint::DerivedOutput(f) = enc.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert_eq!(
+            f(&nv12).alternatives(),
+            &[Caps::CompressedVideo {
+                codec: VideoCodec::H265,
+                width: Dim::Fixed(1280),
+                height: Dim::Fixed(720),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
     }
 
     #[test]
