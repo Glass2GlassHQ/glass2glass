@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M57: `WebGPUExternalTexture` memory domain + `WebGPUKeepAlive` (P2.1)
+
+- Opens Phase 2 (the browser zero-copy chain): a new core `MemoryDomain`
+  variant `WebGPUExternalTexture(OwnedWebGPUExternalTexture)` carrying a
+  decoded browser `VideoFrame` to be imported into WebGPU as a
+  `GPUExternalTexture` and sampled on the GPU, so a WebCodecs-decoded frame is
+  preprocessed and run through inference without ever copying to CPU.
+  Everything downstream in P2 (the GPU-resident decode output, the
+  `WebGPUPreprocess` compute pass) depends on this carrier, so it lands first.
+- Mirrors the existing `OwnedCudaBuffer`/`CudaKeepAlive` and
+  `OwnedD3D11Texture`/`D3D11KeepAlive` pattern: `g2g-core` never links
+  `web-sys`, so the producing element boxes the `VideoFrame` owner as
+  `Box<dyn WebGPUKeepAlive>` and dropping it closes the frame. Two differences
+  from the CUDA/D3D11 carriers: the payload (the `VideoFrame`) is a JS handle
+  living inside the owner rather than a raw pointer in the struct, so
+  `WebGPUKeepAlive` adds `as_any` for a consumer to downcast and recover the
+  frame for `importExternalTexture`; and it keeps the `Send` supertrait so the
+  enum stays `Send` and the carrier is native-testable, with the wasm element
+  to assert `Send` under the single-threaded contract (the `MfDecode` /
+  `D3D11KeepAlive` precedent). Re-exported from the crate prelude beside the
+  sibling carriers.
+- Tests: three core unit tests (`kind()` reports `WebGPUExternalTexture`;
+  dropping the carrier closes the backing frame via the keep-alive;
+  `as_any` downcasts to the concrete owner), reusing the `FlagOnDrop`
+  stand-in. VERIFIED on the dev host: `cargo test -p g2g-core --lib memory`
+  green (7, incl. the 3 new); `cargo check --workspace` green (the new variant
+  breaks no exhaustive match); `cargo check -p g2g-core` and `-p g2g-plugins
+  --target wasm32-unknown-unknown` green; `cargo clippy -p g2g-core --lib`
+  clean. Design note for P2.3: research confirmed ORT-Web ignores a
+  caller-supplied `env.webgpu.device` (issue #26107, open as of 1.26.x, source
+  read), so the device handshake will invert (ORT creates the WebGPU device
+  and the wgpu side adopts it) rather than sharing our device into ORT. The
+  in-browser device adoption is owed a browser run.
+
 ### M56: `VideoRate` software temporal resampler (P1.2), completing Phase 1
 
 - Second and last of the "first credible product path" P1 transforms

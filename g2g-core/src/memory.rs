@@ -20,6 +20,13 @@ pub enum MemoryDomain {
     /// Media Foundation `IMFDXGIBuffer` from a DXVA decoder); see
     /// [`OwnedD3D11Texture`]. The Windows analog of [`MemoryDomain::Cuda`].
     D3D11Texture(OwnedD3D11Texture),
+    /// A decoded picture left as a browser `VideoFrame`, to be imported into
+    /// WebGPU as a `GPUExternalTexture` and sampled on the GPU (browser/wasm),
+    /// so a WebCodecs-decoded frame never round-trips to CPU. The frame is
+    /// owned elsewhere (a `web_sys::VideoFrame`); see
+    /// [`OwnedWebGPUExternalTexture`]. The browser analog of
+    /// [`MemoryDomain::D3D11Texture`].
+    WebGPUExternalTexture(OwnedWebGPUExternalTexture),
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
@@ -34,6 +41,7 @@ pub enum MemoryDomainKind {
     WebGPUBuffer,
     Cuda,
     D3D11Texture,
+    WebGPUExternalTexture,
 }
 
 impl MemoryDomain {
@@ -46,6 +54,7 @@ impl MemoryDomain {
             MemoryDomain::WebGPUBuffer(_) => MemoryDomainKind::WebGPUBuffer,
             MemoryDomain::Cuda(_) => MemoryDomainKind::Cuda,
             MemoryDomain::D3D11Texture(_) => MemoryDomainKind::D3D11Texture,
+            MemoryDomain::WebGPUExternalTexture(_) => MemoryDomainKind::WebGPUExternalTexture,
         }
     }
 }
@@ -291,6 +300,61 @@ impl OwnedD3D11Texture {
 /// the runner's worker-thread boundaries like every other domain.
 pub trait D3D11KeepAlive: core::fmt::Debug + Send {}
 
+/// A decoded picture left as a browser `VideoFrame`, to be imported into
+/// WebGPU as a `GPUExternalTexture` (`device.importExternalTexture`) and
+/// sampled in a compute or render pass, so a WebCodecs-decoded frame is
+/// preprocessed and run through inference without ever copying to CPU. A
+/// `VideoFrame`-sourced external texture stays valid until the frame is
+/// closed, so the keep-alive owns the frame and closes it on drop.
+///
+/// The `VideoFrame` is a JS handle `g2g-core` cannot name (it is `no_std`
+/// and never links `web-sys`), so the producing element (a WebCodecs
+/// decoder) boxes the owner as a [`WebGPUKeepAlive`]. Unlike the CUDA / D3D11
+/// domains, whose payload is a raw pointer this struct carries directly, the
+/// payload here lives inside the owner, so a consumer recovers it by
+/// downcasting [`WebGPUKeepAlive::as_any`]. The browser analog of
+/// [`OwnedD3D11Texture`] / [`OwnedCudaBuffer`].
+#[derive(Debug)]
+pub struct OwnedWebGPUExternalTexture {
+    /// Visible picture dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Owns the backing `VideoFrame` for the life of the imported texture;
+    /// dropping it closes the frame and frees the decoder's output slot.
+    keep_alive: Box<dyn WebGPUKeepAlive>,
+}
+
+impl OwnedWebGPUExternalTexture {
+    /// Wrap a decoded frame's dimensions with the owner that keeps the
+    /// backing `VideoFrame` alive.
+    pub fn new(width: u32, height: u32, keep_alive: Box<dyn WebGPUKeepAlive>) -> Self {
+        Self { width, height, keep_alive }
+    }
+
+    /// The keep-alive owner, for a consumer to downcast via
+    /// [`WebGPUKeepAlive::as_any`] and recover the `VideoFrame` to import, or
+    /// to take shared ownership.
+    pub fn keep_alive(&self) -> &dyn WebGPUKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedWebGPUExternalTexture`]. Owns the
+/// browser `VideoFrame`; the producing element boxes its handle as this trait
+/// object and a consumer that can link `web-sys` downcasts via
+/// [`as_any`](Self::as_any) to recover the frame for `importExternalTexture`.
+/// Dropping the box closes the frame. `Send` so a frame can cross the
+/// runner's worker boundaries like every other domain; on the single-threaded
+/// wasm target the concrete owner asserts `Send` under that contract (the
+/// frame never actually crosses a thread), as the `D3D11KeepAlive` owners do
+/// for their COM handles.
+pub trait WebGPUKeepAlive: core::fmt::Debug + Send {
+    /// Recover the concrete owner so a consumer can extract the `VideoFrame`.
+    /// Mirrors the raw-pointer access the CUDA / D3D11 domains expose
+    /// directly; here the payload lives in the owner, so downcast is the route.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +373,11 @@ mod tests {
     }
     impl CudaKeepAlive for FlagOnDrop {}
     impl D3D11KeepAlive for FlagOnDrop {}
+    impl WebGPUKeepAlive for FlagOnDrop {
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
 
     #[test]
     fn cuda_domain_reports_cuda_kind() {
@@ -386,5 +455,36 @@ mod tests {
             dropped.load(Ordering::SeqCst),
             "dropping the texture must release the backing allocation"
         );
+    }
+
+    #[test]
+    fn webgpu_external_texture_reports_kind() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tex = OwnedWebGPUExternalTexture::new(640, 480, Box::new(FlagOnDrop(dropped)));
+        assert_eq!(tex.width, 640);
+        assert_eq!(tex.height, 480);
+        let domain = MemoryDomain::WebGPUExternalTexture(tex);
+        assert_eq!(domain.kind(), MemoryDomainKind::WebGPUExternalTexture);
+    }
+
+    #[test]
+    fn dropping_webgpu_external_texture_closes_frame() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tex = OwnedWebGPUExternalTexture::new(1280, 720, Box::new(FlagOnDrop(dropped.clone())));
+        assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
+        drop(tex);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the texture must close the backing VideoFrame"
+        );
+    }
+
+    #[test]
+    fn webgpu_keep_alive_downcasts_to_concrete_owner() {
+        // a consumer that can link web-sys recovers the concrete VideoFrame
+        // owner through as_any to call importExternalTexture.
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tex = OwnedWebGPUExternalTexture::new(16, 16, Box::new(FlagOnDrop(dropped)));
+        assert!(tex.keep_alive().as_any().downcast_ref::<FlagOnDrop>().is_some());
     }
 }
