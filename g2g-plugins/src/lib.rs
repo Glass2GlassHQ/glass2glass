@@ -52,6 +52,11 @@ pub mod wavsink;
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
 
+// UDP egress sink (M47): drives the M46 RtpH264Packetizer and sends RTP over a
+// tokio UdpSocket, the send-side inverse of RtspSrc's receive path.
+#[cfg(feature = "udp-egress")]
+pub mod udpsink;
+
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the
 // `mf-decode` feature; enabling the feature on other platforms is a no-op.

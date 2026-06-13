@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M47: UDP egress sink (`UdpSink`), the I/O half of live egress
+
+- Closes the encode->egress arc the M46 packetizer opened (DESIGN.md §4.12):
+  `UdpSink` (`udpsink.rs`, `udp-egress` feature) is an `AsyncElement` sink that
+  drives the sans-IO `RtpH264Packetizer` over each Annex-B access unit and sends
+  the RTP packets to a destination on a tokio `UdpSocket`, the send-side inverse
+  of `RtspSrc`'s receive path. The RTP timestamp is the 90 kHz image of
+  `FrameTiming::pts_ns`; sequence numbers and the per-AU marker bit come from the
+  packetizer. Accepts H.264 at any geometry (`Accepts`/intercept narrow to
+  H.264, raw video rejected); `with_rtp(pt, ssrc)` and `with_max_payload(mtu)`
+  configure the flow.
+- The socket is bound synchronously in `configure_pipeline` (fails loud there,
+  no runtime needed) and wrapped into the tokio socket lazily on the first
+  `process`, where a runtime context is guaranteed (`UdpSocket::from_std`
+  requires one). `Flush` does not reset the RTP sequence (a receiver tracks loss
+  by gaps, so the numbering continues across a seek); `Eos` is recorded but emits
+  no RTP end marker. Deferred (user-side, need the sandbox-blocked port 554):
+  RTCP sender reports and the RTSP `ANNOUNCE`/`RECORD` handshake for Wowza-style
+  ingest.
+- Tests: three `udpsink` unit tests (intercept narrows H.264 / rejects raw,
+  configure rejects non-H.264 before binding a socket, the 90 kHz pts->RTP
+  timestamp conversion) plus `m47_udp_egress.rs`, which binds a loopback
+  receiver, runs two access units (small NALs + an oversized NAL forcing FU-A)
+  through the sink, and parses the datagrams back: the datagrams match the
+  packetizer byte-for-byte, the RTP timestamp tracks `pts_ns` at 90 kHz
+  independently (0 and 2999 for pts 0 and 1/30 s), sequence is contiguous, the
+  marker lands on each AU's last packet, and the FU-A fragments reassemble the
+  IDR NAL byte-exactly. Loopback UDP is used because RTP port 554 is
+  sandbox-blocked (§4.11.4). VERIFIED on the dev host: `cargo test -p g2g-plugins
+  --features udp-egress` green (71 lib incl. the new 3, plus the m47 integration
+  test); `cargo clippy -p g2g-plugins --features udp-egress --all-targets` clean;
+  native `cargo check --workspace` + `cargo clippy --workspace --all-targets` +
+  `cargo test --workspace` (default, udp-egress gated off) green.
+
 ### M46: sans-IO H.264 RTP packetizer (`RtpH264Packetizer`)
 
 - Opens the live-egress direction (DESIGN.md §4.12), the inverse of `RtspSrc`'s

@@ -580,11 +580,12 @@ I/O.
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M46** | `RtpH264Packetizer` (`rtppay.rs`): sans-IO RFC 3550 + RFC 6184, an H.264 access unit to RTP packets (single-NAL when it fits the MTU, else FU-A fragments; marker on the AU's last packet; incrementing sequence). Pure `no_std` logic, host-tested and Cortex-M-clean. | **implemented** |
-| **M47** | UDP egress sink + `AsyncElement` wrapper sending the packets; RTCP sender reports; an RTSP `ANNOUNCE` / `RECORD` path for Wowza-style ingest. | planned |
+| **M47** | `UdpSink` (`udpsink.rs`): an `AsyncElement` sink driving `RtpH264Packetizer` and sending the RTP packets over a tokio `UdpSocket`. RTP timestamp from `FrameTiming::pts_ns` at 90 kHz; H.264-only sink. Loopback-UDP-verified (port 554 blocked, §4.11.4). | **implemented** |
+| **M49** | RTCP sender reports; an RTSP `ANNOUNCE` / `RECORD` path for Wowza-style ingest. User-side (need the sandbox-blocked port). | planned |
 
-The packetizer is host-verifiable (parse the RTP headers back, reassemble the
-FU-A fragments); the UDP send and RTSP server are user-side (port 554 is blocked
-in the sandbox, as for the receive path, §4.11.4).
+The packetizer and the UDP send are host-verifiable over loopback (parse the RTP
+headers back, reassemble the FU-A fragments); the RTSP server and live ingest are
+user-side (port 554 is blocked in the sandbox, as for the receive path, §4.11.4).
 
 ---
 
