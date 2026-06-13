@@ -5,6 +5,44 @@ here are deferrals from the spec, follow-ups blocked on a concrete driver or
 upstream fix, and forward-looking tracks that the current architecture
 anticipates but hasn't yet built.
 
+## Status (2026-06)
+
+Shipped this session (M55-M65, all on `master`):
+
+- **P1 software transforms:** `VideoScale` (M55), `VideoRate` (M56),
+  `VideoCrop` (M62), native + wasm32. `VideoFlip` / `AudioResample` still open.
+- **Browser decode groundwork:** the `MemoryDomain::WebGPUExternalTexture`
+  carrier (M57) and `WebCodecsDecode::with_gpu_output()` (M58) landed, but are
+  reachable only by the raw-`web_sys` GPU path (see the Phase 2 update below).
+- **Inference composition:** `OrtInference::with_tensor_input()` (M59) lets a
+  GPU preprocess feed inference directly; the native end-to-end ML pipeline
+  (`VideoConvert -> VideoScale -> WgpuPreprocess -> OrtInference`) is verified
+  on hardware (M61).
+- **DAG runner:** D1 `Graph` + validation (M63); D2 `solve_graph` topological
+  CSP, fan-out (M64) + muxer fan-in (M65).
+
+New / reshaped follow-ups surfaced this session:
+
+- **Browser MVP via `ort-web`** (replaces the shelved GPU-resident P2.4/P2.5;
+  see the Phase 2 update): a wasm32 inference element on the maintained
+  `ort-web` crate (CPU tensors), wiring `WebSocketSrc -> WebCodecsDecode
+  (system RGBA, M40) -> ort-web -> CanvasSink (M41)`, loaded from the same
+  `.onnx` as native, deployed as a plain static HTTPS site (no COOP/COEP). It
+  proves cross-target ONNX in-browser but is not GPU-resident.
+- **Muxer per-input-pad constraint API:** D2's `NodeConstraint::Muxer {
+  inputs, output }` (M65) takes per-pad accept sets, but real muxer elements
+  (`mux`) don't expose them. Add `caps_constraint_as_input(idx)` (or similar)
+  so the D3 runner can build a muxer's constraint from the element. A
+  prerequisite for wiring real muxers into `run_graph`.
+- **DAG D3 next:** `run_graph` over a `GraphNode { Source(Box<dyn
+  DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload (sources and
+  transforms/sinks are different traits); the coordinator / mid-stream
+  re-cascade stays D4. Fake-element DAG tests verify here; the hardware
+  integration test is owed a Linux run.
+- **Raw-`web_sys` WebGPU path** (only if the GPU-resident browser claim is
+  revived): external-texture import + compute + `ort.Tensor.fromGpuBuffer` on
+  one ORT-owned `GPUDevice`, all outside `wgpu`. Large, browser-unverifiable.
+
 ## GStreamer parity gaps
 
 Capabilities GStreamer's core runtime has that g2g doesn't. Each is sized
@@ -415,6 +453,10 @@ make g2g substantially more credible as a GStreamer replacement.
 developer evaluation: resize, reframe, crop, audio-resample, and live camera
 capture on Linux + Windows.
 
+**Status (2026-06):** Phase A transforms `VideoScale` (M55), `VideoRate`
+(M56), and `VideoCrop` (M62) shipped (native + wasm32). `AudioResample` (A4),
+`VideoFlip`, and the Phase B capture sources remain.
+
 Goal at end of sprint: a self-contained demo with no external feed —
 
 ```
@@ -683,6 +725,9 @@ validated.
 
 Pulled from Tier-1 Phase A. Only the two transforms the demo critically
 needs; `VideoCrop` / `AudioResample` defer until a use case forces them.
+
+**Status: done.** `VideoScale` (M55) and `VideoRate` (M56) shipped, both
+verified on native + wasm32; `VideoCrop` also landed (M62).
 
 - **P1.1 — `VideoScale`** (2 sessions). Software bilinear, separable, per-
   plane on I420 / NV12. The ML model wants a fixed input size
@@ -1129,9 +1174,9 @@ Five focused phases. Each is independently verifiable.
 
 | Phase | Scope | Verifiable on its own |
 | :--- | :--- | :--- |
-| **D1 — `Graph` data structure + validation.** | The builder, `NodeId` / `PadId`, `LinkPolicy` per edge, `finish() -> ValidatedGraph` with topo sort + cycle detection + pad-count + orphan checks. No solver, no runner. | Pure data-structure tests. Reject diamond-with-cycle, accept tee→mux diamond, accept linear, accept fan-out, accept fan-in. |
-| **D2 — `solve_graph` (topological CSP).** | Generalize `solve_linear`'s forward + backward sweep to topo order. Generalize `downstream_feasibility` to a reverse-topo fold. `NegotiationFailure` unchanged. | Solver-only tests against fake elements: diamond with two converters meeting at a mux, fan-out with one rejecting branch (strict failure), linear regression (must match `solve_linear` byte-for-byte). |
-| **D3 — `run_graph` (the runner).** | Spawn-per-node, edge-channels, `join_all`. Coordinator wired to every arm. Tee + Muxer as graph node kinds. Reuses the existing `mux` and per-branch logic. | A `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` integration test (gated on `rtsp ffmpeg wayland-sink`, same gate as `wayland_smoke`). Plus pure-fake DAG tests that don't need hardware. |
+| **D1 — `Graph` data structure + validation.** DONE (M63). | The builder, `NodeId` / `PadId`, `LinkPolicy` per edge, `finish() -> ValidatedGraph` with topo sort + cycle detection + pad-count + orphan checks. No solver, no runner. Generic over the element payload `E` to stay `no_std`. | Pure data-structure tests. Reject diamond-with-cycle, accept tee→mux diamond, accept linear, accept fan-out, accept fan-in. |
+| **D2 — `solve_graph` (topological CSP).** DONE (M64 fan-out, M65 muxer fan-in). | Generalize `solve_linear`'s forward + backward sweep to topo order over edges. Per-node `NodeConstraint` (single `CapsConstraint` for source/transform/sink; `Muxer { inputs, output }` per-input-pad for fan-in). `NegotiationFailure` unchanged. Reverse-topo `downstream_feasibility` fold not yet ported (only needed by D4). | Solver-only tests against fake elements: muxer fan-in narrows each input by its pad, tee fan-out couples branches, a rejecting branch strict-fails, linear regression matches `solve_linear` byte-for-byte. |
+| **D3 — `run_graph` (the runner).** NEXT. | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload (sources and transforms/sinks are different traits). Tee + Muxer as graph node kinds; reuses the existing `mux` and per-branch logic. The coordinator / mid-stream re-cascade is D4, so D3 wires a no-op control leg. Wiring real muxers needs the per-input-pad constraint API (see Status). | A `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` integration test (gated on `rtsp ffmpeg wayland-sink`, same gate as `wayland_smoke`). Plus pure-fake DAG tests that don't need hardware. |
 | **D4 — Mid-stream re-solve + β cascade over the DAG.** | Snapshot feasibility into each arm at startup. On mid-stream `CapsChanged`, walk the affected subgraph via topo + `in_edges`. Per-branch concurrent walks on a tee, per-input independent walks on a mux. | Fake-element regression: change source caps mid-stream, assert every downstream branch re-solves correctly, the rejecting branch fails its arm, the rest keep flowing. |
 | **D5 — Convenience wrappers + deprecation path.** | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
 
