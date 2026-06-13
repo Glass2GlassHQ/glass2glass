@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M50: inline GPU tensor preprocessing (`WgpuPreprocess`), the §5.1 hardware-first pillar
+
+- Realizes DESIGN.md §5.1 (Pillars 2 + 4: zero-copy hardware + ML): `WgpuPreprocess`
+  (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is an `AsyncElement` that turns
+  an NV12 video frame into a normalized f32 NCHW RGB tensor
+  (`Caps::RawVideo{Nv12} -> Caps::Tensor{F32,[1,3,H,W],Nchw}`), doing the BT.601
+  colour conversion and the `value / 255` normalization in a wgpu compute shader
+  instead of on the CPU. It produces the same tensor contract `OrtInference`
+  builds on the CPU, so it slots into the existing tensor graph
+  (`decoder(NV12) -> WgpuPreprocess -> TensorBatcher -> inference ->
+  TensorPostprocess`). Negotiation mirrors `OrtInference`/`VideoConvert`: a native
+  `DerivedOutput(NV12@even WxH -> tensor)`, non-NV12 input rejected at solve time.
+- The NV12 bytes are uploaded to a storage buffer (packed `array<u32>`, unpacked
+  in WGSL) and the f32 tensor is read back to `MemoryDomain::System` via a staging
+  buffer + `poll(PollType::Wait)`. The GPU context (instance/adapter/device,
+  pipeline, buffers sized to `W x H`) is built lazily on the first frame, since
+  `request_adapter`/`request_device` are async and `configure_pipeline` is not.
+  `wgpu` 29 (default backends; D3D12 on Windows). Deferred: the zero-copy path
+  (binding a decoder's `DmaBuf`/`D3D11Texture` surface directly into the compute
+  pass and emitting a GPU-resident tensor domain, which needs the surface-import
+  handshake + a GPU tensor domain in core), RGBA input (normalize only), and
+  offloading the blocking GPU round-trip to a blocking pool.
+- Tests: three unit tests (the BT.601 host reference is grayscale-linear in luma,
+  intercept narrows NV12 / rejects RGBA, configure rejects odd 4:2:0 geometry)
+  plus `wgpu_preprocess.rs`, which runs a known NV12 frame (distinct luma, one
+  neutral and one coloured chroma block) through the element on the real GPU and
+  asserts the read-back tensor matches the host BT.601 reference within float
+  tolerance, the tensor caps emit exactly once across two frames, and timing is
+  inherited; it skips gracefully when no wgpu adapter is present. VERIFIED on the
+  dev host (D3D12 adapter): `cargo test -p g2g-ml --features wgpu` green (3 unit +
+  the GPU integration test); `cargo clippy -p g2g-ml --features wgpu --all-targets`
+  clean; native `cargo check --workspace` + `cargo clippy --workspace
+  --all-targets` + `cargo test --workspace` (default, wgpu gated off) green.
+
 ### M47: UDP egress sink (`UdpSink`), the I/O half of live egress
 
 - Closes the encode->egress arc the M46 packetizer opened (DESIGN.md §4.12):

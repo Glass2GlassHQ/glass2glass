@@ -15,3 +15,9 @@ pub mod ortinfer;
 // tensor post-processing (softmax / argmax classification head); pure Rust,
 // no feature gate.
 pub mod postprocess;
+
+// Inline GPU tensor preprocessing (DESIGN.md §5.1): NV12 -> normalized f32
+// NCHW RGB tensor in a wgpu compute shader, the hardware-first preprocessing
+// counterpart of OrtInference's CPU path.
+#[cfg(feature = "wgpu")]
+pub mod wgpupreprocess;

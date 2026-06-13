@@ -599,6 +599,8 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 2. An inline compute shader converts color spaces (e.g. NV12 → planar RGB) and performs normalization scales directly in graphics memory.
 3. The resulting tensor handle is emitted as a `Frame { domain: VulkanTexture(...), caps: Caps::Tensor { .. }, .. }`, submitted straight to the inference backend.
 
+**Status (M50):** `WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) implements step 2: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. This is the system-memory variant (NV12 uploaded to a storage buffer, the f32 tensor read back to `MemoryDomain::System`), verified on the local D3D12 GPU against a host BT.601 reference. Steps 1 and 3 (binding a decoder's `DmaBuf`/`D3D11Texture` surface directly and emitting a GPU-resident tensor domain) need the surface-import handshake and a GPU tensor `MemoryDomain`; deferred.
+
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
