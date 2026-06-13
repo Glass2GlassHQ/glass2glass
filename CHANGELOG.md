@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M55: `VideoScale` software spatial resampler (P1.1)
+
+- First element of the "first credible product path" P1 transforms (DESIGN_TODO.md):
+  `VideoScale::new(w, h)` resamples raw video to a configured output geometry,
+  preserving the pixel format, so a stream's geometry can be fit to an ML model's
+  fixed input size or a delivery resolution. Handles the same format set as
+  `VideoConvert` (`Rgba8`, `Bgra8`, `Nv12`, `I420`): packed formats scale as one
+  4-channel plane, the 4:2:0 formats scale luma and chroma independently at their
+  own resolutions. CPU-only, integer-only (Q16 fixed-point bilinear, half-pixel-
+  centred source mapping, no float intrinsics), `no_std`: lives in the plugin
+  baseline with no feature gate, so it runs in the native and the wasm32 builds.
+- Negotiation mirrors `VideoConvert`: a native `DerivedOutput(any supported raw ->
+  same format at the configured target dims, framerate preserved)`. 4:2:0 needs
+  even input and target dims (chroma is subsampled 2x2), rejected loud at
+  negotiation; equal in/out dims short-circuit to an exact copy. Bilinear is the
+  baseline-correctness choice; it undersamples on large downscale ratios, so a
+  wgpu variant for GPU-resident input and higher-quality kernels is the deferred
+  follow-up (DESIGN_TODO.md P1).
+- Tests: eight unit tests (exact bilinear endpoint values on a 2->4 upscale,
+  identity copy, per-format output byte sizes, NV12 per-plane chroma resample,
+  `DerivedOutput` target mapping + odd-4:2:0-target rejection, configure even-dim
+  rejection on both sides, and a smooth-gradient down/up round-trip with MSE < 65,
+  i.e. PSNR > 30 dB) plus `m55_videoscale.rs`, which up- and down-scales an RGBA
+  `VideoTestSrc` through the real source-transform-sink runner and asserts the
+  target geometry + preserved framerate are announced via `CapsChanged`. VERIFIED
+  on the dev host: `cargo test -p g2g-plugins --lib videoscale` (8) and `--test
+  m55_videoscale` (2) green; `cargo clippy -p g2g-plugins --lib` + the m55 test
+  clean; `cargo check -p g2g-plugins --target wasm32-unknown-unknown` green (stays
+  in the no_std baseline). The planar math is unit-tested; NV12/I420 through the
+  runner is not exercised end-to-end (`VideoTestSrc` emits RGBA), the runner path
+  being format-agnostic.
+
 ### M54: `FfmpegH264Dec` accepts YUV444P source (chroma downsampled to 4:2:0)
 
 - Closes the YUV444P half of the `ffmpegdec` "YUV444P / 10-bit" deferral: the
