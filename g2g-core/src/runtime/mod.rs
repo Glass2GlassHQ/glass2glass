@@ -19,6 +19,9 @@ pub mod solver;
 #[cfg(feature = "std")]
 mod fanin;
 
+#[cfg(feature = "std")]
+mod graph_runner;
+
 pub use channel::{
     bounded, link, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot, Receiver,
     ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
@@ -38,3 +41,6 @@ pub use runner::{
 
 #[cfg(feature = "std")]
 pub use fanin::{run_fanin_sink, run_muxer_sink, run_muxer_sink_with_bus, DynSourceLoop};
+
+#[cfg(feature = "std")]
+pub use graph_runner::{run_graph, GraphNode};

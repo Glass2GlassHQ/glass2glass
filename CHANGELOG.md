@@ -5,6 +5,48 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M67: DAG runner D3 - `run_graph`
+
+- Opens D3 of the DAG runner (DESIGN_TODO "DAG runner - detailed plan"): a
+  single `run_graph(graph, clock, link_capacity)` entry point drives an
+  arbitrary DAG, collapsing the linear + fan-out runner shapes. It negotiates
+  the whole graph at once via `solve_graph` (D2), configures each node, then
+  spawns one arm per node over per-edge channels joined with `join_all`. The
+  element payload is `GraphNode { Source(Box<dyn DynSourceLoop>) |
+  Element(Box<dyn DynAsyncElement>) }` (sources and transforms/sinks are
+  different traits), with `GraphNode::source` / `GraphNode::element` boxing
+  helpers. `ValidatedGraph` gains `element` / `element_mut` accessors so the
+  runner builds each node's constraint before taking the element into its arm.
+- Scope is source / transform / sink / tee (the fan-out half). A tee broadcasts
+  each packet to all branches; since `PipelinePacket` is not `Clone` (a
+  GPU-resident frame owns a non-copyable handle), the broadcast deep-copies
+  `System` frames via a `try_clone_packet` helper and fails loud
+  (`UnsupportedDomain`) on a GPU domain. The mid-stream re-cascade (coordinator)
+  is D4, so an interior arm handles a `CapsChanged` locally (configure +
+  forward) without the downstream-feasibility steering or β allocation walk.
+- Deferred, each with a clear failure: a muxer node is rejected (real-muxer
+  fan-in needs the per-input-pad constraint API, a separate follow-up); a
+  GPU-resident frame in a tee fails loud (a refcounted shareable frame is the
+  zero-copy-tee follow-up); the `rtspsrc -> parse -> tee -> {decode -> wayland,
+  mux -> mp4}` hardware integration test is owed a Linux run. D4 (mid-stream
+  re-solve over the DAG) and D5 (reframe the existing runners as thin
+  `run_graph` wrappers) are the remaining phases. `run_graph` lives in
+  `runtime/graph_runner.rs` under the same `std` gate as the other runners; the
+  `no_std` baseline is unaffected.
+- Tests: two core unit tests (`try_clone_packet` deep-copies a `System` frame's
+  bytes + timing into a distinct allocation; control packets clone) plus
+  `m67_dag_run_graph.rs`, four pure-fake integration tests through the real
+  runner (a linear `src -> flip -> sink`; a `tee(2)` fan-out where each of two
+  sinks consumes all four frames; a tee whose two branches run independent
+  `flip` / `crop` transforms; and an RGBA-source-into-NV12-filter graph that
+  fails the whole-graph solve loud). VERIFIED on the dev host: `cargo test -p
+  g2g-core --features "std runtime"` green (144, incl. the 2 new); `cargo test
+  -p g2g-plugins --features std` green (incl. the 4 new m67 tests, no
+  regression); `cargo clippy -p g2g-core --features "std runtime" --lib` + the
+  m67 test clean; `cargo check -p g2g-core --target thumbv7em-none-eabihf` green
+  (graph_runner is `std`-gated, the baseline stays `no_std`); native `cargo
+  check --workspace` green.
+
 ### M66: `VideoFlip` software flip / rotate (Tier-1 A)
 
 - `VideoFlip::new(method)` mirrors or rotates a raw frame by a fixed

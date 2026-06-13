@@ -20,7 +20,8 @@ Shipped this session (M55-M65, all on `master`):
   (`VideoConvert -> VideoScale -> WgpuPreprocess -> OrtInference`) is verified
   on hardware (M61).
 - **DAG runner:** D1 `Graph` + validation (M63); D2 `solve_graph` topological
-  CSP, fan-out (M64) + muxer fan-in (M65).
+  CSP, fan-out (M64) + muxer fan-in (M65); D3 `run_graph` over a
+  `GraphNode { Source | Element }` payload, source/transform/sink/tee (M67).
 
 New / reshaped follow-ups surfaced this session:
 
@@ -35,11 +36,15 @@ New / reshaped follow-ups surfaced this session:
   (`mux`) don't expose them. Add `caps_constraint_as_input(idx)` (or similar)
   so the D3 runner can build a muxer's constraint from the element. A
   prerequisite for wiring real muxers into `run_graph`.
-- **DAG D3 next:** `run_graph` over a `GraphNode { Source(Box<dyn
-  DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload (sources and
-  transforms/sinks are different traits); the coordinator / mid-stream
-  re-cascade stays D4. Fake-element DAG tests verify here; the hardware
-  integration test is owed a Linux run.
+- **DAG D3 done (M67):** `run_graph` over a `GraphNode { Source(Box<dyn
+  DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload, handling
+  source/transform/sink/tee with fake-element tests. Two gaps surfaced and are
+  the next DAG work: (1) a tee deep-copies `System` frames and fails loud on a
+  GPU domain because `PipelinePacket` is not `Clone` (GPU handles can't be) - a
+  refcounted shareable frame is the zero-copy-tee prerequisite; (2) muxer nodes
+  are rejected, still owed the per-input-pad constraint API above. **DAG D4
+  next:** the coordinator / mid-stream re-cascade over the DAG. The hardware
+  `tee -> {decode, mux}` integration test is owed a Linux run.
 - **Raw-`web_sys` WebGPU path** (only if the GPU-resident browser claim is
   revived): external-texture import + compute + `ort.Tensor.fromGpuBuffer` on
   one ORT-owned `GPUDevice`, all outside `wgpu`. Large, browser-unverifiable.
@@ -1177,7 +1182,7 @@ Five focused phases. Each is independently verifiable.
 | :--- | :--- | :--- |
 | **D1 — `Graph` data structure + validation.** DONE (M63). | The builder, `NodeId` / `PadId`, `LinkPolicy` per edge, `finish() -> ValidatedGraph` with topo sort + cycle detection + pad-count + orphan checks. No solver, no runner. Generic over the element payload `E` to stay `no_std`. | Pure data-structure tests. Reject diamond-with-cycle, accept tee→mux diamond, accept linear, accept fan-out, accept fan-in. |
 | **D2 — `solve_graph` (topological CSP).** DONE (M64 fan-out, M65 muxer fan-in). | Generalize `solve_linear`'s forward + backward sweep to topo order over edges. Per-node `NodeConstraint` (single `CapsConstraint` for source/transform/sink; `Muxer { inputs, output }` per-input-pad for fan-in). `NegotiationFailure` unchanged. Reverse-topo `downstream_feasibility` fold not yet ported (only needed by D4). | Solver-only tests against fake elements: muxer fan-in narrows each input by its pad, tee fan-out couples branches, a rejecting branch strict-fails, linear regression matches `solve_linear` byte-for-byte. |
-| **D3 — `run_graph` (the runner).** NEXT. | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload (sources and transforms/sinks are different traits). Tee + Muxer as graph node kinds; reuses the existing `mux` and per-branch logic. The coordinator / mid-stream re-cascade is D4, so D3 wires a no-op control leg. Wiring real muxers needs the per-input-pad constraint API (see Status). | A `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` integration test (gated on `rtsp ffmpeg wayland-sink`, same gate as `wayland_smoke`). Plus pure-fake DAG tests that don't need hardware. |
+| **D3 — `run_graph` (the runner).** DONE (M67), source/transform/sink/tee. | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) }` payload (sources and transforms/sinks are different traits). The coordinator / mid-stream re-cascade is D4, so an interior arm handles a `CapsChanged` locally (no β walk). Two gaps surfaced: a tee can't share a `PipelinePacket` (not `Clone`, GPU handles), so it deep-copies `System` frames and fails loud on a GPU domain (zero-copy tee needs a refcounted shareable frame); muxer nodes are rejected, still owed the per-input-pad constraint API. | DONE: pure-fake DAG tests (linear chain, `tee(2)` fan-out to two sinks, tee with per-branch transforms, incompatible-branch solve failure). OWED: the `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` hardware integration test (gated on `rtsp ffmpeg wayland-sink`), a Linux run. |
 | **D4 — Mid-stream re-solve + β cascade over the DAG.** | Snapshot feasibility into each arm at startup. On mid-stream `CapsChanged`, walk the affected subgraph via topo + `in_edges`. Per-branch concurrent walks on a tee, per-input independent walks on a mux. | Fake-element regression: change source caps mid-stream, assert every downstream branch re-solves correctly, the rejecting branch fails its arm, the rest keep flowing. |
 | **D5 — Convenience wrappers + deprecation path.** | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
 

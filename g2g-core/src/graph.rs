@@ -317,6 +317,18 @@ impl<E> ValidatedGraph<E> {
     pub fn take_element(&mut self, node: NodeId) -> Option<E> {
         self.nodes[node.0 as usize].element.take()
     }
+
+    /// Borrow a node's element payload, for building its negotiation
+    /// constraint before the runner takes it. `None` for tee/muxer nodes.
+    pub fn element(&self, node: NodeId) -> Option<&E> {
+        self.nodes[node.0 as usize].element.as_ref()
+    }
+
+    /// Mutably borrow a node's element payload, for the async source caps
+    /// probe and per-node `configure_pipeline`. `None` for tee/muxer nodes.
+    pub fn element_mut(&mut self, node: NodeId) -> Option<&mut E> {
+        self.nodes[node.0 as usize].element.as_mut()
+    }
 }
 
 impl<E> core::fmt::Debug for ValidatedGraph<E> {
