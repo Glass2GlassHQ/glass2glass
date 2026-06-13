@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M62: `VideoCrop` software rectangular crop (Tier-1 A1)
+
+- `VideoCrop::new(x, y, w, h)` extracts a sub-rectangle of a raw frame,
+  preserving the pixel format, for ROI-driven flows (a detector emits boxes,
+  the cropper extracts the patches a classifier sees). No resampling, a
+  per-plane row copy. Completes the software-transform trio with `VideoScale`
+  (M55) and `VideoRate` (M56), same format set (`Rgba8`/`Bgra8`/`Nv12`/`I420`).
+  4:2:0 needs an even crop origin and size (chroma is 2x2 subsampled); odd
+  coords fail loud, packed formats crop at any coords. CPU-only `no_std`
+  baseline.
+- Negotiation mirrors the sibling transforms: a native `DerivedOutput(any
+  supported raw -> same format at the rect dims, framerate preserved)`, with an
+  odd 4:2:0 rect collapsing to the empty set so the solve fails loud;
+  `configure` additionally validates the rect lies inside the frame.
+- Tests: six unit tests (`crop_plane` sub-rect copy, RGBA pixel extraction,
+  NV12 per-plane sizes + luma offset, `DerivedOutput` rect mapping + odd-4:2:0
+  rejection, configure fit + evenness) plus `m62_videocrop.rs`, which crops an
+  8x8 RGBA `VideoTestSrc` to 4x4 at (2,2) through the real runner and asserts
+  the cropped geometry + preserved framerate via `CapsChanged`. VERIFIED on the
+  dev host: `cargo test -p g2g-plugins --lib videocrop` (6) and `--test
+  m62_videocrop` (1) green; `cargo clippy -p g2g-plugins --lib` + the m62 test
+  clean; `cargo check -p g2g-plugins --target wasm32-unknown-unknown` green.
+
 ### M61: native end-to-end ML pipeline test (cross-target proof, native half)
 
 - An integration test runs `VideoTestSrc(RGBA) -> VideoConvert(NV12) ->
