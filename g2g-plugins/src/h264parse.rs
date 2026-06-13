@@ -252,14 +252,17 @@ fn parse_sps_dimensions(rbsp: &[u8]) -> Option<(u32, u32)> {
 
     let _sps_id = br.read_ue()?;
 
+    // 4:2:0 unless a high profile signals a different chroma format.
+    let mut chroma_format_idc = 1u32;
+    let mut separate_colour_plane_flag = 0u32;
     // Profiles that include chroma/scaling/etc. extra header fields.
     if matches!(
         profile_idc,
         100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
     ) {
-        let chroma_format_idc = br.read_ue()?;
+        chroma_format_idc = br.read_ue()?;
         if chroma_format_idc == 3 {
-            let _separate_colour_plane_flag = br.read_bit()?;
+            separate_colour_plane_flag = br.read_bit()?;
         }
         let _bit_depth_luma_minus8 = br.read_ue()?;
         let _bit_depth_chroma_minus8 = br.read_ue()?;
@@ -308,14 +311,18 @@ fn parse_sps_dimensions(rbsp: &[u8]) -> Option<(u32, u32)> {
         (0, 0, 0, 0)
     };
 
-    // Crop units are 1 luma sample for 4:0:0 / 4:4:4 and otherwise 2x2;
-    // we assume 4:2:0 for the baseline profile path (chroma_format_idc=1)
-    // and 1x1 sample units for the high-profile path when we didn't read
-    // chroma_format_idc. Tests use frame_cropping_flag=0 so the multiplier
-    // doesn't affect correctness here.
-    let crop_x = (crop_left + crop_right).saturating_mul(2);
-    let crop_y =
-        (crop_top + crop_bottom).saturating_mul(2 * (2u32.saturating_sub(frame_mbs_only_flag)));
+    // Crop units in luma samples (H.264 7.4.2.1.1). ChromaArrayType 0
+    // (monochrome, or 4:4:4 with separate colour planes) crops 1 x (2-fmof);
+    // otherwise SubWidthC x SubHeightC*(2-fmof).
+    let chroma_array_type = if separate_colour_plane_flag == 1 { 0 } else { chroma_format_idc };
+    let (sub_width_c, sub_height_c) = match chroma_array_type {
+        1 => (2u32, 2u32), // 4:2:0
+        2 => (2, 1),       // 4:2:2
+        _ => (1, 1),       // 4:4:4 / monochrome
+    };
+    let crop_x = (crop_left + crop_right).saturating_mul(sub_width_c);
+    let crop_y = (crop_top + crop_bottom)
+        .saturating_mul(sub_height_c.saturating_mul(2u32.saturating_sub(frame_mbs_only_flag)));
 
     let width = (pic_width_in_mbs_minus1 + 1) * 16;
     let height = (2 - frame_mbs_only_flag) * (pic_height_in_map_units_minus1 + 1) * 16;

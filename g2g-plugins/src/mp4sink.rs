@@ -297,10 +297,16 @@ fn parameter_sets<'a>(
         VideoCodec::H265 => &[32, 33, 34],
         _ => &[7, 8],
     };
-    types
+    let sets: Vec<&[u8]> = types
         .iter()
         .map(|ty| find_nalu(codec, nalus, *ty).ok_or(G2gError::CapsMismatch))
-        .collect()
+        .collect::<Result<_, _>>()?;
+    // avcC copies profile/compat/level from sps[1..4]; a shorter SPS is
+    // malformed, so fail loud instead of writing a truncated record.
+    if !matches!(codec, VideoCodec::H265) && sets[0].len() < 4 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(sets)
 }
 
 /// AVCC sample payload: every NALU prefixed with its 4-byte big-endian
@@ -314,34 +320,10 @@ fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+// box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
+use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+
 // --- box writers ----------------------------------------------------------
-
-fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + payload.len());
-    b.extend_from_slice(&((payload.len() as u32 + 8).to_be_bytes()));
-    b.extend_from_slice(kind);
-    b.extend_from_slice(payload);
-    b
-}
-
-fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(4 + payload.len());
-    p.push(version);
-    p.extend_from_slice(&flags.to_be_bytes()[1..]);
-    p.extend_from_slice(payload);
-    mp4_box(kind, &p)
-}
-
-fn ftyp() -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(b"iso5"); // major brand
-    p.extend_from_slice(&512u32.to_be_bytes()); // minor version
-    p.extend_from_slice(b"iso5");
-    p.extend_from_slice(b"isom");
-    mp4_box(b"ftyp", &p)
-}
-
-const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
 
 fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]]) -> Vec<u8> {
     let mvhd = {

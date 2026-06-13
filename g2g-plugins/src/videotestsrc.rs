@@ -132,7 +132,7 @@ impl SourceLoop for VideoTestSrc {
                     for (i, b) in slice.iter_mut().take(bytes_per_frame).enumerate() {
                         *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
                     }
-                    MemoryDomain::System(SystemSlice::from_pool(buf))
+                    MemoryDomain::System(SystemSlice::from_pool(buf, bytes_per_frame))
                 } else {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
                     for (i, b) in buf.iter_mut().enumerate() {

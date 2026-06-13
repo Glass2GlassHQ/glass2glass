@@ -357,7 +357,9 @@ fn forward_propagate(
                 }
             }
             if out.is_empty() {
-                return Err(NegotiationFailure::EmptyLink { upstream: i - 1, downstream: i + 1 });
+                // No input alternative matched any mapping row: the input link
+                // (between elements i-1 and i) is the conflict, same as Identity.
+                return Err(NegotiationFailure::EmptyLink { upstream: i - 1, downstream: i });
             }
             Ok(out)
         }

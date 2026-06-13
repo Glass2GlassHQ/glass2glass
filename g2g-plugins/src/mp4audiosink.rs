@@ -41,6 +41,10 @@ pub struct Mp4AudioSink {
     header_written: bool,
     fragments: u64,
     decode_time: u64,
+    // carries the sub-tick remainder of ns->sample conversion so decode_time
+    // (tfdt) tracks real time exactly across a long recording instead of
+    // truncating one sample per fragment.
+    tick_remainder: u128,
     eos_seen: bool,
 }
 
@@ -55,6 +59,7 @@ impl Mp4AudioSink {
             header_written: false,
             fragments: 0,
             decode_time: 0,
+            tick_remainder: 0,
             eos_seen: false,
         }
     }
@@ -160,8 +165,11 @@ impl AsyncElement for Mp4AudioSink {
                     // duration in media-time ticks: AAC-LC frame, or derived
                     // from the frame's explicit duration if present.
                     let duration = if frame.timing.duration_ns != 0 {
-                        ((frame.timing.duration_ns as u128 * self.sample_rate as u128)
-                            / 1_000_000_000) as u32
+                        let numer = frame.timing.duration_ns as u128
+                            * self.sample_rate as u128
+                            + self.tick_remainder;
+                        self.tick_remainder = numer % 1_000_000_000;
+                        (numer / 1_000_000_000) as u32
                     } else {
                         AAC_FRAME_SAMPLES
                     };
@@ -196,23 +204,10 @@ impl PadTemplates for Mp4AudioSink {
     }
 }
 
+// box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
+use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+
 // --- box writers -----------------------------------------------------------
-
-fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + payload.len());
-    b.extend_from_slice(&((payload.len() as u32 + 8).to_be_bytes()));
-    b.extend_from_slice(kind);
-    b.extend_from_slice(payload);
-    b
-}
-
-fn full_box(kind: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(4 + payload.len());
-    p.push(version);
-    p.extend_from_slice(&flags.to_be_bytes()[1..]);
-    p.extend_from_slice(payload);
-    mp4_box(kind, &p)
-}
 
 /// An MPEG-4 descriptor: tag, expandable size (single byte, payloads here are
 /// small), then payload.
@@ -224,17 +219,6 @@ fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
     d.extend_from_slice(payload);
     d
 }
-
-fn ftyp() -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(b"iso5");
-    p.extend_from_slice(&512u32.to_be_bytes());
-    p.extend_from_slice(b"iso5");
-    p.extend_from_slice(b"isom");
-    mp4_box(b"ftyp", &p)
-}
-
-const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
 
 /// The `esds` (ES_Descriptor) box carrying the AAC AudioSpecificConfig.
 fn esds(asc: &[u8]) -> Vec<u8> {

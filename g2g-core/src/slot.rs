@@ -50,6 +50,12 @@ impl core::fmt::Debug for ElementSlot {
     }
 }
 
+/// Install `element` into a slot cell. Shared by `ElementSlot::swap` and
+/// `SwapHandle::swap` so the store can't drift between the two.
+fn store_element(cell: &SlotCell, element: Box<dyn DynAsyncElement + Send>) {
+    cell.store(Arc::new(Mutex::new(element)));
+}
+
 impl ElementSlot {
     pub fn new(element: Box<dyn DynAsyncElement + Send>) -> Self {
         Self { inner: Arc::new(ArcSwap::new(Arc::new(Mutex::new(element)))) }
@@ -62,7 +68,7 @@ impl ElementSlot {
     /// pipeline's current fixated caps before installing — the slot will
     /// not re-run negotiation.
     pub fn swap(&self, element: Box<dyn DynAsyncElement + Send>) {
-        self.inner.store(Arc::new(Mutex::new(element)));
+        store_element(&self.inner, element);
     }
 
     /// A cloneable handle that can swap this slot's element from another
@@ -94,7 +100,7 @@ impl SwapHandle {
     /// [`ElementSlot::swap`]: the caller must have configured `element`
     /// against the pipeline's current fixated caps beforehand.
     pub fn swap(&self, element: Box<dyn DynAsyncElement + Send>) {
-        self.inner.store(Arc::new(Mutex::new(element)));
+        store_element(&self.inner, element);
     }
 }
 

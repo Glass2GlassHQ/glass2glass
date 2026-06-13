@@ -54,23 +54,7 @@ impl WavSink {
     }
 }
 
-/// PCM parameters of an accepted caps: (format tag, bits, channels, rate).
-fn pcm_params(caps: &Caps) -> Result<(u16, u16, u16, u32), G2gError> {
-    let Caps::Audio {
-        format,
-        channels,
-        sample_rate,
-    } = caps
-    else {
-        return Err(G2gError::CapsMismatch);
-    };
-    let (tag, bits) = match format {
-        AudioFormat::PcmS16Le => (1u16, 16u16),  // WAVE_FORMAT_PCM
-        AudioFormat::PcmF32Le => (3u16, 32u16),  // WAVE_FORMAT_IEEE_FLOAT
-        AudioFormat::Aac | AudioFormat::Opus => return Err(G2gError::CapsMismatch),
-    };
-    Ok((tag, bits, *channels as u16, *sample_rate))
-}
+use crate::audio::pcm_params;
 
 /// The canonical 44-byte header with zeroed running sizes.
 fn wav_header(tag: u16, bits: u16, channels: u16, rate: u32) -> Vec<u8> {

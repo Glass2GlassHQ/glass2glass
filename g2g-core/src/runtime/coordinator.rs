@@ -138,21 +138,25 @@ impl Coordinator {
             observed += 1;
             match event {
                 CoordinatorEvent::CapsChanged { proposal, .. } => {
-                    // β: start the cascade at the last interior arm. Serial,
-                    // so the bounded control channel never blocks; a closed
-                    // channel means that arm already drained and exited.
+                    // β: start the cascade at the last interior arm. A
+                    // non-blocking try_send keeps the coordinator out of the
+                    // data backpressure cycle: a blocking send could wedge if
+                    // the target arm is parked pushing data downstream while
+                    // the sink (upstream of this event) waits to report. A full
+                    // or closed channel drops the best-effort directive.
                     if let (Some(ctrl), Some(p)) = (self.arm_ctrl.last(), proposal) {
-                        let _ = ctrl.send(ArmDirective::Recascade(p)).await;
+                        let _ = ctrl.try_send(ArmDirective::Recascade(p));
                     }
                 }
                 CoordinatorEvent::ArmProposal { index, proposal } => {
                     // β N-hop: forward the arm's re-derived proposal one hop
                     // further upstream. Index 0's reply terminates the cascade.
+                    // Non-blocking like the kick-off above.
                     if index > 0 {
                         if let (Some(ctrl), Some(p)) =
                             (self.arm_ctrl.get(index - 1), proposal)
                         {
-                            let _ = ctrl.send(ArmDirective::Recascade(p)).await;
+                            let _ = ctrl.try_send(ArmDirective::Recascade(p));
                         }
                     }
                 }

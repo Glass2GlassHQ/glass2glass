@@ -369,12 +369,15 @@ impl KmsSink {
     /// (we don't request them) are ignored.
     fn wait_for_flip(&mut self) -> Result<(), G2gError> {
         let card = self.card.as_ref().ok_or(G2gError::NotConfigured)?;
+        let mut empty_reads = 0u32;
         loop {
             let events = card
                 .receive_events()
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             let mut saw_flip = false;
+            let mut saw_any = false;
             for ev in events {
+                saw_any = true;
                 if matches!(ev, Event::PageFlip(_)) {
                     saw_flip = true;
                 }
@@ -383,8 +386,18 @@ impl KmsSink {
                 self.flip_pending = false;
                 return Ok(());
             }
-            // No flip event yet; the read returned vblanks or nothing.
-            // Loop and block again.
+            // A blocking DRM fd should not return an empty read; repeated
+            // empties mean the device went away (tty switch, hot-unplug, lost
+            // master). Bail with a hardware error instead of spinning forever.
+            if saw_any {
+                empty_reads = 0;
+            } else {
+                empty_reads += 1;
+                if empty_reads >= 8 {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+            }
+            // Otherwise no flip event yet (vblanks); loop and block again.
         }
     }
 

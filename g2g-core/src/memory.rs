@@ -62,8 +62,10 @@ pub struct SystemSlice {
 #[derive(Debug)]
 enum SystemSliceInner {
     Owned(Box<[u8]>),
+    // a pool buffer may be larger than the frame, so the valid payload length
+    // is carried explicitly rather than inferred from the buffer capacity.
     #[cfg(feature = "runtime")]
-    Pooled(PooledBuffer<Box<[u8]>>),
+    Pooled { buffer: PooledBuffer<Box<[u8]>>, len: usize },
 }
 
 impl SystemSlice {
@@ -71,16 +73,19 @@ impl SystemSlice {
         Self { inner: SystemSliceInner::Owned(bytes) }
     }
 
+    /// Wrap a pooled buffer, exposing only its first `len` bytes (the valid
+    /// frame payload). The backing buffer may be larger than `len`.
     #[cfg(feature = "runtime")]
-    pub fn from_pool(buffer: PooledBuffer<Box<[u8]>>) -> Self {
-        Self { inner: SystemSliceInner::Pooled(buffer) }
+    pub fn from_pool(buffer: PooledBuffer<Box<[u8]>>, len: usize) -> Self {
+        debug_assert!(len <= buffer.as_ref().len(), "valid len exceeds pool buffer");
+        Self { inner: SystemSliceInner::Pooled { buffer, len } }
     }
 
     pub fn as_slice(&self) -> &[u8] {
         match &self.inner {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
-            SystemSliceInner::Pooled(p) => p.as_ref(),
+            SystemSliceInner::Pooled { buffer, len } => &buffer.as_ref()[..*len],
         }
     }
 
@@ -88,7 +93,7 @@ impl SystemSlice {
         match &mut self.inner {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
-            SystemSliceInner::Pooled(p) => p.as_mut(),
+            SystemSliceInner::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
         }
     }
 }

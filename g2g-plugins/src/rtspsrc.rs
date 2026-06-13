@@ -269,6 +269,7 @@ async fn run_rtsp(
     let mut last_session_max_pts: u64 = 0;
 
     loop {
+        let emitted_before = total_emitted;
         let outcome =
             run_session(src, out, &mut total_emitted, pts_base_ns, limit, &mut last_session_max_pts)
                 .await;
@@ -302,8 +303,13 @@ async fn run_rtsp(
                 // their `last_sequence` so the new (continuing) sequence
                 // counter isn't rejected as out-of-order.
                 let _ = out.push(PipelinePacket::Flush).await;
-                // Push PTS forward past the gap before the next session.
-                pts_base_ns = last_session_max_pts.saturating_add(1_000_000_000);
+                // Push PTS forward past the gap before the next session, but
+                // only if this session emitted frames; otherwise the base is
+                // unchanged so a flapping empty reconnect doesn't inflate PTS
+                // by a second each attempt.
+                if total_emitted > emitted_before {
+                    pts_base_ns = last_session_max_pts.saturating_add(1_000_000_000);
+                }
 
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 backoff_ms = backoff_ms
@@ -483,7 +489,7 @@ async fn probe_session_with_reconnect(
                 }
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 attempt += 1;
-                backoff_ms = (backoff_ms * 2).min(policy.max_backoff_ms.max(backoff_ms));
+                backoff_ms = backoff_ms.saturating_mul(2).min(policy.max_backoff_ms.max(backoff_ms));
             }
         }
     }

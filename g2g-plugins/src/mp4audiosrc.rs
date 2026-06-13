@@ -138,47 +138,8 @@ struct Sample {
     duration_ns: u64,
 }
 
-// --- box parsing -----------------------------------------------------------
-
-fn be32(data: &[u8], at: usize) -> Result<u32, G2gError> {
-    data.get(at..at + 4)
-        .map(|b| u32::from_be_bytes(b.try_into().expect("4 bytes")))
-        .ok_or(G2gError::CapsMismatch)
-}
-
-fn be64(data: &[u8], at: usize) -> Result<u64, G2gError> {
-    data.get(at..at + 8)
-        .map(|b| u64::from_be_bytes(b.try_into().expect("8 bytes")))
-        .ok_or(G2gError::CapsMismatch)
-}
-
-fn boxes(data: &[u8]) -> impl Iterator<Item = (&[u8; 4], &[u8])> {
-    let mut i = 0usize;
-    core::iter::from_fn(move || {
-        if i + 8 > data.len() {
-            return None;
-        }
-        let size = u32::from_be_bytes(data[i..i + 4].try_into().expect("4 bytes")) as usize;
-        if size < 8 || i + size > data.len() {
-            return None;
-        }
-        let kind: &[u8; 4] = data[i + 4..i + 8].try_into().expect("4 bytes");
-        let payload = &data[i + 8..i + size];
-        i += size;
-        Some((kind, payload))
-    })
-}
-
-fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
-    boxes(data).find(|(k, _)| *k == kind).map(|(_, p)| p)
-}
-
-fn find_path<'a>(mut data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a [u8]> {
-    for kind in path {
-        data = find_box(data, kind)?;
-    }
-    Some(data)
-}
+// box read primitives are shared across the MP4 elements.
+use crate::mp4box::{be32, be64, boxes, find_box, find_path};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;

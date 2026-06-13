@@ -541,7 +541,9 @@ impl AsyncElement for FfmpegH264Dec {
             // not-yet-opened context. `av_hwdevice_ctx_create` initialises
             // `hw_device_ctx`; we read the CUcontext out of the device's
             // hwctx, hand the codec its own ref, drop ours, and install the
-            // get_format callback. All pointers are checked for null.
+            // get_format callback. A successful create guarantees the device
+            // `data` and CUDA `hwctx` are non-null, so only `hw_device_ctx`
+            // itself is checked explicitly below.
             unsafe {
                 let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
                 let ret = ffmpeg::ffi::av_hwdevice_ctx_create(

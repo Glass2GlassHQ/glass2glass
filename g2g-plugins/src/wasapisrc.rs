@@ -51,8 +51,8 @@ use g2g_core::{
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
-const WAVE_FORMAT_PCM: u16 = 1;
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+use crate::audio::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
+
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms.

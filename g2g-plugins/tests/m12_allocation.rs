@@ -82,7 +82,7 @@ impl SourceLoop for PoolSrc {
             let pool: BufferPool<Box<[u8]>> = BufferPool::new_byte_pool(count, size);
             let buf = pool.acquire().await;
             let frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_pool(buf)),
+                domain: MemoryDomain::System(SystemSlice::from_pool(buf, size)),
                 timing: FrameTiming::default(),
                 sequence: 0,
             };

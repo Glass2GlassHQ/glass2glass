@@ -64,7 +64,6 @@ use std::time::Duration;
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::sync::Arc as RcArc;
 use alloc::vec::Vec;
 
 use smithay_client_toolkit::{
@@ -815,14 +814,6 @@ mod parking_handshake {
         }
     }
 }
-
-// Suppress unused-import warnings for the `RcArc` we kept around in
-// case future code wants `alloc::sync::Arc` distinct from `std::sync::Arc`.
-// `RcArc` is the same type under feature `std`, but we don't actually use it.
-const _: () = {
-    #[allow(dead_code)]
-    fn _suppress_rcarc_unused(_: Option<RcArc<u8>>) {}
-};
 
 #[cfg(test)]
 mod tests {

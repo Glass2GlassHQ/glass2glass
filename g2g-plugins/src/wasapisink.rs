@@ -47,10 +47,7 @@ use g2g_core::{
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
-/// WAVEFORMATEX `wFormatTag` for integer PCM.
-const WAVE_FORMAT_PCM: u16 = 1;
-/// WAVEFORMATEX `wFormatTag` for 32-bit float PCM.
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+use crate::audio::pcm_params;
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms. Large enough that
 /// the worker's top-up cadence never starves the engine, small enough that the
@@ -126,25 +123,6 @@ impl Drop for WasapiSink {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-/// PCM parameters of an accepted caps: (format tag, bits, channels, rate).
-/// Rejects compressed audio structurally, the same rule as `WavSink`.
-fn pcm_params(caps: &Caps) -> Result<(u16, u16, u16, u32), G2gError> {
-    let Caps::Audio {
-        format,
-        channels,
-        sample_rate,
-    } = caps
-    else {
-        return Err(G2gError::CapsMismatch);
-    };
-    let (tag, bits) = match format {
-        AudioFormat::PcmS16Le => (WAVE_FORMAT_PCM, 16u16),
-        AudioFormat::PcmF32Le => (WAVE_FORMAT_IEEE_FLOAT, 32u16),
-        AudioFormat::Aac | AudioFormat::Opus => return Err(G2gError::CapsMismatch),
-    };
-    Ok((tag, bits, *channels as u16, *sample_rate))
 }
 
 /// Build a canonical `WAVEFORMATEX` for an interleaved PCM stream.
@@ -446,6 +424,7 @@ fn audio_err(e: windows::core::Error) -> G2gError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
 
     #[test]
     fn pcm_params_maps_formats_and_rejects_compressed() {

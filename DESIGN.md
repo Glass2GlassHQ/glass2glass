@@ -92,13 +92,13 @@ Inside real-time or `no_std` loops, dynamic allocation during steady-state strea
 ```rust
 let pool = BufferPool::new_byte_pool(count, bytes);
 let buf = pool.acquire().await;  // awaits if exhausted; backpressure-friendly
-let mut frame = SystemSlice::from_pool(buf);
+let mut frame = SystemSlice::from_pool(buf, frame_len);  // valid payload length
 ```
 
 - **`no_std + alloc` environments (and `std`):** `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a `VecDeque<Waker>` of acquire waiters. `acquire().await` resolves the moment a `PooledBuffer` elsewhere is dropped. `try_acquire()` is the sync fast path for non-blocking contexts.
 - **Strict `no_std` (no heap) environments:** a future variant will be statically sized at construction (e.g. `StaticBufferPool::<NV12, 8>::new()`) and yield bounded mutable references checked via compile-time lifetimes. The `Arc + Mutex + Vec` variant is unsuitable here because it relies on `alloc`.
 
-The `SystemSlice` carrier transparently supports both ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>)` for recycled frames. Downstream elements treat the two identically.
+The `SystemSlice` carrier transparently supports both ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>, len)` for recycled frames (the buffer may exceed the frame, so the valid length is carried). Downstream elements treat the two identically.
 
 ---
 

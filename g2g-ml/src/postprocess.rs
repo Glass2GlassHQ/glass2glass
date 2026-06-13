@@ -140,6 +140,12 @@ impl AsyncElement for TensorPostprocess {
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
+                    // a model diverged to NaN/inf yields a meaningless class
+                    // (argmax would emit (0, -inf), softmax all-NaN); reject
+                    // loud rather than pass it downstream.
+                    if values.iter().any(|v| !v.is_finite()) {
+                        return Err(G2gError::CapsMismatch);
+                    }
 
                     let (result, new_caps) = match self.op {
                         Op::Softmax => {
