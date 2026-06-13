@@ -14,9 +14,11 @@
 //!   and static `H`/`W`: the element then accepts RGBA exactly at `W x H`
 //! - output dims static (a dynamic leading batch dim is treated as 1)
 //!
-//! Execution providers: the session uses ONNX Runtime's default (CPU) EP.
-//! Wiring CUDA / TensorRT / DirectML stays inside this module as a builder
-//! follow-up; the element shape doesn't change.
+//! Execution providers: `from_memory` uses ONNX Runtime's default (CPU) EP;
+//! `from_memory_with_directml` (M26) and `from_memory_with_cuda` (M53) register
+//! a GPU EP ahead of the CPU fallback (best-effort, so the pipeline keeps
+//! flowing without the device). TensorRT / CoreML are the same constructor
+//! shape and remain a follow-up; the element shape doesn't change.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -73,6 +75,22 @@ impl OrtInference {
         let builder = Session::builder().map_err(ort_err)?;
         let mut builder = builder
             .with_execution_providers([::ort::ep::DirectML::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the CUDA execution provider (NVIDIA GPU)
+    /// registered ahead of the CPU fallback. Like the DirectML path,
+    /// registration is best-effort: on a host without a usable CUDA device or
+    /// runtime the session silently runs on the CPU, so the pipeline keeps
+    /// flowing either way. The element shape is unchanged; the EP choice is a
+    /// constructor variant.
+    #[cfg(feature = "cuda")]
+    pub fn from_memory_with_cuda(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::CUDA::default().build()])
             .map_err(ort_err)?;
         let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
         Self::from_session(session)

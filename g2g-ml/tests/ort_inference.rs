@@ -129,6 +129,52 @@ async fn directml_session_infers_identically() {
     assert_eq!(values, expected);
 }
 
+/// The CUDA-registered session (best-effort, CPU fallback when no NVIDIA
+/// device) must produce the same byte-exact results as the CPU path. On this
+/// host without CUDA it proves the EP wires/registers/runs via fallback, not
+/// that CUDA executed.
+#[cfg(feature = "cuda")]
+#[tokio::test]
+async fn cuda_session_infers_identically() {
+    let model = identity_model(&[1, 3, 2, 2]);
+    let mut inf = OrtInference::from_memory_with_cuda(&model).expect("model loads");
+    assert_eq!(inf.input_dims(), (2, 2));
+    let narrowed = inf.intercept_caps(&rgba_caps(2, 2)).expect("2x2 accepted");
+    inf.configure_pipeline(&narrowed).expect("configure");
+
+    let mut sink = Collect::default();
+    inf.process(
+        PipelinePacket::DataFrame(rgba_frame((0..16).collect(), 0)),
+        &mut sink,
+    )
+    .await
+    .expect("frame");
+    let values: Vec<f32> = sink
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => {
+                let MemoryDomain::System(slice) = &f.domain else {
+                    return None;
+                };
+                Some(
+                    slice
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                )
+            }
+            _ => None,
+        })
+        .expect("one tensor frame");
+    let expected: Vec<f32> = [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14]
+        .iter()
+        .map(|b| *b as f32 / 255.0)
+        .collect();
+    assert_eq!(values, expected);
+}
+
 #[tokio::test]
 async fn inference_emits_tensor_caps_and_normalized_values() {
     let model = identity_model(&[1, 3, 2, 2]);

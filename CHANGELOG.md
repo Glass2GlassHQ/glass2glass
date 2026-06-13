@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M53: CUDA execution provider for `OrtInference` (`cuda` feature)
+
+- Second GPU inference EP on the `ort` path, the NVIDIA counterpart of M26's
+  DirectML: a new g2g-ml `cuda` feature (implies `ort`, adds `ort/cuda`, which
+  downloads a CUDA-enabled ONNX Runtime build) and
+  `OrtInference::from_memory_with_cuda`, which registers the CUDA EP
+  (`ep::CUDA::default().build()`) ahead of the CPU fallback. Registration is
+  best-effort per ort's dispatch default: on a host without a usable CUDA device
+  or runtime the session silently runs on the CPU, so the pipeline keeps flowing
+  either way. The element shape is unchanged; the EP choice is a constructor
+  variant. The `ep::CUDA` API + the `cuda = ["ort-sys/cuda"]` feature were
+  checked against the fetched ort 2.0.0-rc.12 source, not assumed.
+- This is the one deferred track buildable on the Windows dev host, so it is
+  verified as far as the host allows. NOT verifiable here: that CUDA actually
+  executed (this host has no NVIDIA CUDA runtime, so the EP falls back to CPU).
+  The test confirms the EP wires, the CUDA-enabled runtime loads, registration
+  succeeds best-effort, and inference runs byte-identically, not that a GPU ran
+  it. A real CUDA run is owed to an NVIDIA box.
+- Test (gated on `cuda`): the identity-model inference through
+  `from_memory_with_cuda` produces byte-identical results to the CPU path,
+  mirroring the DirectML test. VERIFIED on the dev host: `cargo test -p g2g-ml
+  --features cuda --test ort_inference` green (3/3, incl. the CUDA case, on the
+  downloaded CUDA-enabled runtime with CPU fallback); `cargo clippy -p g2g-ml
+  --features cuda --all-targets` clean; `--features ort` (CPU) unregressed;
+  native `cargo test --workspace` (default, cuda gated off) green.
+
 ### M52: `H264Parse` AVCC framing + VUI framerate
 
 - Closes the AVCC + VUI items the `h264parse` module header had carried as

@@ -27,6 +27,12 @@ ort = ["std", "dep:ort"]
 # DirectML-enabled ONNX Runtime build; registration falls back to CPU at
 # runtime when no device is available.
 directml = ["ort", "ort/directml"]
+# CUDA execution provider (NVIDIA GPU, Linux/Windows). Downloads a CUDA-enabled
+# ONNX Runtime build; registration is best-effort and falls back to CPU at
+# runtime when no CUDA device/runtime is present, like the directml EP. NOT
+# verifiable without an NVIDIA device: the in-tree test confirms the EP wires,
+# registers, and runs (on CUDA where present, else CPU), not that CUDA executed.
+cuda = ["ort", "ort/cuda"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
