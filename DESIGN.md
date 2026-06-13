@@ -620,6 +620,31 @@ Because the core processing loop requires only `core` and `alloc`, deployment pr
 - **Hardware Interop:** Packets ingested via WebSockets / WebRTC data channels, parsed by browser hardware via the native WebCodecs JS API, and injected into WebGPU textures.
 - **Cargo features:** `std` (`wasm32-unknown-unknown` provides a usable `std` shim).
 
+#### 6.3.1 Browser/Wasm Element Track (M39+)
+
+The browser target is built incrementally as `cfg(target_arch = "wasm32")`
+elements in `g2g-plugins` behind the `web` feature (which implies `std`); the
+wasm bindings (`wasm-bindgen` / `js-sys` / `web-sys` / `wasm-bindgen-futures`)
+are target-gated so native builds never resolve them, mirroring the
+windows/linux element gating (§2). No core change is needed: the runner future
+is executor-agnostic, so `wasm_bindgen_futures::spawn_local` drives it on the
+browser event loop, and wasm builds without `multi-thread`, so the `!Send` JS
+handle types satisfy the empty `ElementBound` (§4.3).
+
+| Milestone | Scope | Status |
+| :--- | :--- | :--- |
+| **M39** | Foundation: `web` feature; `WasmClock` (`performance.now()` + `setTimeout`, the wasm analog of `WallClock`); `WebSocketSrc` ingest source (analog of `FileSrc`); `run_websocket_ingest` `spawn_local` entry. | **implemented** (browser runtime owed a `wasm-bindgen-test` run) |
+| **M40** | `WebCodecsDecode`: wrap the browser `VideoDecoder` (WebCodecs), H.264 / H.265 access units in, `VideoFrame` copied out to `System` NV12 / RGBA. Pairs with `H264Parse`. | planned |
+| **M41** | WebGPU domain: produce / consume `MemoryDomain::WebGPUBuffer`, inject decoded frames into WebGPU textures, a `CanvasSink` presenting to an HTML canvas. First in-browser glass-to-glass. | planned |
+| **M42** | Web Workers executor (pipeline off the main thread) + WebRTC datachannel ingest source. | planned |
+
+The M39 foundation makes `WebSocketSrc → H264Parse → FakeSink` compile and run
+in the browser; M40–M42 add hardware decode, GPU zero-copy, and the
+off-main-thread executor that complete the §6.3 picture. The in-browser runtime
+(live `WebSocket` receive, `performance.now()` pacing) is validated user-side,
+as with the live RTSP path (§4.11.4); the local gate is
+`cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`.
+
 ---
 
 ## 7. Ecosystem Coexistence Strategy: GStreamer Bridge

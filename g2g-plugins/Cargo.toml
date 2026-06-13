@@ -73,6 +73,12 @@ kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
 # This is the desktop-dev convenience sink; KmsSink is the production
 # low-latency path.
 wayland-sink = ["std", "dep:smithay-client-toolkit"]
+# Browser / WebAssembly target (DESIGN.md §6.3). Wasm-gated elements: WasmClock
+# (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
+# browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures
+# (target-gated to wasm32); implies std. Build:
+# cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web.
+web = ["std", "dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:wasm-bindgen-futures"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -125,6 +131,24 @@ smithay-client-toolkit = { version = "0.20", optional = true }
 khronos-egl = { version = "6", optional = true, features = ["static"] }
 glow = { version = "0.17", optional = true }
 wayland-egl = { version = "0.32", optional = true }
+
+# Browser / WebAssembly bindings (web feature). wasm32-only target gate so
+# native builds never resolve them. wasm-bindgen-futures drives the runner
+# future on the browser event loop; web-sys features cover performance.now,
+# the WebSocket ingest API, and setTimeout (Window).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Performance",
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "Event",
+    "CloseEvent",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }

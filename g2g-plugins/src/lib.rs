@@ -112,3 +112,20 @@ pub mod cuda;
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.
 #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
 pub mod cudaglsink;
+
+// Browser / WebAssembly target (DESIGN.md §6.3), behind the `web` feature:
+// WasmClock (performance.now + setTimeout), WebSocketSrc ingest, and a
+// spawn_local browser entry. The wasm bindings are target-gated to wasm32, so
+// enabling `web` elsewhere is a no-op, like mf-decode on Linux.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod wasmclock;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod web;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod websocketsrc;
+
+// Pure helpers shared by the wasm elements (ms->ns conversion, the
+// callback->async Inbox bridge). Compiled for the wasm `web` build and under
+// `cfg(test)` so the logic is unit-testable on the host.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web")))]
+mod webutil;

@@ -5,6 +5,48 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M39: Browser/Wasm foundation (`WasmClock`, `WebSocketSrc`, `web` feature)
+
+- Bootstraps the third deployment target (DESIGN.md §6.3): the same typed
+  pipeline now compiles for `wasm32-unknown-unknown` and runs on the browser
+  event loop. New `web` feature (implies std) on g2g-plugins, with the wasm
+  bindings (wasm-bindgen / js-sys / web-sys / wasm-bindgen-futures) target-gated
+  to `cfg(target_arch = "wasm32")` so native builds never resolve them, exactly
+  like the windows/linux element gating. No core change: the runner future is
+  executor-agnostic (spin-based channels), so `wasm_bindgen_futures::spawn_local`
+  drives it as tokio drives it natively, and wasm builds without `multi-thread`,
+  so the `!Send` JS handle types satisfy the empty `ElementBound`.
+- `WasmClock` (`wasmclock.rs`): the browser `PipelineClock` / `AsyncClock`,
+  `performance.now()` for `now_ns` (epoch captured at construction, like
+  `WallClock`'s `Instant`) and a `setTimeout`-backed `Promise` for
+  `sleep_until_ns`. The wasm analog of `WallClock`, whose tokio timer does not
+  tick on `wasm32-unknown-unknown`. Degrades to a zero reading / immediate
+  resolve when no `window` is present rather than panicking.
+- `WebSocketSrc` (`websocketsrc.rs`): the browser ingest source, the analog of
+  `FileSrc` / `RtspSrc`. Opens a `WebSocket`, receives `ArrayBuffer` messages,
+  and emits each as a system-memory `DataFrame` chunk; a raw byte stream carries
+  no caps, so the caller declares them at construction (`Produces`), mirroring
+  `FileSrc`. The JS `onmessage` / `onclose` / `onerror` callbacks are bridged to
+  the async `run` loop through a hand-rolled `Inbox` (callback-to-async queue,
+  same style as the runtime's `select2`). Feed the output through `H264Parse`
+  (then a `WebCodecsDecode`, M40) to recover access units.
+- `run_websocket_ingest(url)` (`web.rs`): a `#[wasm_bindgen]` entry that wires
+  `WebSocketSrc -> FakeSink` and `spawn_local`s `run_simple_pipeline` with
+  `WasmClock`, the demonstrable browser pipeline.
+- The pure logic (the `performance.now()` ms->ns conversion and the `Inbox`
+  queue/waker bridge) lives in `webutil.rs`, compiled for the wasm `web` build
+  and under `cfg(test)`, so it is unit-testable on the host without a browser.
+- Tests: four host unit tests (`ms_to_ns` conversion + clamping; `Inbox`
+  in-order drain, park-then-wake, drain-before-close). VERIFIED on the dev host:
+  `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`
+  green; `cargo test -p g2g-plugins --lib webutil` green (4/4); native
+  `cargo check --workspace` and `cargo clippy --workspace --all-targets` green
+  (web modules are wasm32-gated, so native is unaffected); wasm `web` clippy
+  clean. NOT verifiable on this Windows host: the in-browser runtime (live
+  WebSocket receive, `performance.now()` pacing) needs a browser /
+  `wasm-bindgen-test` harness; the code is written to compile for wasm32 and is
+  owed a browser run, as the Linux display sinks are owed a Linux run.
+
 ### M38: WASAPI loopback capture in `WasapiSrc`
 
 - `WasapiSrc::with_loopback()` captures the default render endpoint's output

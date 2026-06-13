@@ -704,12 +704,16 @@ dependencies = [
  "futures-util",
  "g2g-core",
  "glow",
+ "js-sys",
  "khronos-egl",
  "retina",
  "smithay-client-toolkit",
  "tokio",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wayland-egl",
+ "web-sys",
  "windows",
 ]
 
@@ -2147,6 +2151,16 @@ dependencies = [
  "rustversion",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.73"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54568702fabf5d4849ce2b90fadfa64168a097eaf4b351ce9df8b687a0086aaf"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
