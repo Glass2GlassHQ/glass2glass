@@ -703,6 +703,31 @@ existing CSP shape. **Verification gate before P2:** native +
 The W1 sprint, made concrete. Each step adds one element / one memory
 domain primitive; each is independently testable.
 
+**Update (2026-06): the GPU-resident chain below is not achievable from
+idiomatic Rust, confirmed by an API survey.** (1) wgpu cannot import a
+WebCodecs `VideoFrame` as an external texture on its WebGPU backend
+(`Features::EXTERNAL_TEXTURE` is DX12-only); the import is raw
+`web_sys::GpuDevice::import_external_texture` behind
+`--cfg=web_sys_unstable_apis`. (2) wgpu cannot share or adopt a device on
+wasm (`Device::as_hal` returns `None` for the webgpu backend, no
+`create_device_from_hal`), so a wgpu compute pass cannot run on ORT's device
+and a web_sys-imported external texture cannot be sampled by wgpu. (3) the
+`ort-web` crate (the maintained onnxruntime-web Rust path) runs ORT in a
+separate WASM module and syncs tensors through CPU, with no `fromGpuBuffer`,
+and a `web_sys::GpuBuffer` cannot be extracted from a `wgpu::Buffer`. So P2.4 /
+P2.5 as written (a wgpu `WebGPUPreprocess` handing GPU-buffer tensors to ORT)
+cannot be built. GPU-residency in-browser would require raw `web_sys` WebGPU
+(external-texture import + compute shader) plus hand-rolled onnxruntime-web JS
+bindings on one ORT-owned device, all browser-unverifiable on the dev host.
+The buildable alternative is a CPU-round-trip MVP via `ort-web`, reusing the
+System-RGBA `WebCodecsDecode` (M40) + `CanvasSink` (M41); it still proves the
+same `.onnx` runs native and in-browser, just not GPU-resident. Landed toward
+the original plan: P2.1 (`WebGPUExternalTexture` carrier, M57) and P2.2
+(`WebCodecsDecode::with_gpu_output`, M58) are in tree but only reachable by the
+raw-web_sys path. The transform/inference groundwork (M55 `VideoScale`, M56
+`VideoRate`, M59 `OrtInference` tensor-input, M61 native GPU pipeline) is
+backend-agnostic and stands regardless of which browser path is chosen.
+
 - **P2.1 — `MemoryDomain::WebGPUExternalTexture` in core** (1 session).
   Wraps a `web_sys::VideoFrame` handle behind a `WebGPUKeepAlive` trait
   object the same way `OwnedCudaBuffer` wraps a CUDA pointer behind
