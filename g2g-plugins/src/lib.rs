@@ -33,6 +33,10 @@ pub mod mp4sink;
 #[cfg(feature = "std")]
 pub mod mp4src;
 #[cfg(feature = "std")]
+pub mod mp4audiosink;
+#[cfg(feature = "std")]
+pub mod mp4audiosrc;
+#[cfg(feature = "std")]
 pub mod syncsink;
 #[cfg(feature = "std")]
 pub mod wavsink;

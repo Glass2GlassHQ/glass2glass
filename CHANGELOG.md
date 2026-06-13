@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M37: AAC audio in the fMP4 container (`Mp4AudioSink` / `Mp4AudioSrc`)
+
+- An audio-only AAC fMP4 (`.m4a`) muxer/demuxer pair, the audio counterpart of
+  `Mp4Sink`/`Mp4Src`: one `soun` track, `mp4a`/`esds` sample entry, one
+  `moof`+`mdat` fragment per access unit, media timescale = sample rate.
+  std-gated, self-contained (own box writer/reader so the video muxer is
+  untouched).
+- `Mp4AudioSink` writes the `esds` (ES/DecoderConfig/DecoderSpecific
+  descriptors) from a supplied AudioSpecificConfig
+  (`with_audio_specific_config`, from `MfAacEncode`); AAC access units are
+  stored verbatim. `Mp4AudioSrc` recovers the codec/channels/rate and the ASC
+  from the probe (exposed via `audio_specific_config()`) and parses the `esds`
+  descriptor tree (expandable sizes) plus the `moof`/`mdat` fragments.
+- Tests: unit tests on both elements (esds carries the ASC, fragment data
+  offset, caps/ASC rejection, descriptor reader for single-byte and expandable
+  sizes, timescale) plus `m37_audio_mp4.rs`: a cross-platform `Mp4AudioSink ->
+  Mp4AudioSrc` round trip recovering every access unit byte-exactly with the
+  ASC, and on Windows a full audio file loop `MfAacEncode -> Mp4AudioSink ->
+  Mp4AudioSrc -> MfAacDecode` (PCM -> AAC -> .m4a -> PCM), the first complete
+  file-based audio glass-to-glass loop. VERIFIED: `cargo test --workspace`
+  green (0 failures), full circle green, `std`/`mf-aac` clippy clean.
+
 ### M36: `MfAacDecode` AAC audio decoder
 
 - The decode-side mirror of `MfAacEncode`: consumes raw AAC-LC access units and
