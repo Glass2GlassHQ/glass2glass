@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M56: `VideoRate` software temporal resampler (P1.2), completing Phase 1
+
+- Second and last of the "first credible product path" P1 transforms
+  (DESIGN_TODO.md): `VideoRate::new(target_fps)` drops or duplicates whole
+  frames to hit a configured framerate (`30 -> 10` fps for ML inference, `30
+  -> 60` for delivery), the temporal counterpart of `VideoScale`. It never
+  touches pixels, so it is format-agnostic: preserves format and geometry,
+  replaces only the framerate. `f64` target so fractional rates (29.97) work.
+  CPU-only, `no_std` baseline, no feature gate, runs native + wasm32.
+- Cadence follows GStreamer's `videorate`: hold the previous frame and, on
+  each new frame, emit it for every output slot at least as close to the held
+  frame as to the new one (nearest-neighbour, ties to the held frame so an
+  on-grid input duplicates rather than drops). Output PTS is re-stamped onto
+  the exact target grid; `saturating_add` survives a near-`u64::MAX` PTS; the
+  held last frame is flushed once on EOS so the stream's final frame is not
+  lost; `Flush` and a mid-stream geometry/format change reset the grid. The
+  drop/duplicate decision is the pure `emit_slots` helper, host-testable
+  without the runner. Negotiation is a native `DerivedOutput(any raw -> same
+  format/geometry at the target rate)`.
+- Tests: seven unit tests (downsample 1-in-3 grid spacing, upsample ~2x with
+  monotonic PTS, near-`u64::MAX` PTS does not overflow, backward-PTS jump is a
+  no-op, `f64` fps -> Q16 rounding incl. 29.97, configure rejects 0 fps and
+  compressed input, `DerivedOutput` replaces only the framerate) plus
+  `m56_videorate.rs`, which runs a 30 fps RGBA `VideoTestSrc` through the real
+  runner at 10 fps (drops to 4 frames: 3 in-stream + the EOS-flushed last) and
+  at 60 fps (duplicates past the 5 inputs), each announcing the new framerate
+  via `CapsChanged`. VERIFIED on the dev host: `cargo test -p g2g-plugins
+  --lib videorate` (7) and `--test m56_videorate` (2) green; `cargo clippy -p
+  g2g-plugins --lib` + the m56 test clean; `cargo check -p g2g-plugins
+  --target wasm32-unknown-unknown` green. With M55 this completes Phase 1 (the
+  P1 software transforms), both green on native and wasm32.
+
 ### M55: `VideoScale` software spatial resampler (P1.1)
 
 - First element of the "first credible product path" P1 transforms (DESIGN_TODO.md):
