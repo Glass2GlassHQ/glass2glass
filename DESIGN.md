@@ -41,11 +41,13 @@ pub enum PipelinePacket {
     CapsChanged(Caps),
     DataFrame(Frame),
     Eos,
+    /// Seek flush: discard in-flight and buffered data and reset position
+    /// state. Unlike `Eos`, the stream resumes after a flush.
+    Flush,
 }
 
 pub struct Frame {
     pub domain: MemoryDomain,
-    pub caps: Caps,
     pub timing: FrameTiming,
     /// Monotonically increasing per-source sequence number assigned at
     /// capture time and preserved unchanged across the pipeline. Used
@@ -53,6 +55,15 @@ pub struct Frame {
     pub sequence: u64,
 }
 ```
+
+**Caps live on the link, not on the frame.** A `Frame` does not carry its
+`Caps`. The current caps of a link are established by the most recent
+`PipelinePacket::CapsChanged(Caps)` packet to arrive; every subsequent
+`DataFrame` on that link is implicitly under those caps until the next
+`CapsChanged` arrives. The runner guarantees `CapsChanged` is **ordered**
+in the stream — it sits between the last old-caps `DataFrame` and the
+first new-caps `DataFrame`, which is the load-bearing correctness
+property for mid-stream format changes (§4.13.4).
 
 See §4.4 for the definition of `FrameTiming` and the pipeline clock model.
 
@@ -657,8 +668,9 @@ pub enum CapsConstraint {
 }
 ```
 
-`Caps` is the *fixed* description used at runtime (`DataFrame.caps`,
-`configure_pipeline`); `CapsSet` is the negotiation-time vocabulary.
+`Caps` is the *fixed* description used at runtime (carried by
+`PipelinePacket::CapsChanged`, handed to `configure_pipeline`); `CapsSet`
+is the negotiation-time vocabulary.
 `Caps` is split into compressed and raw at the type level:
 
 ```rust
@@ -726,11 +738,18 @@ format-changing element moves its derivation into the declared constraint
 (`Mapping` / `DerivedOutput`) as the single source of truth; the solver
 already consumes it at startup and at re-solve.
 
-The **frame-tagging invariant** is the load-bearing correctness property:
-every `DataFrame` carries `Frame.caps`, which is authoritative for *that*
-frame. In-flight old-caps frames drain cleanly under their own caps;
-new-caps frames pull from the new pool. Pre-allocating the new pool
-concurrently with old-pool drain avoids a double-allocation stall.
+The **CapsChanged ordering invariant** is the load-bearing correctness
+property. `Caps` are not stamped on each frame; they live on the link as
+the most recently received `CapsChanged` packet. Correctness across a
+mid-stream change therefore depends on `CapsChanged` sitting **between**
+the last old-caps `DataFrame` and the first new-caps `DataFrame` in the
+forward stream — not before, not after. For a format-changing element
+that buffers (decoder B-frame reorder, encoder lookahead), this means
+the element emits its output `CapsChanged` at the **decode/encode
+boundary** in its `process` output, not at the moment it received the
+input `CapsChanged`. The runner cascades that ordered event downstream;
+sinks reconfigure their pools when they see it, and the next data frame
+they process is unambiguously under the new caps.
 
 #### 4.13.5 Allocation cascade
 
