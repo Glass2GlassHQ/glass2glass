@@ -634,7 +634,7 @@ handle types satisfy the empty `ElementBound` (§4.3).
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M39** | Foundation: `web` feature; `WasmClock` (`performance.now()` + `setTimeout`, the wasm analog of `WallClock`); `WebSocketSrc` ingest source (analog of `FileSrc`); `run_websocket_ingest` `spawn_local` entry. | **implemented** (browser runtime owed a `wasm-bindgen-test` run) |
-| **M40** | `WebCodecsDecode`: wrap the browser `VideoDecoder` (WebCodecs), H.264 / H.265 access units in, `VideoFrame` copied out to `System` NV12 / RGBA. Pairs with `H264Parse`. | planned |
+| **M40** | `WebCodecsDecode`: wrap the browser `VideoDecoder` (WebCodecs), H.264 Annex-B access units in, `VideoFrame` copied out to `System` RGBA. Pairs with `H264Parse`. Needs `--cfg=web_sys_unstable_apis`. | **implemented** (H.264; HEVC + browser runtime owed) |
 | **M41** | WebGPU domain: produce / consume `MemoryDomain::WebGPUBuffer`, inject decoded frames into WebGPU textures, a `CanvasSink` presenting to an HTML canvas. First in-browser glass-to-glass. | planned |
 | **M42** | Web Workers executor (pipeline off the main thread) + WebRTC datachannel ingest source. | planned |
 

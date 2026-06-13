@@ -59,6 +59,14 @@ impl<T> Inbox<T> {
         NextItem { state: &self.state }
     }
 
+    /// Non-blocking pop of a ready item, used by `WebCodecsDecode` to drain
+    /// decoder output frames that arrived since the last poll without awaiting.
+    /// `None` when the queue is momentarily empty.
+    #[cfg(any(test, feature = "web-codecs"))]
+    pub(crate) fn try_pop(&self) -> Option<T> {
+        self.state.borrow_mut().queue.pop_front()
+    }
+
     /// Whether a consumer is currently parked (a waker is stored). Test-only
     /// introspection of the wake wiring.
     #[cfg(test)]
@@ -181,5 +189,14 @@ mod tests {
         tx.close();
         assert_eq!(poll_once(&mut inbox.next()), Poll::Ready(Some(1)), "queued item drains first");
         assert_eq!(poll_once(&mut inbox.next()), Poll::Ready(None), "then close yields None");
+    }
+
+    #[test]
+    fn inbox_try_pop_is_nonblocking() {
+        let inbox: Inbox<u32> = Inbox::new();
+        assert_eq!(inbox.try_pop(), None);
+        inbox.sender().push(42);
+        assert_eq!(inbox.try_pop(), Some(42));
+        assert_eq!(inbox.try_pop(), None);
     }
 }

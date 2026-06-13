@@ -5,6 +5,47 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M40: WebCodecs decode (`WebCodecsDecode`, `web-codecs` feature)
+
+- Second browser/wasm element (DESIGN.md §6.3.1): the receive-to-decoded-pixels
+  step. `WebCodecsDecode` wraps the browser `VideoDecoder`, consuming Annex-B
+  H.264 access units and producing decoded RGBA frames in
+  `MemoryDomain::System`, the browser analog of `MfDecode` (Windows) and
+  `FfmpegH264Dec` (Linux). New `web-codecs` feature (implies `web`).
+- Output is RGBA, not the decoder's native YUV: `VideoFrame.copyTo` is asked to
+  convert via `VideoFrameCopyToOptions::format`, so negotiation fixates one
+  deterministic output (`DerivedOutput(H.264 -> RGBA, same dims)`, mirroring
+  `MfDecode`'s NV12) that pairs with the RGBA-consuming elements
+  (`OrtInference`). Tight RGBA packing is assumed; row-stride de-pad and
+  visible-rect cropping are follow-ups.
+- Async shape (unlike the synchronous MFT / libav decoders): `decode()` queues
+  work and the browser delivers `VideoFrame`s later through the decoder's output
+  callback, bridged to the async `process` loop by the `webutil::Inbox`
+  (extended with a non-blocking `try_pop`). Each `process(DataFrame)` feeds one
+  chunk (tagged key/delta from in-band IDR detection) and drains the ready
+  frames; `process(Eos)` awaits `flush()` then drains the reorder tail.
+  Configuration is lazy: the `codec` string (`"avc1.PPCCLL"`) is derived from
+  the first access unit's SPS.
+- The H.264 bitstream inspection (NAL split, IDR/keyframe detection,
+  codec-string from SPS) lives in a pure `h264util` module, compiled for the
+  wasm build and under `cfg(test)` so it is host-testable without a browser.
+- The build requires `RUSTFLAGS="--cfg=web_sys_unstable_apis"` (the WebCodecs
+  web-sys bindings are unstable). A `run_websocket_decode(url)`
+  `#[wasm_bindgen]` entry wires `WebSocketSrc -> WebCodecsDecode -> FakeSink`.
+  H.264 only; the HEVC `codec` string is a follow-up.
+- Tests: six host unit tests (`h264util`: keyframe detection, codec-string from
+  SPS and its absence, NAL iteration across 3- and 4-byte start codes;
+  `webutil`: `try_pop`). VERIFIED on the dev host:
+  `RUSTFLAGS=--cfg=web_sys_unstable_apis cargo check --target
+  wasm32-unknown-unknown -p g2g-plugins --features web-codecs` green;
+  `cargo test -p g2g-plugins --lib` green (43, incl. the new 6); base `web`
+  (no cfg) still builds; native `cargo check --workspace` +
+  `cargo clippy --workspace --all-targets` green; wasm `web-codecs` clippy
+  clean. NOT verifiable on this Windows host: the in-browser decode itself
+  (live `VideoDecoder`, `copyTo` RGBA conversion) needs a browser /
+  `wasm-bindgen-test` harness; the code is written to compile for wasm32 and is
+  owed a browser run.
+
 ### M39: Browser/Wasm foundation (`WasmClock`, `WebSocketSrc`, `web` feature)
 
 - Bootstraps the third deployment target (DESIGN.md §6.3): the same typed

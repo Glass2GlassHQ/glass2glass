@@ -129,3 +129,13 @@ pub mod websocketsrc;
 // `cfg(test)` so the logic is unit-testable on the host.
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web")))]
 mod webutil;
+
+// WebCodecs hardware decode (M40), behind the `web-codecs` feature (implies
+// `web`). The build needs RUSTFLAGS=--cfg=web_sys_unstable_apis. H.264 -> RGBA.
+#[cfg(all(target_arch = "wasm32", feature = "web-codecs"))]
+pub mod webcodecsdecode;
+
+// H.264 Annex-B helpers for WebCodecsDecode (NAL split, keyframe, codec
+// string). Pure; compiled under cfg(test) so the logic is host-testable.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
+mod h264util;

@@ -33,3 +33,29 @@ pub fn run_websocket_ingest(url: String) {
         let _ = run_simple_pipeline(&mut src, &mut sink, &clock, 8).await;
     });
 }
+
+/// Open `url`, decode the H.264 Annex-B access units it delivers with the
+/// browser `VideoDecoder`, and run `WebSocketSrc -> WebCodecsDecode -> FakeSink`
+/// on the browser event loop. The first in-browser receive-to-decoded-pixels
+/// pipeline (M40); a canvas sink lands in M41. Requires the stream to send one
+/// access unit per WebSocket message, starting at a keyframe.
+#[cfg(feature = "web-codecs")]
+#[wasm_bindgen]
+pub fn run_websocket_decode(url: String) {
+    use crate::webcodecsdecode::WebCodecsDecode;
+    use g2g_core::runtime::run_source_transform_sink;
+
+    spawn_local(async move {
+        let caps = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let mut src = WebSocketSrc::new(url, caps);
+        let mut dec = WebCodecsDecode::new();
+        let mut sink = FakeSink::new();
+        let clock = WasmClock::new();
+        let _ = run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await;
+    });
+}

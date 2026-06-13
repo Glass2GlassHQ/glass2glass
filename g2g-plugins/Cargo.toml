@@ -79,6 +79,24 @@ wayland-sink = ["std", "dep:smithay-client-toolkit"]
 # (target-gated to wasm32); implies std. Build:
 # cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web.
 web = ["std", "dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:wasm-bindgen-futures"]
+# WebCodecs hardware video decode (M40): WebCodecsDecode wraps the browser
+# VideoDecoder, H.264 Annex-B -> RGBA (System). Adds the unstable web-sys
+# WebCodecs bindings; the BUILD REQUIRES RUSTFLAGS="--cfg=web_sys_unstable_apis".
+# Build: RUSTFLAGS=--cfg=web_sys_unstable_apis cargo check
+#   --target wasm32-unknown-unknown -p g2g-plugins --features web-codecs
+web-codecs = [
+    "web",
+    "web-sys/VideoDecoder",
+    "web-sys/VideoDecoderInit",
+    "web-sys/VideoDecoderConfig",
+    "web-sys/EncodedVideoChunk",
+    "web-sys/EncodedVideoChunkInit",
+    "web-sys/EncodedVideoChunkType",
+    "web-sys/VideoFrame",
+    "web-sys/VideoFrameCopyToOptions",
+    "web-sys/VideoPixelFormat",
+    "web-sys/PlaneLayout",
+]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
