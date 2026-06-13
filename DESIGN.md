@@ -627,7 +627,7 @@ no_std `embassy` feature.
 | :--- | :--- | :--- |
 | **M43** | `StaticBufferPool<T, N>` (no-alloc core pool); `EmbassyClock` (`embassy-time`); pipeline under `embassy-futures::block_on`; bare-metal compile (`aarch64-unknown-none`). | **implemented** (EmbassyClock tick owed to a HAL time driver) |
 | **M44** | `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M (`thumbv7em`) / RISC-V32 compile; gate the std-only `coordinator_with_recascade_n` for a warning-free no_std build. | **implemented** |
-| **M45** | `embassy-sync` static channels (zero-alloc link transport) + full `embassy-executor` multi-task integration. | planned |
+| **M45** | `embassy-sync` zero-alloc packet link (`PacketChannel` + `EmbassySink`), the §6.2 stack channel. Full `embassy-executor` multi-task integration (vs the M43 `block_on` primitive) remains a follow-up. | **implemented** |
 | **M46** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
 
 M44 closed the M43 finding: `metrics::LatencyHistogram` used `AtomicU64`, which

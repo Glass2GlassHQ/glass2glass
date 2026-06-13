@@ -151,3 +151,8 @@ mod h264util;
 // embassy-time, the no_std analog of WallClock / WasmClock.
 #[cfg(feature = "embassy")]
 pub mod embassyclock;
+
+// Embassy zero-alloc inter-task packet link (M45): PacketChannel over
+// embassy-sync, the §6.2 stack-channel backend.
+#[cfg(feature = "embassy-link")]
+pub mod embassylink;

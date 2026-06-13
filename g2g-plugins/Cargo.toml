@@ -52,6 +52,10 @@ ffmpeg = ["std", "dep:ffmpeg-next"]
 # driver at link. The embassy-futures block_on executor primitive (dev-dep)
 # runs pipelines, verified in m43_embassy.rs.
 embassy = ["dep:embassy-time", "embassy-time/tick-hz-1_000_000"]
+# Embassy zero-alloc inter-task packet channel (M45): PacketChannel over
+# embassy-sync, the §6.2 stack-channel link. Separate from `embassy` so the host
+# test links without embassy-time's HAL driver.
+embassy-link = ["dep:embassy-sync"]
 # CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 # `Backend::NvdecCuda` `MemoryDomain::Cuda` NV12 frame back to system memory
 # (device->host `cuMemcpy2D`) so the decode path reaches the existing CPU
@@ -111,6 +115,8 @@ bytes = { version = "1", optional = true }
 # Embassy RTOS clock backend (embassy feature, M43). no_std; embassy-time needs
 # a HAL-provided time driver registered at link (owed to hardware).
 embassy-time = { version = "0.5", optional = true, default-features = false }
+# Embassy zero-alloc packet channel (embassy-link feature, M45). no_std.
+embassy-sync = { version = "0.8", optional = true }
 
 # Media Foundation bindings are Windows-only; target-gate so other platforms
 # never attempt to resolve or build the windows crate.
@@ -187,6 +193,9 @@ tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 # integration test only. Feature unification keeps the lib build at `runtime`.
 g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
 embassy-futures = "0.1.2"
+# critical-section impl for host tests of embassy-sync (embassy-link): it calls
+# critical_section::with, which needs an impl at link. The std impl suffices.
+critical-section = { version = "1", features = ["std"] }
 
 [lints]
 workspace = true

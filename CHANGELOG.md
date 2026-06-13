@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M45: embassy-sync zero-alloc packet link (`PacketChannel`)
+
+- The §6.2 "stack channels": `PacketChannel<M, N>` (`embassylink.rs`,
+  `embassy-link` feature) wraps `embassy_sync::channel::Channel<PipelinePacket,
+  N>`, a statically-sized, allocation-free inter-task link, the embassy-sync
+  counterpart of the spin-based runtime channel. The app owns the channel (in a
+  `static` / `StaticCell`) and hands its `sink` (an `OutputSink`) to a producer
+  and its `receiver` to a consumer. `SinglePacketChannel<N>` is the
+  single-executor (`NoopRawMutex`) default.
+- Kept under a feature separate from `embassy` (the clock) so a host test links
+  without embassy-time's HAL driver. The channel storage is zero-alloc; the
+  `OutputSink` adapter still boxes its push future (the dyn-safe trait), so a
+  fully allocation-free element model (no boxing) remains the static-graph layer
+  (§4.8.1) work.
+- Tests: `m45_embassy_link.rs` runs `VideoTestSrc -> EmbassySink -> channel ->
+  consumer` under `embassy_futures::block_on`, asserting every frame crosses the
+  embassy-sync link. VERIFIED on the dev host: `cargo test -p g2g-plugins
+  --features embassy-link --test m45_embassy_link` green; `cargo check -p
+  g2g-plugins --features embassy-link --target thumbv7em-none-eabihf` green
+  (Cortex-M); native `cargo check --workspace` + `cargo clippy --workspace
+  --all-targets` green; embassy-link clippy clean. embassy-sync references
+  `critical_section::with`, so the host test pulls a `critical-section` std impl
+  as a dev-dep.
+
 ### M44: Cortex-M readiness (`portable-atomic` for the metrics histogram)
 
 - Closes the M43 finding: `metrics::LatencyHistogram` used
