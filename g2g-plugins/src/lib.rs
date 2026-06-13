@@ -17,6 +17,10 @@ pub mod h264parse;
 pub mod identity;
 pub mod mux;
 pub mod videoconvert;
+// Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
+pub mod rtppay;
+// Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
+mod annexb;
 pub mod videotestsrc;
 
 #[cfg(feature = "std")]

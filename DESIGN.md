@@ -570,6 +570,22 @@ The negotiation track (M8–M12) is orthogonal to the **platform-element track**
 | **M13** | `VaapiH264Dec` (`vaapi` feature, Linux-only): cros-codecs 0.0.6 stateless H.264 decoder on a VAAPI backend, GBM-allocated NV12 surfaces row-copied into `System` frames. Target-gated `cros-codecs` 0.0.6 + libva + GBM. Blocked on AMD desktop by cros-codecs GBM/NV12 surface assumption (see §4.11.1); `FfmpegH264Dec` covers Linux until that is fixed upstream. Deferred: zero-copy `DmaBuf` export, H.265, upstream `Reconfigure`. |
 | **C3** | Zero-copy NVDEC → GPU display (`MemoryDomain::Cuda`). Phase 1: CUDA memory domain in core. Phase 2: `Backend::NvdecCuda` keeps decoded NV12 in device memory via the generic `h264` decoder + CUDA hwdevice + `get_format`. Phase 3: `CudaDownload` fallback + a `CudaGlSink` (CUDA↔GL interop, not KMS/dmabuf — see `DESIGN-C3-cuda.md`). Linux + NVIDIA-GPU only; user-side e2e. |
 
+### 4.12 Live Egress Track (M46+)
+
+`RtspSrc` (M5) and the decoders (M13) cover the receive path; egress is the
+inverse, sending encoded video out over RTP. The protocol logic is Sans-IO
+(§1): a pure packetizer produces the RTP packets and a thin sink does the UDP
+I/O.
+
+| Milestone | Scope | Status |
+| :--- | :--- | :--- |
+| **M46** | `RtpH264Packetizer` (`rtppay.rs`): sans-IO RFC 3550 + RFC 6184, an H.264 access unit to RTP packets (single-NAL when it fits the MTU, else FU-A fragments; marker on the AU's last packet; incrementing sequence). Pure `no_std` logic, host-tested and Cortex-M-clean. | **implemented** |
+| **M47** | UDP egress sink + `AsyncElement` wrapper sending the packets; RTCP sender reports; an RTSP `ANNOUNCE` / `RECORD` path for Wowza-style ingest. | planned |
+
+The packetizer is host-verifiable (parse the RTP headers back, reassemble the
+FU-A fragments); the UDP send and RTSP server are user-side (port 554 is blocked
+in the sandbox, as for the receive path, §4.11.4).
+
 ---
 
 ## 5. First-Class Machine Learning Integration
@@ -628,7 +644,7 @@ no_std `embassy` feature.
 | **M43** | `StaticBufferPool<T, N>` (no-alloc core pool); `EmbassyClock` (`embassy-time`); pipeline under `embassy-futures::block_on`; bare-metal compile (`aarch64-unknown-none`). | **implemented** (EmbassyClock tick owed to a HAL time driver) |
 | **M44** | `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M (`thumbv7em`) / RISC-V32 compile; gate the std-only `coordinator_with_recascade_n` for a warning-free no_std build. | **implemented** |
 | **M45** | `embassy-sync` zero-alloc packet link (`PacketChannel` + `EmbassySink`), the §6.2 stack channel. Full `embassy-executor` multi-task integration (vs the M43 `block_on` primitive) remains a follow-up. | **implemented** |
-| **M46** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
+| **M48** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
 
 M44 closed the M43 finding: `metrics::LatencyHistogram` used `AtomicU64`, which
 `thumbv7em` (Cortex-M) and `riscv32` lack, so `portable-atomic` now provides it

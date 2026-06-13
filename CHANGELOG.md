@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M46: sans-IO H.264 RTP packetizer (`RtpH264Packetizer`)
+
+- Opens the live-egress direction (DESIGN.md §4.12), the inverse of `RtspSrc`'s
+  receive path: `rtppay.rs`'s `RtpH264Packetizer` turns an Annex-B H.264 access
+  unit into RTP packets (RFC 3550 header + RFC 6184 payload), a single-NAL packet
+  when the NAL fits the MTU, else FU-A fragments. The marker bit lands on the
+  access unit's last packet; sequence numbers increment across packets and
+  calls; one RTP timestamp per access unit. Pure Sans-IO logic (§1): no I/O, no
+  dependencies, `no_std + alloc`, so an embedded device can emit RTP too.
+- Refactor (DRY): the Annex-B NAL splitting `h264util` (WebCodecs) used is
+  extracted to a shared `annexb` module, now used by both `h264util` and
+  `rtppay`.
+- Tests: four `rtppay` unit tests (single-NAL header/payload, two NALs
+  incrementing sequence with the marker only on the last, an oversized NAL
+  fragmenting into FU-A and reassembling byte-exactly with correct S/E/type
+  bits, sequence persisting across access units) plus the moved `annexb`
+  NAL-iteration test. VERIFIED on the dev host: `cargo test -p g2g-plugins
+  --lib` green (47); native `cargo check --workspace` + `cargo clippy
+  --workspace --all-targets` green; the WebCodecs path still compiles
+  (`web-codecs` wasm32, `h264util` via `annexb`); and `rtppay` compiles for
+  `thumbv7em-none-eabihf` (no_std). The UDP egress sink and RTSP server path are
+  the M47 follow-up (I/O, user-side).
+
 ### M45: embassy-sync zero-alloc packet link (`PacketChannel`)
 
 - The §6.2 "stack channels": `PacketChannel<M, N>` (`embassylink.rs`,
