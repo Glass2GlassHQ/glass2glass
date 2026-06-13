@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M34: `AudioConvert` PCM converter
+
+- The audio analog of `VideoConvert`: converts interleaved PCM between sample
+  formats (`PcmS16Le` <-> `PcmF32Le`) and channel counts (identity, mono
+  fan-out, downmix-to-mono average) at the same sample rate, so audio chains
+  compose across format boundaries (`WasapiSrc` emits f32, `WavSink` / encoders
+  often want s16). CPU-only `no_std` baseline; samples pass through an f32
+  intermediate, s16 rounding is half-away-from-zero without libm.
+- Negotiation mirrors `VideoConvert`: a `DerivedOutput` constraint maps a
+  supported PCM input to the target format/channels; unsupported channel remaps
+  (e.g. 5.1 -> stereo) and non-PCM inputs yield an empty set and fail loud.
+- Tests: seven unit tests (derived-output mapping, f32<->s16 round trip within a
+  quantum, peak scaling, mono fan-out, stereo downmix average, ragged-input
+  rejection, channel-remap rejection) plus `m34_audioconvert.rs`, which runs
+  `AudioTestSrc(s16) -> AudioConvert -> WavSink` through the real
+  source-transform-sink runner and asserts a float32 WAV and a downmixed mono
+  track, proving the chain negotiates. VERIFIED: `cargo test --workspace` green
+  (0 failures), `std` clippy clean.
+
 ### M33: Async-MFT support in `MfEncode` (hardware encoders)
 
 - Completes the M30 deferral: `MfEncode` now drives asynchronous (event-based)

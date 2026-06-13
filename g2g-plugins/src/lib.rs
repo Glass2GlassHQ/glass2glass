@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+pub mod audioconvert;
 pub mod audiotestsrc;
 pub mod capsfilter;
 pub mod fakesink;
