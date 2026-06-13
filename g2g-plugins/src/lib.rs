@@ -101,6 +101,12 @@ pub mod vaapidec;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegdec;
 
+// Pure chroma-resampling math for the decoders (YUV444P -> 4:2:0 downsample).
+// Compiled for the Linux ffmpeg build that uses it and under cfg(test) so the
+// resampling logic is host-testable without libavcodec.
+#[cfg(any(test, all(target_os = "linux", feature = "ffmpeg")))]
+mod yuv;
+
 // KMS/DRM display sink for NV12 frames. Linux-only (drm + drm-fourcc deps are
 // target-gated). Requires DRM master at runtime; see module docs.
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]

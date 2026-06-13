@@ -538,9 +538,9 @@ The cleanest fix is upstream: a cros-codecs surface backend that allocates VAAPI
 
 **Deferred:**
 - VAAPI hwaccel: open the `h264_vaapi` codec with an attached `AVHWDeviceContext(VAAPI)`, register a `get_format` callback that claims `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface into System memory. Stays inside this module — the public `AsyncElement` shape doesn't change. Useful on Intel iGPUs and AMD desktop (radeonsi VAAPI works fine; it's only the cros-codecs GBM/NV12 assumption that breaks).
-- YUV444P / 10-bit pixel formats.
+- 10-bit pixel formats (`YUV420P10` / `P010`). `YUV444P` is now accepted, its full-resolution chroma box-averaged down to 4:2:0.
 
-(NV12 output, originally deferred here, is implemented via `with_output_format`; NVDEC cuvid/CUDA backends likewise landed since. Both are no longer pending.)
+(NV12 output, originally deferred here, is implemented via `with_output_format`; NVDEC cuvid/CUDA backends likewise landed since, and YUV444P input is accepted. All no longer pending.)
 
 #### 4.11.4 End-to-End RTSP Pipeline
 
@@ -567,7 +567,7 @@ The negotiation track (M8–M12) is orthogonal to the **platform-element track**
 | **M5** | `RtspSrc` (`rtsp` feature) wrapping `retina`. |
 | **M13** | `MfDecode` (`mf-decode` feature, Windows-only): Media Foundation H.264 Decoder MFT (`IMFTransform`) → NV12 `System` frames. Target-gated `windows` 0.62 dependency. Thread-affine (COM/MTA), single-thread executor. Deferred: D3D11 zero-copy, DXVA, strided NV12. |
 | **M19** | `MfEncode` (`mf-encode` feature, Windows-only): Media Foundation H.264 Encoder MFT (`CLSID_MSH264EncoderMFT`), NV12 `System` frames → Annex-B H.264, low-latency mode (`MF_LOW_LATENCY`, no B-frames). Same COM/MTA contract as `MfDecode`; verified by an in-tree encode → decode round trip. |
-| **M13** | `FfmpegH264Dec` (`ffmpeg` feature, Linux-only): `ffmpeg-next` 8.1 against system libavcodec, software H.264 decode → I420 `System` frames. Production-ready baseline; validated end-to-end on AMD radeonsi. NV12 output (`with_output_format`) and NVDEC cuvid/CUDA backends landed since. Deferred: VAAPI hwaccel via `h264_vaapi` + `AVHWDeviceContext`, 10-bit / 4:4:4. |
+| **M13** | `FfmpegH264Dec` (`ffmpeg` feature, Linux-only): `ffmpeg-next` 8.1 against system libavcodec, software H.264 decode → I420 `System` frames. Production-ready baseline; validated end-to-end on AMD radeonsi. NV12 output (`with_output_format`), NVDEC cuvid/CUDA backends, and YUV444P input (chroma downsampled to 4:2:0) landed since. Deferred: VAAPI hwaccel via `h264_vaapi` + `AVHWDeviceContext`, 10-bit. |
 | **M13** | `VaapiH264Dec` (`vaapi` feature, Linux-only): cros-codecs 0.0.6 stateless H.264 decoder on a VAAPI backend, GBM-allocated NV12 surfaces row-copied into `System` frames. Target-gated `cros-codecs` 0.0.6 + libva + GBM. Blocked on AMD desktop by cros-codecs GBM/NV12 surface assumption (see §4.11.1); `FfmpegH264Dec` covers Linux until that is fixed upstream. Deferred: zero-copy `DmaBuf` export, H.265, upstream `Reconfigure`. |
 | **C3** | Zero-copy NVDEC → GPU display (`MemoryDomain::Cuda`). Phase 1: CUDA memory domain in core. Phase 2: `Backend::NvdecCuda` keeps decoded NV12 in device memory via the generic `h264` decoder + CUDA hwdevice + `get_format`. Phase 3: `CudaDownload` fallback + a `CudaGlSink` (CUDA↔GL interop, not KMS/dmabuf — see `DESIGN-C3-cuda.md`). Linux + NVIDIA-GPU only; user-side e2e. |
 

@@ -68,8 +68,9 @@
 //!   `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface
 //!   into System memory. This stays inside this module — public shape
 //!   (`AsyncElement`, input/output caps) doesn't change.
-//! - YUV444P / 10-bit pixel formats. Mainline H.264 cameras emit YUV420P;
-//!   other formats are rejected with `CapsMismatch` so the failure is loud.
+//! - 10-bit pixel formats (`YUV420P10` / `P010`). Mainline H.264 cameras emit
+//!   8-bit YUV420P; `YUV444P` is now accepted (chroma box-averaged to 4:2:0),
+//!   but 10-bit and other formats are still rejected with `CapsMismatch`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -85,6 +86,7 @@ use ffmpeg::packet::Packet;
 use ffmpeg::Dictionary;
 use ffmpeg::Error as FfError;
 
+use crate::yuv::downsample_chroma_420;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
@@ -746,10 +748,12 @@ fn yuv420_caps(format: OutputFormat, w: u32, h: u32) -> Caps {
 /// exceed the visible width due to libavcodec's alignment, so rows are
 /// copied individually.
 ///
-/// Two source pixel layouts are accepted: planar `YUV420P` (the software
-/// H.264 decoder's native output) and semi-planar `NV12` (h264_cuvid's
-/// native output). Any other format is rejected loud — those streams need
-/// a `ColorConvert` element upstream of any I420/NV12 consumer.
+/// Three source pixel layouts are accepted: planar `YUV420P` (the software
+/// H.264 decoder's native output), semi-planar `NV12` (h264_cuvid's native
+/// output), and planar `YUV444P` (High 4:4:4 profile), whose full-resolution
+/// chroma is box-averaged down to 4:2:0 (lossy). Any other format (e.g.
+/// 10-bit) is rejected loud — those streams need a `ColorConvert` element
+/// upstream of any I420/NV12 consumer.
 fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
     let src = match frame.format() {
         // YUVJ420P is YUV420P with JPEG (full) range. Same plane layout, so
@@ -757,10 +761,13 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
         // be advertised by a future colour-metadata field on `Caps::Video`.
         Pixel::YUV420P | Pixel::YUVJ420P => SourceLayout::Planar420,
         Pixel::NV12 => SourceLayout::SemiPlanar420,
+        // 4:4:4 (High 4:4:4 profile). Full-resolution chroma is box-averaged
+        // down to 4:2:0; lossy in chroma, but keeps the output contract.
+        Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,
         _ => return Err(G2gError::CapsMismatch),
     };
     let required_planes = match src {
-        SourceLayout::Planar420 => 3,
+        SourceLayout::Planar420 | SourceLayout::Planar444 => 3,
         SourceLayout::SemiPlanar420 => 2,
     };
     if frame.planes() < required_planes {
@@ -844,6 +851,26 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                 }
             }
         }
+        // 4:4:4 source -> planar I420: box-average each full-res U/V plane to
+        // half resolution (tightly packed, row stride `cw`), then store.
+        (SourceLayout::Planar444, OutputFormat::I420) => {
+            let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
+            let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
+            out[y_size..y_size + c_size].copy_from_slice(&u_ds);
+            out[y_size + c_size..y_size + 2 * c_size].copy_from_slice(&v_ds);
+        }
+        // 4:4:4 source -> semi-planar NV12: downsample, then interleave U/V.
+        (SourceLayout::Planar444, OutputFormat::Nv12) => {
+            let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
+            let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
+            for row in 0..ch {
+                let dst_base = y_size + row * 2 * cw;
+                for col in 0..cw {
+                    out[dst_base + 2 * col] = u_ds[row * cw + col];
+                    out[dst_base + 2 * col + 1] = v_ds[row * cw + col];
+                }
+            }
+        }
     }
 
     Ok(out.into_boxed_slice())
@@ -853,6 +880,8 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
 enum SourceLayout {
     Planar420,
     SemiPlanar420,
+    /// Planar 4:4:4 (full-resolution chroma); downsampled to 4:2:0 on output.
+    Planar444,
 }
 
 /// `get_format` hook for the `NvdecCuda` backend: pick `AV_PIX_FMT_CUDA` if the

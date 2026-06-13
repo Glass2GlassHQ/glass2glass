@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M54: `FfmpegH264Dec` accepts YUV444P source (chroma downsampled to 4:2:0)
+
+- Closes the YUV444P half of the `ffmpegdec` "YUV444P / 10-bit" deferral: the
+  decoder previously rejected any non-4:2:0 source with `CapsMismatch`, so a
+  High 4:4:4 profile H.264 stream failed loud. `copy_yuv420` now also accepts
+  `YUV444P` / `YUVJ444P` frames, box-averaging each full-resolution U/V plane
+  down to 4:2:0 before packing the existing I420 or NV12 output. The reduction
+  is lossy in chroma resolution but keeps the decoder's 4:2:0 output contract,
+  so it needs no new `RawVideoFormat` variant or downstream change. 10-bit
+  (`YUV420P10` / `P010`) stays deferred (its 16-bit sample layout is too
+  endianness/bit-position-specific to add without a libav host to verify on).
+- The chroma-downsample math is extracted to a pure, non-OS-gated `yuv` module
+  (`downsample_chroma_420`, 2x2 box average with edge clamping for odd dims and
+  source-pitch handling) so the algorithm is host-testable without libavcodec;
+  the Linux-only `ffmpegdec` arms are reduced to extracting the frame planes and
+  calling it. The module is gated `cfg(any(test, all(linux, ffmpeg)))`, the same
+  shape as `h264util`, so it is never dead code off-Linux.
+- VERIFIABILITY: the `ffmpeg` feature is Linux-only and target-gated, so the
+  decoder arms were NOT compiled or run on this Windows dev host. What IS
+  verified here: the `yuv` downsample math (4 host unit tests: even 2x2, 4x2,
+  pitch-padded, odd-dim edge clamping), and that nothing off-Linux regressed.
+  The actual 4:4:4 decode through libavcodec is owed a Linux + libav run (the
+  new `ffmpegdec` plumbing mirrors the existing planar arms and uses the
+  host-tested helper, but is unverified on this host). VERIFIED: `cargo test -p
+  g2g-plugins --lib` green (58, incl. the 4 new `yuv` cases); `cargo check -p
+  g2g-plugins --target thumbv7em-none-eabihf` green (`yuv` stays out of the
+  no_std baseline); native `cargo check --workspace` + `cargo clippy --workspace
+  --all-targets` + `cargo test --workspace` green.
+
 ### M53: CUDA execution provider for `OrtInference` (`cuda` feature)
 
 - Second GPU inference EP on the `ort` path, the NVIDIA counterpart of M26's
