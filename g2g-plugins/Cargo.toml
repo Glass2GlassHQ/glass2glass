@@ -21,6 +21,10 @@ mf-decode = ["std", "dep:windows"]
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.
 mf-encode = ["std", "dep:windows"]
+# Windows AAC audio encode/decode via Media Foundation MFTs (M35/M36):
+# MfAacEncode (PCM->AAC, enumerated encoder) and MfAacDecode (AAC->PCM via
+# CLSID_MSAACDecMFT). Pulls the windows crate; Windows-only, implies std.
+mf-aac = ["std", "dep:windows"]
 # Windows WASAPI render sink (M29): plays interleaved PCM (PcmS16Le/PcmF32Le)
 # on the default audio endpoint via WASAPI shared mode. The audible-output end
 # of the M25 audio path. Pulls the windows crate; Windows-only, implies std.

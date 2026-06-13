@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M35: `MfAacEncode` AAC audio encoder
+
+- Compressed-audio analog of `MfEncode`: consumes interleaved 16-bit PCM
+  (`PcmS16Le`) and produces raw AAC-LC access units (`AudioFormat::Aac`, one per
+  1024-sample frame, no ADTS header) via the MS AAC encoder MFT. Windows-only
+  behind the `mf-aac` feature.
+- The AAC encoder has no fixed CLSID, so it is enumerated by output subtype via
+  `MFTEnumEx`; it is synchronous, so the same `ProcessInput`/`ProcessOutput`
+  drain loop as the H.264 encoder applies. Bitrate is selectable
+  (`with_bytes_per_second`, validated against the encoder's 96/128/160/192 kbps
+  set). The AudioSpecificConfig is read from the negotiated output type's
+  `MF_MT_USER_DATA` (past the 12-byte HEAACWAVEINFO tail) and exposed via
+  `audio_specific_config()` for a decoder or MP4 `esds`.
+- Negotiation: a `DerivedOutput` constraint maps S16 PCM to AAC at the same
+  channels/rate; non-S16 input is rejected.
+- Tests: three unit tests (intercept, derived-output mapping, bitrate
+  validation) plus `m35_aac_encode.rs`, which drives the real encoder over 10
+  PCM buffers and asserts non-empty AAC access units, a non-empty ASC, and AAC
+  output caps. VERIFIED on the dev host: the MS AAC encoder produced AUs + ASC;
+  `mf-aac` clippy clean.
+
 ### M34: `AudioConvert` PCM converter
 
 - The audio analog of `VideoConvert`: converts interleaved PCM between sample
