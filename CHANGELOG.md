@@ -5,6 +5,20 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M38: WASAPI loopback capture in `WasapiSrc`
+
+- `WasapiSrc::with_loopback()` captures the default render endpoint's output
+  (what the system is playing) in WASAPI loopback mode, instead of a capture
+  endpoint (mic / line-in). The endpoint dataflow (`eRender`) and the
+  `AUDCLNT_STREAMFLAGS_LOOPBACK` init flag thread through the probe and the
+  capture worker; the mix format then comes from the render endpoint.
+- Tests: a unit test for the builder/`is_loopback` shape plus
+  `m38_wasapi_loopback.rs`, which plays a tone through `WasapiSink` on a
+  background thread while the loopback source captures, asserting the requested
+  buffers of non-empty PCM arrive with `Eos`, skipping when no render endpoint
+  is present. VERIFIED on the dev host: loopback captured 5 buffers of the
+  played-back tone; `cargo check --workspace` green; feature clippy clean.
+
 ### M37: AAC audio in the fMP4 container (`Mp4AudioSink` / `Mp4AudioSrc`)
 
 - An audio-only AAC fMP4 (`.m4a`) muxer/demuxer pair, the audio counterpart of
