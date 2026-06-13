@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M61: native end-to-end ML pipeline test (cross-target proof, native half)
+
+- An integration test runs `VideoTestSrc(RGBA) -> VideoConvert(NV12) ->
+  VideoScale(NV12 4x4->2x2) -> WgpuPreprocess(GPU) -> OrtInference(tensor-input,
+  identity fixture) -> FakeSink` through `run_linear_chain`, the native half of
+  the cross-target story: the same element-graph shape the browser pipeline
+  runs, substituting the platform source/decode/sink. It proves the software
+  transforms compose with the GPU preprocess and the M59 tensor-input inference
+  into one negotiated chain on real hardware: the caps solver threads
+  `RGBA -> NV12 -> NV12@2x2 -> tensor[1,3,2,2] -> tensor-input` end to end, and
+  three frames reach the inference output carrying the model's tensor caps.
+- `g2g-plugins` is now a dev-dependency of `g2g-ml` (acyclic: g2g-plugins does
+  not depend on g2g-ml), so the ML elements can be tested against the real
+  source/transform/sink elements rather than fakes.
+- VERIFIED on the dev host (D3D12 adapter): `cargo test -p g2g-ml --features
+  "wgpu ort" --test native_ml_pipeline` green; `cargo clippy -p g2g-ml
+  --features "wgpu ort" --tests` clean; the test skips gracefully when no wgpu
+  adapter is present, like the other GPU-gated tests.
+
 ### M59: `OrtInference` tensor-input mode
 
 - `OrtInference::with_tensor_input()` switches the input pad from `RawVideo`

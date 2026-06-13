@@ -44,7 +44,12 @@ wgpu = { version = "29", optional = true }
 burn = { version = "0.21", optional = true, default-features = false, features = ["std", "wgpu"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+# Native end-to-end ML pipeline test (M61): the source/transform/sink elements
+# (VideoTestSrc, VideoConvert, VideoScale, FakeSink) that the g2g-ml preprocess
+# and inference elements compose with. g2g-plugins does not depend on g2g-ml,
+# so this is dev-only and acyclic.
+g2g-plugins = { path = "../g2g-plugins" }
 
 [lints]
 workspace = true
