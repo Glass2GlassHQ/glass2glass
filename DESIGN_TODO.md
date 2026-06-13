@@ -631,6 +631,291 @@ unblocks the existing RTSP-driven pipelines. Phase A + B1 + B2
 (8–9 sessions, ~3 weeks) adds the Linux capture baseline. Full
 sprint (11–14 sessions, ~5 weeks) reaches Windows + modern Linux.
 
+## First credible product path — 18-session sequenced plan
+
+**Why this exists.** The plans above are organized by capability area. Each
+makes architectural sense in isolation. None of them, on its own, produces
+something a developer can pick up and evaluate. This section is the
+opposite framing: **if the project only ever ships one focused track, this
+is it.** It selects the minimum cut across the other plans that produces a
+working, defensible, end-to-end demo — and stops there. Everything else
+waits.
+
+**Goal at end of 18 sessions.** A working browser application — deployed
+to a public URL, working in Chrome / Firefox / Safari — that exercises
+the full cross-target value proposition:
+
+```
+WebSocketSrc → H264Parse → WebCodecsDecode → WebGPUPreprocess →
+  WebOrtInference (segmentation) → WebGPUSink (compose + present)
+```
+
+— with every link after `WebCodecsDecode` staying on the GPU. The exact
+same g2g element graph (substituting platform sources / sinks) also runs
+as a native Linux desktop binary against an RTSP feed, producing the
+same output to a `CudaGlSink`. Both deployments build from one
+`Cargo.toml`, one set of element source files, one negotiation model.
+
+This is the single artifact that makes the "cross-target multimedia
+framework with hardware-resident graph in the browser" claim
+demonstrable rather than aspirational. Nothing else in the project tells
+that story until it exists.
+
+### Sequencing principle
+
+Three phases. Each phase produces a verifiable artifact; the project can
+honestly pause after any phase boundary and still have shipped value.
+
+| Phase | Sessions | End-of-phase artifact |
+| :--- | :--- | :--- |
+| **P1 — SW transforms** | 3 | Existing pipelines can resize and reframe. |
+| **P2 — Browser zero-copy chain (W1)** | 8 | A browser pipeline that decodes H.264 and renders via WebGPU with no host round-trip. |
+| **P3 — Reference application + cross-target proof** | 7 | A deployed, public-URL demo + the matching native binary + a written positioning piece. |
+
+The sequencing is deliberate: P1 first because it unblocks both the
+browser and native pipelines without requiring browser stack decisions;
+P2 second because the browser zero-copy chain is the riskiest unproven
+piece and should be derisked before the application work; P3 last
+because shipping the demo requires both prior phases to be done and
+validated.
+
+### Phase 1 — Minimum SW transforms (3 sessions)
+
+Pulled from Tier-1 Phase A. Only the two transforms the demo critically
+needs; `VideoCrop` / `AudioResample` defer until a use case forces them.
+
+- **P1.1 — `VideoScale`** (2 sessions). Software bilinear, separable, per-
+  plane on I420 / NV12. The ML model wants a fixed input size
+  (e.g. 256×256 for a small segmentation network) and the camera /
+  stream geometry won't match. *Verify:* round-trip PSNR > 30 dB, reject
+  odd target dims on 4:2:0, runs in both native and wasm32 builds.
+- **P1.2 — `VideoRate`** (1 session). Target-fps drop / duplicate. The ML
+  network runs at a fixed rate (10–15 fps for browser ML is typical);
+  source rate won't match. *Verify:* monotonic PTS, correct 1-in-3 drop
+  / 1-into-2 duplicate, PTS-wraparound edge.
+
+Both elements ship as pure `g2g-plugins` `AsyncElement` impls in the
+existing CSP shape. **Verification gate before P2:** native +
+`wasm32-unknown-unknown` clean compile, unit tests green on both targets.
+
+### Phase 2 — Browser zero-copy chain (8 sessions)
+
+The W1 sprint, made concrete. Each step adds one element / one memory
+domain primitive; each is independently testable.
+
+- **P2.1 — `MemoryDomain::WebGPUExternalTexture` in core** (1 session).
+  Wraps a `web_sys::VideoFrame` handle behind a `WebGPUKeepAlive` trait
+  object the same way `OwnedCudaBuffer` wraps a CUDA pointer behind
+  `CudaKeepAlive`. Core never links `web-sys` — the producing element
+  supplies the owner as `Box<dyn WebGPUKeepAlive>`. *Why first:*
+  everything downstream depends on this carrier; landing it isolated
+  proves the core extension is clean.
+- **P2.2 — `WebCodecsDecode` GPU-resident output path** (1 session).
+  Replace the existing `videoFrame.copyTo(rgba_buffer)` path with
+  emitting the `VideoFrame` directly in the new memory domain. Keep
+  the `copyTo` path behind a `with_system_output()` builder for the
+  CPU-consumer case. *Why:* this is the load-bearing zero-copy moment —
+  the decoder hands the GPU surface forward instead of pulling it back.
+- **P2.3 — Async WebGPU device handshake** (1 session). The
+  `request_adapter` / `request_device` calls are async and
+  `configure_pipeline` is not. Resolve the device once at pipeline
+  construction time (a builder-side `await`) and store the `GPUDevice`
+  + `GPUQueue` on the element; element configuration uses the cached
+  handles. This is the foundation P2.4 and P2.5 sit on.
+- **P2.4 — `WebGPUPreprocess` element** (2 sessions). Wasm32 sibling of
+  `WgpuPreprocess`: imports a `WebGPUExternalTexture` via
+  `device.importExternalTexture()`, runs a compute shader that produces
+  a normalized f32 NCHW tensor or downsized RGBA texture, emits in a
+  GPU-resident tensor domain. *Why 2 sessions:* the
+  `GPUExternalTexture` lifetime is single-render-pass and forces a
+  specific shape (sample in the same pass that imports), which the
+  shader and the element loop have to be designed around.
+- **P2.5 — `WebOrtInference` element** (1 session). New element in
+  `g2g-ml`, wasm32-only, behind a `web-ort` feature. Wraps the
+  `onnxruntime-web` JS module via `wasm-bindgen`: the page loads
+  `ort.min.js` (or imports the npm package), the Rust element calls
+  into it through generated bindings. Same `Caps::Tensor` in /
+  `Caps::Tensor` out contract as the native `OrtInference` so it slots
+  into the existing tensor graph. Register the WebGPU execution
+  provider ahead of the WASM CPU fallback so a usable GPU runs the
+  inference; WebNN is the future optimal EP (Apple Neural Engine via
+  Safari, Snapdragon Hexagon) and can be probed first with WebGPU as
+  fallback once it's mainstream. **Why this over `BurnInference` for
+  the browser:** runtime ONNX model loading from any URL (Burn's
+  `burn-import` is build-time codegen — every model means a rebuild),
+  thousands of battle-tested operators, async-first design matching
+  WebGPU, and a real Microsoft-maintained runtime that's used in
+  production by Bing / Office. `BurnInference` stays as the native
+  pure-Rust backend; the browser path uses ORT Web. Same model file
+  loads in both targets because native `OrtInference` and
+  `WebOrtInference` are both ONNX consumers.
+- **P2.6 — `WebGPUSink`** (1 session). Replaces `CanvasSink` for the
+  GPU-resident case. Takes a render-ready GPU texture and presents to a
+  canvas via `<canvas>.getContext("webgpu")` + swapchain. *Why simple:*
+  it's a 50-line render pass + present loop once the device handshake
+  exists.
+- **P2.7 — In-browser validation harness** (1 session). A
+  `wasm-bindgen-test` browser test plus a minimal manual HTML page that
+  loads a known H.264 clip from a static asset, runs the full chain,
+  asserts visual output via canvas pixel readback against a reference.
+  *Why this needs its own session:* every element above compiles today,
+  but the in-browser runtime is currently unvalidated. The harness is
+  what burns down that debt before the application work starts.
+
+**Verification gate before P3:** the harness runs the full
+`WebSocketSrc → WebCodecsDecode → WebGPUPreprocess → WebOrtInference →
+WebGPUSink` chain on a public CI runner with headless Chrome, asserts
+no host round-trip via the `VideoFrame` lifetime trace, asserts visual
+parity within tolerance against the native pipeline's output on the
+same clip. **Until this gate passes, the demo cannot be claimed.**
+
+### Phase 3 — Reference application (7 sessions)
+
+The user-facing artifact. Picks one wedge use case, ships it
+end-to-end. Recommendation: **edge ML on a streamed camera feed**
+because it exercises hardware decode (vs `getUserMedia` which uses raw
+camera frames and skips the decode pillar) and is the canonical
+"why does this need to be in the browser" use case (zero install,
+privacy, no server round-trip).
+
+- **P3.1 — Pick the model and the scenario** (1 session). The model is
+  the constraint. Three viable candidates:
+  - **Selfie segmentation** (MediaPipe-Selfie-Segmentation shape, ~6MB).
+    Wedge: video conferencing background blur. Wide appeal, clear
+    demo value.
+  - **Object detection** (a quantized YOLOv8-nano, ~6MB or
+    DETR-tiny). Wedge: surveillance, monitoring. Stronger differentiation
+    against `<video>` element solutions.
+  - **Pose estimation** (BlazePose-lite). Wedge: fitness, accessibility,
+    AR. Higher novelty.
+  Decide once based on file size + WebGPU operator coverage of the
+  candidate ONNX export (ORT Web's WebGPU EP runs most common ops but
+  not all; check before committing). Rest of P3 doesn't depend on
+  which.
+- **P3.2 — Application scaffolding** (2 sessions). The static
+  HTML / TypeScript glue that bootstraps the wasm module, wires
+  controls (source URL, model URL, performance overlay), handles the
+  cross-origin-isolation headers required for WebCodecs +
+  SharedArrayBuffer, and provides the fallback path when WebGPU is
+  unavailable (currently: Safari pre-17, headless contexts). The g2g
+  wasm module is a single `wasm_bindgen` entry point that takes the
+  source / model / canvas-id and returns a handle.
+- **P3.3 — Native sibling demo** (1 session). The same pipeline shape
+  as a Linux binary: `RtspSrc → H264Parse → FfmpegH264Dec (NvdecCuda)
+  → WgpuPreprocess → OrtInference (CUDA EP) → CudaGlSink`. Same
+  element source files, same negotiation model. **And critically, the
+  same `.onnx` model file** — native `OrtInference` and browser
+  `WebOrtInference` both load standard ONNX, so the cross-target
+  artifact is literally "one model file, two deployments, identical
+  output." That's a stronger claim than "same pipeline shape" alone.
+  Running both deployments side by side on the same RTSP feed with
+  the same model is the value proposition made literal.
+- **P3.4 — Deployment** (1 session). Static-hosted at
+  `glass2glass.dev` or a GitHub Pages route. Includes the cross-origin
+  headers (deploy behind Cloudflare Worker or via the
+  `Cross-Origin-Embedder-Policy: require-corp` +
+  `Cross-Origin-Opener-Policy: same-origin` static-site shim). Includes
+  a known-good RTSP feed (or recorded clip served over WebSocket from
+  the same origin to dodge CORS).
+- **P3.5 — Validation matrix** (1 session). Chrome / Firefox / Safari
+  on macOS + Windows + Android + iOS. Document what works, what
+  doesn't, why. WebGPU availability + WebCodecs codec coverage are the
+  two main axes. This document is what an evaluator reads to decide
+  whether the framework fits their target audience.
+- **P3.6 — Positioning piece** (1 session). A short README +
+  blog-shaped write-up: "here's what this demo does, here's how it's
+  different from mediabunny / WebAV / raw WebCodecs apps, here's how
+  the same pipeline runs native." Includes the side-by-side
+  native + browser running on the same RTSP feed. This is the artifact
+  that an external developer reads to decide whether to investigate
+  the framework. Without it, the demo is technically real but
+  invisible.
+
+**Verification gate at end of P3:** the deployment is reachable from
+an external network and works in at least Chrome stable + Firefox
+stable on Linux + macOS + Windows desktop. The positioning piece is
+linkable from the project README. The native sibling demo runs from a
+`cargo run --example` against a known-good RTSP feed.
+
+### Sizing
+
+| Phase | Step | Sessions | Cumulative |
+| :--- | :--- | :--- | :--- |
+| P1 | VideoScale | 2 | 2 |
+| P1 | VideoRate | 1 | 3 |
+| P2 | WebGPUExternalTexture domain | 1 | 4 |
+| P2 | WebCodecsDecode GPU-resident output | 1 | 5 |
+| P2 | Async WebGPU device handshake | 1 | 6 |
+| P2 | WebGPUPreprocess | 2 | 8 |
+| P2 | WebOrtInference (onnxruntime-web) | 1 | 9 |
+| P2 | WebGPUSink | 1 | 10 |
+| P2 | In-browser validation harness | 1 | 11 |
+| P3 | Pick model + scenario | 1 | 12 |
+| P3 | Application scaffolding | 2 | 14 |
+| P3 | Native sibling demo | 1 | 15 |
+| P3 | Deployment | 1 | 16 |
+| P3 | Validation matrix | 1 | 17 |
+| P3 | Positioning piece | 1 | 18 |
+
+### What this path deliberately excludes
+
+To stay credible at 18 sessions, the following are explicitly out and
+wait for later work, even though they appear elsewhere in this doc:
+
+- **DAG runner.** The demo pipeline is linear; the DAG runner is needed
+  for multi-source / multi-sink topologies (tee, mux). Worth doing
+  next, but not blocking this artifact.
+- **Auto-plug / element registry.** The demo names elements explicitly
+  in Rust code. A user-facing "play this URL and figure out the chain"
+  flow is the next-tier polish.
+- **State machine / preroll / seek.** The demo plays once, end-to-end.
+  Pause / scrub / seek would need the state machine work.
+- **VideoCrop / AudioResample.** Not on the demo critical line. Add
+  when an audio path or ROI-driven flow is built.
+- **Live camera capture (V4l2Src / MfVideoSrc / PipeWireSrc).** The
+  browser demo uses `WebSocketSrc` against a known clip / known feed;
+  the native demo uses `RtspSrc`. Live camera capture is a
+  general-purpose tier-1 win but not required for the cross-target
+  proof.
+- **Compositor, RTP receive jitterbuffer, bus message coverage,
+  metadata system, every codec beyond H.264.** Wait.
+- **macOS / Android platforms.** The deployment runs on whatever
+  WebGPU + WebCodecs + H.264 supports in those browsers, which covers
+  more than the in-tree native macOS / Android story would.
+
+### Why this sequence and not a different one
+
+- **Why P1 before P2:** the two transforms are fast to land and
+  unblock both targets. Doing them first lets P2's browser work
+  proceed against a CSP solver that's already exercising more than
+  trivial linear chains.
+- **Why the W1 chain before the application:** the application is the
+  user-facing surface but the chain is the technically risky surface.
+  If `GPUExternalTexture` lifetime constraints or the async device
+  handshake force a rethink, that risk lands early, in P2, not in P3
+  where it would torpedo the deployment timeline.
+- **Why a native sibling demo in P3 and not separately:** the
+  cross-target story is the only defensible positioning. Showing the
+  same pipeline native + browser in the same commit, side by side, is
+  the only way that claim is concrete rather than rhetorical. It's
+  cheap (1 session) because the wasm32-incompatible element
+  substitutions are already in tree.
+- **Why a positioning piece counts as a session:** an invisible demo
+  is a non-demo. The artifact that takes an evaluator from "I clicked
+  the link" to "I understand what's different here" is part of the
+  deliverable.
+
+### What success looks like at session 18
+
+A linkable, runnable, public URL that an external developer can open
+in 30 seconds and see hardware-accelerated H.264 decode + GPU-resident
+segmentation + on-GPU composite in a browser tab, accompanied by a
+linkable native binary doing the same with the same source code.
+Plus a 500-word write-up that names the technical claim and shows the
+artifacts that back it. This is the artifact that earns the project
+the right to be evaluated against the broader plans in the rest of
+this document; without it, those plans are speculation.
+
 ## DAG runner — detailed plan
 
 Plan, not implementation. Locks the shape of the `Graph` API, the generalized
