@@ -146,3 +146,8 @@ pub mod webcodecsdecode;
 // string). Pure; compiled under cfg(test) so the logic is host-testable.
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 mod h264util;
+
+// Embassy RTOS clock backend (M43): the embedded deployment-profile clock over
+// embassy-time, the no_std analog of WallClock / WasmClock.
+#[cfg(feature = "embassy")]
+pub mod embassyclock;

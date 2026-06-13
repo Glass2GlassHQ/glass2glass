@@ -5,6 +5,43 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M43: Embedded/Embassy foundation (`StaticBufferPool`, `EmbassyClock`)
+
+- Opens the third deployment target, embedded/RTOS (DESIGN.md §6.2): the no_std
+  core now runs under an Embassy executor primitive. The `no_std + alloc` core
+  was built for this, so M43 adds the missing pieces rather than touching the
+  core.
+- `StaticBufferPool<T, const N>` (g2g-core, `staticpool.rs`): the strict
+  no-heap pool the §3.3 / `pool.rs` docs named as missing, the counterpart of
+  the `Arc`/`Vec`-backed `BufferPool`. Fixed `[T; N]` storage, `try_acquire`
+  plus an async single-waiter `acquire`, and a RAII handle that returns its slot
+  on drop. Pure `core` (a `RefCell` free list, sound on the single-core
+  cooperative Embassy executor), no `alloc`, no feature gate, so it works in
+  strict no-heap builds.
+- `EmbassyClock` (g2g-plugins, `embassy` feature): `PipelineClock` /
+  `AsyncClock` over `embassy-time`, the no_std analog of `WallClock` /
+  `WasmClock`. `now_ns` reads `Instant`; `sleep_until_ns` returns an
+  `embassy_time::Timer` directly (no allocation). The `embassy` feature is
+  no_std (does not imply std).
+- `m43_embassy.rs` drives `VideoTestSrc -> FakeSink` to EOS with
+  `embassy_futures::block_on` (the bare-metal future runner), proving the
+  executor-agnostic runner works off Embassy, not just tokio.
+- Finding: the no_std baseline compiles for bare metal on a 64-bit-atomic target
+  (`aarch64-unknown-none`), but `metrics::LatencyHistogram` uses `AtomicU64`,
+  which Cortex-M (`thumbv7em`) and `riscv32` lack; `portable-atomic` is the M44
+  fix. A pre-existing no-std-build dead_code warning in core's `coordinator`
+  (its callers are std/test-gated) is likewise an M44 cleanup.
+- Tests: five `StaticBufferPool` unit tests (capacity/available, acquire +
+  drop-returns, exhaustion, deref write-through, async park-then-resolve) plus
+  the `block_on` integration test. VERIFIED on the dev host: `cargo test -p
+  g2g-core --lib staticpool` (5) and `cargo test -p g2g-plugins --test
+  m43_embassy` green; `cargo check -p g2g-core --target aarch64-unknown-none`
+  and `cargo check -p g2g-plugins --features embassy --target
+  aarch64-unknown-none` green (no-std bare metal); native `cargo check
+  --workspace` + `cargo clippy --workspace --all-targets` green; bare-metal
+  embassy clippy clean. Owed to hardware: `EmbassyClock`'s tick (a HAL time
+  driver).
+
 ### M42: WebRTC data-channel ingest (`WebRtcSrc`)
 
 - Second browser ingest path (DESIGN.md §6.3.1), alongside `WebSocketSrc`:

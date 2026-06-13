@@ -613,7 +613,28 @@ Because the core processing loop requires only `core` and `alloc`, deployment pr
 - **Runtime Driver:** Embassy async executor (single-threaded, cooperative multitasking hardware timer loop).
 - **Inter-Element Channels:** Zero-allocation stack channels (`embassy-sync`).
 - **Hardware Interop:** Fixed-memory DMA rings mapped to microcontroller video capture peripherals.
-- **Cargo features:** none (default `no_std + alloc`), or strict no-heap via `BufferPool<_, N>` only.
+- **Cargo features:** none (default `no_std + alloc`), or strict no-heap via `StaticBufferPool<_, N>` only.
+
+#### 6.2.1 Embedded/Embassy Track (M43+)
+
+Built incrementally; the `no_std + alloc` core already runs here, since the
+runner futures are executor-agnostic and `ElementBound` is empty without
+`multi-thread` (§4.3). `StaticBufferPool` lands in `g2g-core` (pure `core`, no
+feature gate); the Embassy clock/executor glue in `g2g-plugins` behind the
+no_std `embassy` feature.
+
+| Milestone | Scope | Status |
+| :--- | :--- | :--- |
+| **M43** | `StaticBufferPool<T, N>` (no-alloc core pool); `EmbassyClock` (`embassy-time`); pipeline under `embassy-futures::block_on`; bare-metal compile (`aarch64-unknown-none`). | **implemented** (EmbassyClock tick owed to a HAL time driver) |
+| **M44** | `embassy-sync` static channels (zero-alloc link transport) + full `embassy-executor` multi-task integration; `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M / RISC-V32 (no 64-bit atomics) compile. | planned |
+| **M45** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
+
+Finding (M43): the no_std baseline compiles for bare metal on a target with
+64-bit atomics (`aarch64-unknown-none`), but `metrics::LatencyHistogram` uses
+`AtomicU64`, which `thumbv7em` (Cortex-M) and `riscv32` lack; `portable-atomic`
+is the M44 fix. Verification is largely local (unlike §6.3): the pool unit tests
+and the `block_on` pipeline run on the host, and the bare-metal compile proves
+no-std-ness; only `EmbassyClock`'s tick needs a HAL driver on real hardware.
 
 ### 6.3 Browser Sandbox (Web Application Scaling)
 - **Runtime Driver:** Web Workers spawned via `wasm-bindgen-futures`.
