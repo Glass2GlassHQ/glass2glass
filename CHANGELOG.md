@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M66: `VideoFlip` software flip / rotate (Tier-1 A)
+
+- `VideoFlip::new(method)` mirrors or rotates a raw frame by a fixed
+  `FlipMethod` (`HorizontalMirror`, `VerticalMirror`, `Rotate90Cw`, `Rotate180`,
+  `Rotate90Ccw`), the last open transform of Tier-1 Phase A alongside
+  `VideoScale` (M55), `VideoRate` (M56), and `VideoCrop` (M62). Same format set
+  (`Rgba8`/`Bgra8`/`Nv12`/`I420`), a per-plane coordinate remap with no
+  resampling. The two 90-degree rotations transpose the frame and swap width and
+  height; the mirrors and 180 preserve geometry. 4:2:0 needs even input dims
+  (chroma is 2x2 subsampled); odd dims fail loud. CPU-only `no_std` baseline, no
+  feature gate, native + wasm32.
+- Negotiation mirrors the sibling transforms: a native `DerivedOutput(any
+  supported raw -> same format/framerate, dims swapped for the 90-degree
+  rotations and preserved otherwise)`; `configure` validates the 4:2:0 even-dim
+  constraint where input dims are absolute. The coordinate remap is the pure
+  `transform_plane` / `flip` pair, host-testable without the runner. NV12's UV
+  plane remaps with `channels = 2` so each chroma pair moves as a unit.
+- Tests: seven unit tests (`transform_plane` for all five methods on a square
+  plane, the 90-degree dim swap on a 3x2 plane, RGBA pixel mirror, NV12 90-degree
+  geometry + byte-total preservation, `DerivedOutput` dim-swap for rotation and
+  dim-preserve for mirror, configure odd-4:2:0/compressed rejection) plus
+  `m66_videoflip.rs`, which rotates an 8x4 RGBA `VideoTestSrc` 90 degrees CW
+  through the real runner and asserts the swapped 4x8 geometry + preserved
+  framerate via `CapsChanged`. VERIFIED on the dev host: `cargo test -p
+  g2g-plugins --lib videoflip` (7) and `--test m66_videoflip` (1) green; `cargo
+  clippy -p g2g-plugins --lib` + the m66 test clean; `cargo check -p g2g-plugins
+  --target wasm32-unknown-unknown` and `--target thumbv7em-none-eabihf` green
+  (stays in the no_std baseline); native `cargo check --workspace` green.
+
 ### M65: DAG runner D2 muxer fan-in (`NodeConstraint`)
 
 - Completes D2's fan-in half (M64 deferred it). `solve_graph` now handles

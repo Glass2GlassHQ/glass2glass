@@ -10,7 +10,8 @@ anticipates but hasn't yet built.
 Shipped this session (M55-M65, all on `master`):
 
 - **P1 software transforms:** `VideoScale` (M55), `VideoRate` (M56),
-  `VideoCrop` (M62), native + wasm32. `VideoFlip` / `AudioResample` still open.
+  `VideoCrop` (M62), `VideoFlip` (M66), native + wasm32. `AudioResample`
+  still open.
 - **Browser decode groundwork:** the `MemoryDomain::WebGPUExternalTexture`
   carrier (M57) and `WebCodecsDecode::with_gpu_output()` (M58) landed, but are
   reachable only by the raw-`web_sys` GPU path (see the Phase 2 update below).
@@ -454,8 +455,8 @@ developer evaluation: resize, reframe, crop, audio-resample, and live camera
 capture on Linux + Windows.
 
 **Status (2026-06):** Phase A transforms `VideoScale` (M55), `VideoRate`
-(M56), and `VideoCrop` (M62) shipped (native + wasm32). `AudioResample` (A4),
-`VideoFlip`, and the Phase B capture sources remain.
+(M56), `VideoCrop` (M62), and `VideoFlip` (M66) shipped (native + wasm32).
+`AudioResample` (A4) and the Phase B capture sources remain.
 
 Goal at end of sprint: a self-contained demo with no external feed —
 
