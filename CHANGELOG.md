@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M36: `MfAacDecode` AAC audio decoder
+
+- The decode-side mirror of `MfAacEncode`: consumes raw AAC-LC access units and
+  produces interleaved 16-bit PCM via the MS AAC Decoder MFT
+  (`CLSID_MSAACDecMFT`, synchronous). Windows-only, shares the `mf-aac` feature.
+- Needs the stream's AudioSpecificConfig to configure its input type
+  (`with_audio_specific_config`, supplied by the encoder or an MP4 `esds`); it
+  is wrapped in the 12-byte HEAACWAVEINFO `MF_MT_USER_DATA` header. `configure`
+  fails loud without it. A `DerivedOutput` constraint maps AAC to S16 PCM at the
+  same channels/rate.
+- Tests: four unit tests (intercept, derived-output mapping, user-data framing,
+  missing-ASC rejection) plus `m36_aac_roundtrip.rs`, a `MfAacEncode ->
+  MfAacDecode` round trip through both real MFTs that recovers the stream with a
+  decoded sample-frame count within the AAC priming delay of the input.
+  VERIFIED on the dev host: PCM -> AAC -> PCM round trip green; `mf-aac` clippy
+  clean.
+
 ### M35: `MfAacEncode` AAC audio encoder
 
 - Compressed-audio analog of `MfEncode`: consumes interleaved 16-bit PCM

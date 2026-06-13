@@ -55,6 +55,8 @@ pub mod mfencode;
 // enumerated encoder, MfAacDecode wraps CLSID_MSAACDecMFT.
 #[cfg(all(target_os = "windows", feature = "mf-aac"))]
 pub mod mfaacencode;
+#[cfg(all(target_os = "windows", feature = "mf-aac"))]
+pub mod mfaacdecode;
 
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
