@@ -5,14 +5,16 @@
 //! per node over per-edge channels, joined with [`join_all`]. It collapses the
 //! linear + fan-out runner shapes into one entry point.
 //!
-//! Scope (D3): source / transform / sink / tee. A tee broadcasts each packet
-//! to all its branches; since [`PipelinePacket`] is not `Clone` (a GPU-resident
-//! frame owns a non-copyable handle), the broadcast deep-copies `System` frames
-//! and fails loud on a GPU domain. A refcounted shareable frame (zero-copy tee)
-//! and the muxer fan-in (which needs the per-input-pad constraint API) are the
-//! follow-ups; a muxer node is rejected here. The mid-stream re-cascade
-//! (coordinator) is D4, so an interior arm handles a `CapsChanged` locally
-//! (configure + forward) without the β allocation walk.
+//! Scope: source / transform / sink / tee (fan-out) + muxer (fan-in). A tee
+//! broadcasts each packet to all its branches; since [`PipelinePacket`] is not
+//! `Clone` (a GPU-resident frame owns a non-copyable handle), the broadcast
+//! deep-copies `System` frames and fails loud on a GPU domain (a refcounted
+//! shareable frame for the zero-copy / GPU tee is a follow-up). A muxer node
+//! runs a [`DynMultiInputElement`]: per-input forwarder arms tag each packet
+//! with its pad and feed one muxer arm that combines them, emitting a single
+//! `Eos` after every input ends (the `run_muxer_sink` shape). The mid-stream
+//! re-cascade (coordinator) is D4, so an interior arm handles a `CapsChanged`
+//! locally (configure + forward) without the β allocation walk.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -23,24 +25,26 @@ use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink, Reconfigure,
 };
 use crate::error::G2gError;
+use crate::fanout::MultiInputElement;
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{MemoryDomain, SystemSlice};
 use crate::query::LatencyReport;
-use crate::runtime::channel::{link, LinkReceiver, LinkSender, SenderSink};
-use crate::runtime::fanin::DynSourceLoop;
+use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
+use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::join::join_all;
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 use crate::runtime::solver::{solve_graph, NodeConstraint};
 
-/// Element payload for a [`Graph`] driven by [`run_graph`]. Sources and
-/// transforms/sinks implement different traits (a source has no input pad), so
-/// the payload is an enum the runner matches on per node kind. Tee and muxer
-/// nodes carry no element (`Graph::add_tee` / `add_muxer` take none).
+/// Element payload for a [`Graph`] driven by [`run_graph`]. Sources,
+/// transforms/sinks, and muxers implement different traits (a source has no
+/// input pad, a muxer has many), so the payload is an enum the runner matches
+/// on per node kind. A tee carries no element (`Graph::add_tee` takes none).
 pub enum GraphNode {
     Source(Box<dyn DynSourceLoop>),
     Element(Box<dyn DynAsyncElement>),
+    Muxer(Box<dyn DynMultiInputElement>),
 }
 
 impl GraphNode {
@@ -53,6 +57,11 @@ impl GraphNode {
     pub fn element<E: AsyncElement + 'static>(element: E) -> Self {
         GraphNode::Element(Box::new(element))
     }
+
+    /// Box a fan-in muxer (`add_muxer`).
+    pub fn muxer<M: MultiInputElement + 'static>(muxer: M) -> Self {
+        GraphNode::Muxer(Box::new(muxer))
+    }
 }
 
 impl core::fmt::Debug for GraphNode {
@@ -60,6 +69,7 @@ impl core::fmt::Debug for GraphNode {
         match self {
             GraphNode::Source(_) => f.write_str("GraphNode::Source(..)"),
             GraphNode::Element(_) => f.write_str("GraphNode::Element(..)"),
+            GraphNode::Muxer(_) => f.write_str("GraphNode::Muxer(..)"),
         }
     }
 }
@@ -68,10 +78,10 @@ impl core::fmt::Debug for GraphNode {
 /// one arm per node over per-edge channels. `link_capacity` accepts a
 /// [`LatencyProfile`](crate::runtime::LatencyProfile) or a `usize` depth.
 ///
-/// Negotiation, allocation, clock-election, and latency aggregation over a DAG
-/// are reported as neutral values for now (like the fan-out / fan-in runners);
-/// the DAG-wide folds are a follow-up. A muxer node, a non-`System` frame in a
-/// tee, or a negotiation conflict fails loud.
+/// Allocation, clock-election, and latency aggregation over a DAG are reported
+/// as neutral values for now (like the fan-out / fan-in runners); the DAG-wide
+/// folds are a follow-up. A non-`System` frame in a tee or a negotiation
+/// conflict fails loud.
 pub async fn run_graph<Clk: PipelineClock>(
     graph: Graph<GraphNode>,
     clock: &Clk,
@@ -84,12 +94,6 @@ pub async fn run_graph<Clk: PipelineClock>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
-
-    // Muxer fan-in needs the per-input-pad constraint API (DESIGN_TODO "Muxer
-    // per-input-pad constraint API"); reject until that lands.
-    if topo.iter().any(|&node| matches!(vg.kind(node), NodeKind::Muxer(_))) {
-        return Err(G2gError::CapsMismatch);
-    }
 
     // Phase 1: probe each source's caps (async) into an owned map, releasing
     // the mutable borrow before the constraint phase borrows every node.
@@ -125,7 +129,20 @@ pub async fn run_graph<Clk: PipelineClock>(
                 }
                 // A tee is structural; the solver ignores its slot.
                 NodeKind::Tee(_) => NodeConstraint::Element(CapsConstraint::IdentityAny),
-                NodeKind::Muxer(_) => return Err(G2gError::CapsMismatch),
+                NodeKind::Muxer(_) => {
+                    let GraphNode::Muxer(elem) =
+                        vg.element(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    let inputs: Vec<CapsConstraint<'_>> = (0..elem.input_count())
+                        .map(|pad| elem.caps_constraint_as_input(pad))
+                        .collect();
+                    let output = elem
+                        .caps_constraint_for_output()
+                        .map_err(|_| G2gError::CapsMismatch)?;
+                    NodeConstraint::Muxer { inputs, output }
+                }
             };
             constraints.push(nc);
         }
@@ -160,7 +177,22 @@ pub async fn run_graph<Clk: PipelineClock>(
                 }
             }
             NodeKind::Tee(_) => {}
-            NodeKind::Muxer(_) => unreachable!("muxer rejected above"),
+            NodeKind::Muxer(_) => {
+                // Configure each input pad with its in-edge's negotiated caps.
+                let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
+                for &eid in &in_edges {
+                    let pad = vg.edge(eid).dst.index as usize;
+                    let caps = solution[eid].clone();
+                    let GraphNode::Muxer(elem) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    if let ConfigureOutcome::ReFixate(_) = elem.configure_pipeline(pad, &caps)? {
+                        return Err(G2gError::FixationFailed);
+                    }
+                }
+            }
         }
     }
 
@@ -189,6 +221,33 @@ pub async fn run_graph<Clk: PipelineClock>(
             out_e.iter().map(|&e| txs[e].take().expect("edge tx present")).collect();
         let element = vg.take_element(node);
 
+        // A muxer contributes N+1 arms (one forwarder per input pad plus the
+        // muxer arm), so it is built before the single-arm match below.
+        if let NodeKind::Muxer(_) = kind {
+            let Some(GraphNode::Muxer(mux)) = element else {
+                return Err(G2gError::CapsMismatch);
+            };
+            let out_tx = out_txs.pop().expect("muxer output edge");
+            let pads: Vec<usize> =
+                in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
+            let input_count = in_rxs.len();
+            // Per-input forwarders tag each packet with its pad and feed one
+            // tagged channel; only they keep it open (the runner drops its end).
+            let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+            for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
+                let fwd: BoxFuture<'static, Result<u64, G2gError>> =
+                    Box::pin(muxer_forwarder(in_rx, pad, tagged_tx.clone()));
+                arms.push(fwd);
+                arm_kinds.push(kind);
+            }
+            drop(tagged_tx);
+            let arm: BoxFuture<'static, Result<u64, G2gError>> =
+                Box::pin(muxer_arm(mux, tagged_rx, out_tx, input_count));
+            arms.push(arm);
+            arm_kinds.push(kind);
+            continue;
+        }
+
         let arm: BoxFuture<'static, Result<u64, G2gError>> = match kind {
             NodeKind::Source => {
                 let Some(GraphNode::Source(src)) = element else {
@@ -216,7 +275,7 @@ pub async fn run_graph<Clk: PipelineClock>(
                 let in_rx = in_rxs.pop().expect("tee input edge");
                 Box::pin(tee_arm(in_rx, out_txs))
             }
-            NodeKind::Muxer(_) => unreachable!("muxer rejected above"),
+            NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
         arms.push(arm);
         arm_kinds.push(kind);
@@ -246,11 +305,11 @@ pub async fn run_graph<Clk: PipelineClock>(
 }
 
 /// View a node's payload as a transform/sink element. `None` for a source or a
-/// tee/muxer (whose constraint the runner builds without the element).
+/// muxer (whose constraints the runner builds from their own trait methods).
 fn element_ref(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<&dyn DynAsyncElement> {
     match vg.element(node)? {
         GraphNode::Element(elem) => Some(&**elem),
-        GraphNode::Source(_) => None,
+        GraphNode::Source(_) | GraphNode::Muxer(_) => None,
     }
 }
 
@@ -358,6 +417,63 @@ async fn broadcast(senders: &mut [SenderSink], packet: PipelinePacket) -> Result
     }
     senders[last].push(packet).await?;
     Ok(())
+}
+
+/// One muxer input: drain its edge and tag every packet with its pad index for
+/// the muxer arm. A per-input `Eos` (or a closed edge) is tagged so the muxer
+/// arm can aggregate the single merged `Eos`.
+async fn muxer_forwarder(
+    in_rx: LinkReceiver,
+    pad: usize,
+    tagged: Sender<(usize, PipelinePacket)>,
+) -> Result<u64, G2gError> {
+    loop {
+        match in_rx.recv().await {
+            Some(PipelinePacket::Eos) | None => {
+                tagged
+                    .send((pad, PipelinePacket::Eos))
+                    .await
+                    .map_err(|_| G2gError::Shutdown)?;
+                return Ok(0);
+            }
+            Some(packet) => {
+                tagged
+                    .send((pad, packet))
+                    .await
+                    .map_err(|_| G2gError::Shutdown)?;
+            }
+        }
+    }
+}
+
+/// The muxer arm: drain the tagged channel, combine each input's packets via
+/// `process(pad, ..)`, and emit a single `Eos` once every input has ended. The
+/// per-input `Eos` is delivered to the element first (so a stateful muxer can
+/// flush) but the element must not forward it; the runner owns the merged one.
+async fn muxer_arm(
+    mut mux: Box<dyn DynMultiInputElement>,
+    tagged_rx: Receiver<(usize, PipelinePacket)>,
+    out_tx: LinkSender,
+    input_count: usize,
+) -> Result<u64, G2gError> {
+    let mut adapter = SenderSink::new(out_tx);
+    let mut ended = 0usize;
+    loop {
+        match tagged_rx.recv().await {
+            Some((pad, PipelinePacket::Eos)) => {
+                mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;
+                ended += 1;
+                if ended == input_count {
+                    adapter.push(PipelinePacket::Eos).await?;
+                    return Ok(0);
+                }
+            }
+            Some((pad, packet)) => {
+                mux.process(pad, packet, &mut adapter).await?;
+            }
+            None => return Ok(0),
+        }
+    }
 }
 
 /// Clone a packet for a tee branch. Control packets clone trivially; a

@@ -40,7 +40,9 @@ pub use runner::{
 };
 
 #[cfg(feature = "std")]
-pub use fanin::{run_fanin_sink, run_muxer_sink, run_muxer_sink_with_bus, DynSourceLoop};
+pub use fanin::{
+    run_fanin_sink, run_muxer_sink, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
+};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{run_graph, GraphNode};

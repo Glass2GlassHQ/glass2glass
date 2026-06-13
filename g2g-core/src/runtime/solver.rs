@@ -672,17 +672,21 @@ fn narrow(
 }
 
 /// Per-node constraint for [`solve_graph`]. Source/transform/sink carry a
-/// single [`CapsConstraint`]; a fan-in muxer carries a per-input-pad accept
-/// set plus its output produce set. A tee is structural, so its slot is
-/// ignored (pass any `Element`).
+/// single [`CapsConstraint`]; a fan-in muxer carries a per-input-pad constraint
+/// plus its output constraint. A tee is structural, so its slot is ignored
+/// (pass any `Element`).
 #[derive(Debug)]
 pub enum NodeConstraint<'a> {
     /// Source (`Produces`), transform (`Identity` / `Mapping` /
     /// `DerivedOutput` / `IdentityAny`), or sink (`Accepts` / `AcceptsAny`).
     Element(CapsConstraint<'a>),
-    /// Fan-in muxer: `inputs[i]` is the accept set for input pad `i`, and
-    /// `output` is the produce set for the single output pad.
-    Muxer { inputs: Vec<CapsSet>, output: CapsSet },
+    /// Fan-in muxer: `inputs[i]` is input pad `i`'s constraint (`Accepts` to
+    /// narrow that pad, `AcceptsAny` for a wildcard pad that forwards
+    /// per-frame caps), and `output` is the single output pad's `Produces`
+    /// constraint. This is the per-pad shape real muxer elements expose
+    /// (`MultiInputElement::caps_constraint_as_input` / `_for_output`), so the
+    /// DAG runner builds it straight from the element.
+    Muxer { inputs: Vec<CapsConstraint<'a>>, output: CapsConstraint<'a> },
 }
 
 /// Solve caps for an arbitrary DAG (DESIGN_TODO "DAG runner" D2). Generalizes
@@ -927,25 +931,33 @@ fn apply_tee_node<E>(
     Ok(())
 }
 
-/// A muxer fans in: narrow each input edge by its pad's accept set, and the
-/// single output edge by the produce set. `inputs[i]` applies to input pad
-/// `i`; D1 validation guarantees each input pad index appears exactly once.
+/// A muxer fans in: apply each input pad's constraint to its edge (`Accepts`
+/// narrows, `AcceptsAny` leaves the edge to carry whatever per-frame caps flow
+/// through), and the single output edge by the `Produces` set. `inputs[i]`
+/// applies to input pad `i`; D1 validation guarantees each input pad index
+/// appears exactly once.
 fn apply_muxer_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
-    inputs: &[CapsSet],
-    output: &CapsSet,
+    inputs: &[CapsConstraint<'_>],
+    output: &CapsConstraint<'_>,
     edges: &mut [Option<CapsSet>],
 ) -> Result<(), NegotiationFailure> {
     let idx = node.0 as usize;
+    let shape_err = NegotiationFailure::EndpointShapeMismatch { index: idx };
     for &eid in graph.in_edges(node) {
         let pad = graph.edge(eid).dst.index as usize;
-        let accept = inputs
-            .get(pad)
-            .ok_or(NegotiationFailure::EndpointShapeMismatch { index: idx })?;
-        narrow_edge(graph, edges, eid, accept)?;
+        match inputs.get(pad) {
+            Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set)?,
+            Some(CapsConstraint::AcceptsAny) => {}
+            _ => return Err(shape_err),
+        }
     }
-    narrow_edge(graph, edges, graph.out_edges(node)[0], output)
+    let out_edge = graph.out_edges(node)[0];
+    match output {
+        CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set),
+        _ => Err(shape_err),
+    }
 }
 
 #[cfg(test)]
@@ -1512,15 +1524,18 @@ mod tests {
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h264.clone()))),
             NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h265.clone()))),
             NodeConstraint::Muxer {
-                inputs: vec![CapsSet::one(h264_any), CapsSet::one(h265_any)],
-                output: CapsSet::one(muxed.clone()),
+                inputs: vec![
+                    CapsConstraint::Accepts(CapsSet::one(h264_any)),
+                    CapsConstraint::Accepts(CapsSet::one(h265_any)),
+                ],
+                output: CapsConstraint::Produces(CapsSet::one(muxed.clone())),
             },
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
         let mut g: Graph<()> = Graph::new();
         let s0 = g.add_source(());
         let s1 = g.add_source(());
-        let mux = g.add_muxer(2);
+        let mux = g.add_muxer((), 2);
         let sink = g.add_sink(());
         g.link(s0, mux.input(0)).unwrap();
         g.link(s1, mux.input(1)).unwrap();
@@ -1530,5 +1545,39 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("muxer fan-in solves");
         // edges in id order: s0->in0, s1->in1, mux.out->sink.
         assert_eq!(sol, vec![h264, h265, muxed], "each input narrowed by its pad, output by produce");
+    }
+
+    #[test]
+    fn solve_graph_muxer_wildcard_inputs_forward_source_caps() {
+        // The `InterleaveMux` shape: every input pad is `AcceptsAny` (frames
+        // carry their own caps), the output `Produces` a fixed merged caps. The
+        // wildcard inputs impose no narrowing, so each input edge keeps its
+        // source's caps and the output edge takes the produced caps.
+        let h264 = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let aac = Caps::Audio { format: crate::caps::AudioFormat::Aac, channels: 2, sample_rate: 48_000 };
+        let merged = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h264.clone()))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(aac.clone()))),
+            NodeConstraint::Muxer {
+                inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
+                output: CapsConstraint::Produces(CapsSet::one(merged.clone())),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("wildcard muxer solves");
+        // a wildcard input pad leaves each input edge at its own source caps.
+        assert_eq!(sol, vec![h264, aac, merged]);
     }
 }

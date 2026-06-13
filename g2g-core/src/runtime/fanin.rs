@@ -87,6 +87,60 @@ impl<T: SourceLoop> DynSourceLoop for T {
     }
 }
 
+/// Dyn-safe mirror of [`MultiInputElement`] for a fan-in muxer node in the DAG
+/// runner (`run_graph`). Boxes `process`'s future and forwards the
+/// `Self: Sized` constraint methods, the same shape as [`DynSourceLoop`] /
+/// [`DynAsyncElement`](crate::element::DynAsyncElement). Only the methods the
+/// runner uses are mirrored (the per-input `intercept_caps` / `output_caps`
+/// legacy paths stay on the concrete trait).
+pub trait DynMultiInputElement: ElementBound {
+    fn input_count(&self) -> usize;
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError>;
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>>;
+}
+
+impl<T: MultiInputElement> DynMultiInputElement for T {
+    fn input_count(&self) -> usize {
+        MultiInputElement::input_count(self)
+    }
+
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        MultiInputElement::caps_constraint_as_input(self, input)
+    }
+
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        MultiInputElement::caps_constraint_for_output(self)
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        MultiInputElement::configure_pipeline(self, input, absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        Box::pin(MultiInputElement::process(self, input, packet, out))
+    }
+}
+
 /// Drives `N sources → Merger → 1 sink` (M9 fan-in). The `Merger` selects
 /// which input feeds the sink; the others are drained. The merged stream
 /// ends once every input has reached EOS.

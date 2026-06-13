@@ -173,8 +173,8 @@ impl<E> Graph<E> {
         Tee(self.push(NodeKind::Tee(outputs), None))
     }
 
-    pub fn add_muxer(&mut self, inputs: u8) -> Muxer {
-        Muxer(self.push(NodeKind::Muxer(inputs), None))
+    pub fn add_muxer(&mut self, element: E, inputs: u8) -> Muxer {
+        Muxer(self.push(NodeKind::Muxer(inputs), Some(element)))
     }
 
     fn push(&mut self, kind: NodeKind, element: Option<E>) -> NodeId {
@@ -448,7 +448,7 @@ mod tests {
         let mut g = G::new();
         let s0 = g.add_source("s0");
         let s1 = g.add_source("s1");
-        let mux = g.add_muxer(2);
+        let mux = g.add_muxer("mux", 2);
         let sink = g.add_sink("sink");
         g.link(s0, mux.input(0)).unwrap();
         g.link(s1, mux.input(1)).unwrap();
@@ -464,7 +464,7 @@ mod tests {
         let tee = g.add_tee(2);
         let a = g.add_transform("a");
         let b = g.add_transform("b");
-        let mux = g.add_muxer(2);
+        let mux = g.add_muxer("mux", 2);
         let sink = g.add_sink("sink");
         g.link(src, tee.input()).unwrap();
         g.link(tee.out(0), a).unwrap();

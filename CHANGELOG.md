@@ -5,6 +5,41 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M69: DAG runner fan-in - muxer nodes in `run_graph`
+
+- Completes `run_graph`'s topology: it now drives source / transform / sink /
+  tee (fan-out, M67) plus muxer (fan-in), so the canonical "split, process two
+  ways, recombine" diamond runs end to end, not just fan-out. The arbitrary-DAG
+  runner now covers linear + fan-out + fan-in + nested diamonds.
+- Solver: `NodeConstraint::Muxer` generalizes from `{ inputs: Vec<CapsSet>,
+  output: CapsSet }` to per-pad `{ inputs: Vec<CapsConstraint>, output:
+  CapsConstraint }`, the shape real muxer elements expose
+  (`MultiInputElement::caps_constraint_as_input` / `_for_output`). A wildcard
+  (`AcceptsAny`) input pad imposes no narrowing (the interleave muxer forwards
+  per-frame caps), an `Accepts(set)` pad narrows its edge, and the `Produces`
+  output narrows the merged edge. This is the per-input-pad constraint API the
+  DAG plan flagged as the prerequisite for wiring real muxers.
+- Runner: `Graph::add_muxer` now carries the muxer element (a new
+  `DynMultiInputElement`, the dyn-safe mirror of `MultiInputElement`), surfaced
+  as `GraphNode::Muxer`. `run_graph` builds the muxer's `NodeConstraint` from
+  the element, configures each input pad with its negotiated caps, and spawns
+  the `run_muxer_sink` shape: one forwarder arm per input tags each packet with
+  its pad into a single tagged channel that one muxer arm drains, combining via
+  `process(pad, ..)` and emitting one merged `Eos` after every input ends. The
+  per-input mid-stream re-solve (MX-1 / MX-2) stays D4.
+- Tests: a new solver test (wildcard `AcceptsAny` input pads forward each
+  source's caps, output takes the produced caps) and the M65 muxer test moved to
+  the per-pad `CapsConstraint` API; plus `m69_dag_muxer.rs`, two pure-fake
+  integration tests through the real runner (two unequal-length sources fan in
+  to one sink with a single merged Eos; a `src -> tee(2) -> {flip, crop} -> mux
+  -> sink` diamond recombines both branches). VERIFIED on the dev host: `cargo
+  test -p g2g-core --features "std runtime"` green (145, incl. the new solver
+  test); `cargo test -p g2g-plugins --features std` green (incl. the 2 new m69
+  tests, no regression); `cargo clippy -p g2g-core --features "std runtime"
+  --lib` + the m69 test clean; `cargo check -p g2g-core --target
+  thumbv7em-none-eabihf` green (the solver/graph muxer constraint stays
+  `no_std`; the runner is `std`-gated); native `cargo check --workspace` green.
+
 ### M68: `H265Parse` HEVC SPS parser
 
 - The H.265 sibling of `H264Parse`: `H265Parse` scans each access unit for an
