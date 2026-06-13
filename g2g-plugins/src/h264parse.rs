@@ -26,6 +26,8 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
+use crate::annexb::{strip_emulation_prevention, BitReader};
+
 #[derive(Debug, Default)]
 pub struct H264Parse {
     configured: bool,
@@ -183,24 +185,6 @@ fn extract_sps_info(au: &[u8]) -> Option<SpsInfo> {
     None
 }
 
-/// Convert EBSP → RBSP by removing `0x03` emulation-prevention bytes that
-/// follow two consecutive zero bytes. Returns the original slice as a
-/// borrowed `Vec` only when emulation bytes are present; otherwise copies.
-/// Always returns owned bytes for parser simplicity.
-fn strip_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ebsp.len());
-    let mut zeros = 0usize;
-    for &b in ebsp {
-        if zeros >= 2 && b == 0x03 {
-            zeros = 0;
-            continue;
-        }
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-        out.push(b);
-    }
-    out
-}
-
 /// Parse the SPS RBSP (post NAL-header byte) for the coded picture dimensions
 /// and, when the VUI carries `timing_info`, the framerate. Returns `None` on a
 /// parse failure up to the dimensions; a failure past them leaves only the
@@ -352,71 +336,6 @@ fn parse_vui_framerate(br: &mut BitReader) -> Option<u32> {
         return u32::try_from(q16).ok();
     }
     None
-}
-
-/// MSB-first bit reader over a byte slice. All readers return `None` on
-/// EOF rather than panicking so partial / malformed SPSes propagate as
-/// "dimensions unknown" rather than aborting the pipeline.
-struct BitReader<'a> {
-    buf: &'a [u8],
-    bit_pos: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, bit_pos: 0 }
-    }
-
-    fn read_bit(&mut self) -> Option<u32> {
-        let byte_idx = self.bit_pos / 8;
-        let bit_off = 7 - (self.bit_pos % 8);
-        if byte_idx >= self.buf.len() {
-            return None;
-        }
-        let bit = u32::from((self.buf[byte_idx] >> bit_off) & 1);
-        self.bit_pos += 1;
-        Some(bit)
-    }
-
-    /// Read `n` (<= 32) bits MSB-first into a `u32`.
-    fn read_bits(&mut self, n: u32) -> Option<u32> {
-        let mut value = 0u32;
-        for _ in 0..n {
-            value = (value << 1) | self.read_bit()?;
-        }
-        Some(value)
-    }
-
-    /// Unsigned exp-Golomb. Reads leading zeros to determine codeword
-    /// length, then `n+1` bits of the codeword value, returns value - 1.
-    fn read_ue(&mut self) -> Option<u32> {
-        let mut leading_zeros = 0u32;
-        loop {
-            let b = self.read_bit()?;
-            if b == 1 {
-                break;
-            }
-            leading_zeros += 1;
-            if leading_zeros > 31 {
-                return None;
-            }
-        }
-        let mut val = 1u32;
-        for _ in 0..leading_zeros {
-            val = (val << 1) | self.read_bit()?;
-        }
-        Some(val - 1)
-    }
-
-    /// Signed exp-Golomb, mapping ue→se per H.264 §9.1.1.
-    fn read_se(&mut self) -> Option<i32> {
-        let ue = self.read_ue()?;
-        Some(if ue & 1 == 1 {
-            ((ue >> 1) + 1) as i32
-        } else {
-            -((ue >> 1) as i32)
-        })
-    }
 }
 
 #[cfg(test)]

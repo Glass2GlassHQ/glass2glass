@@ -376,9 +376,12 @@ For every codec we host, the bitstream parser (SPS / VPS / sequence-header
 extraction, framing detection, framerate / dimension recovery) is what feeds
 the negotiation. We have `H264Parse`; everything else is missing.
 
-- **`H265Parse`.** 2 sessions. VPS + SPS + PPS; we already decode and
-  contain H.265 but cannot parse a raw H.265 elementary stream into framed
-  caps. Means we can't restream / record raw H.265.
+- **`H265Parse`.** DONE (M68), dimensions. Recovers the coded picture
+  dimensions from the SPS (skipping `profile_tier_level`, applying the
+  conformance window) and refines caps mid-stream, the H.265 sibling of
+  `H264Parse`. Owed: framerate from the VUI `timing_info` (past the PCM /
+  ref-pic-set loops, deferred until a real-stream reference is available), and
+  validation against a real H.265 elementary stream.
 - **`AacParse`.** 1 session. ADTS / LATM headers, sample-rate recovery.
 - **`Vp8Parse` / `Vp9Parse` / `Av1Parse` / `OpusParse`.** 1–2 sessions each,
   alongside the corresponding codec.
@@ -650,7 +653,12 @@ Within Phase B, V4L2 → MJPEG → MF → PipeWire because:
   setting; this sprint pre-dates that.
 - **T2.** `AudioResample` uses `rubato`, not libsamplerate or a
   hand-rolled SRC. Confirm before A4 starts. Adds ~80 KB to the binary,
-  no system deps, MIT licensed.
+  no system deps, MIT licensed. **Update (2026-06):** `rubato` 3.0.0
+  (current) needs rustc 1.85, above the workspace MSRV 1.75, and is not
+  `no_std`. So A4 needs one of: bump the MSRV to 1.85, pin an older
+  `rubato` that builds on 1.75, or hand-roll a windowed-sinc SRC. Unlike
+  the other Phase A transforms, `AudioResample` would be `std`-gated, not in
+  the `no_std` baseline. Decide the MSRV/dep question before starting.
 - **T3.** `V4l2Src` ships hand-rolled ioctls (no `v4l2` crate dep).
   Surface is small (≈15 ioctls + 6 ioctl-arg structs); pulling a
   binding crate brings a transitive `nix` dep and obscures the small

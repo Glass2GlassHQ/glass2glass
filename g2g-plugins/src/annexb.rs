@@ -1,5 +1,8 @@
-//! Annex-B NAL unit splitting, shared by the WebCodecs payloader (`h264util`)
-//! and the RTP packetizer (`rtppay`).
+//! Annex-B/AVCC NAL splitting and RBSP bitstream helpers, shared by the
+//! H.264/H.265 parsers, the WebCodecs payloader (`h264util`), and the RTP
+//! packetizer (`rtppay`).
+
+use alloc::vec::Vec;
 
 /// Find the next Annex-B start code (`00 00 01` or `00 00 00 01`) at or after
 /// `from`. Returns `(start_index, payload_index)`: the offset of the start code
@@ -113,11 +116,104 @@ pub(crate) fn nal_units_any(data: &[u8]) -> NalUnitsAny<'_> {
     }
 }
 
+/// Convert EBSP to RBSP by removing `0x03` emulation-prevention bytes that
+/// follow two consecutive zero bytes (H.264 / H.265 share this encoding).
+/// Always returns owned bytes for parser simplicity.
+pub(crate) fn strip_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ebsp.len());
+    let mut zeros = 0usize;
+    for &b in ebsp {
+        if zeros >= 2 && b == 0x03 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+
+/// MSB-first bit reader over a byte slice, the shared bitstream cursor for the
+/// H.264 / H.265 SPS parsers. All readers return `None` on EOF rather than
+/// panicking, so a partial / malformed header propagates as "field unknown"
+/// instead of aborting the pipeline.
+pub(crate) struct BitReader<'a> {
+    buf: &'a [u8],
+    bit_pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        Self { buf, bit_pos: 0 }
+    }
+
+    pub(crate) fn read_bit(&mut self) -> Option<u32> {
+        let byte_idx = self.bit_pos / 8;
+        let bit_off = 7 - (self.bit_pos % 8);
+        if byte_idx >= self.buf.len() {
+            return None;
+        }
+        let bit = u32::from((self.buf[byte_idx] >> bit_off) & 1);
+        self.bit_pos += 1;
+        Some(bit)
+    }
+
+    /// Read `n` (<= 32) bits MSB-first into a `u32`.
+    pub(crate) fn read_bits(&mut self, n: u32) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..n {
+            value = (value << 1) | self.read_bit()?;
+        }
+        Some(value)
+    }
+
+    /// Advance past `n` bits without decoding them (e.g. H.265's fixed-size
+    /// `profile_tier_level`). `None` if that would run past the end.
+    pub(crate) fn skip_bits(&mut self, n: usize) -> Option<()> {
+        let new_pos = self.bit_pos.checked_add(n)?;
+        if new_pos > self.buf.len() * 8 {
+            return None;
+        }
+        self.bit_pos = new_pos;
+        Some(())
+    }
+
+    /// Unsigned exp-Golomb. Reads leading zeros to determine codeword length,
+    /// then `n+1` bits of the codeword value, returns value - 1.
+    pub(crate) fn read_ue(&mut self) -> Option<u32> {
+        let mut leading_zeros = 0u32;
+        loop {
+            let b = self.read_bit()?;
+            if b == 1 {
+                break;
+            }
+            leading_zeros += 1;
+            if leading_zeros > 31 {
+                return None;
+            }
+        }
+        let mut val = 1u32;
+        for _ in 0..leading_zeros {
+            val = (val << 1) | self.read_bit()?;
+        }
+        Some(val - 1)
+    }
+
+    /// Signed exp-Golomb, mapping ue to se per H.264 SS9.1.1.
+    pub(crate) fn read_se(&mut self) -> Option<i32> {
+        let ue = self.read_ue()?;
+        Some(if ue & 1 == 1 {
+            ((ue >> 1) + 1) as i32
+        } else {
+            -((ue >> 1) as i32)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn nal_iter_handles_3_and_4_byte_start_codes() {

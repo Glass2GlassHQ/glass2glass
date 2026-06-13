@@ -5,6 +5,44 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M68: `H265Parse` HEVC SPS parser
+
+- The H.265 sibling of `H264Parse`: `H265Parse` scans each access unit for an
+  SPS NAL (`nal_unit_type == 33`), recovers the coded picture dimensions, and
+  emits a refining `CapsChanged` before forwarding the frame, so a raw H.265
+  elementary stream (which advertises `Dim::Any` at negotiation until bytes
+  flow) can be restreamed or recorded with concrete geometry. We already decode
+  and contain H.265; this closes the parse half. Pure CPU `no_std` baseline (no
+  feature gate), native + wasm32, mirroring `H264Parse`'s `Identity(H265 any)`
+  constraint and mid-stream caps refinement.
+- H.265 specifics handled: the 2-byte NAL header (type is bits `[1..7]` of the
+  first byte), and `profile_tier_level` before the dimensions, a fixed 96-bit
+  block for a single-layer stream (`sps_max_sub_layers_minus1 == 0`) plus the
+  per-sub-layer blocks when present. Dimensions apply the conformance-window
+  crop scaled by `SubWidthC` / `SubHeightC`. Framerate from the VUI is not
+  recovered yet (in H.265 the VUI sits past the PCM / ref-pic-set loops, too
+  deep to reach safely without a real-stream reference), so caps carry
+  `Rate::Any`, a documented follow-up.
+- Refactor (DRY): the RBSP de-emulation (`strip_emulation_prevention`) and the
+  exp-Golomb `BitReader`, previously private to `h264parse`, move to the shared
+  `annexb` module (now "NAL splitting and RBSP bitstream helpers"); both parsers
+  use the single copy. `BitReader` gains `skip_bits` for the fixed-size PTL. The
+  `h264parse` test suite guards the move.
+- Tests: eleven (six parser unit tests, incl. dimension recovery, conformance
+  cropping `1920x1088 -> 1920x1080`, the 96-bit PTL skip landing exactly on the
+  next field, length-prefixed framing, non-SPS / empty rejection; plus five
+  element-level tests driving `H265Parse::process` through a recording sink:
+  `CapsChanged` before the first frame, no re-emit on identical SPS, re-emit on
+  a resolution change, non-H.265 intercept rejection, the `Identity` constraint
+  shape). The synthetic-fixture approach matches `H264Parse`'s bar; validation
+  against a real H.265 elementary stream is owed (as `H264Parse` was, later
+  confirmed against retina's AVCC output). VERIFIED on the dev host: `cargo test
+  -p g2g-plugins --lib` green (97, incl. the 11 new and the unchanged
+  h264parse/annexb after the refactor); `cargo clippy -p g2g-plugins --lib`
+  clean; `cargo check -p g2g-plugins --target thumbv7em-none-eabihf` and
+  `--target wasm32-unknown-unknown` green (stays in the no_std baseline); native
+  `cargo check --workspace` green.
+
 ### M67: DAG runner D3 - `run_graph`
 
 - Opens D3 of the DAG runner (DESIGN_TODO "DAG runner - detailed plan"): a

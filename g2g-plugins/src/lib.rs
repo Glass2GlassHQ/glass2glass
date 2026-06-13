@@ -14,6 +14,7 @@ pub mod audiotestsrc;
 pub mod capsfilter;
 pub mod fakesink;
 pub mod h264parse;
+pub mod h265parse;
 pub mod identity;
 pub mod mux;
 pub mod videoconvert;
