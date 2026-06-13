@@ -18,6 +18,7 @@ pub mod clock;
 pub mod element;
 pub mod error;
 pub mod frame;
+pub mod graph;
 pub mod link;
 pub mod memory;
 pub mod metrics;
@@ -53,6 +54,9 @@ pub use format_element::{
     FormatElement,
 };
 pub use frame::{Frame, FrameTiming, PipelinePacket};
+pub use graph::{
+    Edge, Graph, GraphError, Muxer, NodeId, NodeKind, PadDir, PadId, Tee, ValidatedGraph,
+};
 pub use link::LinkPolicy;
 pub use memory::{
     CudaKeepAlive, D3D11KeepAlive, MemoryDomain, MemoryDomainKind, OwnedCudaBuffer,

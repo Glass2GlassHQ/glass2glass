@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M63: DAG runner D1 - `Graph` builder + validation
+
+- Opens the DAG runner track (DESIGN_TODO "DAG runner - detailed plan", phase
+  D1). `Graph<E>` builds an arbitrary multimedia DAG (linear + fan-out tee +
+  fan-in muxer + nested branches) in one topology: `add_source` /
+  `add_transform` / `add_sink` carry an element payload, `add_tee(n)` /
+  `add_muxer(n)` are the runner shapes (no payload), and `link` / `link_with`
+  connect output pads to input pads with a per-edge `LinkPolicy` (reusing
+  `crate::link`). `finish()` validates and returns a `ValidatedGraph` carrying
+  the topological order + per-node edge adjacency the solver (D2) and runner
+  (D3) will consume.
+- Generic over the element payload `E` so it stays `no_std` and carries no
+  dependency on the std-gated runner: the runner will instantiate
+  `Graph<Box<dyn DynAsyncElement>>`, embedded/wasm callers bring their own. It
+  is a baseline module (no feature gate), usable from every target.
+- Validation: every pad linked exactly once (`UnlinkedPad` /
+  `PadCountMismatch`, since a pad peers with exactly one other, fan-out/in goes
+  through tee/muxer), no cycles (Kahn topological sort -> `Cycle { nodes }`),
+  orphan nodes rejected, and pad indices range-checked at link time
+  (`PadOutOfRange` / `UnknownNode`). `NodeKind` fixes the pad counts (Source
+  0/1, Transform 1/1, Sink 1/0, `Tee(n)` 1/n, `Muxer(n)` n/1). Scope is D1
+  only: no solver (D2), no runner (D3).
+- Tests: ten unit tests (linear-chain topo order, fan-out via tee, fan-in via
+  muxer, tee->muxer diamond, cycle rejected, unlinked pad, double-linked pad,
+  orphan node, pad-index out-of-range at link, `take_element` moves the payload
+  once). VERIFIED on the dev host: `cargo test -p g2g-core --lib graph` (10)
+  green; `cargo clippy -p g2g-core --lib` clean; `cargo check -p g2g-core
+  --target thumbv7em-none-eabihf` green (stays `no_std`); native `cargo check
+  --workspace` green.
+
 ### M62: `VideoCrop` software rectangular crop (Tier-1 A1)
 
 - `VideoCrop::new(x, y, w, h)` extracts a sub-rectangle of a raw frame,
