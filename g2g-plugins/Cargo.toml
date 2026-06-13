@@ -166,6 +166,13 @@ web-sys = { version = "0.3", optional = true, features = [
     "BinaryType",
     "Event",
     "CloseEvent",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "RtcDataChannel",
+    "RtcDataChannelType",
 ] }
 
 [dev-dependencies]

@@ -124,6 +124,13 @@ pub mod web;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub mod websocketsrc;
 
+// CanvasSink (M41): present decoded RGBA frames to an HTML canvas. WebRtcSrc
+// (M42): ingest over a provided RtcDataChannel. Both stable web-sys.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod canvassink;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod webrtcsrc;
+
 // Pure helpers shared by the wasm elements (ms->ns conversion, the
 // callback->async Inbox bridge). Compiled for the wasm `web` build and under
 // `cfg(test)` so the logic is unit-testable on the host.

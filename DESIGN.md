@@ -635,8 +635,8 @@ handle types satisfy the empty `ElementBound` (§4.3).
 | :--- | :--- | :--- |
 | **M39** | Foundation: `web` feature; `WasmClock` (`performance.now()` + `setTimeout`, the wasm analog of `WallClock`); `WebSocketSrc` ingest source (analog of `FileSrc`); `run_websocket_ingest` `spawn_local` entry. | **implemented** (browser runtime owed a `wasm-bindgen-test` run) |
 | **M40** | `WebCodecsDecode`: wrap the browser `VideoDecoder` (WebCodecs), H.264 Annex-B access units in, `VideoFrame` copied out to `System` RGBA. Pairs with `H264Parse`. Needs `--cfg=web_sys_unstable_apis`. | **implemented** (H.264; HEVC + browser runtime owed) |
-| **M41** | WebGPU domain: produce / consume `MemoryDomain::WebGPUBuffer`, inject decoded frames into WebGPU textures, a `CanvasSink` presenting to an HTML canvas. First in-browser glass-to-glass. | planned |
-| **M42** | Web Workers executor (pipeline off the main thread) + WebRTC datachannel ingest source. | planned |
+| **M41** | `CanvasSink`: present decoded RGBA to an HTML canvas via the 2D context, completing in-browser glass-to-glass (`WebSocketSrc → WebCodecsDecode → CanvasSink`). WebGPU-texture zero-copy (`MemoryDomain::WebGPUBuffer` into a `GPUTexture`) deferred: async device handshake + core keep-alive. | **implemented** (2D; WebGPU + browser runtime owed) |
+| **M42** | `WebRtcSrc`: ingest over a provided `RtcDataChannel`, the second browser ingest path. Web Workers executor deferred (JS-bootstrap infra; `spawn_local` already drives pipelines). | **implemented** (datachannel src; Workers + runtime owed) |
 
 The M39 foundation makes `WebSocketSrc → H264Parse → FakeSink` compile and run
 in the browser; M40–M42 add hardware decode, GPU zero-copy, and the

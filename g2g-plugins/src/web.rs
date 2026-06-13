@@ -59,3 +59,55 @@ pub fn run_websocket_decode(url: String) {
         let _ = run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await;
     });
 }
+
+/// WebSocket ingest -> WebCodecs decode -> canvas: the first in-browser
+/// glass-to-glass receive pipeline (M41). `canvas_id` is the id of an existing
+/// `<canvas>` element. Expects one H.264 access unit per WebSocket message,
+/// starting at a keyframe.
+#[cfg(feature = "web-codecs")]
+#[wasm_bindgen]
+pub fn run_websocket_to_canvas(url: String, canvas_id: String) {
+    use crate::canvassink::CanvasSink;
+    use crate::webcodecsdecode::WebCodecsDecode;
+    use g2g_core::runtime::run_source_transform_sink;
+
+    spawn_local(async move {
+        let caps = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let mut src = WebSocketSrc::new(url, caps);
+        let mut dec = WebCodecsDecode::new();
+        let mut sink = CanvasSink::new(canvas_id);
+        let clock = WasmClock::new();
+        let _ = run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await;
+    });
+}
+
+/// WebRTC data-channel ingest -> WebCodecs decode -> canvas (M42). `channel` is
+/// an already-open `RtcDataChannel` the application negotiated; same decode and
+/// presentation path as `run_websocket_to_canvas`.
+#[cfg(feature = "web-codecs")]
+#[wasm_bindgen]
+pub fn run_datachannel_to_canvas(channel: web_sys::RtcDataChannel, canvas_id: String) {
+    use crate::canvassink::CanvasSink;
+    use crate::webcodecsdecode::WebCodecsDecode;
+    use crate::webrtcsrc::WebRtcSrc;
+    use g2g_core::runtime::run_source_transform_sink;
+
+    spawn_local(async move {
+        let caps = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let mut src = WebRtcSrc::new(channel, caps);
+        let mut dec = WebCodecsDecode::new();
+        let mut sink = CanvasSink::new(canvas_id);
+        let clock = WasmClock::new();
+        let _ = run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await;
+    });
+}

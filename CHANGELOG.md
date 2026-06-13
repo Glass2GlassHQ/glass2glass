@@ -5,6 +5,54 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M42: WebRTC data-channel ingest (`WebRtcSrc`)
+
+- Second browser ingest path (DESIGN.md §6.3.1), alongside `WebSocketSrc`:
+  `WebRtcSrc` consumes binary messages from a provided, already-open
+  `RtcDataChannel` and emits each as a system-memory `DataFrame`, reusing the
+  M39 `webutil::Inbox` callback-to-async bridge verbatim. Signaling
+  (offer/answer/ICE) stays the application's job; the element wraps the
+  negotiated channel, so it carries no signaling surface. `web` feature (stable
+  web-sys). A `run_datachannel_to_canvas(channel, canvas_id)` entry wires
+  `WebRtcSrc -> WebCodecsDecode -> CanvasSink`.
+- Deferred: the Web Workers executor (running the pipeline off the main
+  thread). That is JS-bootstrap / build infrastructure rather than element
+  code, and `wasm_bindgen_futures::spawn_local` already drives pipelines on the
+  event loop; it is owed a worker harness, not blocked.
+- Tests: no new host-testable logic (the element is pure JS interop, like the
+  display sinks). VERIFIED: base `web` and `web-codecs` (unstable cfg) wasm
+  builds green; native `cargo check --workspace` + `clippy --all-targets`
+  green; wasm clippy clean. NOT verifiable on this Windows host: the live
+  data-channel receive needs a browser; owed a `wasm-bindgen-test` run.
+
+### M41: in-browser presentation (`CanvasSink`), first browser glass-to-glass
+
+- Completes the in-browser receive-to-screen path (DESIGN.md §6.3.1):
+  `WebSocketSrc -> WebCodecsDecode -> CanvasSink` decodes a network H.264
+  stream and draws it, the browser counterpart of the KMS / Wayland / D3D11
+  display sinks. `CanvasSink` consumes decoded RGBA `System` frames and presents
+  them to a `<canvas>` through the 2D context (`ImageData` + `putImageData`),
+  tracking geometry from the `CapsChanged(RGBA, w, h)` the decoder emits. `web`
+  feature (stable web-sys). A `run_websocket_to_canvas(url, canvas_id)` entry
+  wires the full pipeline.
+- The `putImageData` dx/dy argument type differs by web-sys cfg (`f64` on the
+  stable bindings, `i32` under `web_sys_unstable_apis`, which the `web-codecs`
+  build sets globally), so the overload is selected at compile time; the same
+  `CanvasSink` source compiles under both the base `web` build and the
+  unstable-cfg `web-codecs` build.
+- Deferred: a WebGPU zero-copy sink (decoded `MemoryDomain::WebGPUBuffer`
+  straight into a `GPUTexture`). That needs an async adapter/device handshake
+  and a core keep-alive for the WebGPU domain (the §5.1 wgpu compute pillar
+  builds on the same), so 2D presentation is the M41 path and WebGPU is the
+  follow-up.
+- Tests: no new host-testable logic (pure JS interop). VERIFIED on the dev
+  host: `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features
+  web` (f64 path) and `RUSTFLAGS=--cfg=web_sys_unstable_apis cargo check ...
+  --features web-codecs` (i32 path + canvas entries) both green; native
+  `cargo check --workspace` + `cargo clippy --workspace --all-targets` green;
+  both wasm clippy configs clean. NOT verifiable on this Windows host: the
+  actual canvas render needs a browser; owed a `wasm-bindgen-test` run.
+
 ### M40: WebCodecs decode (`WebCodecsDecode`, `web-codecs` feature)
 
 - Second browser/wasm element (DESIGN.md §6.3.1): the receive-to-decoded-pixels
