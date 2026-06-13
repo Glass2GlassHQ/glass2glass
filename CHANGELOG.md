@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M65: DAG runner D2 muxer fan-in (`NodeConstraint`)
+
+- Completes D2's fan-in half (M64 deferred it). `solve_graph` now handles
+  muxer nodes via a new `NodeConstraint`: `Element(CapsConstraint)` for
+  source/transform/sink (and the ignored tee slot), and `Muxer { inputs,
+  output }` for fan-in, where `inputs[i]` is the accept set for input pad `i`
+  and `output` is the produce set. A muxer narrows each input edge by its
+  pad's accept set and its single output edge by the produce set, mapping each
+  edge to its pad via the edge's `dst.index`. The M64
+  `NegotiationFailure::UnsupportedNode` placeholder is removed (muxers are
+  supported now), and `solve_graph`'s signature moves from `&[CapsConstraint]`
+  to `&[NodeConstraint]`.
+- D2 is now complete: source/transform/sink/tee fan-out plus muxer fan-in.
+  The single-`CapsConstraint`-per-element model didn't fit a muxer (per-input
+  pad constraints + an output), which is why the multi-input shape lives in
+  `NodeConstraint`. The D3 `run_graph` runner is the remaining DAG phase.
+- Tests: the M64 muxer-reject test becomes a fan-in success test (two video
+  sources, input pad 0 accepts H264 and pad 1 H265, output produces a muxed
+  stream; asserts each input edge is narrowed by its own pad and the output by
+  the produce set); the other three D2 tests move to the `NodeConstraint` API.
+  VERIFIED on the dev host: `cargo test -p g2g-core --features runtime --lib`
+  green (140, incl. the rewritten muxer test); `cargo clippy -p g2g-core
+  --features runtime --lib` clean; `cargo check -p g2g-core --features runtime
+  --target thumbv7em-none-eabihf` green (stays `no_std`); native `cargo check
+  --workspace` green.
+
 ### M64: DAG runner D2 - `solve_graph` (topological CSP)
 
 - Generalizes `solve_linear`'s arc-consistency sweep (M16) to a topological

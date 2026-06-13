@@ -56,12 +56,6 @@ pub enum NegotiationFailure {
     /// `DerivedOutput` variants. Mixed handling is added once step 5
     /// starts migrating individual elements off the legacy bridge.
     MixedLegacyAndNative,
-    /// The DAG solver ([`solve_graph`]) met a node kind it does not handle
-    /// yet. Fan-in muxers need per-input-pad constraints (a separate item),
-    /// so a graph containing one is rejected here. `node` is the node id.
-    UnsupportedNode {
-        node: usize,
-    },
 }
 
 /// Solve a linear chain of caps constraints. See module docs.
@@ -677,6 +671,20 @@ fn narrow(
     Ok(())
 }
 
+/// Per-node constraint for [`solve_graph`]. Source/transform/sink carry a
+/// single [`CapsConstraint`]; a fan-in muxer carries a per-input-pad accept
+/// set plus its output produce set. A tee is structural, so its slot is
+/// ignored (pass any `Element`).
+#[derive(Debug)]
+pub enum NodeConstraint<'a> {
+    /// Source (`Produces`), transform (`Identity` / `Mapping` /
+    /// `DerivedOutput` / `IdentityAny`), or sink (`Accepts` / `AcceptsAny`).
+    Element(CapsConstraint<'a>),
+    /// Fan-in muxer: `inputs[i]` is the accept set for input pad `i`, and
+    /// `output` is the produce set for the single output pad.
+    Muxer { inputs: Vec<CapsSet>, output: CapsSet },
+}
+
 /// Solve caps for an arbitrary DAG (DESIGN_TODO "DAG runner" D2). Generalizes
 /// [`solve_linear`]'s arc-consistency sweep to topological order over a
 /// [`ValidatedGraph`]: each edge is a link variable, narrowed by the
@@ -684,15 +692,13 @@ fn narrow(
 /// backward in reverse to a fixed point, then fixated. Returns one fixated
 /// `Caps` per edge, indexed by edge id.
 ///
-/// `constraints` is indexed by node id (length must equal the node count).
-/// Source nodes use `Produces`, sinks `Accepts` / `AcceptsAny`, transforms
-/// `Identity` / `Mapping` / `DerivedOutput` / `IdentityAny`; the slot for a
-/// tee/muxer node is ignored. A tee fans its input caps out to every output
-/// unchanged. Fan-in muxers are not handled yet (they need per-input-pad
-/// constraints) and yield [`NegotiationFailure::UnsupportedNode`].
+/// `constraints` is indexed by node id (length must equal the node count). A
+/// tee fans its input caps out to every output unchanged (its slot is
+/// ignored); a muxer narrows each input edge by its pad's accept set and its
+/// single output edge by the produce set.
 pub fn solve_graph<E>(
     graph: &ValidatedGraph<E>,
-    constraints: &[CapsConstraint<'_>],
+    constraints: &[NodeConstraint<'_>],
 ) -> Result<Vec<Caps>, NegotiationFailure> {
     let n = graph.node_count();
     if n < 2 || constraints.len() != n {
@@ -742,26 +748,42 @@ fn edge_endpoints<E>(graph: &ValidatedGraph<E>, edge_id: usize) -> (usize, usize
 fn apply_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
-    constraints: &[CapsConstraint<'_>],
+    constraints: &[NodeConstraint<'_>],
     edges: &mut [Option<CapsSet>],
 ) -> Result<(), NegotiationFailure> {
     let kind = graph.kind(node);
     let in_e = graph.in_edges(node);
     let out_e = graph.out_edges(node);
-    let c = &constraints[node.0 as usize];
+    let idx = node.0 as usize;
+    let nc = &constraints[idx];
+    let shape_err = NegotiationFailure::EndpointShapeMismatch { index: idx };
     match kind {
-        NodeKind::Source => match c {
-            CapsConstraint::Produces(s) => narrow_edge(graph, edges, out_e[0], s),
-            _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+        NodeKind::Source => match nc {
+            NodeConstraint::Element(CapsConstraint::Produces(s)) => {
+                narrow_edge(graph, edges, out_e[0], s)
+            }
+            _ => Err(shape_err),
         },
-        NodeKind::Sink => match c {
-            CapsConstraint::Accepts(s) => narrow_edge(graph, edges, in_e[0], s),
-            CapsConstraint::AcceptsAny => Ok(()),
-            _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+        NodeKind::Sink => match nc {
+            NodeConstraint::Element(CapsConstraint::Accepts(s)) => {
+                narrow_edge(graph, edges, in_e[0], s)
+            }
+            NodeConstraint::Element(CapsConstraint::AcceptsAny) => Ok(()),
+            _ => Err(shape_err),
         },
-        NodeKind::Transform => apply_transform_node(graph, c, in_e[0], out_e[0], edges, node),
+        NodeKind::Transform => match nc {
+            NodeConstraint::Element(c) => {
+                apply_transform_node(graph, c, in_e[0], out_e[0], edges, node)
+            }
+            _ => Err(shape_err),
+        },
         NodeKind::Tee(_) => apply_tee_node(graph, in_e[0], out_e, edges),
-        NodeKind::Muxer(_) => Err(NegotiationFailure::UnsupportedNode { node: node.0 as usize }),
+        NodeKind::Muxer(_) => match nc {
+            NodeConstraint::Muxer { inputs, output } => {
+                apply_muxer_node(graph, node, inputs, output, edges)
+            }
+            _ => Err(shape_err),
+        },
     }
 }
 
@@ -903,6 +925,27 @@ fn apply_tee_node<E>(
         }
     }
     Ok(())
+}
+
+/// A muxer fans in: narrow each input edge by its pad's accept set, and the
+/// single output edge by the produce set. `inputs[i]` applies to input pad
+/// `i`; D1 validation guarantees each input pad index appears exactly once.
+fn apply_muxer_node<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    inputs: &[CapsSet],
+    output: &CapsSet,
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    let idx = node.0 as usize;
+    for &eid in graph.in_edges(node) {
+        let pad = graph.edge(eid).dst.index as usize;
+        let accept = inputs
+            .get(pad)
+            .ok_or(NegotiationFailure::EndpointShapeMismatch { index: idx })?;
+        narrow_edge(graph, edges, eid, accept)?;
+    }
+    narrow_edge(graph, edges, graph.out_edges(node)[0], output)
 }
 
 #[cfg(test)]
@@ -1368,7 +1411,7 @@ mod tests {
         // source Produces fixed RGBA -> DerivedOutput RGBA->NV12 -> Accepts NV12.
         let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
         let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
-        let cs: Vec<CapsConstraint> = vec![
+        let lin: Vec<CapsConstraint> = vec![
             CapsConstraint::Produces(CapsSet::one(rgba.clone())),
             CapsConstraint::DerivedOutput(Box::new({
                 let nv12 = nv12.clone();
@@ -1376,10 +1419,18 @@ mod tests {
             })),
             CapsConstraint::Accepts(CapsSet::one(nv12.clone())),
         ];
-
-        let refs: Vec<&CapsConstraint> = cs.iter().collect();
+        let refs: Vec<&CapsConstraint> = lin.iter().collect();
         let linear = solve_linear(&refs).expect("linear chain solves");
 
+        // the same chain expressed as a graph (constraints rebuilt identically).
+        let dag_cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new({
+                let nv12 = nv12.clone();
+                move |_input: &Caps| CapsSet::one(nv12.clone())
+            }))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12.clone()))),
+        ];
         let mut g: Graph<()> = Graph::new();
         let src = g.add_source(());
         let tx = g.add_transform(());
@@ -1387,7 +1438,7 @@ mod tests {
         g.link(src, tx).unwrap();
         g.link(tx, sink).unwrap();
         let v = g.finish().unwrap();
-        let dag = solve_graph(&v, &cs).expect("same chain as a graph solves");
+        let dag = solve_graph(&v, &dag_cs).expect("same chain as a graph solves");
 
         assert_eq!(dag, linear, "DAG solver matches the linear solver byte-for-byte");
         assert_eq!(dag, vec![rgba, nv12]);
@@ -1398,11 +1449,11 @@ mod tests {
         let nv12_fixed = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
         let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
         // source (node 0) -> tee (1) -> two NV12 sinks (2, 3).
-        let cs: Vec<CapsConstraint> = vec![
-            CapsConstraint::Produces(CapsSet::one(nv12_fixed.clone())),
-            CapsConstraint::IdentityAny, // tee slot, ignored
-            CapsConstraint::Accepts(CapsSet::one(nv12_any.clone())),
-            CapsConstraint::Accepts(CapsSet::one(nv12_any)),
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12_fixed.clone()))),
+            NodeConstraint::Element(CapsConstraint::IdentityAny), // tee slot, ignored
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_any.clone()))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_any))),
         ];
         let mut g: Graph<()> = Graph::new();
         let src = g.add_source(());
@@ -1425,11 +1476,11 @@ mod tests {
         let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
         let rgba_any = video(RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any);
         // one branch accepts NV12, the other only RGBA: strict whole-graph fail.
-        let cs: Vec<CapsConstraint> = vec![
-            CapsConstraint::Produces(CapsSet::one(nv12)),
-            CapsConstraint::IdentityAny,
-            CapsConstraint::Accepts(CapsSet::one(nv12_any)),
-            CapsConstraint::Accepts(CapsSet::one(rgba_any)),
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12))),
+            NodeConstraint::Element(CapsConstraint::IdentityAny),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_any))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(rgba_any))),
         ];
         let mut g: Graph<()> = Graph::new();
         let src = g.add_source(());
@@ -1448,13 +1499,23 @@ mod tests {
     }
 
     #[test]
-    fn solve_graph_rejects_muxer_for_now() {
-        let nv12 = || CapsSet::one(fixed_video(RawVideoFormat::Nv12, 64, 48, 30));
-        let cs: Vec<CapsConstraint> = vec![
-            CapsConstraint::Produces(nv12()),
-            CapsConstraint::Produces(nv12()),
-            CapsConstraint::IdentityAny, // muxer slot
-            CapsConstraint::AcceptsAny,
+    fn solve_graph_muxer_fan_in_narrows_each_input() {
+        // two video sources combine at a muxer: input pad 0 accepts H264,
+        // pad 1 accepts H265, the output produces a (token) muxed stream.
+        let h264 = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let h265 = compressed(VideoCodec::H265, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+        let h264_any = compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any);
+        let h265_any = compressed(VideoCodec::H265, Dim::Any, Dim::Any, Rate::Any);
+        let muxed = compressed(VideoCodec::H264, Dim::Fixed(64), Dim::Fixed(48), Rate::Fixed(30 << 16));
+
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h264.clone()))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(h265.clone()))),
+            NodeConstraint::Muxer {
+                inputs: vec![CapsSet::one(h264_any), CapsSet::one(h265_any)],
+                output: CapsSet::one(muxed.clone()),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
         let mut g: Graph<()> = Graph::new();
         let s0 = g.add_source(());
@@ -1466,9 +1527,8 @@ mod tests {
         g.link(mux.output(), sink).unwrap();
         let v = g.finish().unwrap();
 
-        assert!(matches!(
-            solve_graph(&v, &cs),
-            Err(NegotiationFailure::UnsupportedNode { .. })
-        ));
+        let sol = solve_graph(&v, &cs).expect("muxer fan-in solves");
+        // edges in id order: s0->in0, s1->in1, mux.out->sink.
+        assert_eq!(sol, vec![h264, h265, muxed], "each input narrowed by its pad, output by produce");
     }
 }
