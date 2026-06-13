@@ -8,6 +8,10 @@
 //! bytes are the output tensor's f32 little-endian values, under
 //! `Caps::Tensor { F32, shape, Nchw }`.
 //!
+//! `with_tensor_input()` switches the input pad to `Caps::Tensor` (an
+//! already-normalized f32 NCHW `[1, 3, H, W]`, e.g. from `WgpuPreprocess` /
+//! `WebGPUPreprocess`), fed straight to the session with no CPU normalize.
+//!
 //! v1 model contract (checked at construction, fails loud):
 //! - exactly one input and one output, both f32 tensors
 //! - input is rank-4 `[N, 3, H, W]` with `N` 1 (or dynamic, treated as 1)
@@ -44,6 +48,9 @@ pub struct OrtInference {
     height: u32,
     /// Static output dims (a dynamic leading batch dim coerced to 1).
     out_shape: Vec<u32>,
+    /// When set, the input pad is a preprocessed f32 NCHW `Caps::Tensor` fed
+    /// straight to the session, not RGBA normalized on the CPU.
+    tensor_input: bool,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -123,6 +130,7 @@ impl OrtInference {
             width: w as u32,
             height: h as u32,
             out_shape,
+            tensor_input: false,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -144,12 +152,29 @@ impl OrtInference {
         self.emitted
     }
 
+    /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
+    /// (e.g. from `WgpuPreprocess` / `WebGPUPreprocess`) instead of RGBA,
+    /// feeding it straight to the session with no CPU normalize. The model
+    /// geometry is unchanged.
+    pub fn with_tensor_input(mut self) -> Self {
+        self.tensor_input = true;
+        self
+    }
+
     fn supported_input(&self) -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Any,
+        if self.tensor_input {
+            Caps::Tensor {
+                dtype: TensorDType::F32,
+                shape: TensorShape(vec![1, 3, self.height, self.width]),
+                layout: TensorLayout::Nchw,
+            }
+        } else {
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(self.width),
+                height: Dim::Fixed(self.height),
+                framerate: Rate::Any,
+            }
         }
     }
 
@@ -163,8 +188,7 @@ impl OrtInference {
         }
     }
 
-    /// RGBA8 -> normalized f32 NCHW RGB, run the session, return the output
-    /// tensor's values as little-endian bytes plus its actual dims.
+    /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
     fn infer(&mut self, rgba: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         if rgba.len() < w * h * 4 {
@@ -178,8 +202,29 @@ impl OrtInference {
             chw[plane + px] = rgba[src + 1] as f32 / 255.0;
             chw[2 * plane + px] = rgba[src + 2] as f32 / 255.0;
         }
+        self.run_chw(chw)
+    }
 
-        let tensor = Tensor::from_array((vec![1i64, 3, h as i64, w as i64], chw)).map_err(ort_err)?;
+    /// Feed an already-normalized f32 NCHW `[1, 3, H, W]` tensor straight to
+    /// the session (tensor-input mode); the bytes are the tensor's
+    /// little-endian f32 values, e.g. from a GPU preprocess step.
+    fn infer_tensor(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let n = 3 * self.width as usize * self.height as usize;
+        if bytes.len() < n * 4 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let chw: Vec<f32> = bytes[..n * 4]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        self.run_chw(chw)
+    }
+
+    /// Run the session on a `[1, 3, H, W]` f32 plane, returning the first
+    /// output tensor's little-endian bytes plus its actual dims.
+    fn run_chw(&mut self, chw: Vec<f32>) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (w, h) = (self.width as i64, self.height as i64);
+        let tensor = Tensor::from_array((vec![1i64, 3, h, w], chw)).map_err(ort_err)?;
         let outputs = self
             .session
             .run(::ort::inputs![self.input_name.as_str() => tensor])
@@ -242,7 +287,11 @@ impl AsyncElement for OrtInference {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let (bytes, dims) = self.infer(slice.as_slice())?;
+                    let (bytes, dims) = if self.tensor_input {
+                        self.infer_tensor(slice.as_slice())?
+                    } else {
+                        self.infer(slice.as_slice())?
+                    };
                     let new_caps = Caps::Tensor {
                         dtype: TensorDType::F32,
                         shape: TensorShape(dims),

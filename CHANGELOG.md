@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M59: `OrtInference` tensor-input mode
+
+- `OrtInference::with_tensor_input()` switches the input pad from `RawVideo`
+  RGBA to `Caps::Tensor` (an already-normalized f32 NCHW `[1, 3, H, W]`), fed
+  straight to the session with no CPU `/255` normalize. Closes the
+  composability gap that blocked `WgpuPreprocess` / `WebGPUPreprocess` (both
+  emit `Caps::Tensor`) from feeding inference directly: `OrtInference`
+  previously only accepted RGBA and normalized internally, so the GPU
+  preprocess output had nowhere to go. The native and browser demos both
+  depend on this handoff. Default stays RGBA, so existing chains are
+  unaffected.
+- The session run + output extraction are factored into a shared `run_chw`,
+  called by the RGBA path (`infer`, which normalizes first) and the new
+  tensor path (`infer_tensor`, which reads the f32 values from the frame
+  bytes). `supported_input` branches the negotiated input caps on the mode;
+  `process` dispatches the two infer paths.
+- Tests: a new `ort` integration test (`with_tensor_input` accepts the
+  matching tensor caps, rejects RGBA, and an identity model returns the fed
+  f32 NCHW tensor unchanged, proving no second normalization is applied).
+  VERIFIED on the dev host: `cargo test -p g2g-ml --features ort --test
+  ort_inference` green (3, incl. the new case, CPU EP); `cargo clippy -p
+  g2g-ml --features ort --all-targets` clean; native `cargo check --workspace`
+  green (`ortinfer` is `ort`-gated).
+
 ### M58: `WebCodecsDecode` GPU-resident output (P2.2)
 
 - `WebCodecsDecode::with_gpu_output()` hands the decoded `VideoFrame` forward

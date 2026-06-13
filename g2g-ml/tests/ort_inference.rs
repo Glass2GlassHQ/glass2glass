@@ -250,3 +250,55 @@ async fn inference_emits_tensor_caps_and_normalized_values() {
     assert_eq!(frames[0].sequence, 0);
     assert_eq!(frames[1].sequence, 1);
 }
+
+#[tokio::test]
+async fn tensor_input_mode_feeds_preprocessed_tensor_directly() {
+    // tensor-input mode (M59): a GPU preprocess hands an already-normalized
+    // f32 NCHW tensor straight in, with no second CPU /255 normalize.
+    let model = identity_model(&[1, 3, 2, 2]);
+    let mut inf = OrtInference::from_memory(&model)
+        .expect("model loads")
+        .with_tensor_input();
+
+    let tensor_caps = Caps::Tensor {
+        dtype: TensorDType::F32,
+        shape: TensorShape(vec![1, 3, 2, 2]),
+        layout: TensorLayout::Nchw,
+    };
+    // negotiation flips to the tensor pad: matching tensor accepted, RGBA rejected.
+    assert_eq!(inf.intercept_caps(&tensor_caps), Ok(tensor_caps.clone()));
+    assert_eq!(
+        inf.intercept_caps(&rgba_caps(2, 2)),
+        Err(G2gError::CapsMismatch)
+    );
+    inf.configure_pipeline(&tensor_caps).expect("configure");
+
+    // identity model returns the fed tensor unchanged (no extra normalization).
+    let input: Vec<f32> = (0..12).map(|i| i as f32 / 255.0).collect();
+    let bytes: Vec<u8> = input.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut sink = Collect::default();
+    inf.process(PipelinePacket::DataFrame(rgba_frame(bytes, 0)), &mut sink)
+        .await
+        .expect("tensor frame");
+
+    let values: Vec<f32> = sink
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => {
+                let MemoryDomain::System(slice) = &f.domain else {
+                    return None;
+                };
+                Some(
+                    slice
+                        .as_slice()
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect(),
+                )
+            }
+            _ => None,
+        })
+        .expect("one tensor frame");
+    assert_eq!(values, input);
+}
