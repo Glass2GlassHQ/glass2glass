@@ -5,6 +5,41 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M51: pure-Rust Burn inference backend (`BurnInference`, `burn` feature)
+
+- Stands up the §5.2 Burn backend, previously a no-op `burn` feature alias:
+  `BurnInference` (`g2g-ml/src/burninfer.rs`) is the no-C++ counterpart of
+  `OrtInference`, an `AsyncElement` negotiating `Caps::RawVideo` (RGBA) in and
+  `Caps::Tensor` out, running the inference on burn's `wgpu` backend (any
+  D3D12/Vulkan/Metal GPU, WebGPU on wasm). v1 is a single linear layer:
+  `BurnInference::linear(w, h, weights, bias)` takes a row-major `[K, N]` matrix
+  (`K = 3*w*h`) and `[N]` bias; each RGBA frame is normalized to a flat f32 NCHW
+  RGB vector (`value / 255`, the same preprocessing `OrtInference` does) and run
+  through `input . W + b`, emitting the `[1, N]` logits as an f32 tensor.
+  Negotiation mirrors `OrtInference` (a native `DerivedOutput(RGBA@WxH ->
+  tensor)`, geometry/format pinned at construction). Because burn drives the GPU
+  runtime internally (cubecl), the element is fully synchronous, no async device
+  handshake.
+- Dependency: `burn` 0.21 (verified current, May 2026; API checked against the
+  Burn Book + docs.rs, not assumed), `default-features = false` with `["std",
+  "wgpu"]`. Module named `burninfer` so in-crate paths can't collide with the
+  `burn` crate (as `ortinfer` does for `ort`). Deferred: ONNX import (burn-import
+  is build-time codegen, not a runtime loader), the `Module` path with trained
+  weights, and richer layers (conv); the caps/`AsyncElement` contract here is
+  what they slot into.
+- Tests: three unit tests (linear-layer dimension validation, intercept narrows
+  RGBA / rejects NV12 and wrong geometry, configure rejects non-RGBA before
+  touching the GPU) plus `burn_inference.rs`, which runs a known RGBA frame
+  through the element on the real GPU and asserts the `[1, N]` logits match a CPU
+  matmul of the same deterministic weights within float tolerance, the tensor
+  caps emit once across two frames, and timing is inherited; it skips gracefully
+  (catch_unwind probe) when burn's wgpu backend has no adapter. VERIFIED on the
+  dev host (D3D12 adapter): `cargo test -p g2g-ml --features burn` green (3 unit +
+  the GPU integration test); `cargo clippy -p g2g-ml --features burn
+  --all-targets` clean; native `cargo check --workspace` + `cargo clippy
+  --workspace --all-targets` + `cargo test --workspace` (default, burn gated off)
+  green.
+
 ### M50: inline GPU tensor preprocessing (`WgpuPreprocess`), the §5.1 hardware-first pillar
 
 - Realizes DESIGN.md §5.1 (Pillars 2 + 4: zero-copy hardware + ML): `WgpuPreprocess`

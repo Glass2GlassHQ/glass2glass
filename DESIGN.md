@@ -604,7 +604,7 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
-- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders.
+- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. **Status (M51):** `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) implements the wgpu-backend inference element, a deterministic linear layer (`input . W + b`) over the `RawVideo` -> `Tensor` contract, verified on the local GPU against a CPU matmul. ONNX compile-time import (burn-import codegen) and the trained-weight `Module` path are follow-ups.
 - **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA/TensorRT, Apple CoreML) natively.
 
 ### 5.3 Native Async Batching Engine

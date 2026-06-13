@@ -21,3 +21,9 @@ pub mod postprocess;
 // counterpart of OrtInference's CPU path.
 #[cfg(feature = "wgpu")]
 pub mod wgpupreprocess;
+
+// Pure-Rust Burn inference element (DESIGN.md §5.2): a linear layer run on
+// burn's wgpu backend, the no-C++ counterpart of OrtInference. The module is
+// `burninfer` (not `burn`) so in-crate paths can't collide with the dependency.
+#[cfg(feature = "burn")]
+pub mod burninfer;

@@ -11,8 +11,10 @@ repository.workspace = true
 [features]
 default = ["std"]
 std = ["g2g-core/std"]
-# Pure-Rust Burn backend with wgpu. Targets embedded / Wasm / RTOS.
-burn = ["std"]
+# Pure-Rust Burn backend with wgpu (DESIGN.md §5.2): BurnInference runs a
+# deterministic linear-layer inference on the GPU through burn's wgpu backend,
+# no C++ engine. Targets embedded / Wasm / RTOS / server alike.
+burn = ["std", "dep:burn"]
 # Inline GPU tensor preprocessing (DESIGN.md §5.1): WgpuPreprocess converts an
 # NV12 frame to a normalized f32 NCHW RGB tensor in a wgpu compute shader.
 # Pulls wgpu (any D3D12/Vulkan/Metal GPU); implies std.
@@ -32,6 +34,8 @@ ort = { version = "2.0.0-rc.12", optional = true }
 # Inline GPU preprocessing (wgpu feature, §5.1). Default features pull the
 # native backend per platform (dx12 on Windows).
 wgpu = { version = "29", optional = true }
+# Pure-Rust Burn deep-learning framework, wgpu backend (burn feature, §5.2).
+burn = { version = "0.21", optional = true, default-features = false, features = ["std", "wgpu"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
