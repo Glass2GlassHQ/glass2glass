@@ -8,7 +8,7 @@
 //! single shared epoch so a source-side stamp and a sink-side `now()`
 //! agree on what "zero" means.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use portable_atomic::{AtomicU64, Ordering};
 
 /// Number of log2 buckets. Bucket `k` covers durations in
 /// `[2^k, 2^(k+1))` nanoseconds. Bucket 0 covers `[0, 2)`; bucket 31

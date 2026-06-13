@@ -197,6 +197,10 @@ pub(crate) fn coordinator_with_recascade(
 /// element of an `N`-element linear chain (`run_linear_chain`). Returns the
 /// per-arm [`ArmDirective`] receivers, ordered source-to-sink, that each
 /// interior arm selects on. `n == 0` yields an observe-only coordinator.
+///
+/// Used only by the std-gated `run_linear_chain` (and its tests), so it is
+/// gated likewise to stay dead-code-free in no_std (embedded) builds.
+#[cfg(any(feature = "std", test))]
 pub(crate) fn coordinator_with_recascade_n(
     capacity: usize,
     n: usize,

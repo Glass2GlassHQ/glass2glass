@@ -18,10 +18,19 @@ runtime = ["dep:spin"]
 # Lock-free atomic-swap container for `Box<dyn DynAsyncElement>`. Powers
 # the dynamic graph layer (M8 piece 6); implies std + multi-thread + runtime.
 dyn-slot = ["std", "multi-thread", "runtime", "dep:arc-swap"]
+# Enable portable-atomic's critical-section fallback so the metrics histogram's
+# 64-bit atomics work on targets without native 64-bit atomics (Cortex-M,
+# RISC-V32). The embedded app provides the critical-section impl.
+critical-section = ["portable-atomic/critical-section"]
 
 [dependencies]
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
 arc-swap = { version = "1", optional = true }
+# 64-bit atomics for the metrics histogram on targets without native AtomicU64
+# (Cortex-M, RISC-V32). Native where available (x86_64, aarch64); the default
+# `fallback` provides a lock-based AtomicU64 elsewhere, which the
+# `critical-section` feature makes interrupt-safe on real hardware.
+portable-atomic = { version = "1" }
 
 [lints]
 workspace = true

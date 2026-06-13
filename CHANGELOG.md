@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M44: Cortex-M readiness (`portable-atomic` for the metrics histogram)
+
+- Closes the M43 finding: `metrics::LatencyHistogram` used
+  `core::sync::atomic::AtomicU64`, which Cortex-M (`thumbv7em`) and RISC-V32
+  lack, so the core did not compile for the canonical Embassy targets. It now
+  uses `portable-atomic`'s `AtomicU64` (native where available, a lock-based
+  fallback elsewhere). The new `critical-section` feature passes through to
+  `portable-atomic/critical-section` so the fallback is interrupt-safe on real
+  hardware (the app supplies the impl); the default `fallback` is enough to
+  compile.
+- Also gated the std-only `coordinator_with_recascade_n` (used only by the
+  std-gated `run_linear_chain` and its tests) with `cfg(any(feature = "std",
+  test))`, so the no_std `runtime` build is warning-free.
+- VERIFIED on the dev host: `cargo check -p g2g-core --target
+  thumbv7em-none-eabihf` (with and without `critical-section`) and `cargo check
+  -p g2g-plugins --features embassy --target thumbv7em-none-eabihf` (the full
+  core + plugins + EmbassyClock stack) green; the no_std `runtime` build for
+  `aarch64-unknown-none` is warning-free; `cargo test -p g2g-core --lib` green
+  (54, metrics on native atomics); native `cargo check --workspace` + `cargo
+  clippy --workspace --all-targets` green.
+
 ### M43: Embedded/Embassy foundation (`StaticBufferPool`, `EmbassyClock`)
 
 - Opens the third deployment target, embedded/RTOS (DESIGN.md §6.2): the no_std

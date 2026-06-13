@@ -626,14 +626,17 @@ no_std `embassy` feature.
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M43** | `StaticBufferPool<T, N>` (no-alloc core pool); `EmbassyClock` (`embassy-time`); pipeline under `embassy-futures::block_on`; bare-metal compile (`aarch64-unknown-none`). | **implemented** (EmbassyClock tick owed to a HAL time driver) |
-| **M44** | `embassy-sync` static channels (zero-alloc link transport) + full `embassy-executor` multi-task integration; `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M / RISC-V32 (no 64-bit atomics) compile. | planned |
-| **M45** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
+| **M44** | `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M (`thumbv7em`) / RISC-V32 compile; gate the std-only `coordinator_with_recascade_n` for a warning-free no_std build. | **implemented** |
+| **M45** | `embassy-sync` static channels (zero-alloc link transport) + full `embassy-executor` multi-task integration. | planned |
+| **M46** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
 
-Finding (M43): the no_std baseline compiles for bare metal on a target with
-64-bit atomics (`aarch64-unknown-none`), but `metrics::LatencyHistogram` uses
-`AtomicU64`, which `thumbv7em` (Cortex-M) and `riscv32` lack; `portable-atomic`
-is the M44 fix. Verification is largely local (unlike §6.3): the pool unit tests
-and the `block_on` pipeline run on the host, and the bare-metal compile proves
+M44 closed the M43 finding: `metrics::LatencyHistogram` used `AtomicU64`, which
+`thumbv7em` (Cortex-M) and `riscv32` lack, so `portable-atomic` now provides it
+(native where available, a lock-based fallback elsewhere; `critical-section`
+makes the fallback interrupt-safe on hardware). The core and the full embedded
+stack (g2g-core + g2g-plugins + `EmbassyClock`) now compile for `thumbv7em`.
+Verification is largely local (unlike §6.3): the pool unit tests and the
+`block_on` pipeline run on the host, and the bare-metal compile proves
 no-std-ness; only `EmbassyClock`'s tick needs a HAL driver on real hardware.
 
 ### 6.3 Browser Sandbox (Web Application Scaling)
