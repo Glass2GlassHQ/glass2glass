@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet};
 use crate::format_element::CapsConstraint;
+use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 
 /// Per-link assignment produced by the solver: one fixated `Caps` per
 /// link between adjacent elements. For an `N`-element pipeline this is
@@ -55,6 +56,12 @@ pub enum NegotiationFailure {
     /// `DerivedOutput` variants. Mixed handling is added once step 5
     /// starts migrating individual elements off the legacy bridge.
     MixedLegacyAndNative,
+    /// The DAG solver ([`solve_graph`]) met a node kind it does not handle
+    /// yet. Fan-in muxers need per-input-pad constraints (a separate item),
+    /// so a graph containing one is rejected here. `node` is the node id.
+    UnsupportedNode {
+        node: usize,
+    },
 }
 
 /// Solve a linear chain of caps constraints. See module docs.
@@ -670,6 +677,234 @@ fn narrow(
     Ok(())
 }
 
+/// Solve caps for an arbitrary DAG (DESIGN_TODO "DAG runner" D2). Generalizes
+/// [`solve_linear`]'s arc-consistency sweep to topological order over a
+/// [`ValidatedGraph`]: each edge is a link variable, narrowed by the
+/// constraints of the nodes at both ends, swept forward in topo order and
+/// backward in reverse to a fixed point, then fixated. Returns one fixated
+/// `Caps` per edge, indexed by edge id.
+///
+/// `constraints` is indexed by node id (length must equal the node count).
+/// Source nodes use `Produces`, sinks `Accepts` / `AcceptsAny`, transforms
+/// `Identity` / `Mapping` / `DerivedOutput` / `IdentityAny`; the slot for a
+/// tee/muxer node is ignored. A tee fans its input caps out to every output
+/// unchanged. Fan-in muxers are not handled yet (they need per-input-pad
+/// constraints) and yield [`NegotiationFailure::UnsupportedNode`].
+pub fn solve_graph<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[CapsConstraint<'_>],
+) -> Result<Vec<Caps>, NegotiationFailure> {
+    let n = graph.node_count();
+    if n < 2 || constraints.len() != n {
+        return Err(NegotiationFailure::Degenerate);
+    }
+    let ne = graph.edge_count();
+    let mut edges: Vec<Option<CapsSet>> = alloc::vec![None; ne];
+
+    // Same convergence bound as the linear solver, generalized to edges.
+    let max_iters = 8 * ne + 4;
+    for _ in 0..max_iters {
+        let snapshot = edges.clone();
+        for &node in graph.topo() {
+            apply_node(graph, node, constraints, &mut edges)?;
+        }
+        for &node in graph.topo().iter().rev() {
+            apply_node(graph, node, constraints, &mut edges)?;
+        }
+        if edges == snapshot {
+            break;
+        }
+    }
+
+    let mut out = Vec::with_capacity(ne);
+    for (id, slot) in edges.iter().enumerate() {
+        let (up, down) = edge_endpoints(graph, id);
+        let set = slot
+            .as_ref()
+            .ok_or(NegotiationFailure::EmptyLink { upstream: up, downstream: down })?;
+        if set.is_empty() {
+            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+        }
+        out.push(
+            set.fixate()
+                .ok_or(NegotiationFailure::Unfixable { upstream: up, downstream: down })?,
+        );
+    }
+    Ok(out)
+}
+
+/// The (upstream node, downstream node) ids an edge connects, for failures.
+fn edge_endpoints<E>(graph: &ValidatedGraph<E>, edge_id: usize) -> (usize, usize) {
+    let e = graph.edge(edge_id);
+    (e.src.node.0 as usize, e.dst.node.0 as usize)
+}
+
+fn apply_node<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    constraints: &[CapsConstraint<'_>],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    let kind = graph.kind(node);
+    let in_e = graph.in_edges(node);
+    let out_e = graph.out_edges(node);
+    let c = &constraints[node.0 as usize];
+    match kind {
+        NodeKind::Source => match c {
+            CapsConstraint::Produces(s) => narrow_edge(graph, edges, out_e[0], s),
+            _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+        },
+        NodeKind::Sink => match c {
+            CapsConstraint::Accepts(s) => narrow_edge(graph, edges, in_e[0], s),
+            CapsConstraint::AcceptsAny => Ok(()),
+            _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+        },
+        NodeKind::Transform => apply_transform_node(graph, c, in_e[0], out_e[0], edges, node),
+        NodeKind::Tee(_) => apply_tee_node(graph, in_e[0], out_e, edges),
+        NodeKind::Muxer(_) => Err(NegotiationFailure::UnsupportedNode { node: node.0 as usize }),
+    }
+}
+
+fn narrow_edge<E>(
+    graph: &ValidatedGraph<E>,
+    edges: &mut [Option<CapsSet>],
+    edge_id: usize,
+    contrib: &CapsSet,
+) -> Result<(), NegotiationFailure> {
+    let next = match &edges[edge_id] {
+        Some(cur) => cur.intersect(contrib),
+        None => contrib.clone(),
+    };
+    if next.is_empty() {
+        let (up, down) = edge_endpoints(graph, edge_id);
+        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+    }
+    edges[edge_id] = Some(next);
+    Ok(())
+}
+
+/// Couple two edges to carry equal caps (each intersected with the other),
+/// the pass-through relation a transform's input and output share.
+fn couple_edges<E>(
+    graph: &ValidatedGraph<E>,
+    edges: &mut [Option<CapsSet>],
+    a: usize,
+    b: usize,
+) -> Result<(), NegotiationFailure> {
+    match (edges[a].clone(), edges[b].clone()) {
+        (Some(sa), Some(sb)) => {
+            let coupled = sa.intersect(&sb);
+            if coupled.is_empty() {
+                let up = edge_endpoints(graph, a).0;
+                let down = edge_endpoints(graph, b).1;
+                return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+            }
+            edges[a] = Some(coupled.clone());
+            edges[b] = Some(coupled);
+        }
+        (Some(sa), None) => edges[b] = Some(sa),
+        (None, Some(sb)) => edges[a] = Some(sb),
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Transform node narrowing: the edge-indexed analog of the linear solver's
+/// `apply_constraint` transform arms.
+fn apply_transform_node<E>(
+    graph: &ValidatedGraph<E>,
+    c: &CapsConstraint<'_>,
+    in_e: usize,
+    out_e: usize,
+    edges: &mut [Option<CapsSet>],
+    node: NodeId,
+) -> Result<(), NegotiationFailure> {
+    match c {
+        CapsConstraint::Identity(s) => {
+            narrow_edge(graph, edges, in_e, s)?;
+            narrow_edge(graph, edges, out_e, s)?;
+            couple_edges(graph, edges, in_e, out_e)
+        }
+        CapsConstraint::IdentityAny => couple_edges(graph, edges, in_e, out_e),
+        CapsConstraint::Mapping(pairs) => {
+            let mut new_in = CapsSet::from_alternatives(Vec::new());
+            let mut new_out = CapsSet::from_alternatives(Vec::new());
+            for (in_set, out_set) in pairs {
+                let in_match = match &edges[in_e] {
+                    Some(cur) => cur.intersect(in_set),
+                    None => in_set.clone(),
+                };
+                let out_match = match &edges[out_e] {
+                    Some(cur) => cur.intersect(out_set),
+                    None => out_set.clone(),
+                };
+                if !in_match.is_empty() && !out_match.is_empty() {
+                    new_in = new_in.union(&in_match);
+                    new_out = new_out.union(&out_match);
+                }
+            }
+            if new_in.is_empty() || new_out.is_empty() {
+                let up = edge_endpoints(graph, in_e).0;
+                let down = edge_endpoints(graph, out_e).1;
+                return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+            }
+            edges[in_e] = Some(new_in);
+            edges[out_e] = Some(new_out);
+            Ok(())
+        }
+        CapsConstraint::DerivedOutput(f) => {
+            // Fire once the input edge has fixated to a single concrete caps,
+            // mirroring the linear solver.
+            if let Some(input_set) = &edges[in_e] {
+                if let Some(fixed_input) = input_set.fixate() {
+                    if input_set.alternatives().len() == 1
+                        && input_set.alternatives()[0] == fixed_input
+                    {
+                        let derived = f(&fixed_input);
+                        if derived.is_empty() {
+                            let (up, down) = edge_endpoints(graph, out_e);
+                            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                        }
+                        return narrow_edge(graph, edges, out_e, &derived);
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
+    }
+}
+
+/// A tee fans its input caps out to every output unchanged: couple the input
+/// edge and all output edges to one shared set (their intersection).
+fn apply_tee_node<E>(
+    graph: &ValidatedGraph<E>,
+    in_e: usize,
+    out_e: &[usize],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    let mut acc: Option<CapsSet> = edges[in_e].clone();
+    for &oe in out_e {
+        if let Some(s) = edges[oe].clone() {
+            acc = Some(match acc {
+                Some(a) => a.intersect(&s),
+                None => s,
+            });
+        }
+    }
+    if let Some(coupled) = acc {
+        if coupled.is_empty() {
+            let (up, down) = edge_endpoints(graph, in_e);
+            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+        }
+        edges[in_e] = Some(coupled.clone());
+        for &oe in out_e {
+            edges[oe] = Some(coupled.clone());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,6 +1358,117 @@ mod tests {
         assert!(matches!(
             resolve_forward_output(&conv, &i420, Some(&bgra_set)),
             ForwardResolve::Infeasible(NegotiationFailure::EmptyLink { .. })
+        ));
+    }
+
+    use crate::graph::Graph;
+
+    #[test]
+    fn solve_graph_matches_solve_linear_on_a_chain() {
+        // source Produces fixed RGBA -> DerivedOutput RGBA->NV12 -> Accepts NV12.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let cs: Vec<CapsConstraint> = vec![
+            CapsConstraint::Produces(CapsSet::one(rgba.clone())),
+            CapsConstraint::DerivedOutput(Box::new({
+                let nv12 = nv12.clone();
+                move |_input: &Caps| CapsSet::one(nv12.clone())
+            })),
+            CapsConstraint::Accepts(CapsSet::one(nv12.clone())),
+        ];
+
+        let refs: Vec<&CapsConstraint> = cs.iter().collect();
+        let linear = solve_linear(&refs).expect("linear chain solves");
+
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tx = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, tx).unwrap();
+        g.link(tx, sink).unwrap();
+        let v = g.finish().unwrap();
+        let dag = solve_graph(&v, &cs).expect("same chain as a graph solves");
+
+        assert_eq!(dag, linear, "DAG solver matches the linear solver byte-for-byte");
+        assert_eq!(dag, vec![rgba, nv12]);
+    }
+
+    #[test]
+    fn solve_graph_tee_fanout_couples_branches() {
+        let nv12_fixed = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
+        // source (node 0) -> tee (1) -> two NV12 sinks (2, 3).
+        let cs: Vec<CapsConstraint> = vec![
+            CapsConstraint::Produces(CapsSet::one(nv12_fixed.clone())),
+            CapsConstraint::IdentityAny, // tee slot, ignored
+            CapsConstraint::Accepts(CapsSet::one(nv12_any.clone())),
+            CapsConstraint::Accepts(CapsSet::one(nv12_any)),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tee = g.add_tee(2);
+        let a = g.add_sink(());
+        let b = g.add_sink(());
+        g.link(src, tee.input()).unwrap();
+        g.link(tee.out(0), a).unwrap();
+        g.link(tee.out(1), b).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("tee fan-out solves");
+        assert_eq!(sol.len(), 3, "three edges");
+        assert!(sol.iter().all(|c| *c == nv12_fixed), "every branch carries the source caps");
+    }
+
+    #[test]
+    fn solve_graph_rejects_incompatible_branch() {
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
+        let rgba_any = video(RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any);
+        // one branch accepts NV12, the other only RGBA: strict whole-graph fail.
+        let cs: Vec<CapsConstraint> = vec![
+            CapsConstraint::Produces(CapsSet::one(nv12)),
+            CapsConstraint::IdentityAny,
+            CapsConstraint::Accepts(CapsSet::one(nv12_any)),
+            CapsConstraint::Accepts(CapsSet::one(rgba_any)),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tee = g.add_tee(2);
+        let a = g.add_sink(());
+        let b = g.add_sink(());
+        g.link(src, tee.input()).unwrap();
+        g.link(tee.out(0), a).unwrap();
+        g.link(tee.out(1), b).unwrap();
+        let v = g.finish().unwrap();
+
+        assert!(
+            matches!(solve_graph(&v, &cs), Err(NegotiationFailure::EmptyLink { .. })),
+            "an incompatible branch fails the whole solve"
+        );
+    }
+
+    #[test]
+    fn solve_graph_rejects_muxer_for_now() {
+        let nv12 = || CapsSet::one(fixed_video(RawVideoFormat::Nv12, 64, 48, 30));
+        let cs: Vec<CapsConstraint> = vec![
+            CapsConstraint::Produces(nv12()),
+            CapsConstraint::Produces(nv12()),
+            CapsConstraint::IdentityAny, // muxer slot
+            CapsConstraint::AcceptsAny,
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer(2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+
+        assert!(matches!(
+            solve_graph(&v, &cs),
+            Err(NegotiationFailure::UnsupportedNode { .. })
         ));
     }
 }

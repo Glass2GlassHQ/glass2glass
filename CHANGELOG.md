@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M64: DAG runner D2 - `solve_graph` (topological CSP)
+
+- Generalizes `solve_linear`'s arc-consistency sweep (M16) to a topological
+  sweep over a D1 `ValidatedGraph`: each edge is a link variable narrowed by
+  the constraints of the nodes at both ends, swept forward in topo order and
+  backward in reverse to a fixed point, then fixated to one `Caps` per edge.
+  Per node kind: a source's `Produces` narrows its out-edge, a sink's
+  `Accepts` / `AcceptsAny` its in-edge, a transform's `Identity` / `Mapping` /
+  `DerivedOutput` / `IdentityAny` narrows its in/out edges (the edge-indexed
+  analog of the linear solver's `apply_constraint`), and a tee fans its input
+  caps out to every output unchanged (couples the in-edge equal to all
+  out-edges). `EmptyLink` / `Unfixable` carry node ids in the DAG context.
+- Scope is D2's fan-out half (source/transform/sink/tee). Fan-in muxers need
+  per-input-pad constraints (a separate item), so a graph containing one
+  yields the new `NegotiationFailure::UnsupportedNode`; that and the D3 runner
+  are the follow-ups. Stays `no_std` (lives in `runtime/solver.rs` beside
+  `solve_linear`, which the embedded path uses).
+- Tests: four (a linear chain solves byte-for-byte identically to
+  `solve_linear`; a tee fan-out couples every branch to the source caps; an
+  incompatible branch fails the whole solve strictly; a muxer yields
+  `UnsupportedNode`). VERIFIED on the dev host: `cargo test -p g2g-core
+  --features runtime --lib` green (140, incl. the 4 new); `cargo clippy -p
+  g2g-core --features runtime --lib` clean; `cargo check -p g2g-core --features
+  runtime --target thumbv7em-none-eabihf` green (stays `no_std`); native `cargo
+  check --workspace` green (the new variant breaks no match).
+
 ### M63: DAG runner D1 - `Graph` builder + validation
 
 - Opens the DAG runner track (DESIGN_TODO "DAG runner - detailed plan", phase

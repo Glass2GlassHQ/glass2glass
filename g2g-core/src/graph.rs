@@ -285,6 +285,10 @@ impl<E> ValidatedGraph<E> {
         self.nodes.len()
     }
 
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
     /// Nodes in topological order (every node appears after all its inputs).
     pub fn topo(&self) -> &[NodeId] {
         &self.topo
