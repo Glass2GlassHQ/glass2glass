@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>glass2glass — Hardware-First Multimedia Framework in Rust</title>
+    <meta name="description" content="A next-generation, async, sans-IO multimedia graph framework in pure Rust. Hardware-first, no_std + alloc core, first-class ML. Designed to replace GStreamer.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0A0E14;
+            --bg-secondary: #11161E;
+            --bg-tertiary: #161C26;
+            --bg-card: #1A2230;
+            --bg-card-hover: #1F2937;
+            --border: #232D3D;
+            --border-hover: #38445A;
+            --accent: #22D3EE;
+            --accent-dim: rgba(34, 211, 238, 0.15);
+            --accent-glow: rgba(34, 211, 238, 0.3);
+            --blue: #60A5FA;
+            --purple: #A78BFA;
+            --amber: #FBBF24;
+            --rose: #FB7185;
+            --green: #34D399;
+            --text-primary: #F1F5F9;
+            --text-secondary: #94A3B8;
+            --text-tertiary: #64748B;
+            --text-muted: #475569;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        code, pre { font-family: 'JetBrains Mono', monospace; }
+
+        /* ── NAV ── */
+        nav {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+            background: rgba(10, 14, 20, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-inner {
+            max-width: 1280px; margin: 0 auto;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 32px; height: 64px;
+        }
+        .nav-logo {
+            display: flex; align-items: center; gap: 10px;
+            text-decoration: none; color: var(--text-primary);
+            font-weight: 700; font-size: 1.15rem;
+        }
+        .nav-logo svg { width: 28px; height: 28px; }
+        .nav-links { display: flex; align-items: center; gap: 8px; list-style: none; }
+        .nav-links a {
+            color: var(--text-secondary); text-decoration: none;
+            font-size: 0.875rem; font-weight: 500;
+            padding: 8px 14px; border-radius: 8px;
+            transition: all 0.15s;
+        }
+        .nav-links a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+        .nav-btn-ghost {
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border);
+            background: transparent;
+        }
+        .nav-btn-ghost:hover { border-color: var(--border-hover) !important; background: var(--bg-tertiary) !important; }
+        .nav-btn-accent {
+            background: linear-gradient(135deg, #06B6D4, #22D3EE) !important;
+            color: #0A0E14 !important; font-weight: 700 !important;
+        }
+        .nav-btn-accent:hover { opacity: 0.9; }
+        .nav-hamburger {
+            display: none; background: none; border: none;
+            color: var(--text-primary); font-size: 1.5rem;
+            cursor: pointer; padding: 4px;
+        }
+
+        /* ── HERO ── */
+        .hero {
+            padding: 160px 32px 80px;
+            text-align: center; position: relative; overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+            width: 900px; height: 600px;
+            background: radial-gradient(ellipse, rgba(34, 211, 238, 0.10) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .hero-content { position: relative; z-index: 1; max-width: 880px; margin: 0 auto; }
+        .hero-badge {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 6px 16px 6px 10px; border-radius: 100px;
+            border: 1px solid var(--border); background: var(--bg-secondary);
+            font-size: 0.8rem; font-weight: 500; color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+        .hero-badge .badge-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent-glow);
+            animation: dotPulse 2s ease-in-out infinite;
+        }
+        @keyframes dotPulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+            50% { opacity: 0.5; box-shadow: 0 0 4px var(--accent-glow); }
+        }
+        .hero-badge span { color: var(--accent); }
+        .hero h1 {
+            font-size: clamp(2.5rem, 5.5vw, 4rem);
+            font-weight: 800; color: var(--text-primary);
+            line-height: 1.1; letter-spacing: -0.03em;
+            margin-bottom: 24px;
+        }
+        .hero h1 em { font-style: normal; color: var(--accent); }
+        .hero-sub {
+            font-size: 1.15rem; color: var(--text-secondary);
+            max-width: 640px; margin: 0 auto 40px;
+            line-height: 1.7;
+        }
+        .hero-actions {
+            display: flex; gap: 12px; justify-content: center;
+            flex-wrap: wrap; margin-bottom: 48px;
+        }
+
+        /* ── BUTTONS ── */
+        .btn {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 12px 24px; border-radius: 10px;
+            font-size: 0.9rem; font-weight: 600;
+            text-decoration: none; border: none;
+            cursor: pointer; transition: all 0.15s;
+            font-family: inherit;
+        }
+        .btn-accent {
+            background: linear-gradient(135deg, #06B6D4, #22D3EE);
+            color: #0A0E14;
+            box-shadow: 0 4px 20px rgba(34, 211, 238, 0.3);
+        }
+        .btn-accent:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 6px 24px rgba(34, 211, 238, 0.4); }
+        .btn-outline {
+            background: transparent; color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        .btn-outline:hover { border-color: var(--border-hover); background: var(--bg-tertiary); }
+
+        /* ── HERO DEMO ── */
+        .hero-demo {
+            max-width: 760px; margin: 0 auto;
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; overflow: hidden;
+        }
+        .demo-header {
+            display: flex; align-items: center;
+            padding: 14px 20px; border-bottom: 1px solid var(--border); gap: 8px;
+        }
+        .demo-dots { display: flex; gap: 6px; }
+        .demo-dots span { width: 10px; height: 10px; border-radius: 50%; }
+        .demo-dots span:nth-child(1) { background: #FF5F57; }
+        .demo-dots span:nth-child(2) { background: #FEBC2E; }
+        .demo-dots span:nth-child(3) { background: #28C840; }
+        .demo-title { flex: 1; text-align: center; font-size: 0.75rem; color: var(--text-tertiary); }
+        .demo-body {
+            padding: 24px;
+            font-size: 0.8rem; line-height: 1.9;
+            text-align: left;
+        }
+        .demo-body .kw { color: var(--purple); }
+        .demo-body .fn { color: var(--blue); }
+        .demo-body .str { color: var(--green); }
+        .demo-body .cmt { color: var(--text-muted); }
+        .demo-body .num { color: var(--amber); }
+        .demo-body .ty { color: var(--accent); }
+
+        /* ── STATS ── */
+        .stats-row {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 1px; background: var(--border);
+            border-radius: 16px; overflow: hidden;
+            margin-top: 64px;
+        }
+        .stat-cell { background: var(--bg-secondary); padding: 32px 24px; text-align: center; }
+        .stat-cell h3 {
+            font-size: 2rem; font-weight: 800;
+            background: linear-gradient(135deg, #22D3EE, #60A5FA);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 4px;
+        }
+        .stat-cell p { font-size: 0.82rem; color: var(--text-tertiary); }
+
+        /* ── TRUST BAR ── */
+        .trust-bar {
+            padding: 48px 32px;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+        }
+        .trust-bar p {
+            font-size: 0.8rem; text-transform: uppercase;
+            letter-spacing: 0.12em; color: var(--text-muted);
+            font-weight: 600; margin-bottom: 28px;
+        }
+        .trust-logos {
+            display: flex; align-items: center; justify-content: center;
+            gap: 48px; flex-wrap: wrap; opacity: 0.5;
+        }
+        .trust-logos span {
+            font-size: 1.05rem; font-weight: 700;
+            color: var(--text-secondary); letter-spacing: 0.02em;
+        }
+
+        /* ── SECTIONS ── */
+        section { padding: 120px 32px; }
+        .section-inner { max-width: 1200px; margin: 0 auto; }
+        .section-label {
+            display: inline-flex; align-items: center; gap: 8px;
+            font-size: 0.8rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.1em;
+            color: var(--accent); margin-bottom: 16px;
+        }
+        .section-label::before { content: ''; width: 20px; height: 1px; background: var(--accent); }
+        .section-title {
+            font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+            font-weight: 800; color: var(--text-primary);
+            letter-spacing: -0.02em; margin-bottom: 16px; line-height: 1.2;
+        }
+        .section-desc {
+            font-size: 1.05rem; color: var(--text-secondary);
+            max-width: 640px; line-height: 1.7; margin-bottom: 56px;
+        }
+
+        /* ── PILLARS ── */
+        #pillars { border-bottom: 1px solid var(--border); }
+        .pillars-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+        }
+        .pillar-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 32px;
+            transition: all 0.2s;
+        }
+        .pillar-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+        .pillar-card .num {
+            display: inline-block; padding: 4px 10px;
+            border-radius: 6px; background: var(--accent-dim);
+            color: var(--accent); font-size: 0.75rem;
+            font-weight: 700; margin-bottom: 16px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .pillar-card h3 { font-size: 1.15rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .pillar-card p { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.6; }
+
+        /* ── CRATES ── */
+        #crates { border-bottom: 1px solid var(--border); }
+        .crates-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .crate-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 28px; transition: all 0.2s;
+        }
+        .crate-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+        .crate-card .crate-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem; font-weight: 700;
+            color: var(--accent); margin-bottom: 6px;
+        }
+        .crate-card .crate-tag {
+            display: inline-block; padding: 2px 8px;
+            border-radius: 4px; background: var(--bg-tertiary);
+            color: var(--text-tertiary); font-size: 0.7rem;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 14px;
+        }
+        .crate-card p { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; }
+
+        /* ── FEATURES ── */
+        #features { border-bottom: 1px solid var(--border); }
+        .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .feature-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 28px 24px;
+            transition: all 0.2s;
+        }
+        .feature-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+        .feature-card .f-icon { font-size: 1.5rem; margin-bottom: 14px; display: block; }
+        .feature-card h3 { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .feature-card p { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; }
+        .feature-tag {
+            display: inline-block; margin-top: 12px;
+            padding: 3px 10px; border-radius: 100px;
+            font-size: 0.65rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.06em;
+        }
+        .tag-core   { background: var(--accent-dim); color: var(--accent); }
+        .tag-gpu    { background: rgba(167, 139, 250, 0.15); color: var(--purple); }
+        .tag-ml     { background: rgba(96, 165, 250, 0.15); color: var(--blue); }
+        .tag-rtos   { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .tag-web    { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+
+        /* ── TARGETS ── */
+        #targets { border-bottom: 1px solid var(--border); }
+        .targets-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .target-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 32px;
+            transition: all 0.2s;
+        }
+        .target-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+        .target-card .t-icon { font-size: 2rem; margin-bottom: 16px; }
+        .target-card h3 { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .target-card p { font-size: 0.88rem; color: var(--text-secondary); line-height: 1.6; }
+        .target-card code {
+            background: var(--bg-tertiary); padding: 2px 6px;
+            border-radius: 4px; font-size: 0.78rem;
+            color: var(--accent);
+        }
+
+        /* ── QUICKSTART / TABS ── */
+        #quickstart { border-bottom: 1px solid var(--border); }
+        .code-block { max-width: 880px; }
+        .tab-row {
+            display: flex; gap: 2px;
+            background: var(--bg-tertiary);
+            border-radius: 12px 12px 0 0;
+            padding: 4px; overflow-x: auto;
+        }
+        .tab-btn {
+            padding: 10px 18px; border: none; background: none;
+            cursor: pointer; font-size: 0.82rem; font-weight: 600;
+            color: var(--text-tertiary); border-radius: 8px;
+            transition: all 0.15s; font-family: inherit; white-space: nowrap;
+        }
+        .tab-btn.active { background: var(--bg-card); color: var(--accent); }
+        .tab-btn:hover:not(.active) { color: var(--text-secondary); }
+        .tab-body {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-top: none; border-radius: 0 0 12px 12px;
+            padding: 24px; overflow-x: auto;
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .tab-panel pre {
+            font-size: 0.82rem; line-height: 1.8;
+            color: var(--text-secondary); white-space: pre;
+        }
+        .tab-panel pre .kw  { color: var(--purple); }
+        .tab-panel pre .fn  { color: var(--blue); }
+        .tab-panel pre .str { color: var(--green); }
+        .tab-panel pre .cmt { color: var(--text-muted); }
+        .tab-panel pre .num { color: var(--amber); }
+        .tab-panel pre .ty  { color: var(--accent); }
+
+        /* ── ROADMAP ── */
+        #roadmap { border-bottom: 1px solid var(--border); }
+        .roadmap-table {
+            width: 100%; border-collapse: collapse;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border); border-radius: 16px;
+            overflow: hidden;
+        }
+        .roadmap-table th, .roadmap-table td {
+            padding: 14px 20px; text-align: left;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.88rem;
+        }
+        .roadmap-table th {
+            background: var(--bg-tertiary);
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            font-size: 0.72rem; letter-spacing: 0.08em; font-weight: 700;
+        }
+        .roadmap-table tr:last-child td { border-bottom: none; }
+        .roadmap-table td:first-child {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent); font-weight: 600;
+            width: 80px;
+        }
+        .roadmap-table td.status { width: 130px; }
+        .roadmap-table .pill {
+            display: inline-block; padding: 3px 10px;
+            border-radius: 100px; font-size: 0.7rem;
+            font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .pill-done { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .pill-wip  { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+        .pill-plan { background: var(--bg-tertiary); color: var(--text-tertiary); }
+
+        /* ── CTA ── */
+        .cta-section { padding: 120px 32px; text-align: center; position: relative; overflow: hidden; }
+        .cta-section::before {
+            content: '';
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 600px; height: 400px;
+            background: radial-gradient(ellipse, rgba(34, 211, 238, 0.10) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .cta-content { position: relative; z-index: 1; }
+        .cta-section h2 {
+            font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+            font-weight: 800; color: var(--text-primary);
+            margin-bottom: 16px; letter-spacing: -0.02em;
+        }
+        .cta-section > .cta-content > p {
+            color: var(--text-secondary); font-size: 1.05rem; margin-bottom: 32px;
+        }
+        .cta-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+        /* ── FOOTER ── */
+        footer { border-top: 1px solid var(--border); padding: 48px 32px; }
+        .footer-inner {
+            max-width: 1200px; margin: 0 auto;
+            display: flex; justify-content: space-between;
+            align-items: center; flex-wrap: wrap; gap: 24px;
+        }
+        .footer-inner p { font-size: 0.82rem; color: var(--text-muted); }
+        .footer-links { display: flex; gap: 20px; }
+        .footer-links a {
+            color: var(--text-tertiary); text-decoration: none;
+            font-size: 0.82rem; transition: color 0.15s;
+        }
+        .footer-links a:hover { color: var(--accent); }
+
+        /* ── RESPONSIVE ── */
+        @media (max-width: 1024px) {
+            .features-grid, .crates-grid, .targets-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .nav-hamburger { display: block; }
+            .nav-links.show {
+                display: flex; flex-direction: column;
+                position: absolute; top: 64px; left: 0; right: 0;
+                background: var(--bg-primary);
+                border-bottom: 1px solid var(--border);
+                padding: 16px 24px; gap: 4px;
+            }
+            .pillars-grid, .features-grid, .crates-grid, .targets-grid { grid-template-columns: 1fr; }
+            .hero { padding: 120px 20px 60px; }
+            section { padding: 80px 20px; }
+            .stats-row { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ═══ NAV ═══ -->
+<nav>
+    <div class="nav-inner">
+        <a href="#" class="nav-logo">
+            <svg viewBox="0 0 28 28" fill="none">
+                <rect x="2" y="2" width="24" height="24" rx="6" stroke="#22D3EE" stroke-width="2"/>
+                <path d="M8 14 L14 8 L20 14 L14 20 Z" fill="#22D3EE" fill-opacity="0.3" stroke="#22D3EE" stroke-width="1.5"/>
+                <circle cx="14" cy="14" r="2" fill="#22D3EE"/>
+            </svg>
+            glass2glass
+        </a>
+        <ul class="nav-links">
+            <li><a href="#pillars">Pillars</a></li>
+            <li><a href="#crates">Crates</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#targets">Targets</a></li>
+            <li><a href="#quickstart">Quickstart</a></li>
+            <li><a href="#roadmap">Roadmap</a></li>
+            <li><a href="https://github.com/boxerab/glass2glass/blob/main/DESIGN.md" class="nav-btn-ghost">Spec</a></li>
+            <li><a href="https://github.com/boxerab/glass2glass" class="nav-btn-accent">GitHub</a></li>
+        </ul>
+        <button class="nav-hamburger" onclick="document.querySelector('.nav-links').classList.toggle('show')" aria-label="Toggle menu">&#9776;</button>
+    </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero">
+    <div class="hero-content">
+        <div class="hero-badge">
+            <div class="badge-dot"></div>
+            Pre-release &middot; <span>0.1.0 &middot; 54 milestones in</span>
+        </div>
+        <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
+        <p class="hero-sub">
+            A next-generation, async, sans-IO multimedia graph framework built to replace
+            GStreamer in AI-driven, real-time embedded, cloud, and browser targets.
+            <code style="color: var(--accent); background: var(--bg-tertiary); padding: 1px 6px; border-radius: 4px; font-size: 0.85em;">no_std + alloc</code>
+            core. Zero-copy by design. ML on the graph.
+        </p>
+        <div class="hero-actions">
+            <a href="#quickstart" class="btn btn-accent">Quickstart &rarr;</a>
+            <a href="https://github.com/boxerab/glass2glass" class="btn btn-outline">View on GitHub</a>
+        </div>
+
+        <div class="hero-demo">
+            <div class="demo-header">
+                <div class="demo-dots"><span></span><span></span><span></span></div>
+                <div class="demo-title">main.rs &mdash; RTSP &rarr; NVDEC &rarr; CUDA-GL</div>
+                <div style="width: 38px;"></div>
+            </div>
+            <div class="demo-body">
+<span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
+
+<span class="cmt">// Zero PCIe round-trip: NVDEC keeps NV12 in CUDA device memory,</span>
+<span class="cmt">// CUDA-GL interop hands it straight to the GL fragment shader.</span>
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(<span class="str">"rtsp://camera.local/stream"</span>);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">with_backend</span>(<span class="ty">Backend</span>::<span class="ty">NvdecCuda</span>);
+<span class="kw">let</span> sink = <span class="ty">CudaGlSink</span>::<span class="fn">new</span>();
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;
+            </div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stat-cell"><h3>54</h3><p>Milestones</p></div>
+            <div class="stat-cell"><h3>50+</h3><p>Elements</p></div>
+            <div class="stat-cell"><h3>5</h3><p>Target Profiles</p></div>
+            <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ TRUST BAR ═══ -->
+<div class="trust-bar">
+    <p>Open source &middot; LGPL v2.1+ &middot; designed for</p>
+    <div class="trust-logos">
+        <span>RTOS</span>
+        <span>CLOUD</span>
+        <span>BROWSER</span>
+        <span>EDGE</span>
+        <span>DESKTOP</span>
+    </div>
+</div>
+
+<!-- ═══ PILLARS ═══ -->
+<section id="pillars">
+    <div class="section-inner">
+        <span class="section-label">Pillars</span>
+        <h2 class="section-title">Four non-negotiable design pillars.</h2>
+        <p class="section-desc">
+            The architecture optimizes for a single metric: <strong>glass-to-glass latency</strong> &mdash;
+            the time between photon capture and hardware presentation. Every design
+            decision serves that target.
+        </p>
+
+        <div class="pillars-grid">
+            <div class="pillar-card">
+                <span class="num">01</span>
+                <h3>Asynchronous execution</h3>
+                <p>Every element is a cooperative <code>Future</code>. No internal OS thread management; runtime-agnostic. Tokio on servers, Embassy on RTOS, <code>wasm-bindgen-futures</code> in the browser.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">02</span>
+                <h3>Hardware-first &amp; zero-copy</h3>
+                <p>Buffers stay in DMABUF, Vulkan, CUDA, D3D11, or WebGPU memory domains. CPU memory copies are treated as system faults, not as the default.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">03</span>
+                <h3>no_std + alloc, sans-IO</h3>
+                <p>The same pipeline shape runs on a Cortex-M, a multi-threaded server, or wasm32. Network and protocol parsers are pure sans-IO, with I/O stripped out of the logic layer.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">04</span>
+                <h3>First-class ML</h3>
+                <p>Tensor allocation, reshaping, and pipeline batching are part of graph orchestration. ML elements negotiate <code>Caps::Tensor</code> the same way video elements negotiate <code>Caps::RawVideo</code>.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ CRATES ═══ -->
+<section id="crates">
+    <div class="section-inner">
+        <span class="section-label">Workspace</span>
+        <h2 class="section-title">Five crates. Clean boundaries.</h2>
+        <p class="section-desc">
+            A cargo workspace, MSRV 1.75, edition 2021. OS-coupled elements live
+            behind cargo features so the baseline compiles for bare-metal targets.
+        </p>
+
+        <div class="crates-grid">
+            <div class="crate-card">
+                <div class="crate-name">g2g-core</div>
+                <div class="crate-tag">no_std + alloc</div>
+                <p>Traits (<code>AsyncElement</code>, <code>SourceLoop</code>), <code>Frame</code>/<code>PipelinePacket</code>, <code>Caps</code> algebra, buffer pools, the pipeline clock, the CSP solver, and the runner. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-plugins</div>
+                <div class="crate-tag">mixed</div>
+                <p>The element library: RTSP, RTP, H.264 parser/AVCC/Annex-B, ffmpeg / VAAPI / MF decoders, Wayland / KMS / D3D11 sinks, WASAPI, fMP4, file I/O, Embassy bindings, web elements. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-ml</div>
+                <div class="crate-tag">std</div>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, GPU tensor preprocess (<code>WgpuPreprocess</code>), classification head. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-bridge</div>
+                <div class="crate-tag">std, cdylib</div>
+                <p>C-FFI dynamic library to embed g2g sub-graphs inside legacy GStreamer pipelines. <code>libgstglass2glass.so</code>. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-enterprise</div>
+                <div class="crate-tag">std</div>
+                <p>Lock-free multi-channel tensor batcher that fans N camera streams into a single GPU tensor execution array. AGPL v3.</p>
+            </div>
+            <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
+                <div class="crate-name" style="color: var(--text-primary);">designed for replacement</div>
+                <div class="crate-tag">vs GStreamer</div>
+                <p>Statically-typed graphs replace runtime string-keyed plugin factories. CSP caps negotiation with structured failures. Per-link memory-domain policies. ~95% feature parity with GStreamer's core runtime &mdash; with the latency edge.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ FEATURES ═══ -->
+<section id="features">
+    <div class="section-inner">
+        <span class="section-label">Capabilities</span>
+        <h2 class="section-title">Built for production multimedia.</h2>
+        <p class="section-desc">
+            Receive, decode, transform, infer, encode, and egress &mdash; with the
+            memory-domain handoffs you'd expect from a hardware-first stack.
+        </p>
+
+        <div class="features-grid">
+            <div class="feature-card">
+                <span class="f-icon">&#127909;</span>
+                <h3>Receive: RTSP / WebRTC / WebSocket / file</h3>
+                <p><code>RtspSrc</code> over <code>retina</code> (DESCRIBE + SETUP probe), <code>WebRtcSrc</code> over RtcDataChannel, <code>WebSocketSrc</code> for browsers, <code>FileSrc</code>, <code>Mp4Src</code> fMP4 demuxer.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128268;</span>
+                <h3>Decode: ffmpeg / VAAPI / MF / WebCodecs</h3>
+                <p><code>FfmpegH264Dec</code> with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code> on Windows; <code>VaapiH264Dec</code> via cros-codecs; <code>WebCodecsDecode</code> in browser.</p>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128194;</span>
+                <h3>Display: Wayland / KMS / D3D11 / CUDA-GL</h3>
+                <p><code>WaylandSink</code> for desktop, <code>KmsSink</code> for tty / production, <code>D3D11Sink</code> on Windows, <code>CudaGlSink</code> for zero-copy NVDEC presentation.</p>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#129504;</span>
+                <h3>Inference: ORT + Burn + wgpu preprocess</h3>
+                <p><code>OrtInference</code> with CUDA + DirectML EPs, pure-Rust <code>BurnInference</code> on wgpu, GPU <code>WgpuPreprocess</code> (NV12 &rarr; f32 NCHW), <code>TensorBatcher</code> for N-stream fan-in.</p>
+                <span class="feature-tag tag-ml">ML</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128226;</span>
+                <h3>Egress: RTP packetize + UDP</h3>
+                <p>Sans-IO <code>RtpH264Packetizer</code> (RFC 3550 + RFC 6184) and a tokio-driven <code>UdpSink</code> with 90 kHz PTS mapping. Loopback-verified; RTCP + RTSP ANNOUNCE next.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127932;</span>
+                <h3>Audio: WASAPI + AAC + fMP4</h3>
+                <p><code>WasapiSink</code> / <code>WasapiSrc</code> render + capture (incl. loopback), <code>MfAacEncode</code> / <code>MfAacDecode</code> via Media Foundation, <code>Mp4AudioSink</code> in fMP4.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128279;</span>
+                <h3>CSP caps negotiation</h3>
+                <p><code>CapsSet</code> with alternatives + preferences, <code>solve_linear</code> with arc consistency, structured <code>NegotiationFailure</code>, mid-stream re-solve over the downstream subgraph (Caps-α).</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#9889;</span>
+                <h3>Mid-stream allocation cascade</h3>
+                <p>β N-hop allocation re-cascade through a coordinator task: a sink-side allocation proposal reaches the source on a mid-stream <code>CapsChanged</code> via the <code>select2</code> + per-arm control channel.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128218;</span>
+                <h3>Multi-element runner</h3>
+                <p><code>run_linear_chain(src, Vec&lt;Transform&gt;, sink)</code> drives any-length linear chains. Pad templates as type-level metadata for pre-instantiation compatibility queries.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127956;</span>
+                <h3>Fan-out / fan-in</h3>
+                <p><code>Router</code>, <code>Gate</code>, <code>Merger</code> primitives; <code>BranchSlot</code> with three <code>SwapPolicy</code>s (immediate, drain-old, shadow-warm); <code>tee</code>-to-display+recording with per-branch re-solve.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128737;</span>
+                <h3>Dynamic graph reconfiguration</h3>
+                <p><code>ElementSlot</code> via <code>arc_swap</code>: hot-swap elements with no pipeline stall. Use for ReFixate, codec change at keyframe, bitrate switch at next segment.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128247;</span>
+                <h3>Live clock + sync</h3>
+                <p>Single pipeline reference clock; sources map capture clocks to it; backpressure-paced sync sinks with <code>capture_ns</code> preserved end-to-end for honest latency measurement.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#129497;&#65039;&#8205;&#9794;&#65039;</span>
+                <h3>Embedded / RTOS / Embassy</h3>
+                <p><code>StaticBufferPool</code> for no-alloc loops, <code>EmbassyClock</code> over <code>embassy-time</code>, <code>PacketChannel</code> zero-alloc inter-task link. Compiles for <code>thumbv7em-none-eabihf</code> + <code>riscv32</code>.</p>
+                <span class="feature-tag tag-rtos">RTOS</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127760;</span>
+                <h3>Browser / Wasm</h3>
+                <p><code>WasmClock</code>, <code>WebSocketSrc</code>, <code>WebCodecsDecode</code>, <code>CanvasSink</code>. First in-browser glass-to-glass pipeline: WS &rarr; WebCodecs &rarr; Canvas.</p>
+                <span class="feature-tag tag-web">Web</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128293;</span>
+                <h3>CUDA zero-copy track (C3)</h3>
+                <p><code>MemoryDomain::Cuda</code> in core, <code>Backend::NvdecCuda</code> keeps NV12 in device memory, <code>CudaDownload</code> + <code>CudaGlSink</code> via CUDA&harr;GL interop (not dmabuf &mdash; doesn't work on NVIDIA).</p>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ TARGETS ═══ -->
+<section id="targets">
+    <div class="section-inner">
+        <span class="section-label">Deployment</span>
+        <h2 class="section-title">One core. Five deployment profiles.</h2>
+        <p class="section-desc">
+            Because the processing loop requires only <code>core</code> and <code>alloc</code>,
+            profiles vary purely by the top-level orchestration binary.
+        </p>
+
+        <div class="targets-grid">
+            <div class="target-card">
+                <div class="t-icon">&#9729;&#65039;</div>
+                <h3>Enterprise server (cloud)</h3>
+                <p>Tokio multi-threaded runtime. Bounded MPMC <code>flume</code> channels. Hardware: VAAPI / NVDEC / V4L2 with <code>OwnedDmaBuf</code> handles. Features <code>multi-thread</code>, <code>std</code>.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#128187;</div>
+                <h3>Desktop &amp; edge</h3>
+                <p>Tokio current-thread. Hardware: <code>FfmpegH264Dec</code> sw / NVDEC, <code>WaylandSink</code> / <code>KmsSink</code> / <code>D3D11Sink</code>. Pair with <code>OrtInference</code> for on-device ML.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#129707;</div>
+                <h3>Bare-metal / RTOS</h3>
+                <p>Embassy executor (single-threaded, cooperative). Stack channels (<code>embassy-sync</code>). DMA-ring capture (M48, planned). No-alloc strict variant via <code>StaticBufferPool</code>.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#127760;</div>
+                <h3>Browser sandbox</h3>
+                <p>Web Workers via <code>wasm-bindgen-futures</code>. WebSocket / WebRTC ingest, WebCodecs decode, Canvas / WebGPU output. <code>std</code> feature on <code>wasm32-unknown-unknown</code>.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#128279;</div>
+                <h3>GStreamer interop</h3>
+                <p><code>libgstglass2glass.so</code> bridge lets a g2g sub-graph (wgpu filter, Burn ML) run inside a legacy C GStreamer pipeline. <code>GstDmaBufMemory</code> &rarr; <code>OwnedDmaBuf</code> no-op close.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#127919;</div>
+                <h3>Single API across all five</h3>
+                <p>Same <code>AsyncElement</code> trait, same <code>Caps</code>, same negotiation, same runner primitives. The deployment shell picks the executor and links the OS-coupled elements.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ QUICKSTART ═══ -->
+<section id="quickstart">
+    <div class="section-inner">
+        <span class="section-label">Quickstart</span>
+        <h2 class="section-title">Six lines from clone to live pixels.</h2>
+        <p class="section-desc">
+            Pick a pipeline shape, enable the right cargo features, and run.
+            Detailed Fedora + CUDA + Rembrandt iGPU recipes in the
+            <a href="https://github.com/boxerab/glass2glass#testing-on-fedora-rembrandt-igpu--nvidia-cuda" style="color: var(--accent);">README</a>.
+        </p>
+
+        <div class="code-block">
+            <div class="tab-row">
+                <button class="tab-btn active" data-tab="rtsp-wayland">RTSP &rarr; Wayland</button>
+                <button class="tab-btn" data-tab="nvdec-gl">NVDEC &rarr; CUDA-GL</button>
+                <button class="tab-btn" data-tab="ml-chain">RTSP &rarr; ML</button>
+                <button class="tab-btn" data-tab="rtp-egress">Camera &rarr; RTP egress</button>
+                <button class="tab-btn" data-tab="browser">Browser</button>
+            </div>
+            <div class="tab-body">
+
+<div class="tab-panel active" id="rtsp-wayland"><pre><span class="cmt"># Cargo.toml</span>
+[dependencies]
+g2g-core    = { git = <span class="str">"https://github.com/boxerab/glass2glass"</span> }
+g2g-plugins = { git = <span class="str">"https://github.com/boxerab/glass2glass"</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
+
+<span class="cmt">// main.rs</span>
+<span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">OutputFormat</span>}, <span class="ty">WaylandSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(<span class="str">"rtsp://localhost:8554/pattern"</span>);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">new</span>().<span class="fn">with_output_format</span>(<span class="ty">OutputFormat</span>::<span class="ty">Nv12</span>);
+<span class="kw">let</span> sink = <span class="ty">WaylandSink</span>::<span class="fn">new</span>();
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="nvdec-gl"><pre><span class="cmt"># Linux + NVIDIA; zero PCIe round-trip after decode.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(url);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">with_backend</span>(<span class="ty">Backend</span>::<span class="ty">NvdecCuda</span>);  <span class="cmt">// MemoryDomain::Cuda</span>
+<span class="kw">let</span> sink = <span class="ty">CudaGlSink</span>::<span class="fn">new</span>();                          <span class="cmt">// EGL + NV12 shader</span>
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="ml-chain"><pre><span class="cmt"># RTSP -> decode -> GPU preprocess -> ORT (CUDA EP) -> classification.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
+g2g-ml      = { git = <span class="str">"..."</span>, features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
+
+<span class="kw">use</span> g2g_core::runtime::<span class="fn">run_linear_chain</span>;
+<span class="kw">use</span> g2g_ml::{<span class="ty">WgpuPreprocess</span>, <span class="ty">OrtInference</span>, <span class="ty">TensorPostprocess</span>};
+
+<span class="kw">let</span> src       = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(url);
+<span class="kw">let</span> <span class="kw">mut</span> dec   = <span class="ty">FfmpegH264Dec</span>::<span class="fn">new</span>().<span class="fn">with_output_format</span>(<span class="ty">OutputFormat</span>::<span class="ty">Nv12</span>);
+<span class="kw">let</span> <span class="kw">mut</span> pre   = <span class="ty">WgpuPreprocess</span>::<span class="fn">new</span>(w, h);                       <span class="cmt">// NV12 -> f32 NCHW</span>
+<span class="kw">let</span> <span class="kw">mut</span> infer = <span class="ty">OrtInference</span>::<span class="fn">from_memory_with_cuda</span>(model)?;
+<span class="kw">let</span> <span class="kw">mut</span> post  = <span class="ty">TensorPostprocess</span>::<span class="fn">topk_classification</span>(<span class="num">5</span>);
+
+<span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> dec, &amp;<span class="kw">mut</span> pre, &amp;<span class="kw">mut</span> infer, &amp;<span class="kw">mut</span> post],
+                 <span class="ty">FakeSink</span>::<span class="fn">new</span>(), &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; RTCP + RTSP ANNOUNCE on the roadmap.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">VideoTestSrc</span>::<span class="fn">new</span>(<span class="ty">RawVideoFormat</span>::<span class="ty">Nv12</span>, <span class="num">1920</span>, <span class="num">1080</span>, <span class="num">30.0</span>);
+<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new_low_latency</span>();                          <span class="cmt">// no B-frames</span>
+<span class="kw">let</span> sink = <span class="ty">UdpSink</span>::<span class="fn">bind</span>(<span class="str">"0.0.0.0:0"</span>)?
+            .<span class="fn">with_remote</span>(<span class="str">"239.0.0.1:5004"</span>)
+            .<span class="fn">with_rtp</span>(<span class="num">96</span>, <span class="num">0x12345678</span>);                       <span class="cmt">// payload type, SSRC</span>
+
+<span class="fn">run_source_transform_sink</span>(src, enc, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="browser"><pre><span class="cmt"># wasm32-unknown-unknown; needs --cfg=web_sys_unstable_apis for WebCodecs.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">WebSocketSrc</span>, <span class="ty">H264Parse</span>, <span class="ty">WebCodecsDecode</span>, <span class="ty">CanvasSink</span>};
+
+<span class="cmt">// Browser glass-to-glass: WS bytes -> parse -> WebCodecs -> canvas.</span>
+<span class="kw">let</span> src    = <span class="ty">WebSocketSrc</span>::<span class="fn">connect</span>(<span class="str">"wss://feed.example.com/h264"</span>).<span class="kw">await</span>?;
+<span class="kw">let</span> parse  = <span class="ty">H264Parse</span>::<span class="fn">new</span>();
+<span class="kw">let</span> decode = <span class="ty">WebCodecsDecode</span>::<span class="fn">new</span>();
+<span class="kw">let</span> sink   = <span class="ty">CanvasSink</span>::<span class="fn">by_id</span>(<span class="str">"video-canvas"</span>);
+
+wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async</span> <span class="kw">move</span> {
+    <span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> parse, &amp;<span class="kw">mut</span> decode], sink, &amp;clock, profile)
+        .<span class="kw">await</span>.<span class="fn">unwrap</span>();
+});</pre></div>
+
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ ROADMAP ═══ -->
+<section id="roadmap">
+    <div class="section-inner">
+        <span class="section-label">Roadmap</span>
+        <h2 class="section-title">Where we are. Where we're going.</h2>
+        <p class="section-desc">
+            The full milestone-by-milestone log is in <a href="https://github.com/boxerab/glass2glass/blob/main/CHANGELOG.md" style="color: var(--accent);">CHANGELOG.md</a>.
+            What's headline-worthy:
+        </p>
+
+        <table class="roadmap-table">
+            <thead><tr><th>ID</th><th>Track</th><th class="status">Status</th></tr></thead>
+            <tbody>
+                <tr><td>M5</td><td>RTSP source (retina, std + tokio)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M8-12</td><td>Negotiation, fan-out / fan-in, bus, allocation + clock + latency queries</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M13</td><td>Hardware decode: ffmpeg / Media Foundation / VAAPI</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M14</td><td>Linux display: WaylandSink + KmsSink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M16-18</td><td>CSP caps negotiation + GStreamer parity push (~95%)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M19-24</td><td>MF encode, file I/O, ORT, batcher, VideoConvert, Mp4Sink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M25-38</td><td>Audio track: WASAPI, AAC, fMP4, loopback</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M39-42</td><td>Browser / Wasm: WasmClock, WebSocket / WebRTC, WebCodecs, Canvas</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M43-45</td><td>Embassy / RTOS: StaticBufferPool, EmbassyClock, PacketChannel</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M46-47</td><td>Sans-IO RTP packetizer + UDP egress</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M50-51</td><td>WgpuPreprocess + pure-Rust BurnInference</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M52-54</td><td>H264Parse AVCC + VUI, CUDA EP for ORT, YUV444 input</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>C3</td><td>CUDA zero-copy: NVDEC &rarr; CudaGlSink (Linux+NVIDIA)</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
+                <tr><td>M48</td><td>Fixed DMA-ring capture source for Embassy</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
+                <tr><td>M49</td><td>RTCP SR + RTSP ANNOUNCE/RECORD (Wowza-style ingest)</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ═══ CTA ═══ -->
+<section class="cta-section">
+    <div class="cta-content">
+        <h2>Start building <em style="color: var(--accent); font-style: normal;">glass to glass</em>.</h2>
+        <p>Read the spec, clone the repo, try the smoke tests.</p>
+        <div class="cta-actions">
+            <a href="https://github.com/boxerab/glass2glass" class="btn btn-accent">Clone on GitHub</a>
+            <a href="https://github.com/boxerab/glass2glass/blob/main/DESIGN.md" class="btn btn-outline">Read DESIGN.md</a>
+            <a href="https://github.com/boxerab/glass2glass/blob/main/README.md" class="btn btn-outline">Sample pipelines</a>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer>
+    <div class="footer-inner">
+        <p>&copy; 2026 Aaron Boxer &middot; glass2glass &middot; LGPL v2.1+ (g2g-enterprise: AGPL v3)</p>
+        <div class="footer-links">
+            <a href="https://github.com/boxerab/glass2glass">GitHub</a>
+            <a href="https://github.com/boxerab/glass2glass/blob/main/DESIGN.md">Spec</a>
+            <a href="https://github.com/boxerab/glass2glass/blob/main/CHANGELOG.md">Changelog</a>
+            <a href="https://github.com/boxerab/glass2glass/issues">Issues</a>
+        </div>
+    </div>
+</footer>
+
+<script>
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const tab = btn.dataset.tab;
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(tab).classList.add('active');
+        });
+    });
+</script>
+
+</body>
+</html>

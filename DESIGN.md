@@ -425,13 +425,13 @@ A `Router` is a 1-to-N transform that reads an atomic discriminator per frame an
 | Demuxer dynamic-pad (bounded N) | Pre-allocated dark slots, populated on discovery |
 | Live source push from app code | Direct `LinkSender::send` from external task |
 | Multi-pipeline isolation | One pipeline per task tree; no shared mutable state |
-| Async messages (bus) | Pipeline-level mpmc message channel (M11) |
-| Latency aggregation query | Upstream-traveling query primitive (M12) |
-| Allocation query | Downstream-proposed allocator handoff (M12) |
-| Probes (`pad_block`, `pad_idle`) | `LinkInterceptor` trait registered on a slot (M11) |
-| Seek with FLUSH | `PipelinePacket::Flush` + runner drain handling (M11) |
-| Live clock distribution | `AsyncClock` provider election (M12) |
-| EOS aggregation across N inputs | Fan-in / muxer (M10) |
+| Async messages (bus) | Pipeline-level mpmc message channel |
+| Latency aggregation query | Upstream-traveling query primitive |
+| Allocation query | Downstream-proposed allocator handoff |
+| Probes (`pad_block`, `pad_idle`) | `LinkInterceptor` trait registered on a slot |
+| Seek with FLUSH | `PipelinePacket::Flush` + runner drain handling |
+| Live clock distribution | `AsyncClock` provider election |
+| EOS aggregation across N inputs | Fan-in / muxer |
 
 #### 4.9.1 Differences Forced by Rust Ownership
 GStreamer relies on parent ↔ child reference cycles via GObject reference counting plus signal callbacks. Rust's strict ownership doesn't allow that shape. Equivalent functionality lives in **message channels** instead of direct back-references: a child element that needs to notify its parent posts a bus message; the parent reads it. Functionally identical; structurally cleaner; no `unref` ordering hazards. Similarly, GStreamer's `gst_pad_link()` performs runtime pointer manipulation; the `g2g` equivalent — moving the receive end of a channel — requires explicit ownership transfer under a brief gate hold. Same outcome, more honest about what's happening.
@@ -445,34 +445,43 @@ GStreamer relies on parent ↔ child reference cycles via GObject reference coun
 #### 4.9.3 The Single Architectural Trade-Off
 Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at-most-N tracks). If an application genuinely needs runtime-growable pad count without an upper bound — e.g., a session router that accepts new RTP streams indefinitely — the dynamic layer uses a `Slab<Slot>` instead of a fixed array. Per-push slot lookup becomes one extra indirection. Since this only matters inside the already-type-erased dynamic layer, the cost is in the noise.
 
-### 4.10 Negotiation & Dynamism Milestone Roadmap
+### 4.10 Architectural Tracks
 
-| Milestone | Scope |
-| :--- | :--- |
-| **M8** | Mid-stream `CapsChanged` runner cascade; upstream `Reconfigure` sideband channel; `OutputSink::push` returns `PushOutcome`; `SourceLoop::reconfigure`; Phase 3 `ReFixate` becomes a real runner path; `ElementSlot` + `ArcSwap` slot mutation. |
-| **M9** | Fan-out: `Router`, `Gate`, `Merger` primitives; `BranchSlot` with all three `SwapPolicy` variants; multi-output element trait variant. |
-| **M10** | Fan-in: muxer trait variant; EOS aggregation across N inputs; per-input caps negotiation. |
-| **M11** | Application control surface: pipeline `Bus` for async messages; `LinkInterceptor` probes; `PipelinePacket::Flush` for seek. |
-| **M12** | Live-source surface (done): latency aggregation query (`LatencyReport` → `RunStats::latency`); allocation query (`AllocationParams` / `MemoryDomainKind` → `RunStats::allocation`); live clock distribution (`ClockPriority` / `ClockCandidate` / `elect_clock` → `RunStats::{clock_priority, base_time_ns}`). |
-| **M13** | Decoder elements: `MfDecode` (Windows MFT, NV12 `System`); `FfmpegH264Dec` (Linux libavcodec, I420 `System`, validated end-to-end on AMD radeonsi); `VaapiH264Dec` (Linux cros-codecs/VAAPI, Intel-only until cros-codecs grows a non-GBM surface backend); first end-to-end RTSP → decoded-pixel pipeline. |
+The framework is built along five interlocking tracks. The spec sections that
+follow describe each track's current architecture.
 
-After M12, `g2g` reaches dynamic-pipeline feature parity with GStreamer while retaining the static typed layer (§4.8.1) for embedded targets that GStreamer does not address at all. After M13, the first fully-live glass-to-glass pipeline from network source to decoded pixels is operational.
+| Track | Section | Summary |
+| :--- | :--- | :--- |
+| Receive | §4.11 | Network sources and hardware decoders (RTSP, file, fMP4, software/VAAPI/MF/NVDEC decoders). |
+| Display & egress | §4.11.5, §4.12 | GPU-resident presentation sinks and outbound RTP packetizers. |
+| Negotiation | §4.13 | Distributed CSP caps solver with per-link assignment and structured failure. |
+| ML | §5 | Inline GPU tensor preprocess and inference (Burn / ORT). |
+| Deployment | §6 | Cloud / embedded / browser orchestration over a single core. |
 
-### 4.11 Hardware Decoder Elements (M13)
+Open work (planned tracks, deferred items, follow-ups) lives in
+[DESIGN_TODO.md](DESIGN_TODO.md).
 
-The layers `RtspSrc → H264Parse` are fully functional for encoded-bitstream processing (mux, re-stream, record) after M11. Decoded-pixel output — required for ML inference, display, and colour-space conversion — needs a decoder `AsyncElement` that accepts `Caps::Video { format: H264 | H265, .. }` and emits `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::DmaBuf` (Linux) or `MemoryDomain::DxgiTexture` (Windows).
+### 4.11 Hardware Decoder Elements
 
-#### 4.11.1 cros-codecs (Linux VAAPI) — **Implemented**
+The layers `RtspSrc → H264Parse` cover encoded-bitstream processing
+(mux, re-stream, record). Decoded-pixel output — required for ML inference,
+display, and colour-space conversion — uses a decoder `AsyncElement` that
+accepts `Caps::CompressedVideo { codec: H264 | H265, .. }` and emits
+`Caps::RawVideo { format: Nv12 | I420, .. }` backed by `MemoryDomain::System`,
+`MemoryDomain::DmaBuf`, `MemoryDomain::Cuda`, or `MemoryDomain::D3D11Texture`
+depending on backend.
 
-`VaapiH264Dec` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is implemented on top of `cros-codecs` 0.0.6 (`vaapi` backend). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses H.264 bitstreams and manages the DPB; the actual decode runs on the GPU through libva.
+#### 4.11.1 cros-codecs (Linux VAAPI)
 
-- **Input caps:** `Caps::Video { format: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else
-- **Output caps:** `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface; see "Deferred" below)
-- **Frame allocation:** uses `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) to allocate `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture
-- **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL
-- **Flush:** forwards `decoder.flush()` and propagates `PipelinePacket::Flush` downstream
-- **EOS:** flushes the decoder, drains the DPB, emits `Eos`
-- **Thread safety:** `libva::Display` is `Rc<Display>` and therefore `!Send`; `unsafe impl Send` is justified by the runner's ownership model (move-not-share), matching the `MfDecode` pattern
+`VaapiH264Dec` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses H.264 bitstreams and manages the DPB; the actual decode runs on the GPU through libva.
+
+- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else.
+- **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface).
+- **Frame allocation:** `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) allocates `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture.
+- **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL.
+- **Flush:** forwards `decoder.flush()` and propagates `PipelinePacket::Flush` downstream.
+- **EOS:** flushes the decoder, drains the DPB, emits `Eos`.
+- **Thread safety:** `libva::Display` is `Rc<Display>` and therefore `!Send`; `unsafe impl Send` is justified by the runner's ownership model (move-not-share).
 
 ```text
 H.264 Annex-B  (MemoryDomain::System)
@@ -489,109 +498,297 @@ H.264 Annex-B  (MemoryDomain::System)
     downstream AsyncElement
 ```
 
-**Deferred:**
-- Zero-copy `MemoryDomain::DmaBuf` output. The GBM-allocated surface is already a DMA-buf; exposing its fd via `OwnedDmaBuf` is a follow-up requiring a refcount story to keep the surface alive until downstream releases it.
-- H.265 decode. The same stateless framework supports it; a sibling element keyed on `VideoFormat::H265` is straightforward.
-- Mid-stream resolution change is observed (`DecoderEvent::FormatChanged` → fresh `CapsChanged` downstream), but resolution-driven `Reconfigure` upstream is not yet plumbed.
+#### 4.11.2 Windows Media Foundation Transform (MFT)
 
-**Hardware coverage status (cros-codecs 0.0.6):** validated on a Mesa-25.3 / `radeonsi` AMD Rembrandt iGPU, the element initialises libva successfully and the cros-codecs bitstream parser ingests the SPS/PPS and reports correct stream geometry — but cros-codecs's `GbmDevice::new_frame(NV12, ...)` then fails to allocate the decoder's output surface. Two distinct cros-codecs assumptions are at fault, neither of which we can paper over from the consumer side:
+`MfDecode` (`g2g-plugins/src/mfdecode.rs`, feature `mf-decode`, `cfg(target_os = "windows")`) wraps `CLSID_MSH264DecoderMFT` via `windows-rs` using an MTA COM apartment.
 
-1. **Hard-coded 16×16 initial VAContext.** `VaapiBackend::new` creates the VA context with `Resolution::from((16, 16))` before any bitstream is fed; AMD `radeonsi` rejects that with `VA_STATUS_ERROR_RESOLUTION_NOT_SUPPORTED` and the `.expect` panics. A larger placeholder (e.g. 1920×1088) is accepted by every libva driver in the field and is later resized by `new_sequence()` once the SPS lands.
-2. **ChromeOS-specific GBM flag for NV12.** Even past (1), `gbm_bo_create(NV12, ..., GBM_BO_USE_HW_VIDEO_DECODER)` returns NULL on radeonsi — that flag is a ChromeOS GBM extension. Mesa's `radeonsi` GBM provider does not expose `NV12` contiguous allocations at all (the `GBM_BO_USE_LINEAR` fallback also fails), because there is no GBM↔VAAPI surface-import path on AMD desktop the way there is on ChromeOS hardware.
+- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }` — rejects anything else at `intercept_caps`.
+- **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the MFT output buffer).
+- **Flush:** forwards `MFT_MESSAGE_COMMAND_FLUSH` and propagates `PipelinePacket::Flush` downstream.
+- **EOS:** sends `MFT_MESSAGE_COMMAND_DRAIN` to flush the B-frame reorder buffer before emitting `Eos`.
+- **Thread safety:** `!Send` by default (COM); `unsafe impl Send` justified by MTA free-threading — the MS H.264 decoder MFT is callable from any MTA thread without marshaling.
 
-The cleanest fix is upstream: a cros-codecs surface backend that allocates VAAPI surfaces directly through libva (`vaCreateSurfaces`) instead of routing through GBM. On Intel iGPUs with the iHD VAAPI driver the current GBM path is expected to work end-to-end with only fix (1). Until cros-codecs grows a non-GBM surface backend, the Linux production path is **ffmpeg `h264_vaapi`** behind a separate `ffmpeg-vaapi` feature (not yet wired up); the `vaapi` feature here is the right abstraction and stays in place to take the upstream fix transparently.
+A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `MF_LOW_LATENCY` set (no B-frames) and converts `Caps::RawVideo { format: Nv12 }` to `Caps::CompressedVideo { codec: H264 }`, Annex-B framed. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC audio path.
 
-#### 4.11.2 Windows Media Foundation Transform (MFT) — **Implemented**
+#### 4.11.3 ffmpeg / libavcodec
 
-`MfDecode` (`g2g-plugins/src/mfdecode.rs`, feature `mf-decode`, `cfg(target_os = "windows")`) is fully implemented. It wraps `CLSID_MSH264DecoderMFT` via `windows-rs` using an MTA COM apartment and the Microsoft software H.264 decoder path.
+`FfmpegH264Dec` (`g2g-plugins/src/ffmpegdec.rs`, feature `ffmpeg`, `cfg(target_os = "linux")`) wraps system libavcodec via `ffmpeg-next`. Selectable backend:
 
-- **Input caps:** `Caps::Video { format: H264, .. }` — rejects anything else at `intercept_caps`
-- **Output caps:** `Caps::Video { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the MFT output buffer)
-- **Flush:** forwards `MFT_MESSAGE_COMMAND_FLUSH` and propagates `PipelinePacket::Flush` downstream
-- **EOS:** sends `MFT_MESSAGE_COMMAND_DRAIN` to flush B-frame reorder buffer before emitting `Eos`
-- **Thread safety:** `!Send` by default (COM); `unsafe impl Send` justified by MTA free-threading — the MS H.264 decoder MFT is callable from any MTA thread without marshaling
+| `Backend` variant | Codec opened | Output domain | Notes |
+| :--- | :--- | :--- | :--- |
+| `Software` | `h264` | `System` | Software decode; broadest hardware coverage. |
+| `NvdecCuvid` | `h264_cuvid` | `System` | GPU decode, host copy. Pairs with CPU sinks. |
+| `NvdecCuda` | `h264` + `AV_HWDEVICE_TYPE_CUDA` | `Cuda` | Zero-copy device-memory output; see §4.11.5. |
 
-**Deferred** (documented in the module header):
-- D3D11 zero-copy output via a new `MemoryDomain::DxgiTexture` variant
-- DXVA hardware acceleration (`MF_SA_D3D11_AWARE`)
-- Strided NV12 output (currently assumes stride == width, true for the software decoder)
-
-#### 4.11.3 ffmpeg / libavcodec (Linux production path) — **Implemented**
-
-`FfmpegH264Dec` (`g2g-plugins/src/ffmpegdec.rs`, feature `ffmpeg`, `cfg(target_os = "linux")`) is implemented on top of `ffmpeg-next` 8.1 against system libavcodec. This is the production-ready Linux decode path that works on every libav-equipped host (validated end-to-end on AMD radeonsi + Mesa 25.3 where `VaapiH264Dec` cannot allocate surfaces).
-
-- **Input caps:** `Caps::Video { format: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else
-- **Output caps:** `Caps::Video { format: I420 | Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of libavcodec's frame buffer). I420 is the default (what `libavcodec`'s `h264` decoder emits natively for 8-bit 4:2:0); NV12 is selectable via `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`, produced by a direct U/V interleave of the decoded planes (no swscale). `YUVJ420P` (full-range JPEG variant) is accepted with the same plane layout. Other pixel formats are rejected loudly with `CapsMismatch`. NVDEC backends were added later (`Backend::NvdecCuvid`, system-memory NV12; `Backend::NvdecCuda`, zero-copy device memory); see the CHANGELOG and `DESIGN-C3-cuda.md`.
-- **Codec construction:** `ffmpeg::init()` → `codec::decoder::find(Id::H264)` → `open_as().video()`. No hwaccel attached — software decode.
-- **Feed loop:** one access unit per `Packet::copy`, PTS forwarded verbatim (libavcodec treats it opaquely and echoes it back on the decoded frame); `send_packet()` then `receive_frame()` drained until `EAGAIN`.
-- **Flush:** `decoder.flush()`; `PipelinePacket::Flush` propagates downstream.
-- **EOS:** `send_eof()` then final drain to flush the B-frame reorder buffer before forwarding `Eos`.
+- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }`.
+- **Output caps:** `Caps::RawVideo { format: I420 | Nv12, .. }`. `I420` is the libavcodec native 8-bit 4:2:0 format; `Nv12` is selectable via `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`, produced by a U/V interleave with no swscale. `YUVJ420P` is accepted with the same plane layout; `YUV444P` / `YUVJ444P` are accepted with the chroma planes box-averaged down to 4:2:0. Other pixel formats are rejected with `CapsMismatch`.
+- **Feed loop:** one access unit per `Packet::copy`; PTS is forwarded verbatim (libavcodec echoes it back on the decoded frame); `send_packet()` then `receive_frame()` drained until `EAGAIN`.
+- **Flush / EOS:** `decoder.flush()` on `PipelinePacket::Flush`; `send_eof()` + final drain before forwarding `Eos`.
 - **Thread safety:** `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is `!Send` by default; `unsafe impl Send` is justified by the same ownership-transfer argument as `MfDecode` and `VaapiH264Dec`.
-
-**System dependencies:**
-
-| Distro | Packages |
-| :--- | :--- |
-| Fedora | `ffmpeg-free-devel` (or `ffmpeg-devel` from RPM Fusion) |
-| Debian / Ubuntu | `libavcodec-dev libavformat-dev libavutil-dev libswscale-dev` |
-| Arch | `ffmpeg` |
-
-**Deferred:**
-- VAAPI hwaccel: open the `h264_vaapi` codec with an attached `AVHWDeviceContext(VAAPI)`, register a `get_format` callback that claims `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface into System memory. Stays inside this module — the public `AsyncElement` shape doesn't change. Useful on Intel iGPUs and AMD desktop (radeonsi VAAPI works fine; it's only the cros-codecs GBM/NV12 assumption that breaks).
-- 10-bit pixel formats (`YUV420P10` / `P010`). `YUV444P` is now accepted, its full-resolution chroma box-averaged down to 4:2:0.
-
-(NV12 output, originally deferred here, is implemented via `with_output_format`; NVDEC cuvid/CUDA backends likewise landed since, and YUV444P input is accepted. All no longer pending.)
 
 #### 4.11.4 End-to-End RTSP Pipeline
 
-After M12 + M13 the first complete glass-to-glass receive pipeline is:
+The complete glass-to-glass receive pipeline is:
 
 ```
 RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode]
-(System/H264)               (DmaBuf or System / NV12)
+(System / H264)            (System / DmaBuf / Cuda / D3D11Texture; NV12)
 ```
 
-| Platform | Decoder element | Feature | Output | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| Linux any | `FfmpegH264Dec` | `ffmpeg` | `System` / I420 | **working** (validated AMD Mesa 25.3) |
-| Linux Intel (iHD) | `VaapiH264Dec` | `vaapi` | `System` / NV12 | expected-working past cros-codecs init-size patch |
-| Linux AMD (radeonsi) | `VaapiH264Dec` | `vaapi` | `System` / NV12 | blocked on cros-codecs GBM/NV12 — use `ffmpeg` |
-| Windows | `MfDecode` | `mf-decode` | `System` / NV12 | working |
+| Platform | Decoder element | Feature | Output |
+| :--- | :--- | :--- | :--- |
+| Linux software | `FfmpegH264Dec` (`Software`) | `ffmpeg` | `System` / I420 |
+| Linux + NVIDIA | `FfmpegH264Dec` (`NvdecCuvid` / `NvdecCuda`) | `ffmpeg` + `cuda` | `System` / `Cuda` / NV12 |
+| Linux + VAAPI | `VaapiH264Dec` | `vaapi` | `System` / NV12 |
+| Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
-**Why the bitstream is already Wowza-ready:** `RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE`, and emits Annex-B access units. It will connect to any public Wowza server on port 554 once a decoder element is wired downstream and M12's live clock is in place for proper A/V timing. Port 554 is blocked in the development sandbox; live-streaming validation must be performed by the user.
+`RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE` (Annex-B) or accepts AVCC framing detected per buffer. The first SPS the parser sees provides geometry; framerate is recovered from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when present, or left as `Rate::Any` when the VUI is absent.
 
-The negotiation track (M8–M12) is orthogonal to the **platform-element track**, which adds concrete OS-coupled elements behind cargo features (each implying `std`):
+#### 4.11.5 Zero-copy NVDEC → CUDA → GPU display
 
-| Milestone | Scope |
-| :--- | :--- |
-| **M5** | `RtspSrc` (`rtsp` feature) wrapping `retina`. |
-| **M13** | `MfDecode` (`mf-decode` feature, Windows-only): Media Foundation H.264 Decoder MFT (`IMFTransform`) → NV12 `System` frames. Target-gated `windows` 0.62 dependency. Thread-affine (COM/MTA), single-thread executor. Deferred: D3D11 zero-copy, DXVA, strided NV12. |
-| **M19** | `MfEncode` (`mf-encode` feature, Windows-only): Media Foundation H.264 Encoder MFT (`CLSID_MSH264EncoderMFT`), NV12 `System` frames → Annex-B H.264, low-latency mode (`MF_LOW_LATENCY`, no B-frames). Same COM/MTA contract as `MfDecode`; verified by an in-tree encode → decode round trip. |
-| **M13** | `FfmpegH264Dec` (`ffmpeg` feature, Linux-only): `ffmpeg-next` 8.1 against system libavcodec, software H.264 decode → I420 `System` frames. Production-ready baseline; validated end-to-end on AMD radeonsi. NV12 output (`with_output_format`), NVDEC cuvid/CUDA backends, and YUV444P input (chroma downsampled to 4:2:0) landed since. Deferred: VAAPI hwaccel via `h264_vaapi` + `AVHWDeviceContext`, 10-bit. |
-| **M13** | `VaapiH264Dec` (`vaapi` feature, Linux-only): cros-codecs 0.0.6 stateless H.264 decoder on a VAAPI backend, GBM-allocated NV12 surfaces row-copied into `System` frames. Target-gated `cros-codecs` 0.0.6 + libva + GBM. Blocked on AMD desktop by cros-codecs GBM/NV12 surface assumption (see §4.11.1); `FfmpegH264Dec` covers Linux until that is fixed upstream. Deferred: zero-copy `DmaBuf` export, H.265, upstream `Reconfigure`. |
-| **C3** | Zero-copy NVDEC → GPU display (`MemoryDomain::Cuda`). Phase 1: CUDA memory domain in core. Phase 2: `Backend::NvdecCuda` keeps decoded NV12 in device memory via the generic `h264` decoder + CUDA hwdevice + `get_format`. Phase 3: `CudaDownload` fallback + a `CudaGlSink` (CUDA↔GL interop, not KMS/dmabuf — see `DESIGN-C3-cuda.md`). Linux + NVIDIA-GPU only; user-side e2e. |
+`Backend::NvdecCuvid` decodes on the GPU but copies NV12 back to system memory;
+the glass-to-glass floor is then dominated by the PCIe round-trip plus the
+sink's CPU NV12→XRGB convert. The CUDA-resident path keeps decoded NV12 in
+device memory end-to-end so a GPU consumer (display) takes the handoff without
+a host round-trip.
 
-### 4.12 Live Egress Track (M46+)
+**Memory domain.** `MemoryDomain::Cuda(OwnedCudaBuffer)` lives in `g2g-core`,
+platform-agnostic. `OwnedCudaBuffer` carries the two NV12 plane device
+pointers (luma Y, interleaved chroma UV), row pitches, dims, the `CUcontext`,
+and a boxed `CudaKeepAlive` owner. Core never links CUDA: the producing
+element supplies the owner as a trait object, and dropping the buffer releases
+the backing allocation. `AllocationParams::cuda(...)` makes
+`MemoryDomainKind::Cuda` a cross-element pool domain in the allocation
+negotiation (§4.13).
 
-`RtspSrc` (M5) and the decoders (M13) cover the receive path; egress is the
-inverse, sending encoded video out over RTP. The protocol logic is Sans-IO
-(§1): a pure packetizer produces the RTP packets and a thin sink does the UDP
-I/O.
+**Decoder.** `Backend::NvdecCuda` opens the generic `h264` codec with an
+`AV_HWDEVICE_TYPE_CUDA` device and a `get_format` hook selecting
+`AV_PIX_FMT_CUDA`; the resulting `AVFrame` is the keep-alive that owns the
+device pointers wrapped into `OwnedCudaBuffer`.
 
-| Milestone | Scope | Status |
-| :--- | :--- | :--- |
-| **M46** | `RtpH264Packetizer` (`rtppay.rs`): sans-IO RFC 3550 + RFC 6184, an H.264 access unit to RTP packets (single-NAL when it fits the MTU, else FU-A fragments; marker on the AU's last packet; incrementing sequence). Pure `no_std` logic, host-tested and Cortex-M-clean. | **implemented** |
-| **M47** | `UdpSink` (`udpsink.rs`): an `AsyncElement` sink driving `RtpH264Packetizer` and sending the RTP packets over a tokio `UdpSocket`. RTP timestamp from `FrameTiming::pts_ns` at 90 kHz; H.264-only sink. Loopback-UDP-verified (port 554 blocked, §4.11.4). | **implemented** |
-| **M49** | RTCP sender reports; an RTSP `ANNOUNCE` / `RECORD` path for Wowza-style ingest. User-side (need the sandbox-blocked port). | planned |
+**Consumer: CUDA↔GL interop, not dma-buf.** CUDA can only export VMM-allocated
+memory (`cuMemCreate` / `cuMemMap`) to a dma-buf fd, and NVDEC decoder frames
+come from libavcodec's CUDA hwframe pool (not VMM); the NVIDIA proprietary
+driver also doesn't import foreign dma-bufs reliably through `nvidia-drm`.
+Presentation therefore uses CUDA↔GL interop — the path GStreamer's `nvcodec`
++ `glimagesink` and NVIDIA's `FramePresenterGL` sample take:
 
-The packetizer and the UDP send are host-verifiable over loopback (parse the RTP
-headers back, reassemble the FU-A fragments); the RTSP server and live ingest are
-user-side (port 554 is blocked in the sandbox, as for the receive path, §4.11.4).
+1. Create an EGL context on the display surface.
+2. Register a GL texture with `cuGraphicsGLRegisterImage` once.
+3. Per frame: `cuGraphicsMapResources`, `cudaMemcpy2D` (device→device,
+   honouring source pitch) the NV12 planes into the GL resource,
+   `cuGraphicsUnmapResources`.
+4. Sample Y + interleaved UV in a fragment shader (BT.601/709 limited range),
+   present via `eglSwapBuffers`.
+
+This is not strictly zero-copy (one device→device copy into the GL texture)
+but it removes the PCIe round-trip and the CPU colour convert.
+
+**Elements.**
+- `CudaDownload` (`cuda` feature) is an `Identity(NV12)` transform that
+  copies a `MemoryDomain::Cuda` frame to `MemoryDomain::System` via
+  device→host `cuMemcpy2D`. Negates the latency win but lets a `NvdecCuda`
+  stream reach the existing CPU sinks for correctness and bring-up.
+- `CudaGlSink` (`cuda-gl` feature, Linux + NVIDIA) holds an EGL context on a
+  Wayland surface (`wl_egl_window` from SCTK), a `glow` GL ES 3 program with
+  the two NV12 textures, and the per-frame map/copy/unmap render loop via
+  the CUDA-GL interop entry points.
+
+**CUDA bindings: hand-rolled FFI.** `cudarc` has no CUDA-GL interop wrappers
+(`cuGraphicsGLRegisterImage` and friends), and its safe API assumes it owns
+the `CudaContext`, whereas the `CUcontext` is created and owned by ffmpeg's
+hwdevice and carried on `OwnedCudaBuffer`. The needed surface is small:
+`cuCtxPushCurrent_v2` / `_PopCurrent_v2`, `cuMemcpy2D_v2`, and the GL-interop
+quartet `cuGraphicsGLRegisterImage` / `cuGraphicsMapResources` /
+`cuGraphicsSubResourceGetMappedArray` / `cuGraphicsUnmapResources`. The
+plugin links `libcuda` directly.
+
+### 4.12 Live Egress
+
+The receive path (§4.11) has an inverse: encoded video out over RTP. The
+protocol logic is Sans-IO (§1): a pure packetizer produces the RTP packets
+and a thin sink does the UDP I/O.
+
+- `RtpH264Packetizer` (`rtppay.rs`) implements RFC 3550 + RFC 6184. An H.264
+  access unit becomes a single-NAL RTP packet if the NAL fits the MTU, else
+  FU-A fragments. The marker bit lands on the access unit's last packet;
+  sequence numbers increment across packets and calls; one RTP timestamp per
+  access unit. Pure `no_std` logic, host-testable.
+- `UdpSink` (`udpsink.rs`, `udp-egress` feature) is an `AsyncElement` sink
+  that drives the packetizer over each Annex-B access unit and sends the RTP
+  packets to a destination on a tokio `UdpSocket`. The RTP timestamp is the
+  90 kHz image of `FrameTiming::pts_ns`; sequence numbers and the per-AU
+  marker bit come from the packetizer. `with_rtp(pt, ssrc)` and
+  `with_max_payload(mtu)` configure the flow.
+
+### 4.13 CSP Caps Negotiation
+
+The handshake sketched in §4.2 is the *interface* contract. The underlying
+mechanism is a **distributed constraint-satisfaction problem (CSP)**: each
+element declares a constraint over `(input, output)` caps; a solver finds an
+assignment over every link in the graph that satisfies all constraints,
+ranked by preferences; the assignment becomes the per-link `Caps` the runner
+hands each element via `configure_pipeline`.
+
+This subsumes GStreamer's pad-by-pad negotiation: the solver runs once over
+the whole graph (or over an affected subgraph on a mid-stream change),
+returns structured failure when no assignment exists, and trades pad-query
+round-trips for direct function calls.
+
+#### 4.13.1 CapsSet and the constraint enum
+
+```rust
+/// A set of acceptable caps descriptions, ordered by preference.
+pub struct CapsSet { alternatives: Vec<Caps> }
+impl CapsSet {
+    pub fn one(caps: Caps) -> Self;
+    pub fn intersect(&self, other: &Self) -> Self;
+    pub fn fixate(&self) -> Option<Caps>;
+}
+
+pub enum CapsConstraint {
+    Accepts(CapsSet),                             // sink-shape
+    AcceptsAny,                                   // wildcard sink (probes, fakes)
+    Produces(CapsSet),                            // source-shape
+    Identity(CapsSet),                            // pass-through transform
+    IdentityAny,                                  // wildcard pass-through
+    Mapping(Vec<(CapsSet, CapsSet)>),             // explicit (in, out) pairs
+    DerivedOutput(Box<dyn Fn(&Caps) -> CapsSet>), // output as function of input
+}
+```
+
+`Caps` is the *fixed* description used at runtime (`DataFrame.caps`,
+`configure_pipeline`); `CapsSet` is the negotiation-time vocabulary.
+`Caps` is split into compressed and raw at the type level:
+
+```rust
+pub enum Caps {
+    CompressedVideo { codec: VideoCodec, extras: CodecExtras },
+    RawVideo { format: RawVideoFormat, width: Dim, height: Dim, framerate: Rate },
+    Audio { .. },
+    Tensor { .. },
+}
+```
+
+so a raw-only sink simply cannot match compressed caps, and the impossibility
+becomes a type-level error rather than a runtime `not-negotiated`.
+
+#### 4.13.2 The solver
+
+`solver::solve_linear` runs arc consistency on a chain: forward sweep
+(`Produces ∩ Accepts ∩ Identity ∩ Mapping ∩ DerivedOutput`), backward sweep
+to propagate narrowing, fixate each link to its highest-preference concrete
+`Caps`, then call `configure_pipeline` per element with its side of the link.
+
+```rust
+pub enum NegotiationFailure {
+    EmptyLink { upstream: ElementId, downstream: ElementId, missed: CapsSet },
+    EndpointShapeMismatch { .. },
+    Unfixable { .. },
+    Cyclic { .. },
+}
+```
+
+Failures name the responsible pair and what they couldn't agree on, and are
+posted to the pipeline `Bus` via `BusMessage::NegotiationFailed`.
+
+`solver::downstream_feasibility(constraints) -> Vec<Option<CapsSet>>` is a
+backward fold from the sink that computes, per link, the set the downstream
+tail can still fixate **ignoring the upstream**. It's source-independent and
+serves as a snapshot for the mid-stream re-solve (§4.13.4).
+
+#### 4.13.3 Multi-element runner
+
+`run_linear_chain(source, Vec<&mut dyn DynAsyncElement>, sink, ..)` drives
+any-length linear chains: whole-chain `solve_linear`, per-element configure,
+the allocation cascade (§4.13.5), and `N + 2` data arms over `N + 1` links.
+`run_source_transform_sink`, `run_simple_pipeline`, `run_source_fanout`, and
+`run_muxer_sink` are the single-transform, source-only, fan-out, and fan-in
+specializations.
+
+#### 4.13.4 Mid-stream re-solve
+
+A mid-stream `PipelinePacket::CapsChanged` triggers a re-fixation that stays
+correctly downstream-aware:
+
+1. At startup, each interior arm receives its `downstream_feasible:
+   Option<CapsSet>` from the backward sweep.
+2. Mid-stream, arm *i* on `CapsChanged(in)`:
+   - intersect `in` with the element's input constraint; empty → loud
+     `EmptyLink` and reverse `Reconfigure` upstream;
+   - derive output candidates from `in` via the constraint;
+   - intersect candidates with `downstream_feasible[i]`;
+   - fixate; `configure_pipeline(in)`; element-local realloc; forward
+     `CapsChanged(fixated_output)`.
+
+The **runner**, not `process(CapsChanged)`, owns the forwarded output. A
+format-changing element moves its derivation into the declared constraint
+(`Mapping` / `DerivedOutput`) as the single source of truth; the solver
+already consumes it at startup and at re-solve.
+
+The **frame-tagging invariant** is the load-bearing correctness property:
+every `DataFrame` carries `Frame.caps`, which is authoritative for *that*
+frame. In-flight old-caps frames drain cleanly under their own caps;
+new-caps frames pull from the new pool. Pre-allocating the new pool
+concurrently with old-pool drain avoids a double-allocation stall.
+
+#### 4.13.5 Allocation cascade
+
+Allocation negotiation is part of the same orchestration. A coordinator task
+owns refs to source / transforms / sink and orchestrates events the spawned
+arms can't reach from each other:
+
+- **Element-local realloc:** `coordinator::realloc_local` re-derives an
+  element's own pool from new caps (`propose_allocation` +
+  `configure_allocation`) at each mid-stream apply site.
+- **N-hop re-cascade:** the `select2` combinator + per-arm control channel
+  makes each transform arm interruptible at its `recv().await`, so a
+  sink-side allocation proposal walks upstream one hop at a time via
+  `CoordinatorEvent::ArmProposal` until it reaches the source.
+
+This is the same machinery a future mid-stream clock change or latency
+adjustment uses: cross-element mid-stream coordination becomes a coordinator
+event instead of an ad-hoc back-channel.
+
+#### 4.13.6 Fan-out and fan-in
+
+`run_source_fanout` per-branch re-solves a mid-stream `CapsChanged` via
+`re_solve_downstream_dyn_sink`. Branches run in independent arms, so the
+re-solves are concurrent (max of single-branch cost, not sum). The default
+failure policy is strict: a branch whose constraint rejects the new caps
+fails the fan-out loud (`CapsMismatch`); a future `FanOutPolicy::AllowBranchDrop`
+opt-in is anticipated for graceful degradation.
+
+`run_muxer_sink` solves each `source ↔ muxer-input` pair at startup,
+per-input re-solves on mid-stream change, and eagerly re-emits the muxer's
+output `CapsChanged` downstream when the merged output caps change as a
+function of an input change. `MultiInputElement` exposes
+`caps_constraint_as_input(idx)` and `caps_constraint_for_output()` for the
+solver to consult per-input.
+
+#### 4.13.7 Pad templates
+
+Static metadata for tools that need to query pad compatibility without
+constructing the element. `PadTemplate` + the `PadTemplates` trait expose
+`pad_templates()` as an associated function; `pad_link` and `types_can_link`
+run the solver against two element types' static templates for pre-
+instantiation compatibility checks. The runtime `caps_constraint_as_*`
+remains the instance-level (possibly narrower) view.
+
+#### 4.13.8 ACCEPT_CAPS and CapsFilter
+
+Fall out of the constraint surface:
+
+- **ACCEPT_CAPS query** is `constraint.accepts(&caps)`, a pure check against
+  the constraint's set. No runtime round-trip; the element's constraint
+  already describes everything it would accept.
+- **`CapsFilter`** is an `Identity(specific_set)` pass-through. Inserted
+  anywhere in a pipeline to force a narrowing.
 
 ---
 
 ## 5. First-Class Machine Learning Integration
-To prevent GPU-to-CPU synchronization stalls, tensor execution happens directly inside the VRAM domain. ML elements are `AsyncElement` implementations like any other — they negotiate `Caps::Video` on the input pad and `Caps::Tensor` on the output pad.
+To prevent GPU-to-CPU synchronization stalls, tensor execution happens directly inside the VRAM domain. ML elements are `AsyncElement` implementations like any other — they negotiate `Caps::RawVideo` on the input pad and `Caps::Tensor` on the output pad.
 
 ### 5.1 Inline Tensor Pre-processing via WebGPU (wgpu)
 The ML element sits in the same memory domain context as the hardware decoder. When a `MemoryDomain::DmaBuf` arrives at the ML element:
@@ -600,13 +797,13 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 2. An inline compute shader converts color spaces (e.g. NV12 → planar RGB) and performs normalization scales directly in graphics memory.
 3. The resulting tensor handle is emitted as a `Frame { domain: VulkanTexture(...), caps: Caps::Tensor { .. }, .. }`, submitted straight to the inference backend.
 
-**Status (M50):** `WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) implements step 2: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. This is the system-memory variant (NV12 uploaded to a storage buffer, the f32 tensor read back to `MemoryDomain::System`), verified on the local D3D12 GPU against a host BT.601 reference. Steps 1 and 3 (binding a decoder's `DmaBuf`/`D3D11Texture` surface directly and emitting a GPU-resident tensor domain) need the surface-import handshake and a GPU tensor `MemoryDomain`; deferred.
+`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`; the surface-import + GPU-resident tensor domain variant uses `MemoryDomain::DmaBuf` / `MemoryDomain::D3D11Texture` inputs directly.
 
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
-- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. **Status (M51):** `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) implements the wgpu-backend inference element, a deterministic linear layer (`input . W + b`) over the `RawVideo` -> `Tensor` contract, verified on the local GPU against a CPU matmul. ONNX compile-time import (burn-import codegen) and the trained-weight `Module` path are follow-ups.
-- **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA/TensorRT, Apple CoreML) natively.
+- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter.
+- **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA / TensorRT / DirectML / Apple CoreML) natively.
 
 ### 5.3 Native Async Batching Engine
 The `g2g-enterprise` layer provides a lock-free, multi-channel execution sink that groups separate asynchronous video input streams into a single hardware tensor execution array:
@@ -635,58 +832,61 @@ Because the core processing loop requires only `core` and `alloc`, deployment pr
 - **Hardware Interop:** Fixed-memory DMA rings mapped to microcontroller video capture peripherals.
 - **Cargo features:** none (default `no_std + alloc`), or strict no-heap via `StaticBufferPool<_, N>` only.
 
-#### 6.2.1 Embedded/Embassy Track (M43+)
+#### 6.2.1 Embedded / Embassy Element Surface
 
-Built incrementally; the `no_std + alloc` core already runs here, since the
-runner futures are executor-agnostic and `ElementBound` is empty without
-`multi-thread` (§4.3). `StaticBufferPool` lands in `g2g-core` (pure `core`, no
-feature gate); the Embassy clock/executor glue in `g2g-plugins` behind the
-no_std `embassy` feature.
+The `no_std + alloc` core runs here directly: runner futures are
+executor-agnostic and `ElementBound` is empty without `multi-thread` (§4.3).
+The embedded surface comprises:
 
-| Milestone | Scope | Status |
-| :--- | :--- | :--- |
-| **M43** | `StaticBufferPool<T, N>` (no-alloc core pool); `EmbassyClock` (`embassy-time`); pipeline under `embassy-futures::block_on`; bare-metal compile (`aarch64-unknown-none`). | **implemented** (EmbassyClock tick owed to a HAL time driver) |
-| **M44** | `portable-atomic` for the `metrics` `AtomicU64` so Cortex-M (`thumbv7em`) / RISC-V32 compile; gate the std-only `coordinator_with_recascade_n` for a warning-free no_std build. | **implemented** |
-| **M45** | `embassy-sync` zero-alloc packet link (`PacketChannel` + `EmbassySink`), the §6.2 stack channel. Full `embassy-executor` multi-task integration (vs the M43 `block_on` primitive) remains a follow-up. | **implemented** |
-| **M48** | Fixed DMA-ring capture `SourceLoop`; no-alloc end-to-end frame flow (a lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy path). | planned |
+- `StaticBufferPool<T, N>` in `g2g-core` (pure `core`, no feature gate) — a
+  compile-time-sized zero-allocation pool yielding bounded mutable references
+  checked via compile-time lifetimes. This is the strict no-heap pool the
+  `Arc<Mutex<Vec<T>>>` `BufferPool` (§3.3) cannot serve.
+- `EmbassyClock` (`embassy` feature) over `embassy-time`, the `no_std` analog
+  of `WallClock`. The tick rate is selected at the feature; a HAL provides
+  the time driver at link.
+- `PacketChannel` + `EmbassySink` (`embassy-link` feature) over
+  `embassy-sync`, a zero-allocation inter-task packet link — the §6.2 stack
+  channel.
+- `embassy-futures::block_on` drives a pipeline as a single task; the full
+  `embassy-executor` multi-task integration uses the same runner futures.
 
-M44 closed the M43 finding: `metrics::LatencyHistogram` used `AtomicU64`, which
-`thumbv7em` (Cortex-M) and `riscv32` lack, so `portable-atomic` now provides it
-(native where available, a lock-based fallback elsewhere; `critical-section`
-makes the fallback interrupt-safe on hardware). The core and the full embedded
-stack (g2g-core + g2g-plugins + `EmbassyClock`) now compile for `thumbv7em`.
-Verification is largely local (unlike §6.3): the pool unit tests and the
-`block_on` pipeline run on the host, and the bare-metal compile proves
-no-std-ness; only `EmbassyClock`'s tick needs a HAL driver on real hardware.
+`portable-atomic` backs the `metrics::LatencyHistogram` `AtomicU64` so
+`thumbv7em` (Cortex-M) and `riscv32` (which lack 64-bit atomics) compile;
+`critical-section` makes the lock-based fallback interrupt-safe.
 
 ### 6.3 Browser Sandbox (Web Application Scaling)
 - **Runtime Driver:** Web Workers spawned via `wasm-bindgen-futures`.
 - **Hardware Interop:** Packets ingested via WebSockets / WebRTC data channels, parsed by browser hardware via the native WebCodecs JS API, and injected into WebGPU textures.
 - **Cargo features:** `std` (`wasm32-unknown-unknown` provides a usable `std` shim).
 
-#### 6.3.1 Browser/Wasm Element Track (M39+)
+#### 6.3.1 Browser / Wasm Element Surface
 
-The browser target is built incrementally as `cfg(target_arch = "wasm32")`
-elements in `g2g-plugins` behind the `web` feature (which implies `std`); the
-wasm bindings (`wasm-bindgen` / `js-sys` / `web-sys` / `wasm-bindgen-futures`)
-are target-gated so native builds never resolve them, mirroring the
-windows/linux element gating (§2). No core change is needed: the runner future
-is executor-agnostic, so `wasm_bindgen_futures::spawn_local` drives it on the
-browser event loop, and wasm builds without `multi-thread`, so the `!Send` JS
-handle types satisfy the empty `ElementBound` (§4.3).
+The browser target is `cfg(target_arch = "wasm32")` elements in `g2g-plugins`
+behind the `web` feature (which implies `std`). The wasm bindings
+(`wasm-bindgen` / `js-sys` / `web-sys` / `wasm-bindgen-futures`) are
+target-gated so native builds never resolve them. No core change is needed:
+the runner future is executor-agnostic, so `wasm_bindgen_futures::spawn_local`
+drives it on the browser event loop, and wasm builds without `multi-thread`,
+so the `!Send` JS handle types satisfy the empty `ElementBound` (§4.3).
 
-| Milestone | Scope | Status |
-| :--- | :--- | :--- |
-| **M39** | Foundation: `web` feature; `WasmClock` (`performance.now()` + `setTimeout`, the wasm analog of `WallClock`); `WebSocketSrc` ingest source (analog of `FileSrc`); `run_websocket_ingest` `spawn_local` entry. | **implemented** (browser runtime owed a `wasm-bindgen-test` run) |
-| **M40** | `WebCodecsDecode`: wrap the browser `VideoDecoder` (WebCodecs), H.264 Annex-B access units in, `VideoFrame` copied out to `System` RGBA. Pairs with `H264Parse`. Needs `--cfg=web_sys_unstable_apis`. | **implemented** (H.264; HEVC + browser runtime owed) |
-| **M41** | `CanvasSink`: present decoded RGBA to an HTML canvas via the 2D context, completing in-browser glass-to-glass (`WebSocketSrc → WebCodecsDecode → CanvasSink`). WebGPU-texture zero-copy (`MemoryDomain::WebGPUBuffer` into a `GPUTexture`) deferred: async device handshake + core keep-alive. | **implemented** (2D; WebGPU + browser runtime owed) |
-| **M42** | `WebRtcSrc`: ingest over a provided `RtcDataChannel`, the second browser ingest path. Web Workers executor deferred (JS-bootstrap infra; `spawn_local` already drives pipelines). | **implemented** (datachannel src; Workers + runtime owed) |
+The browser element surface comprises:
 
-The M39 foundation makes `WebSocketSrc → H264Parse → FakeSink` compile and run
-in the browser; M40–M42 add hardware decode, GPU zero-copy, and the
-off-main-thread executor that complete the §6.3 picture. The in-browser runtime
-(live `WebSocket` receive, `performance.now()` pacing) is validated user-side,
-as with the live RTSP path (§4.11.4); the local gate is
+- `WasmClock` — `performance.now()` + `setTimeout` sleep, the wasm analog
+  of `WallClock`.
+- `WebSocketSrc` — ingest over a browser `WebSocket`, parallel to `FileSrc`
+  / `RtspSrc`.
+- `WebRtcSrc` (`web` feature) — ingest over a provided `RtcDataChannel`.
+- `WebCodecsDecode` (`web-codecs` feature) — wraps the browser `VideoDecoder`;
+  H.264 Annex-B access units in, `VideoFrame` copied to `System` RGBA out.
+  Build needs `--cfg=web_sys_unstable_apis`.
+- `CanvasSink` — presents decoded RGBA to an HTML canvas via the 2D context.
+  A WebGPU-texture zero-copy variant uses `MemoryDomain::WebGPUBuffer` into
+  a `GPUTexture` once the async device handshake lands in the keep-alive.
+
+A complete in-browser glass-to-glass pipeline is
+`WebSocketSrc → H264Parse → WebCodecsDecode → CanvasSink`. The local gate
+for the wasm build is
 `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`.
 
 ---
