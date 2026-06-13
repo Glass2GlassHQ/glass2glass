@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M58: `WebCodecsDecode` GPU-resident output (P2.2)
+
+- `WebCodecsDecode::with_gpu_output()` hands the decoded `VideoFrame` forward
+  in the M57 `MemoryDomain::WebGPUExternalTexture` instead of copying it out to
+  system RGBA, the load-bearing zero-copy step of the browser chain (the
+  decoder hands the GPU surface forward rather than pulling it back). The
+  default stays system RGBA, so the `CanvasSink` (M41) and `WebRtcSrc` (M42)
+  paths are unaffected. The memory domain is not part of `Caps`, so negotiation
+  is unchanged (`RawVideo` RGBA either way); the consumer pairs the matching
+  domain at runtime (a `System`-only sink fed the GPU output fails loud with
+  `UnsupportedDomain`).
+- `VideoFrameOwner` wraps the frame as the `WebGPUKeepAlive`. On the GPU path
+  the frame is NOT closed at hand-off: a VideoFrame-sourced external texture is
+  valid only until the frame closes, so the owner closes it on drop, after
+  downstream has imported and used it. `unsafe impl Send` under the
+  single-threaded wasm contract (the `D3D11KeepAlive` / `MfDecode` precedent).
+  The drain loop splits into `emit_system_rgba` / `emit_external_texture`
+  sharing one `announce_caps`.
+- VERIFIED on the dev host: `RUSTFLAGS=--cfg=web_sys_unstable_apis cargo check
+  --target wasm32-unknown-unknown -p g2g-plugins --features web-codecs` green;
+  wasm web-codecs clippy clean; native `cargo check --workspace` green (the
+  module is wasm-gated). NOT verifiable on this Windows host: the actual
+  GPU-resident decode + WebGPU import needs a browser; owed a browser run, like
+  the rest of the wasm elements (M40-M42).
+
 ### M57: `WebGPUExternalTexture` memory domain + `WebGPUKeepAlive` (P2.1)
 
 - Opens Phase 2 (the browser zero-copy chain): a new core `MemoryDomain`

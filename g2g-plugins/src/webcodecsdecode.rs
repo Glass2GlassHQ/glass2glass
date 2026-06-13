@@ -9,6 +9,12 @@
 //! (e.g. `OrtInference`). A tightly-packed RGBA copy-out is assumed; row-stride
 //! de-padding and visible-rect cropping are documented follow-ups.
 //!
+//! `with_gpu_output()` instead hands the decoded `VideoFrame` forward in
+//! `MemoryDomain::WebGPUExternalTexture` for a zero-copy WebGPU import; the
+//! frame stays open until the keep-alive owner drops downstream (a
+//! VideoFrame-sourced external texture is valid until the frame is closed).
+//! Default stays system RGBA so the CPU-consumer sinks are unaffected. (P2.2)
+//!
 //! Async shape (unlike the synchronous MFT / libav decoders): `decode()` queues
 //! work and the browser delivers `VideoFrame`s later through the decoder's
 //! output callback, bridged to the `run` loop by a [`crate::webutil::Inbox`].
@@ -28,8 +34,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, OwnedWebGPUExternalTexture, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, RawVideoFormat, VideoCodec, WebGPUKeepAlive,
 };
 
 use wasm_bindgen::prelude::*;
@@ -45,6 +51,9 @@ use crate::webutil::Inbox;
 
 pub struct WebCodecsDecode {
     codec: VideoCodec,
+    /// When set, hand the `VideoFrame` forward as a GPU-resident external
+    /// texture instead of copying it out to system RGBA.
+    gpu_output: bool,
     configured: bool,
     width: u32,
     height: u32,
@@ -70,6 +79,7 @@ impl WebCodecsDecode {
     pub fn new() -> Self {
         Self {
             codec: VideoCodec::H264,
+            gpu_output: false,
             configured: false,
             width: 0,
             height: 0,
@@ -81,6 +91,13 @@ impl WebCodecsDecode {
             last_caps: None,
             emitted: 0,
         }
+    }
+
+    /// Emit decoded frames as GPU-resident `WebGPUExternalTexture` for a
+    /// downstream WebGPU import, instead of the default system-RGBA copy-out.
+    pub fn with_gpu_output(mut self) -> Self {
+        self.gpu_output = true;
+        self
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -127,33 +144,66 @@ impl WebCodecsDecode {
         Ok(())
     }
 
-    /// Drain every decoded frame currently in the inbox, converting each to
-    /// packed RGBA and pushing it downstream (with a `CapsChanged` on the first
-    /// frame and on any geometry change).
+    /// Drain every decoded frame currently in the inbox, pushing each
+    /// downstream (with a `CapsChanged` on the first frame and on any geometry
+    /// change). Each frame goes out as GPU-resident external texture or
+    /// system RGBA per the configured output mode.
     async fn drain_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         while let Some(frame) = self.inbox.as_ref().and_then(|i| i.try_pop()) {
-            let (bytes, w, h, pts_ns) = copy_out_rgba(&frame).await?;
-            frame.close();
-
-            let new_caps = rgba_caps(w, h);
-            if self.last_caps.as_ref() != Some(&new_caps) {
-                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
-                self.last_caps = Some(new_caps);
+            if self.gpu_output {
+                self.emit_external_texture(frame, out).await?;
+            } else {
+                self.emit_system_rgba(frame, out).await?;
             }
-
-            let out_frame = Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                timing: FrameTiming {
-                    pts_ns,
-                    dts_ns: pts_ns,
-                    capture_ns: pts_ns,
-                    ..FrameTiming::default()
-                },
-                sequence: self.emitted,
-            };
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(out_frame)).await?;
         }
+        Ok(())
+    }
+
+    /// Announce the output caps if they changed since the last frame.
+    async fn announce_caps(&mut self, w: u32, h: u32, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let new_caps = rgba_caps(w, h);
+        if self.last_caps.as_ref() != Some(&new_caps) {
+            out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+            self.last_caps = Some(new_caps);
+        }
+        Ok(())
+    }
+
+    /// Copy the decoded frame out to system RGBA (the CPU-consumer path).
+    async fn emit_system_rgba(&mut self, frame: VideoFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let (bytes, w, h, pts_ns) = copy_out_rgba(&frame).await?;
+        frame.close();
+        self.announce_caps(w, h, out).await?;
+        let out_frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            sequence: self.emitted,
+        };
+        self.emitted += 1;
+        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+        Ok(())
+    }
+
+    /// Hand the decoded frame forward as a GPU-resident external texture. The
+    /// frame is not closed here: a VideoFrame-sourced external texture is valid
+    /// until the frame closes, so the keep-alive owner closes it on drop once
+    /// downstream has imported and used it.
+    async fn emit_external_texture(&mut self, frame: VideoFrame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let (w, h) = (frame.coded_width(), frame.coded_height());
+        let pts_ns = (frame.timestamp().max(0.0) as u64).saturating_mul(1000);
+        self.announce_caps(w, h, out).await?;
+        let domain = MemoryDomain::WebGPUExternalTexture(OwnedWebGPUExternalTexture::new(
+            w,
+            h,
+            Box::new(VideoFrameOwner::new(frame)),
+        ));
+        let out_frame = Frame {
+            domain,
+            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            sequence: self.emitted,
+        };
+        self.emitted += 1;
+        out.push(PipelinePacket::DataFrame(out_frame)).await?;
         Ok(())
     }
 }
@@ -369,3 +419,46 @@ fn fixed_or_zero(d: &Dim) -> u32 {
         _ => 0,
     }
 }
+
+/// Owns a decoded `VideoFrame` handed forward as a
+/// [`MemoryDomain::WebGPUExternalTexture`]. A downstream element downcasts the
+/// [`WebGPUKeepAlive`] (via `as_any`) to recover the frame for
+/// `importExternalTexture`; dropping this owner closes the frame and frees the
+/// decoder's output slot.
+pub struct VideoFrameOwner {
+    frame: VideoFrame,
+}
+
+impl VideoFrameOwner {
+    fn new(frame: VideoFrame) -> Self {
+        Self { frame }
+    }
+
+    /// The backing `VideoFrame`, for a consumer to import into WebGPU.
+    pub fn frame(&self) -> &VideoFrame {
+        &self.frame
+    }
+}
+
+impl Drop for VideoFrameOwner {
+    fn drop(&mut self) {
+        self.frame.close();
+    }
+}
+
+impl core::fmt::Debug for VideoFrameOwner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VideoFrameOwner").finish_non_exhaustive()
+    }
+}
+
+impl WebGPUKeepAlive for VideoFrameOwner {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+// SAFETY: wasm32-unknown-unknown is single-threaded (built without atomics), so
+// the VideoFrame never crosses a thread. Asserting Send satisfies the
+// WebGPUKeepAlive contract, matching the D3D11KeepAlive / MfDecode precedent.
+unsafe impl Send for VideoFrameOwner {}
