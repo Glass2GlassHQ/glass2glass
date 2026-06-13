@@ -6,12 +6,14 @@
 //! caps mid-stream — `RtspSrc` advertises `Dim::Any` at negotiation time
 //! because the SPS only lands once bytes flow.
 //!
-//! Bitstream format: Annex-B (00 00 01 / 00 00 00 01 start codes). AVCC
-//! length-prefixed framing (what retina emits by default) is deferred to
-//! M7 together with an in-source conversion step.
+//! Bitstream framing: both Annex-B (00 00 01 / 00 00 00 01 start codes) and
+//! AVCC (4-byte length-prefixed NALs, what retina emits by default) are
+//! accepted, detected per access unit via `annexb::nal_units_any`. The element
+//! refines caps only; it does not rewrite the bitstream between framings.
 //!
-//! Framerate parsing from the optional VUI block is also deferred to M7;
-//! emitted caps carry `Rate::Any`.
+//! Framerate is recovered from the SPS VUI `timing_info` when present
+//! (`time_scale / (2 * num_units_in_tick)`, emitted as a Q16 `Rate::Fixed`);
+//! caps carry `Rate::Any` when the VUI omits it.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -104,12 +106,12 @@ impl AsyncElement for H264Parse {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some((w, h)) = extract_sps_dims(slice.as_slice()) {
+                        if let Some(info) = extract_sps_info(slice.as_slice()) {
                             let new_caps = Caps::CompressedVideo {
                                 codec: VideoCodec::H264,
-                                width: Dim::Fixed(w),
-                                height: Dim::Fixed(h),
-                                framerate: Rate::Any,
+                                width: Dim::Fixed(info.width),
+                                height: Dim::Fixed(info.height),
+                                framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
                                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -153,10 +155,19 @@ impl PadTemplates for H264Parse {
     }
 }
 
-/// Walk Annex-B start codes inside `au`, return dimensions from the first
-/// SPS NAL (nal_unit_type == 7) we can fully parse.
-fn extract_sps_dims(au: &[u8]) -> Option<(u32, u32)> {
-    for nal in AnnexBNals::new(au) {
+/// Geometry and optional framerate recovered from an SPS.
+struct SpsInfo {
+    width: u32,
+    height: u32,
+    /// Framerate as Q16 fixed-point from the VUI `timing_info`, `None` when
+    /// the SPS carries no timing.
+    framerate: Option<u32>,
+}
+
+/// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), returning the info
+/// from the first SPS NAL (nal_unit_type == 7) we can fully parse.
+fn extract_sps_info(au: &[u8]) -> Option<SpsInfo> {
+    for nal in crate::annexb::nal_units_any(au) {
         if nal.is_empty() {
             continue;
         }
@@ -165,59 +176,11 @@ fn extract_sps_dims(au: &[u8]) -> Option<(u32, u32)> {
             continue;
         }
         let rbsp = strip_emulation_prevention(&nal[1..]);
-        if let Some(dims) = parse_sps_dimensions(&rbsp) {
-            return Some(dims);
+        if let Some(info) = parse_sps(&rbsp) {
+            return Some(info);
         }
     }
     None
-}
-
-/// Iterator over NAL unit payloads (NAL header byte + EBSP) extracted from
-/// an Annex-B byte stream. Trailing zero bytes between the last NAL and
-/// EOF are ignored.
-struct AnnexBNals<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> AnnexBNals<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    /// Position past the start code at `from`, or `None` if no start code
-    /// is found at-or-after `from`. Returns `(nal_start, code_end)` where
-    /// `code_end` is the byte index immediately after the start code.
-    fn find_start_code(&self, from: usize) -> Option<(usize, usize)> {
-        let buf = self.buf;
-        let mut i = from;
-        while i + 2 < buf.len() {
-            if buf[i] == 0 && buf[i + 1] == 0 {
-                if buf[i + 2] == 1 {
-                    return Some((i, i + 3));
-                }
-                if i + 3 < buf.len() && buf[i + 2] == 0 && buf[i + 3] == 1 {
-                    return Some((i, i + 4));
-                }
-            }
-            i += 1;
-        }
-        None
-    }
-}
-
-impl<'a> Iterator for AnnexBNals<'a> {
-    type Item = &'a [u8];
-
-    fn next(&mut self) -> Option<&'a [u8]> {
-        let (_, nal_start) = self.find_start_code(self.pos)?;
-        let nal_end = self
-            .find_start_code(nal_start)
-            .map(|(s, _)| s)
-            .unwrap_or(self.buf.len());
-        self.pos = nal_end;
-        Some(&self.buf[nal_start..nal_end])
-    }
 }
 
 /// Convert EBSP → RBSP by removing `0x03` emulation-prevention bytes that
@@ -238,10 +201,11 @@ fn strip_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Parse just enough of the SPS RBSP (post NAL-header byte) to recover
-/// the coded picture dimensions in pixels. Returns `None` on any parse
-/// failure — callers should treat dimensions as still unknown.
-fn parse_sps_dimensions(rbsp: &[u8]) -> Option<(u32, u32)> {
+/// Parse the SPS RBSP (post NAL-header byte) for the coded picture dimensions
+/// and, when the VUI carries `timing_info`, the framerate. Returns `None` on a
+/// parse failure up to the dimensions; a failure past them leaves only the
+/// framerate unknown.
+fn parse_sps(rbsp: &[u8]) -> Option<SpsInfo> {
     if rbsp.len() < 3 {
         return None;
     }
@@ -324,9 +288,70 @@ fn parse_sps_dimensions(rbsp: &[u8]) -> Option<(u32, u32)> {
     let crop_y = (crop_top + crop_bottom)
         .saturating_mul(sub_height_c.saturating_mul(2u32.saturating_sub(frame_mbs_only_flag)));
 
-    let width = (pic_width_in_mbs_minus1 + 1) * 16;
-    let height = (2 - frame_mbs_only_flag) * (pic_height_in_map_units_minus1 + 1) * 16;
-    Some((width.saturating_sub(crop_x), height.saturating_sub(crop_y)))
+    let width = ((pic_width_in_mbs_minus1 + 1) * 16).saturating_sub(crop_x);
+    let height = ((2 - frame_mbs_only_flag) * (pic_height_in_map_units_minus1 + 1) * 16)
+        .saturating_sub(crop_y);
+
+    // vui_parameters_present_flag follows frame cropping. Read it without `?`
+    // so a stream truncated right here still yields the dimensions.
+    let framerate = match br.read_bit() {
+        Some(1) => parse_vui_framerate(&mut br),
+        _ => None,
+    };
+
+    Some(SpsInfo {
+        width,
+        height,
+        framerate,
+    })
+}
+
+/// Walk the VUI parameters up to `timing_info`, returning the framerate as Q16
+/// fixed-point (`time_scale / (2 * num_units_in_tick)`). `None` if the VUI
+/// omits timing or ends early; the caller already has the dimensions.
+fn parse_vui_framerate(br: &mut BitReader) -> Option<u32> {
+    // aspect_ratio_info_present_flag
+    if br.read_bit()? == 1 {
+        let aspect_ratio_idc = br.read_bits(8)?;
+        // 255 = Extended_SAR: explicit sar_width / sar_height follow.
+        if aspect_ratio_idc == 255 {
+            br.read_bits(16)?; // sar_width
+            br.read_bits(16)?; // sar_height
+        }
+    }
+    // overscan_info_present_flag
+    if br.read_bit()? == 1 {
+        br.read_bit()?; // overscan_appropriate_flag
+    }
+    // video_signal_type_present_flag
+    if br.read_bit()? == 1 {
+        br.read_bits(3)?; // video_format
+        br.read_bit()?; // video_full_range_flag
+        if br.read_bit()? == 1 {
+            // colour_description_present_flag
+            br.read_bits(8)?; // colour_primaries
+            br.read_bits(8)?; // transfer_characteristics
+            br.read_bits(8)?; // matrix_coefficients
+        }
+    }
+    // chroma_loc_info_present_flag
+    if br.read_bit()? == 1 {
+        br.read_ue()?; // chroma_sample_loc_type_top_field
+        br.read_ue()?; // chroma_sample_loc_type_bottom_field
+    }
+    // timing_info_present_flag
+    if br.read_bit()? == 1 {
+        let num_units_in_tick = br.read_bits(32)?;
+        let time_scale = br.read_bits(32)?;
+        let _fixed_frame_rate_flag = br.read_bit()?;
+        if num_units_in_tick == 0 {
+            return None;
+        }
+        // fps = time_scale / (2 * num_units_in_tick); carry to Q16 in u64.
+        let q16 = ((time_scale as u64) << 16) / (2 * num_units_in_tick as u64);
+        return u32::try_from(q16).ok();
+    }
+    None
 }
 
 /// MSB-first bit reader over a byte slice. All readers return `None` on
@@ -351,6 +376,15 @@ impl<'a> BitReader<'a> {
         let bit = u32::from((self.buf[byte_idx] >> bit_off) & 1);
         self.bit_pos += 1;
         Some(bit)
+    }
+
+    /// Read `n` (<= 32) bits MSB-first into a `u32`.
+    fn read_bits(&mut self, n: u32) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..n {
+            value = (value << 1) | self.read_bit()?;
+        }
+        Some(value)
     }
 
     /// Unsigned exp-Golomb. Reads leading zeros to determine codeword
@@ -438,6 +472,69 @@ mod tests {
         out
     }
 
+    /// Build an Annex-B SPS for `width` x `height` carrying a VUI `timing_info`
+    /// block. Emulation-prevention bytes are inserted (as a real encoder would
+    /// for the 32-bit fields' zero runs) so the parser's de-emulation
+    /// round-trips them exactly.
+    fn build_annexb_sps_with_timing(
+        width: u32,
+        height: u32,
+        num_units_in_tick: u32,
+        time_scale: u32,
+    ) -> Vec<u8> {
+        assert!(width % 16 == 0 && height % 16 == 0);
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(width / 16 - 1); // pic_width_in_mbs_minus1
+        w.write_ue(height / 16 - 1); // pic_height_in_map_units_minus1
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(0); // direct_8x8_inference_flag
+        w.write_bit(0); // frame_cropping_flag
+        w.write_bit(1); // vui_parameters_present_flag
+        w.write_bit(0); // aspect_ratio_info_present_flag
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(0); // video_signal_type_present_flag
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(1); // timing_info_present_flag
+        w.write_bits(num_units_in_tick, 32);
+        w.write_bits(time_scale, 32);
+        w.write_bit(0); // fixed_frame_rate_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let rbsp = w.into_bytes();
+
+        // NAL payload after the 0x67 header: profile/constraint/level + RBSP,
+        // emulation-prevented like an encoder's output.
+        let mut payload = vec![66u8, 0, 30];
+        payload.extend_from_slice(&rbsp);
+        let payload = add_emulation_prevention(&payload);
+
+        let mut out = vec![0u8, 0, 0, 1, 0x67];
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    /// Insert `0x03` after each `00 00` run preceding a byte <= 0x03, the
+    /// inverse of `strip_emulation_prevention`.
+    fn add_emulation_prevention(rbsp: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(rbsp.len());
+        let mut zeros = 0usize;
+        for &b in rbsp {
+            if zeros >= 2 && b <= 0x03 {
+                out.push(0x03);
+                zeros = 0;
+            }
+            out.push(b);
+            zeros = if b == 0 { zeros + 1 } else { 0 };
+        }
+        out
+    }
+
     #[derive(Default)]
     struct BitWriter {
         buf: Vec<u8>,
@@ -484,8 +581,9 @@ mod tests {
     #[test]
     fn round_trips_a_1280x720_sps() {
         let stream = build_test_annexb_sps(1280, 720);
-        let dims = extract_sps_dims(&stream).expect("SPS must parse");
-        assert_eq!(dims, (1280, 720));
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!((info.width, info.height), (1280, 720));
+        assert_eq!(info.framerate, None, "no VUI timing in the baseline fixture");
     }
 
     #[test]
@@ -493,20 +591,41 @@ mod tests {
         let stream = build_test_annexb_sps(1920, 1088);
         // height 1088 because 1080 is not a multiple of 16; the test
         // builder asserts on alignment. Real 1080p streams use cropping.
-        let dims = extract_sps_dims(&stream).expect("SPS must parse");
-        assert_eq!(dims, (1920, 1088));
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!((info.width, info.height), (1920, 1088));
+    }
+
+    #[test]
+    fn parses_an_avcc_framed_sps() {
+        // Re-frame the same SPS NAL as AVCC (4-byte length prefix instead of
+        // the Annex-B start code) and confirm the dimensions still resolve.
+        let annexb = build_test_annexb_sps(1280, 720);
+        let nal = &annexb[4..]; // drop the 00 00 00 01 start code
+        let mut avcc = (nal.len() as u32).to_be_bytes().to_vec();
+        avcc.extend_from_slice(nal);
+        let info = extract_sps_info(&avcc).expect("AVCC SPS must parse");
+        assert_eq!((info.width, info.height), (1280, 720));
+    }
+
+    #[test]
+    fn recovers_framerate_from_vui_timing() {
+        // num_units_in_tick = 1, time_scale = 60 -> 30 fps.
+        let stream = build_annexb_sps_with_timing(1280, 720, 1, 60);
+        let info = extract_sps_info(&stream).expect("SPS with VUI must parse");
+        assert_eq!((info.width, info.height), (1280, 720));
+        assert_eq!(info.framerate, Some(30 << 16), "30 fps in Q16");
     }
 
     #[test]
     fn ignores_non_sps_nals() {
         // A stream containing only a slice NAL (type 5 = IDR) returns None.
         let stream = [0u8, 0, 0, 1, 0x65, 0xAA, 0xBB, 0xCC];
-        assert_eq!(extract_sps_dims(&stream), None);
+        assert!(extract_sps_info(&stream).is_none());
     }
 
     #[test]
     fn returns_none_on_empty_input() {
-        assert_eq!(extract_sps_dims(&[]), None);
+        assert!(extract_sps_info(&[]).is_none());
     }
 
     #[test]
@@ -528,6 +647,42 @@ mod tests {
         assert_eq!(r.read_ue(), Some(1));
         assert_eq!(r.read_ue(), Some(2));
         assert_eq!(r.read_ue(), Some(3));
+    }
+
+    #[test]
+    fn parse_vui_framerate_reads_timing_info() {
+        // num_units_in_tick = 1001, time_scale = 60000 -> 29.97 fps, exercising
+        // the Q16 conversion on a non-integer rate.
+        let mut w = BitWriter::default();
+        w.write_bit(0); // aspect_ratio_info_present_flag
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(0); // video_signal_type_present_flag
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(1); // timing_info_present_flag
+        w.write_bits(1001, 32);
+        w.write_bits(60000, 32);
+        w.write_bit(0); // fixed_frame_rate_flag
+        w.align_to_byte();
+        let bytes = w.into_bytes();
+        let mut br = BitReader::new(&bytes);
+        let fps = parse_vui_framerate(&mut br).expect("timing info present");
+        let expected = ((60000u64 << 16) / (2 * 1001)) as u32;
+        assert_eq!(fps, expected);
+        assert_eq!(fps >> 16, 29, "~29.97 fps");
+    }
+
+    #[test]
+    fn parse_vui_framerate_absent_timing_is_none() {
+        let mut w = BitWriter::default();
+        w.write_bit(0); // aspect_ratio_info_present_flag
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(0); // video_signal_type_present_flag
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(0); // timing_info_present_flag = 0
+        w.align_to_byte();
+        let bytes = w.into_bytes();
+        let mut br = BitReader::new(&bytes);
+        assert_eq!(parse_vui_framerate(&mut br), None);
     }
 
     // -- Element-level tests (drive H264Parse::process directly) -----------
@@ -594,6 +749,32 @@ mod tests {
         }
         assert!(matches!(sink.packets[1], PipelinePacket::DataFrame(_)));
         assert_eq!(parse.caps_changes_emitted(), 1);
+    }
+
+    #[tokio::test]
+    async fn emits_caps_from_an_avcc_access_unit() {
+        let mut parse = H264Parse::new();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        // Re-frame the SPS NAL as AVCC (4-byte length prefix).
+        let annexb = build_test_annexb_sps(1280, 720);
+        let nal = &annexb[4..];
+        let mut avcc = (nal.len() as u32).to_be_bytes().to_vec();
+        avcc.extend_from_slice(nal);
+
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(0, avcc)), &mut sink)
+            .await
+            .unwrap();
+
+        match &sink.packets[0] {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo { width, height, .. }) => {
+                assert_eq!(*width, Dim::Fixed(1280));
+                assert_eq!(*height, Dim::Fixed(720));
+            }
+            other => panic!("expected CapsChanged from the AVCC AU, got {other:?}"),
+        }
     }
 
     #[tokio::test]

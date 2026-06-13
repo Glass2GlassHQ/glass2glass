@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M52: `H264Parse` AVCC framing + VUI framerate
+
+- Closes the AVCC + VUI items the `h264parse` module header had carried as
+  "deferred to M7" since M6. `H264Parse` now accepts both Annex-B and AVCC
+  (4-byte length-prefixed) access units, detected per buffer: `retina` emits
+  AVCC by default, so the parser refined caps only when `RtspSrc` forced
+  `FrameFormat::SIMPLE` before. The shared `annexb` module (M46) grows
+  `is_annex_b`, an `AvccNals` length-prefixed iterator, and `nal_units_any`
+  (picks framing, yields identical NALs); `H264Parse` routes its SPS scan
+  through it and drops its own duplicate Annex-B iterator.
+- The SPS parser now continues past frame cropping into the VUI and recovers the
+  framerate from `timing_info` (`time_scale / (2 * num_units_in_tick)`, emitted
+  as a Q16 `Rate::Fixed`), filling the `Rate::Any` placeholder the caps carried
+  before. A truncated VUI leaves only the framerate unknown, never the
+  dimensions; SPSes without VUI timing keep `Rate::Any`. `BitReader` gains a
+  fixed-width `read_bits`.
+- Tests: AVCC iteration matches Annex-B for the same NALs and stops on a
+  truncated length (`annexb`); `H264Parse` parses an AVCC-framed SPS, recovers
+  30 fps from a VUI fixture (with emulation-prevention bytes inserted so the
+  32-bit timing fields round-trip), the direct VUI reader handles 29.97 fps Q16
+  rounding and absent timing, and a process-level test drives an AVCC access
+  unit to a refined `CapsChanged`. VERIFIED on the dev host: `cargo test -p
+  g2g-plugins --lib` green (54, incl. the new h264parse/annexb cases); `cargo
+  check -p g2g-plugins --target thumbv7em-none-eabihf` green (the parser stays
+  no_std); native `cargo clippy --workspace --all-targets` + `cargo test
+  --workspace` green.
+
 ### M51: pure-Rust Burn inference backend (`BurnInference`, `burn` feature)
 
 - Stands up the §5.2 Burn backend, previously a no-op `burn` feature alias:
