@@ -274,3 +274,54 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::provide_clock(self)
     }
 }
+
+/// Forwarding impl so a borrowed `&mut dyn DynAsyncElement` can be boxed into a
+/// `Box<dyn DynAsyncElement + 'a>` graph node (the convenience wrappers build a
+/// borrowing `Graph` over their `&mut` element references). Disjoint from the
+/// `AsyncElement` blanket above: a `&mut dyn DynAsyncElement` does not implement
+/// `AsyncElement`.
+#[cfg(feature = "std")]
+impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        (**self).intercept_caps(upstream_caps)
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        (**self).configure_pipeline(absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        (**self).process(packet, out)
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        (**self).caps_constraint_as_sink()
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        (**self).caps_constraint_as_transform()
+    }
+
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        (**self).propose_allocation(caps)
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        (**self).configure_allocation(params)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        (**self).latency()
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        (**self).provide_clock()
+    }
+}

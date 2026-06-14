@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M72: lifetime-generic graph runner (borrowing graphs)
+
+- `run_graph`'s payload is now `GraphNodeRef<'a>` (boxes hold `+ 'a` elements);
+  `GraphNode` is a `'static` alias, so existing `Graph<GraphNode>` callers are
+  unchanged. New `source_ref` / `element_ref` / `muxer_ref` constructors box a
+  borrowed `&'a mut dyn Dyn{SourceLoop,AsyncElement,MultiInputElement}` via new
+  forwarding impls (`impl Dyn… for &mut dyn Dyn…`), so a graph can borrow its
+  elements instead of owning them. `run_graph` is now `run_graph<'a>` with arms
+  `BoxFuture<'a>`. This is the D5 prerequisite: the convenience wrappers, which
+  take `&mut` element references, can build a borrowing `Graph` and delegate to
+  `run_graph` while the caller keeps its elements.
+- `DynSourceLoop` gained the stat mirrors in M71; this adds the borrowed-element
+  forwarding impls for all three dyn element traits.
+- Test: `m72_dag_borrowed.rs` builds a `Graph<GraphNodeRef>` from `&mut` borrows
+  (`src -> flip -> sink`), runs it, and reads the borrowed `FakeSink` afterward,
+  proving the caller retains ownership. VERIFIED: `cargo test --workspace` green;
+  `cargo clippy -p g2g-core --features "std runtime" --all-targets` clean; `cargo
+  check -p g2g-core --target thumbv7em-none-eabihf` green.
+
 ### M71: DAG runner - M12 stat folds + muxer MX-1/MX-2 in `run_graph`
 
 - `run_graph` now reports the same M12 stats the linear runners do, so the

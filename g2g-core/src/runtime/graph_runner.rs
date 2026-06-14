@@ -57,35 +57,59 @@ use crate::runtime::solver::{
 /// transforms/sinks, and muxers implement different traits (a source has no
 /// input pad, a muxer has many), so the payload is an enum the runner matches
 /// on per node kind. A tee carries no element (`Graph::add_tee` takes none).
-pub enum GraphNode {
-    Source(Box<dyn DynSourceLoop>),
-    Element(Box<dyn DynAsyncElement>),
-    Muxer(Box<dyn DynMultiInputElement>),
+///
+/// The `'a` lifetime is the lifetime of the boxed elements. Owned `'static`
+/// elements (the common case, [`GraphNode`]) use `source` / `element` / `muxer`;
+/// the convenience wrappers build a *borrowing* graph over their `&mut` element
+/// references with `source_ref` / `element_ref` / `muxer_ref`, so they can call
+/// `run_graph` without taking ownership and the caller keeps its elements.
+pub enum GraphNodeRef<'a> {
+    Source(Box<dyn DynSourceLoop + 'a>),
+    Element(Box<dyn DynAsyncElement + 'a>),
+    Muxer(Box<dyn DynMultiInputElement + 'a>),
 }
 
-impl GraphNode {
-    /// Box a source (`add_source`).
+/// The owning, `'static` graph payload: what most callers build directly.
+pub type GraphNode = GraphNodeRef<'static>;
+
+impl<'a> GraphNodeRef<'a> {
+    /// Box an owned source (`add_source`).
     pub fn source<S: SourceLoop + 'static>(source: S) -> Self {
-        GraphNode::Source(Box::new(source))
+        GraphNodeRef::Source(Box::new(source))
     }
 
-    /// Box a transform or sink (`add_transform` / `add_sink`).
+    /// Box an owned transform or sink (`add_transform` / `add_sink`).
     pub fn element<E: AsyncElement + 'static>(element: E) -> Self {
-        GraphNode::Element(Box::new(element))
+        GraphNodeRef::Element(Box::new(element))
     }
 
-    /// Box a fan-in muxer (`add_muxer`).
+    /// Box an owned fan-in muxer (`add_muxer`).
     pub fn muxer<M: MultiInputElement + 'static>(muxer: M) -> Self {
-        GraphNode::Muxer(Box::new(muxer))
+        GraphNodeRef::Muxer(Box::new(muxer))
+    }
+
+    /// Box a borrowed source, for a borrowing graph (the convenience wrappers).
+    pub fn source_ref(source: &'a mut (dyn DynSourceLoop + 'a)) -> Self {
+        GraphNodeRef::Source(Box::new(source))
+    }
+
+    /// Box a borrowed transform or sink.
+    pub fn element_ref(element: &'a mut (dyn DynAsyncElement + 'a)) -> Self {
+        GraphNodeRef::Element(Box::new(element))
+    }
+
+    /// Box a borrowed fan-in muxer.
+    pub fn muxer_ref(muxer: &'a mut (dyn DynMultiInputElement + 'a)) -> Self {
+        GraphNodeRef::Muxer(Box::new(muxer))
     }
 }
 
-impl core::fmt::Debug for GraphNode {
+impl core::fmt::Debug for GraphNodeRef<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            GraphNode::Source(_) => f.write_str("GraphNode::Source(..)"),
-            GraphNode::Element(_) => f.write_str("GraphNode::Element(..)"),
-            GraphNode::Muxer(_) => f.write_str("GraphNode::Muxer(..)"),
+            GraphNodeRef::Source(_) => f.write_str("GraphNodeRef::Source(..)"),
+            GraphNodeRef::Element(_) => f.write_str("GraphNodeRef::Element(..)"),
+            GraphNodeRef::Muxer(_) => f.write_str("GraphNodeRef::Muxer(..)"),
         }
     }
 }
@@ -163,12 +187,13 @@ fn nearest_upstream_arm<E>(vg: &ValidatedGraph<E>, edge_id: usize) -> Option<Nod
 /// one arm per node over per-edge channels. `link_capacity` accepts a
 /// [`LatencyProfile`](crate::runtime::LatencyProfile) or a `usize` depth.
 ///
-/// Allocation, clock-election, and latency aggregation over a DAG are reported
-/// as neutral values for now (like the fan-out / fan-in runners); the DAG-wide
-/// folds are a follow-up. A non-`System` frame in a tee or a negotiation
-/// conflict fails loud.
-pub async fn run_graph<Clk: PipelineClock>(
-    graph: Graph<GraphNode>,
+/// Reports the M12 stats (latency / clock / allocation) folded over the graph,
+/// the same as the linear runners. The graph payload may own its elements
+/// ([`GraphNode`]) or borrow them ([`GraphNodeRef<'a>`], what the convenience
+/// wrappers build). A non-`System` frame in a tee or a negotiation conflict
+/// fails loud.
+pub async fn run_graph<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
@@ -185,7 +210,7 @@ pub async fn run_graph<Clk: PipelineClock>(
     let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
     for &node in &topo {
         if matches!(vg.kind(node), NodeKind::Source) {
-            let GraphNode::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? else {
+            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? else {
                 return Err(G2gError::CapsMismatch);
             };
             source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
@@ -216,7 +241,7 @@ pub async fn run_graph<Clk: PipelineClock>(
                 // A tee is structural; the solver ignores its slot.
                 NodeKind::Tee(_) => NodeConstraint::Element(CapsConstraint::IdentityAny),
                 NodeKind::Muxer(_) => {
-                    let GraphNode::Muxer(elem) =
+                    let GraphNodeRef::Muxer(elem) =
                         vg.element(node).ok_or(G2gError::CapsMismatch)?
                     else {
                         return Err(G2gError::CapsMismatch);
@@ -244,7 +269,7 @@ pub async fn run_graph<Clk: PipelineClock>(
         match vg.kind(node) {
             NodeKind::Source => {
                 let caps = solution[vg.out_edges(node)[0]].clone();
-                let GraphNode::Source(src) =
+                let GraphNodeRef::Source(src) =
                     vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                 else {
                     return Err(G2gError::CapsMismatch);
@@ -255,7 +280,7 @@ pub async fn run_graph<Clk: PipelineClock>(
             }
             NodeKind::Transform | NodeKind::Sink => {
                 let caps = solution[vg.in_edges(node)[0]].clone();
-                let GraphNode::Element(elem) =
+                let GraphNodeRef::Element(elem) =
                     vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                 else {
                     return Err(G2gError::CapsMismatch);
@@ -271,7 +296,7 @@ pub async fn run_graph<Clk: PipelineClock>(
                 for &eid in &in_edges {
                     let pad = vg.edge(eid).dst.index as usize;
                     let caps = solution[eid].clone();
-                    let GraphNode::Muxer(elem) =
+                    let GraphNodeRef::Muxer(elem) =
                         vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                     else {
                         return Err(G2gError::CapsMismatch);
@@ -325,7 +350,7 @@ pub async fn run_graph<Clk: PipelineClock>(
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
                 if let Some(p) = edge_proposal[out_e] {
-                    if let GraphNode::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? {
+                    if let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? {
                         src.configure_allocation(&p);
                     }
                     allocation = Some(p);
@@ -398,7 +423,7 @@ pub async fn run_graph<Clk: PipelineClock>(
     let coord_handle = GraphCoordHandle { tx: coord_tx };
     let coordinator = GraphCoordinator { rx: coord_rx, arm_ctrl, upstream_arms };
 
-    let mut arms: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
+    let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
 
     for &node in &topo {
@@ -414,7 +439,7 @@ pub async fn run_graph<Clk: PipelineClock>(
         // A muxer contributes N+1 arms (one forwarder per input pad plus the
         // muxer arm), so it is built before the single-arm match below.
         if let NodeKind::Muxer(_) = kind {
-            let Some(GraphNode::Muxer(mux)) = element else {
+            let Some(GraphNodeRef::Muxer(mux)) = element else {
                 return Err(G2gError::CapsMismatch);
             };
             let out_tx = out_txs.pop().expect("muxer output edge");
@@ -426,29 +451,29 @@ pub async fn run_graph<Clk: PipelineClock>(
             // tagged channel; only they keep it open (the runner drops its end).
             let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
-                let fwd: BoxFuture<'static, Result<u64, G2gError>> =
+                let fwd: BoxFuture<'a, Result<u64, G2gError>> =
                     Box::pin(muxer_forwarder(in_rx, pad, tagged_tx.clone()));
                 arms.push(fwd);
                 arm_kinds.push(kind);
             }
             drop(tagged_tx);
-            let arm: BoxFuture<'static, Result<u64, G2gError>> =
+            let arm: BoxFuture<'a, Result<u64, G2gError>> =
                 Box::pin(muxer_arm(mux, tagged_rx, out_tx, input_count, mux_out_caps));
             arms.push(arm);
             arm_kinds.push(kind);
             continue;
         }
 
-        let arm: BoxFuture<'static, Result<u64, G2gError>> = match kind {
+        let arm: BoxFuture<'a, Result<u64, G2gError>> = match kind {
             NodeKind::Source => {
-                let Some(GraphNode::Source(src)) = element else {
+                let Some(GraphNodeRef::Source(src)) = element else {
                     return Err(G2gError::CapsMismatch);
                 };
                 let out_tx = out_txs.pop().expect("source output edge");
                 Box::pin(source_arm(src, out_tx))
             }
             NodeKind::Transform => {
-                let Some(GraphNode::Element(elem)) = element else {
+                let Some(GraphNodeRef::Element(elem)) = element else {
                     return Err(G2gError::CapsMismatch);
                 };
                 let in_rx = in_rxs.pop().expect("transform input edge");
@@ -469,7 +494,7 @@ pub async fn run_graph<Clk: PipelineClock>(
                 ))
             }
             NodeKind::Sink => {
-                let Some(GraphNode::Element(elem)) = element else {
+                let Some(GraphNodeRef::Element(elem)) = element else {
                     return Err(G2gError::CapsMismatch);
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
@@ -521,51 +546,54 @@ pub async fn run_graph<Clk: PipelineClock>(
 
 /// View a node's payload as a transform/sink element. `None` for a source or a
 /// muxer (whose constraints the runner builds from their own trait methods).
-fn element_ref(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<&dyn DynAsyncElement> {
+fn element_ref<'g, 'a>(
+    vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+) -> Option<&'g (dyn DynAsyncElement + 'a)> {
     match vg.element(node)? {
-        GraphNode::Element(elem) => Some(&**elem),
-        GraphNode::Source(_) | GraphNode::Muxer(_) => None,
+        GraphNodeRef::Element(elem) => Some(&**elem),
+        GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) => None,
     }
 }
 
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps
 /// for a transform, its input-link caps for a sink). `None` for other kinds.
 fn element_propose(
-    vg: &ValidatedGraph<GraphNode>,
+    vg: &ValidatedGraph<GraphNodeRef<'_>>,
     node: NodeId,
     caps: &Caps,
 ) -> Option<AllocationParams> {
     match vg.element(node) {
-        Some(GraphNode::Element(elem)) => elem.propose_allocation(caps),
+        Some(GraphNodeRef::Element(elem)) => elem.propose_allocation(caps),
         _ => None,
     }
 }
 
 /// Apply a downstream-derived allocation proposal to a transform's own pool.
 fn element_configure_alloc(
-    vg: &mut ValidatedGraph<GraphNode>,
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
     node: NodeId,
     params: &AllocationParams,
 ) {
-    if let Some(GraphNode::Element(elem)) = vg.element_mut(node) {
+    if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
         elem.configure_allocation(params);
     }
 }
 
 /// A node's latency contribution. `None` for structural (tee) and muxer nodes.
-fn element_latency(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<LatencyReport> {
+fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<LatencyReport> {
     match vg.element(node) {
-        Some(GraphNode::Source(src)) => Some(src.latency()),
-        Some(GraphNode::Element(elem)) => Some(elem.latency()),
+        Some(GraphNodeRef::Source(src)) => Some(src.latency()),
+        Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         _ => None,
     }
 }
 
 /// A node's offered clock for the pipeline clock election.
-fn element_clock(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<ClockCandidate> {
+fn element_clock(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<ClockCandidate> {
     match vg.element(node) {
-        Some(GraphNode::Source(src)) => src.provide_clock(),
-        Some(GraphNode::Element(elem)) => elem.provide_clock(),
+        Some(GraphNodeRef::Source(src)) => src.provide_clock(),
+        Some(GraphNodeRef::Element(elem)) => elem.provide_clock(),
         _ => None,
     }
 }
@@ -604,8 +632,8 @@ fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError
     links.last().cloned().ok_or(G2gError::CapsMismatch)
 }
 
-async fn source_arm(
-    mut src: Box<dyn DynSourceLoop>,
+async fn source_arm<'a>(
+    mut src: Box<dyn DynSourceLoop + 'a>,
     out_tx: LinkSender,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
@@ -619,8 +647,8 @@ async fn source_arm(
 /// `downstream_feasible` snapshot (Caps-α), failing loud via a reverse
 /// reconfigure if downstream positively rejects every output it can produce.
 #[allow(clippy::too_many_arguments)]
-async fn transform_arm(
-    mut elem: Box<dyn DynAsyncElement>,
+async fn transform_arm<'a>(
+    mut elem: Box<dyn DynAsyncElement + 'a>,
     in_rx: LinkReceiver,
     out_tx: LinkSender,
     arm_rx: Receiver<ArmDirective>,
@@ -711,8 +739,8 @@ async fn transform_arm(
 /// its declared constraint; on accept it re-derives its own pool and reports the
 /// proposal so the β cascade walks one hop upstream. A re-solve failure surfaces
 /// loud as a reverse reconfigure into the boundary that emitted the change.
-async fn sink_arm(
-    mut elem: Box<dyn DynAsyncElement>,
+async fn sink_arm<'a>(
+    mut elem: Box<dyn DynAsyncElement + 'a>,
     in_rx: LinkReceiver,
     coord: GraphCoordHandle,
     node: NodeId,
@@ -818,8 +846,8 @@ async fn muxer_forwarder(
 /// `process(pad, ..)`, and emit a single `Eos` once every input has ended. The
 /// per-input `Eos` is delivered to the element first (so a stateful muxer can
 /// flush) but the element must not forward it; the runner owns the merged one.
-async fn muxer_arm(
-    mut mux: Box<dyn DynMultiInputElement>,
+async fn muxer_arm<'a>(
+    mut mux: Box<dyn DynMultiInputElement + 'a>,
     tagged_rx: Receiver<(usize, PipelinePacket)>,
     out_tx: LinkSender,
     input_count: usize,

@@ -45,4 +45,4 @@ pub use fanin::{
 };
 
 #[cfg(feature = "std")]
-pub use graph_runner::{run_graph, GraphNode};
+pub use graph_runner::{run_graph, GraphNode, GraphNodeRef};

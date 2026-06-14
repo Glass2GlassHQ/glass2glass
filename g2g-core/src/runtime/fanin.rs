@@ -111,6 +111,43 @@ impl<T: SourceLoop> DynSourceLoop for T {
     }
 }
 
+/// Forwarding impl so a borrowed `&mut dyn DynSourceLoop` can be boxed into a
+/// `Box<dyn DynSourceLoop + 'a>` graph node (the muxer/fan-out wrappers build a
+/// borrowing `Graph` over their `&mut` source references). Disjoint from the
+/// `SourceLoop` blanket above: a `&mut dyn DynSourceLoop` is not a `SourceLoop`.
+impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
+    fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>> {
+        (**self).intercept_caps()
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        (**self).configure_pipeline(absolute_caps)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> BoxFuture<'a, Result<u64, G2gError>> {
+        (**self).run(out)
+    }
+
+    fn reconfigure(&mut self, request: Reconfigure) -> Result<Caps, G2gError> {
+        (**self).reconfigure(request)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        (**self).latency()
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        (**self).provide_clock()
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        (**self).configure_allocation(params)
+    }
+}
+
 /// Dyn-safe mirror of [`MultiInputElement`] for a fan-in muxer node in the DAG
 /// runner (`run_graph`). Boxes `process`'s future and forwards the
 /// `Self: Sized` constraint methods, the same shape as [`DynSourceLoop`] /
@@ -162,6 +199,41 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
         out: &'a mut dyn OutputSink,
     ) -> BoxFuture<'a, Result<(), G2gError>> {
         Box::pin(MultiInputElement::process(self, input, packet, out))
+    }
+}
+
+/// Forwarding impl so a borrowed `&mut dyn DynMultiInputElement` can be boxed
+/// into a `Box<dyn DynMultiInputElement + 'a>` graph node (the muxer wrapper
+/// builds a borrowing `Graph` over its `&mut` muxer reference). Disjoint from
+/// the `MultiInputElement` blanket above.
+impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
+    fn input_count(&self) -> usize {
+        (**self).input_count()
+    }
+
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        (**self).caps_constraint_as_input(input)
+    }
+
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        (**self).caps_constraint_for_output()
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        (**self).configure_pipeline(input, absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        (**self).process(input, packet, out)
     }
 }
 
