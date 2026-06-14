@@ -2636,6 +2636,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "g2g-core",
+ "g2g-plugins",
  "ort",
  "tokio",
  "wgpu",

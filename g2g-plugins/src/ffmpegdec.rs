@@ -624,21 +624,34 @@ impl AsyncElement for FfmpegH264Dec {
                     )?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // M16 workaround #3 Phase A: validate the format
-                    // (loud-reject an incompatible mid-stream switch like
-                    // H.264 -> VP9, which previously was silently dropped)
-                    // and record `c` as the current input caps. The
-                    // ordering invariant (§3) is preserved: we still emit
-                    // our own output `CapsChanged` at the decode boundary
-                    // from decoded-frame geometry, not eagerly here.
+                    // Two callers:
+                    //   1) An H.264 input CapsChanged from upstream: record
+                    //      it (M16 workaround #3 Phase A validates the
+                    //      format; ordering invariant §3 lets us emit our
+                    //      own output `CapsChanged` later from decoded-frame
+                    //      geometry, not eagerly here).
+                    //   2) The runner's transform arm pre-fixed forward
+                    //      output caps for a strict-NV12 downstream sink
+                    //      (runner.rs:1281). Those carry our output
+                    //      `RawVideoFormat` and must be forwarded so the
+                    //      sink sees its expected caps before the first
+                    //      decoded frame; suppress re-emission from the
+                    //      decode loop by recording `last_caps`.
                     match &c {
                         Caps::CompressedVideo {
                             codec: VideoCodec::H264,
                             ..
-                        } => {}
+                        } => {
+                            self.input_caps = Some(c);
+                        }
+                        Caps::RawVideo { format, .. }
+                            if *format == self.output_format.raw_format() =>
+                        {
+                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.last_caps = Some(c);
+                        }
                         _ => return Err(G2gError::CapsMismatch),
                     }
-                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(d) = self.decoder.as_mut() {
@@ -1236,5 +1249,112 @@ mod tests {
         assert_eq!(recorded.domain, MemoryDomainKind::Cuda);
         assert_eq!(recorded.min_buffers, 3);
         assert_eq!(recorded.align, 256);
+    }
+
+    // Minimal recording `OutputSink` for direct `process` probes. Push
+    // results are collected into a `RefCell<Vec<_>>` we inspect after.
+    struct RecSink<'a>(&'a core::cell::RefCell<Vec<PipelinePacket>>);
+    impl<'a> OutputSink for RecSink<'a> {
+        fn push<'b>(
+            &'b mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'b>> {
+            let log = self.0;
+            Box::pin(async move {
+                log.borrow_mut().push(packet);
+                Ok(g2g_core::PushOutcome::Accepted)
+            })
+        }
+    }
+
+    fn h264_caps(w: u32, h: u32) -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        }
+    }
+
+    /// Regression: when a strict-NV12 downstream sink (e.g. `WaylandSink`)
+    /// declares `Accepts(NV12, Any, ..)`, the solver pre-fixes the
+    /// transform's forward output caps, and the runner's transform arm
+    /// (runner.rs `run_source_transform_sink_inner`, the
+    /// `Some(PipelinePacket::CapsChanged(new_caps))` branch) pushes
+    /// `CapsChanged(forward_caps)` through `transform.process`. The
+    /// decoder used to reject anything that wasn't H.264, killing the
+    /// transform arm and surfacing as `G2gError::Shutdown` to the source
+    /// (it caught the wayland_smoke harness). The decoder must instead
+    /// forward such a packet downstream so the sink sees its expected
+    /// caps before the first decoded frame.
+    #[tokio::test]
+    async fn process_caps_changed_with_output_format_forwards_to_downstream() {
+        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        dec.configure_pipeline(&h264_caps(1280, 720))
+            .expect("configure H.264 input");
+
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let log = core::cell::RefCell::new(Vec::new());
+        let mut rec = RecSink(&log);
+        dec.process(PipelinePacket::CapsChanged(nv12.clone()), &mut rec)
+            .await
+            .expect("decoder must accept and forward its own output-format CapsChanged");
+
+        let recorded = log.borrow();
+        assert_eq!(recorded.len(), 1, "exactly one packet forwarded");
+        match &recorded[0] {
+            PipelinePacket::CapsChanged(c) => assert_eq!(c, &nv12),
+            other => panic!("expected CapsChanged, got {other:?}"),
+        }
+    }
+
+    /// H.264 input caps are still accepted but NOT forwarded (the decoder
+    /// emits its own output `CapsChanged` from decoded-frame geometry later;
+    /// pinning this stops a future "forward everything" refactor from
+    /// breaking the ordering invariant §3).
+    #[tokio::test]
+    async fn process_caps_changed_with_h264_input_records_but_does_not_forward() {
+        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        dec.configure_pipeline(&h264_caps(640, 480))
+            .expect("configure H.264 input");
+
+        let log = core::cell::RefCell::new(Vec::new());
+        let mut rec = RecSink(&log);
+        dec.process(PipelinePacket::CapsChanged(h264_caps(640, 480)), &mut rec)
+            .await
+            .expect("H.264 input CapsChanged must be accepted");
+
+        assert!(log.borrow().is_empty(), "H.264 input caps must not be forwarded");
+        assert!(dec.input_caps.is_some(), "input caps must be recorded");
+    }
+
+    /// Inverse: a raw format that does not match the decoder's configured
+    /// output must still fail loud. The forward-caps acceptance is narrow:
+    /// only the exact `OutputFormat` the decoder emits. Stops a regression
+    /// where the decoder silently accepts any RawVideo caps.
+    #[tokio::test]
+    async fn process_caps_changed_with_wrong_raw_format_rejects() {
+        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        dec.configure_pipeline(&h264_caps(640, 480))
+            .expect("configure H.264 input");
+
+        let i420 = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        let log = core::cell::RefCell::new(Vec::new());
+        let mut rec = RecSink(&log);
+        let err = dec
+            .process(PipelinePacket::CapsChanged(i420), &mut rec)
+            .await;
+        assert_eq!(err, Err(G2gError::CapsMismatch));
+        assert!(log.borrow().is_empty(), "rejected caps must not be forwarded");
     }
 }
