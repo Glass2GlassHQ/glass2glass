@@ -391,7 +391,11 @@ the negotiation. We have `H264Parse`; everything else is missing.
   `H264Parse`. Owed: framerate from the VUI `timing_info` (past the PCM /
   ref-pic-set loops, deferred until a real-stream reference is available), and
   validation against a real H.265 elementary stream.
-- **`AacParse`.** 1 session. ADTS / LATM headers, sample-rate recovery.
+- **`AacParse`.** DONE (M75), ADTS. Scans each access unit for an ADTS header,
+  recovers channel count + sample rate, and refines caps mid-stream, the audio
+  sibling of `H264Parse` / `H265Parse`. Owed: LATM / LOAS framing (MPEG-TS /
+  broadcast), AudioSpecificConfig synthesis for a downstream decoder (needs the
+  metadata side channel), and validation against a real ADTS stream.
 - **`Vp8Parse` / `Vp9Parse` / `Av1Parse` / `OpusParse`.** 1–2 sessions each,
   alongside the corresponding codec.
 
@@ -444,7 +448,7 @@ presentation. Similar 5–8 session shape to macOS.
 | `v4l2src` / `pipewiresrc` / `mfvideosrc` | 2 each | live camera on Linux / Windows |
 | `UdpSrc` + RTP depay | 2 | raw RTP ingest |
 | `HttpSrc` | 2 | prereq for HLS / DASH / random URLs |
-| `H265Parse` + `AacParse` | 2 + 1 | restream codecs we already decode |
+| `H265Parse` + `AacParse` | DONE (M68 + M75) | restream codecs we already decode |
 | VP8 / VP9 / AV1 / Opus codecs | 3 + 3 + 3 + 2 | WebRTC + modern web |
 | MJPEG decode | 1 | low-end RTSP cameras |
 | Linux audio sinks | 1 each | host audio output |

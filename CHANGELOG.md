@@ -5,6 +5,41 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M75: `AacParse` ADTS header parser
+
+- The audio sibling of `H264Parse` / `H265Parse`: `AacParse` scans each access
+  unit for an ADTS header (12-bit `0xFFF` syncword), recovers the channel count
+  (from `channel_configuration`) and sample rate (from `sampling_frequency_index`),
+  and emits a refining `CapsChanged` before forwarding the frame, so a raw ADTS
+  AAC elementary stream can be restreamed or muxed with concrete channel/rate
+  caps. We already decode AAC (`MfAacDecode`, M36); this closes the parse half.
+  Pure CPU `no_std` baseline (no feature gate), native + wasm32.
+- `Caps::Audio` has no open (`Any`) field, so the negotiated constraint is
+  `IdentityAny` (forward whatever AAC the upstream produces) rather than the
+  video parsers' `Identity(any geometry)`; a source advertising AAC before the
+  first header lands uses sentinel `channels`/`sample_rate` 0, and the parser
+  resolves the real values mid-stream. The AAC-only guard lives in
+  `intercept_caps`. The ADTS header is plain bit fields (no exp-Golomb, no
+  emulation prevention), so unlike the H.264 / H.265 parsers this needs none of
+  the `annexb` machinery.
+- Scope is ADTS, the common elementary-stream framing. LATM / LOAS (the
+  MPEG-TS / broadcast framing) is deferred, as is synthesizing the
+  AudioSpecificConfig for a downstream decoder (no per-frame side channel exists
+  until the metadata system lands).
+- Tests: thirteen (seven parser unit tests, incl. stereo/44100 and mono/48000
+  recovery, `channel_configuration` 7 -> 8 channels, reserved sampling-index and
+  channel-config-0 rejection, syncword scan past leading bytes, non-ADTS / empty
+  rejection; plus six element-level tests driving `AacParse::process` through a
+  recording sink: `CapsChanged` before the first frame, no re-emit on identical
+  params, re-emit on a channel/rate change, non-AAC intercept rejection, the
+  `IdentityAny` constraint). The synthetic-fixture approach matches the video
+  parsers (no in-tree AAC source feeds it yet); validation against a real ADTS
+  stream is owed. VERIFIED on the dev host: `cargo test -p g2g-plugins --lib`
+  green (109, incl. the 13 new); `cargo clippy -p g2g-plugins --lib` clean;
+  `cargo check -p g2g-plugins --target thumbv7em-none-eabihf` and `--target
+  wasm32-unknown-unknown` green (stays in the no_std baseline); `cargo test
+  --workspace` green (no regression).
+
 ### M74: `run_linear_chain` as a thin builder + topology-derived rejection policy
 
 - `run_linear_chain` is now a thin builder: it constructs a borrowing
