@@ -1201,7 +1201,25 @@ Five focused phases. Each is independently verifiable.
 | **D2 — `solve_graph` (topological CSP).** DONE (M64 fan-out, M65 muxer fan-in). | Generalize `solve_linear`'s forward + backward sweep to topo order over edges. Per-node `NodeConstraint` (single `CapsConstraint` for source/transform/sink; `Muxer { inputs, output }` per-input-pad for fan-in). `NegotiationFailure` unchanged. Reverse-topo `downstream_feasibility` fold not yet ported (only needed by D4). | Solver-only tests against fake elements: muxer fan-in narrows each input by its pad, tee fan-out couples branches, a rejecting branch strict-fails, linear regression matches `solve_linear` byte-for-byte. |
 | **D3 — `run_graph` (the runner).** DONE (M67 fan-out, M69 fan-in). | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) | Muxer(Box<dyn DynMultiInputElement>) }` payload. The coordinator / mid-stream re-cascade is D4, so an interior arm handles a `CapsChanged` locally (no β walk). A muxer runs the `run_muxer_sink` shape (per-input forwarders + one tagged channel + single merged Eos). Remaining gap: a tee can't share a `PipelinePacket` (not `Clone`, GPU handles), so it deep-copies `System` frames and fails loud on a GPU domain (zero-copy tee needs a refcounted shareable frame). | DONE: pure-fake DAG tests (linear chain, `tee(2)` fan-out, tee with per-branch transforms, incompatible-branch solve failure, two-source fan-in, `tee -> {flip, crop} -> mux` diamond). OWED: the `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` hardware integration test (gated on `rtsp ffmpeg wayland-sink`), a Linux run. |
 | **D4 — Mid-stream re-solve + β cascade over the DAG.** DONE (M70). | Per-edge `graph_downstream_feasibility` snapshot; transform arms steer output via Caps-α; a node-keyed `GraphCoordinator` walks the sink's re-derived proposal upstream through tees via `in_edges` (source/muxer terminate). Per-branch tee re-solve, per-input muxer re-config. Strict-fail on a rejecting branch (matches fan-out); β across a muxer is owed (no per-pad re-cascade channel). | DONE: `m70_dag_recascade.rs` (tee diamond re-cascades each branch, no-change baseline, rejecting branch fails loud, muxer per-input re-config) + two solver feasibility unit tests. |
-| **D5 — Convenience wrappers + deprecation path.** | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
+| **D5 — Convenience wrappers + deprecation path.** BLOCKED (see below). Enablers landed: M71 (`run_graph` M12 stat folds + muxer MX-1/MX-2), M72 (lifetime-generic `GraphNodeRef<'a>` + `&mut dyn` forwarding impls, so a wrapper can build a borrowing `Graph`). | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
+
+**D5 blockers (found while attempting the conversions).** The four wrappers do
+not map onto the current `Graph`/`solve_graph` without prerequisite work:
+- **`run_source_transform_sink` + `run_simple_pipeline` are `no_std` baseline
+  exports**, but `run_graph` is `std`-gated (the dyn-element infra and `fanin`
+  are `std`). Delegating would add `std` to the baseline path (forbidden).
+  Prereq: a `no_std` `run_graph` (make the dyn-element traits + `fanin`
+  `no_std`), or leave these two as the `no_std` linear runners.
+- **`run_source_fanout` takes a selective `MultiOutputElement`** (e.g. `Router`
+  routes each frame to one branch), but the `Graph` only has a broadcast `Tee`
+  node. Prereq: a `MultiOutputElement` graph node kind.
+- **`run_muxer_sink` (and `run_linear_chain`) tolerate `Legacy*` bridge
+  constraints** (e.g. m10's `CollectingSink` uses the default `LegacySink`),
+  but `solve_graph` only accepts native variants (`Produces`/`Accepts`/
+  `Identity`/`AcceptsAny`/`Mapping`/`DerivedOutput`); a legacy sink hits
+  `EndpointShapeMismatch`. `run_muxer_sink` also bypassed the sink constraint
+  entirely (solved the muxer output against `AcceptsAny`). Prereq: legacy-bridge
+  support in `solve_graph`, or migrate every element to native constraints.
 
 D1 + D2 are pure `no_std` (the `Graph` and solver are computation, no I/O).
 D3 onwards is `std` because the runner is `tokio` / `flume`-coupled.
