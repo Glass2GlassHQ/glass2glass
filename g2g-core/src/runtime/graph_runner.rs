@@ -12,9 +12,19 @@
 //! shareable frame for the zero-copy / GPU tee is a follow-up). A muxer node
 //! runs a [`DynMultiInputElement`]: per-input forwarder arms tag each packet
 //! with its pad and feed one muxer arm that combines them, emitting a single
-//! `Eos` after every input ends (the `run_muxer_sink` shape). The mid-stream
-//! re-cascade (coordinator) is D4, so an interior arm handles a `CapsChanged`
-//! locally (configure + forward) without the β allocation walk.
+//! `Eos` after every input ends (the `run_muxer_sink` shape).
+//!
+//! D4 adds the mid-stream re-solve and the β allocation re-cascade over the
+//! DAG. Each arm gets a per-edge downstream feasibility snapshot at startup
+//! ([`graph_downstream_feasibility`]); on a mid-stream `CapsChanged` a transform
+//! steers its forwarded output toward a downstream-acceptable shape (Caps-α),
+//! and a sink re-solves its input against its declared constraint. A node-keyed
+//! [`GraphCoordinator`] walks the sink's re-derived allocation proposal one hop
+//! upstream per reply via [`ValidatedGraph::in_edges`], resolving through
+//! structural tee nodes; a source or muxer terminates the walk. Tee branches
+//! re-solve independently (each broadcast `CapsChanged` lands in its own arm);
+//! muxer inputs re-configure per pad. A muxer is a β boundary: its inputs carry
+//! no per-pad allocation channel, so the proposal stops there (a follow-up).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -30,12 +40,18 @@ use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{MemoryDomain, SystemSlice};
-use crate::query::LatencyReport;
+use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
+use crate::runtime::coordinator::{realloc_local_dyn, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
-use crate::runtime::join::join_all;
-use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
-use crate::runtime::solver::{solve_graph, NodeConstraint};
+use crate::runtime::join::{join_all, select2, Either};
+use crate::runtime::runner::{
+    re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
+};
+use crate::runtime::solver::{
+    graph_downstream_feasibility, resolve_forward_output, solve_graph, ForwardResolve,
+    NodeConstraint,
+};
 
 /// Element payload for a [`Graph`] driven by [`run_graph`]. Sources,
 /// transforms/sinks, and muxers implement different traits (a source has no
@@ -74,6 +90,75 @@ impl core::fmt::Debug for GraphNode {
     }
 }
 
+/// A β allocation re-cascade report from an arm to the [`GraphCoordinator`].
+/// A sink reports the proposal it re-derived on a mid-stream `CapsChanged`; an
+/// interior transform reports the proposal it re-derived after applying an
+/// upstream directive. `node` is the reporting node, so the coordinator walks
+/// the proposal one hop further upstream through the graph topology.
+#[derive(Debug, Clone)]
+struct Recascade {
+    node: NodeId,
+    proposal: Option<AllocationParams>,
+}
+
+/// Producer end of the graph coordinator's control channel, cloned to each
+/// transform and sink arm so it can report a [`Recascade`].
+#[derive(Debug, Clone)]
+struct GraphCoordHandle {
+    tx: Sender<Recascade>,
+}
+
+impl GraphCoordHandle {
+    async fn report(&self, event: Recascade) {
+        let _ = self.tx.send(event).await;
+    }
+}
+
+/// Node-keyed β coordinator for the DAG (the DAG analog of the linear
+/// [`Coordinator`](crate::runtime::coordinator::Coordinator)). It owns one
+/// [`ArmDirective`] sender per interruptible interior arm (transforms), keyed by
+/// node id, plus `upstream_arms`: for each reporting node, the nearest interior
+/// transform arm feeding each of its inputs (resolved through structural tee
+/// nodes; a source or muxer terminates the walk). On each report it forwards an
+/// `ArmDirective::Recascade` one hop upstream to those arms, which re-derive and
+/// report again, so the cascade walks the DAG without a global lock. The walk is
+/// reactive and non-blocking (`try_send`), so it never wedges the data plane.
+#[derive(Debug)]
+struct GraphCoordinator {
+    rx: Receiver<Recascade>,
+    arm_ctrl: Vec<Option<Sender<ArmDirective>>>,
+    upstream_arms: Vec<Vec<NodeId>>,
+}
+
+impl GraphCoordinator {
+    async fn run(self) -> u64 {
+        let mut observed = 0u64;
+        while let Some(event) = self.rx.recv().await {
+            observed += 1;
+            if let Some(p) = event.proposal {
+                for &u in &self.upstream_arms[event.node.0 as usize] {
+                    if let Some(ctrl) = &self.arm_ctrl[u.0 as usize] {
+                        let _ = ctrl.try_send(ArmDirective::Recascade(p));
+                    }
+                }
+            }
+        }
+        observed
+    }
+}
+
+/// The nearest upstream interruptible arm feeding `edge_id`: a transform is an
+/// arm; a structural tee is skipped to its own single input; a source or muxer
+/// terminates the β walk (neither carries a per-element allocation re-cascade).
+fn nearest_upstream_arm<E>(vg: &ValidatedGraph<E>, edge_id: usize) -> Option<NodeId> {
+    let src = vg.edge(edge_id).src.node;
+    match vg.kind(src) {
+        NodeKind::Transform => Some(src),
+        NodeKind::Tee(_) => nearest_upstream_arm(vg, vg.in_edges(src)[0]),
+        _ => None,
+    }
+}
+
 /// Drive an arbitrary DAG to EOS. Negotiates the whole graph at once, then runs
 /// one arm per node over per-edge channels. `link_capacity` accepts a
 /// [`LatencyProfile`](crate::runtime::LatencyProfile) or a `usize` depth.
@@ -107,10 +192,11 @@ pub async fn run_graph<Clk: PipelineClock>(
         }
     }
 
-    // Phase 2: build a per-node constraint and solve the whole DAG. The
+    // Phase 2: build a per-node constraint and solve the whole DAG, and snapshot
+    // each edge's downstream feasibility (D4) for the mid-stream re-solve. The
     // transform/sink constraints borrow their elements immutably (coexisting),
-    // so the solution is computed and the borrows released before configure.
-    let solution: Vec<Caps> = {
+    // so both are computed and the borrows released before configure.
+    let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
         let mut constraints: Vec<NodeConstraint<'_>> = Vec::with_capacity(n);
         for (i, src_caps) in source_caps.iter().enumerate() {
             let node = NodeId(i as u32);
@@ -146,7 +232,9 @@ pub async fn run_graph<Clk: PipelineClock>(
             };
             constraints.push(nc);
         }
-        solve_graph(&vg, &constraints).map_err(|_| G2gError::CapsMismatch)?
+        let solution = solve_graph(&vg, &constraints).map_err(|_| G2gError::CapsMismatch)?;
+        let feasibility = graph_downstream_feasibility(&vg, &constraints);
+        (solution, feasibility)
     };
 
     // Phase 3: configure each element with its negotiated caps. Source nodes
@@ -208,7 +296,41 @@ pub async fn run_graph<Clk: PipelineClock>(
         rxs.push(Some(rx));
     }
 
-    let mut arms: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n);
+    // D4 β coordinator: one `ArmDirective` channel per transform arm (the
+    // interruptible interior arms), plus the upstream-arm adjacency the
+    // coordinator walks. Sinks and transforms hold a clone of the report handle;
+    // when every such arm finishes (EOS-driven), the handles drop and the
+    // coordinator ends.
+    let mut arm_ctrl: Vec<Option<Sender<ArmDirective>>> = (0..n).map(|_| None).collect();
+    let mut arm_ctrl_rx: Vec<Option<Receiver<ArmDirective>>> = (0..n).map(|_| None).collect();
+    let mut upstream_arms: Vec<Vec<NodeId>> = (0..n).map(|_| Vec::new()).collect();
+    for &node in &topo {
+        if matches!(vg.kind(node), NodeKind::Transform) {
+            let (ctx, crx) = bounded::<ArmDirective>(link_capacity);
+            arm_ctrl[node.0 as usize] = Some(ctx);
+            arm_ctrl_rx[node.0 as usize] = Some(crx);
+        }
+    }
+    // β reporters are transforms (after a directive) and sinks (on caps change);
+    // each forwards to the nearest interior arm feeding its inputs.
+    for &node in &topo {
+        if matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink) {
+            let mut ups: Vec<NodeId> = Vec::new();
+            for &ie in vg.in_edges(node) {
+                if let Some(u) = nearest_upstream_arm(&vg, ie) {
+                    if !ups.contains(&u) {
+                        ups.push(u);
+                    }
+                }
+            }
+            upstream_arms[node.0 as usize] = ups;
+        }
+    }
+    let (coord_tx, coord_rx) = bounded::<Recascade>(link_capacity);
+    let coord_handle = GraphCoordHandle { tx: coord_tx };
+    let coordinator = GraphCoordinator { rx: coord_rx, arm_ctrl, upstream_arms };
+
+    let mut arms: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
 
     for &node in &topo {
@@ -262,14 +384,27 @@ pub async fn run_graph<Clk: PipelineClock>(
                 };
                 let in_rx = in_rxs.pop().expect("transform input edge");
                 let out_tx = out_txs.pop().expect("transform output edge");
-                Box::pin(transform_arm(elem, in_rx, out_tx))
+                let out_edge = out_e[0];
+                let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("transform ctrl rx");
+                let out_caps = solution[out_edge].clone();
+                let downstream_feasible = feasibility[out_edge].clone();
+                Box::pin(transform_arm(
+                    elem,
+                    in_rx,
+                    out_tx,
+                    arm_rx,
+                    coord_handle.clone(),
+                    node,
+                    out_caps,
+                    downstream_feasible,
+                ))
             }
             NodeKind::Sink => {
                 let Some(GraphNode::Element(elem)) = element else {
                     return Err(G2gError::CapsMismatch);
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
-                Box::pin(sink_arm(elem, in_rx))
+                Box::pin(sink_arm(elem, in_rx, coord_handle.clone(), node))
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
@@ -281,11 +416,22 @@ pub async fn run_graph<Clk: PipelineClock>(
         arm_kinds.push(kind);
     }
 
+    // Drop the template handle so the coordinator can end once every arm's
+    // clone drops; append the coordinator as the final arm. Its result is the
+    // count of re-cascade events it observed.
+    drop(coord_handle);
+    let coord_arm_index = arms.len();
+    arms.push(Box::pin(async move { Ok(coordinator.run().await) }));
+
     let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    let coordinator_events = counts[coord_arm_index];
     let mut emitted = 0u64;
     let mut consumed = 0u64;
-    for (kind, result) in arm_kinds.into_iter().zip(results) {
-        let count = result?;
+    for (kind, &count) in arm_kinds.iter().zip(counts.iter()) {
         match kind {
             NodeKind::Source => emitted += count,
             NodeKind::Sink => consumed += count,
@@ -300,7 +446,7 @@ pub async fn run_graph<Clk: PipelineClock>(
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: clock.now_ns(),
-        coordinator_events: 0,
+        coordinator_events,
     })
 }
 
@@ -321,26 +467,86 @@ async fn source_arm(
     src.run(&mut adapter).await
 }
 
+/// An interior transform arm. Besides forwarding data, it (D4) selects on a β
+/// `ArmDirective` channel alongside its data link so an upstream re-cascade
+/// reaches it while parked on data, and on a mid-stream `CapsChanged` it steers
+/// its forwarded output toward a downstream-acceptable shape using its
+/// `downstream_feasible` snapshot (Caps-α), failing loud via a reverse
+/// reconfigure if downstream positively rejects every output it can produce.
+#[allow(clippy::too_many_arguments)]
 async fn transform_arm(
     mut elem: Box<dyn DynAsyncElement>,
     in_rx: LinkReceiver,
     out_tx: LinkSender,
+    arm_rx: Receiver<ArmDirective>,
+    coord: GraphCoordHandle,
+    node: NodeId,
+    mut out_caps: Caps,
+    downstream_feasible: Option<CapsSet>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    let mut control_open = true;
     loop {
-        match in_rx.recv().await {
+        let packet = if control_open {
+            match select2(arm_rx.recv(), in_rx.recv()).await {
+                Either::Left(Some(ArmDirective::Recascade(params))) => {
+                    // β: absorb the downstream proposal, re-derive our own from
+                    // our output caps, and report it so the cascade continues to
+                    // our upstream neighbour.
+                    elem.configure_allocation(&params);
+                    let proposal = elem.propose_allocation(&out_caps);
+                    coord.report(Recascade { node, proposal }).await;
+                    continue;
+                }
+                Either::Left(None) => {
+                    control_open = false;
+                    continue;
+                }
+                Either::Right(packet) => packet,
+            }
+        } else {
+            in_rx.recv().await
+        };
+        match packet {
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut adapter).await?;
                 adapter.push(PipelinePacket::Eos).await?;
+                // Drop our report handle so the coordinator can wind down once
+                // every arm exits, then drain any tail-end re-cascade directive
+                // still in flight (a β triggered by the final pre-EOS frames).
+                // Dropping before the drain decouples wind-down from the drain,
+                // so no arm blocks holding the last handle.
+                drop(coord);
+                while let Some(ArmDirective::Recascade(params)) = arm_rx.recv().await {
+                    elem.configure_allocation(&params);
+                }
                 return Ok(0);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
-                // D3 local handling: configure with the upstream caps and let
-                // the element emit its own output `CapsChanged`. The
-                // downstream-feasibility steering and β re-cascade are D4.
+                // Caps-α: derive the forwarded output from this element's
+                // constraint steered by the downstream feasibility snapshot.
+                // `Defer` keeps the prior behavior (forward the incoming caps);
+                // `Infeasible` surfaces loud as a reverse reconfigure.
+                let forward_caps = {
+                    let constraint = elem.caps_constraint_as_transform();
+                    match resolve_forward_output(&constraint, &new_caps, downstream_feasible.as_ref())
+                    {
+                        ForwardResolve::Fixed(caps) => caps,
+                        ForwardResolve::Defer => new_caps.clone(),
+                        // Strict default (matches `run_source_fanout`): a branch
+                        // whose downstream positively rejects every output this
+                        // element can produce fails the whole graph loud. A
+                        // graceful per-branch drop is a future opt-in.
+                        ForwardResolve::Infeasible(_failure) => {
+                            return Err(G2gError::CapsMismatch);
+                        }
+                    }
+                };
                 match elem.configure_pipeline(&new_caps)? {
                     ConfigureOutcome::Accepted => {
-                        elem.process(PipelinePacket::CapsChanged(new_caps), &mut adapter)
+                        realloc_local_dyn(&mut *elem, &forward_caps);
+                        out_caps = forward_caps.clone();
+                        elem.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
                             .await?;
                     }
                     ConfigureOutcome::ReFixate(counter) => {
@@ -356,9 +562,15 @@ async fn transform_arm(
     }
 }
 
+/// A sink arm. On a mid-stream `CapsChanged` (D4) it re-solves its input against
+/// its declared constraint; on accept it re-derives its own pool and reports the
+/// proposal so the β cascade walks one hop upstream. A re-solve failure surfaces
+/// loud as a reverse reconfigure into the boundary that emitted the change.
 async fn sink_arm(
     mut elem: Box<dyn DynAsyncElement>,
     in_rx: LinkReceiver,
+    coord: GraphCoordHandle,
+    node: NodeId,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -369,9 +581,20 @@ async fn sink_arm(
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
-                match elem.configure_pipeline(&new_caps)? {
+                // Strict default (matches `run_source_fanout`): a sink whose
+                // declared constraint rejects the boundary's new output fails
+                // the whole graph loud rather than reverse-reconfiguring a
+                // shared upstream a tee can't satisfy per-branch.
+                let sink_caps = re_solve_downstream_dyn_sink(&new_caps, &*elem)
+                    .map_err(|_| G2gError::CapsMismatch)?;
+                match elem.configure_pipeline(&sink_caps)? {
                     ConfigureOutcome::Accepted => {
-                        elem.process(PipelinePacket::CapsChanged(new_caps), &mut null)
+                        let proposal = elem.propose_allocation(&sink_caps);
+                        if let Some(p) = &proposal {
+                            elem.configure_allocation(p);
+                        }
+                        coord.report(Recascade { node, proposal }).await;
+                        elem.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
                             .await?;
                     }
                     ConfigureOutcome::ReFixate(counter) => {
@@ -467,6 +690,16 @@ async fn muxer_arm(
                     adapter.push(PipelinePacket::Eos).await?;
                     return Ok(0);
                 }
+            }
+            Some((pad, PipelinePacket::CapsChanged(caps))) => {
+                // D4 per-input re-solve: re-configure just this pad, then hand
+                // the change to the element. A muxer is a β allocation boundary
+                // (its inputs carry no per-pad re-cascade channel), and a
+                // mid-stream `ReFixate` on an input pad is unsupported (the
+                // forwarder owns the reverse channel), so the outcome is applied
+                // and not propagated.
+                let _ = mux.configure_pipeline(pad, &caps)?;
+                mux.process(pad, PipelinePacket::CapsChanged(caps), &mut adapter).await?;
             }
             Some((pad, packet)) => {
                 mux.process(pad, packet, &mut adapter).await?;

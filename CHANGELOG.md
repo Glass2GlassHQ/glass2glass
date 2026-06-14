@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M70: DAG runner D4 - mid-stream re-solve + β allocation re-cascade
+
+- `run_graph` now handles a mid-stream `CapsChanged` over the whole DAG, not
+  just locally per arm. At startup it snapshots each edge's downstream
+  feasibility (`graph_downstream_feasibility`, the graph generalization of the
+  linear reverse sweep: a transform passes its output feasibility back through
+  `backward_feasible`, a tee intersects its branch feasibilities, a muxer takes
+  each input pad's accept set). Each transform arm steers its forwarded output
+  toward a downstream-acceptable shape (Caps-α via `resolve_forward_output`); a
+  sink re-solves its input against its declared constraint.
+- β allocation re-cascade: a node-keyed `GraphCoordinator` walks the sink's
+  re-derived allocation proposal one hop upstream per reply via `in_edges`,
+  resolving through structural tee nodes; a source or muxer terminates the walk.
+  Each interior transform arm selects on an `ArmDirective` control channel
+  alongside its data link (so a directive applies while parked on data),
+  re-derives its own proposal, and reports it onward. Tee branches re-solve and
+  re-cascade independently; on EOS each transform drains a tail-end directive
+  still in flight. `RunStats::coordinator_events` now reports the real count.
+- Strict default (matches `run_source_fanout`): a branch whose downstream
+  positively rejects the mid-stream output fails the whole graph loud
+  (`CapsMismatch`). Graceful per-branch drop and a forward coordinator re-solve
+  walk are follow-ups. A muxer is a β allocation boundary: its inputs carry no
+  per-pad re-cascade channel, so the proposal stops there (its inputs still
+  re-configure per pad on a mid-stream change).
+- Tests: two solver unit tests (tee feasibility is the branch intersection,
+  muxer input feasibility is per-pad) and `m70_dag_recascade.rs` (four pure-fake
+  integration tests: a tee diamond re-cascades each branch independently, the
+  no-change baseline records no β, a rejecting branch fails loud, a muxer
+  re-configures only the changed input pad). VERIFIED on the dev host: `cargo
+  test -p g2g-core --features "std runtime"` green (147); `cargo test
+  --workspace` green (no regression, incl. the 4 new m70 tests); `cargo clippy
+  -p g2g-core --features "std runtime" --all-targets` clean.
+
 ### M69: DAG runner fan-in - muxer nodes in `run_graph`
 
 - Completes `run_graph`'s topology: it now drives source / transform / sink /

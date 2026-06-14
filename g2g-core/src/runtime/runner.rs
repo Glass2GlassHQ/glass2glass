@@ -278,7 +278,7 @@ fn re_solve_against_sink_constraint(
 /// Fan-out Phase C FO-2: the [`DynAsyncElement`] counterpart of
 /// [`re_solve_downstream_sink`], for `Box`-erased branch sinks.
 #[cfg(feature = "std")]
-fn re_solve_downstream_dyn_sink(
+pub(crate) fn re_solve_downstream_dyn_sink(
     new_caps: &Caps,
     sink: &dyn DynAsyncElement,
 ) -> Result<Caps, NegotiationFailure> {

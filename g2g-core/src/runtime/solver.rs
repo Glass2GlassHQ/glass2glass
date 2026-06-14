@@ -743,6 +743,74 @@ pub fn solve_graph<E>(
     Ok(out)
 }
 
+/// Per-edge downstream feasibility for the DAG runner's mid-stream re-solve
+/// (D4), the graph generalization of [`downstream_feasibility`]. For each edge
+/// it returns the set the edge can carry such that every node *downstream* of
+/// it can still fixate, ignoring the (mid-stream-changing) upstream. `None`
+/// means "downstream imposes no expressible constraint here". Indexed by edge
+/// id; snapshotted into each arm so a mid-stream `CapsChanged` can steer an
+/// element's output without reaching its peers at runtime.
+///
+/// Generalizes the linear reverse sweep to a reverse-topo fold: a transform
+/// passes its output feasibility back through [`backward_feasible`]; a tee's
+/// input feasibility is the intersection over its branch feasibilities (the
+/// input must satisfy every branch); a muxer's input pads take their pad accept
+/// sets independently (the output does not feed back to the inputs).
+#[cfg(feature = "std")]
+pub(crate) fn graph_downstream_feasibility<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+) -> Vec<Option<CapsSet>> {
+    let ne = graph.edge_count();
+    let mut feas: Vec<Option<CapsSet>> = alloc::vec![None; ne];
+    // Reverse topo: a node's output edges are written by its downstream
+    // consumers, visited earlier in this order, before we read them here.
+    for &node in graph.topo().iter().rev() {
+        let idx = node.0 as usize;
+        match graph.kind(node) {
+            NodeKind::Source => {}
+            NodeKind::Sink => {
+                let ie = graph.in_edges(node)[0];
+                feas[ie] = match &constraints[idx] {
+                    NodeConstraint::Element(CapsConstraint::Accepts(s)) => Some(s.clone()),
+                    _ => None,
+                };
+            }
+            NodeKind::Transform => {
+                let ie = graph.in_edges(node)[0];
+                let oe = graph.out_edges(node)[0];
+                if let NodeConstraint::Element(c) = &constraints[idx] {
+                    feas[ie] = backward_feasible(c, feas[oe].as_ref());
+                }
+            }
+            NodeKind::Tee(_) => {
+                let mut acc: Option<CapsSet> = None;
+                for &oe in graph.out_edges(node) {
+                    if let Some(s) = feas[oe].as_ref() {
+                        acc = Some(match acc {
+                            Some(a) => a.intersect(s),
+                            None => s.clone(),
+                        });
+                    }
+                }
+                feas[graph.in_edges(node)[0]] = acc;
+            }
+            NodeKind::Muxer(_) => {
+                if let NodeConstraint::Muxer { inputs, .. } = &constraints[idx] {
+                    for &ie in graph.in_edges(node) {
+                        let pad = graph.edge(ie).dst.index as usize;
+                        feas[ie] = match inputs.get(pad) {
+                            Some(CapsConstraint::Accepts(s)) => Some(s.clone()),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    feas
+}
+
 /// The (upstream node, downstream node) ids an edge connects, for failures.
 fn edge_endpoints<E>(graph: &ValidatedGraph<E>, edge_id: usize) -> (usize, usize) {
     let e = graph.edge(edge_id);
@@ -1579,5 +1647,80 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("wildcard muxer solves");
         // a wildcard input pad leaves each input edge at its own source caps.
         assert_eq!(sol, vec![h264, aac, merged]);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_intersects_tee_branches() {
+        // src -> tee(2) -> {accepts NV12-any, accepts NV12 64x48}. The tee input
+        // edge's feasibility is the intersection: the tighter 64x48 set.
+        let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
+        let nv12_fixed = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(nv12_fixed.clone()))),
+            NodeConstraint::Element(CapsConstraint::IdentityAny),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_any))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_fixed.clone()))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tee = g.add_tee(2);
+        let a = g.add_sink(());
+        let b = g.add_sink(());
+        g.link(src, tee.input()).unwrap();
+        g.link(tee.out(0), a).unwrap();
+        g.link(tee.out(1), b).unwrap();
+        let v = g.finish().unwrap();
+
+        let feas = graph_downstream_feasibility(&v, &cs);
+        // edge 0 = src->tee, edge 1 = tee.out0->a, edge 2 = tee.out1->b.
+        let tee_in = feas[0].as_ref().expect("tee input has feasibility");
+        assert!(tee_in.intersect(&CapsSet::one(nv12_fixed.clone())).fixate().is_some());
+        // the tee input cannot carry an off-geometry frame both branches reject.
+        let off = fixed_video(RawVideoFormat::Nv12, 99, 99, 30);
+        assert!(tee_in.intersect(&CapsSet::one(off)).is_empty(), "branch B pins 64x48");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_muxer_inputs_are_per_pad() {
+        // two sources -> muxer{H264, H265} -> wildcard sink. Each input edge's
+        // feasibility is its own pad accept set; the output edge is unconstrained
+        // (the wildcard sink imposes nothing, and the output never feeds inputs).
+        let h264_any = compressed(VideoCodec::H264, Dim::Any, Dim::Any, Rate::Any);
+        let h265_any = compressed(VideoCodec::H265, Dim::Any, Dim::Any, Rate::Any);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(
+                fixed_compressed(VideoCodec::H264, 64, 48, 30),
+            ))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(
+                fixed_compressed(VideoCodec::H265, 64, 48, 30),
+            ))),
+            NodeConstraint::Muxer {
+                inputs: vec![
+                    CapsConstraint::Accepts(CapsSet::one(h264_any.clone())),
+                    CapsConstraint::Accepts(CapsSet::one(h265_any.clone())),
+                ],
+                output: CapsConstraint::Produces(CapsSet::one(fixed_compressed(
+                    VideoCodec::H264, 64, 48, 30,
+                ))),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let feas = graph_downstream_feasibility(&v, &cs);
+        // edges: 0 = s0->in0, 1 = s1->in1, 2 = mux.out->sink.
+        assert_eq!(feas[0], Some(CapsSet::one(h264_any)), "pad 0 feasibility = its accept set");
+        assert_eq!(feas[1], Some(CapsSet::one(h265_any)), "pad 1 feasibility = its accept set");
+        assert_eq!(feas[2], None, "wildcard sink leaves the muxer output unconstrained");
     }
 }

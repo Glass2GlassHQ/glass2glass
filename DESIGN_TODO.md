@@ -43,10 +43,17 @@ New / reshaped follow-ups surfaced this session:
   source/transform/sink/tee/muxer (the full topology) with fake-element tests.
   One gap remains: a tee deep-copies `System` frames and fails loud on a GPU
   domain because `PipelinePacket` is not `Clone` (GPU handles can't be) - a
-  refcounted shareable frame is the zero-copy-tee prerequisite. **DAG D4 next:**
-  the coordinator / mid-stream re-cascade over the DAG (per-input muxer re-solve
-  MX-1 / MX-2 included). The hardware `tee -> {decode, mux}` integration test is
-  owed a Linux run.
+  refcounted shareable frame is the zero-copy-tee prerequisite.
+- **DAG D4 done (M70):** mid-stream re-solve + β allocation re-cascade over the
+  DAG. Per-edge `graph_downstream_feasibility` snapshot; transform arms steer
+  output (Caps-α) and a node-keyed `GraphCoordinator` walks the sink's proposal
+  upstream through tees via `in_edges`; per-input muxer re-config on a mid-stream
+  change. Strict-fail on a rejecting branch (matches fan-out). Remaining: a
+  graceful per-branch drop, a forward coordinator re-solve walk, and β across a
+  muxer (its inputs have no per-pad re-cascade channel). The hardware
+  `tee -> {decode, mux}` integration test is still owed a Linux run. **D5 next:**
+  re-express the convenience wrappers (`run_linear_chain`, `run_source_fanout`,
+  `run_muxer_sink`, `run_source_transform_sink`) as thin `Graph` builders.
 - **Raw-`web_sys` WebGPU path** (only if the GPU-resident browser claim is
   revived): external-texture import + compute + `ort.Tensor.fromGpuBuffer` on
   one ORT-owned `GPUDevice`, all outside `wgpu`. Large, browser-unverifiable.
@@ -1193,7 +1200,7 @@ Five focused phases. Each is independently verifiable.
 | **D1 — `Graph` data structure + validation.** DONE (M63). | The builder, `NodeId` / `PadId`, `LinkPolicy` per edge, `finish() -> ValidatedGraph` with topo sort + cycle detection + pad-count + orphan checks. No solver, no runner. Generic over the element payload `E` to stay `no_std`. | Pure data-structure tests. Reject diamond-with-cycle, accept tee→mux diamond, accept linear, accept fan-out, accept fan-in. |
 | **D2 — `solve_graph` (topological CSP).** DONE (M64 fan-out, M65 muxer fan-in). | Generalize `solve_linear`'s forward + backward sweep to topo order over edges. Per-node `NodeConstraint` (single `CapsConstraint` for source/transform/sink; `Muxer { inputs, output }` per-input-pad for fan-in). `NegotiationFailure` unchanged. Reverse-topo `downstream_feasibility` fold not yet ported (only needed by D4). | Solver-only tests against fake elements: muxer fan-in narrows each input by its pad, tee fan-out couples branches, a rejecting branch strict-fails, linear regression matches `solve_linear` byte-for-byte. |
 | **D3 — `run_graph` (the runner).** DONE (M67 fan-out, M69 fan-in). | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) | Muxer(Box<dyn DynMultiInputElement>) }` payload. The coordinator / mid-stream re-cascade is D4, so an interior arm handles a `CapsChanged` locally (no β walk). A muxer runs the `run_muxer_sink` shape (per-input forwarders + one tagged channel + single merged Eos). Remaining gap: a tee can't share a `PipelinePacket` (not `Clone`, GPU handles), so it deep-copies `System` frames and fails loud on a GPU domain (zero-copy tee needs a refcounted shareable frame). | DONE: pure-fake DAG tests (linear chain, `tee(2)` fan-out, tee with per-branch transforms, incompatible-branch solve failure, two-source fan-in, `tee -> {flip, crop} -> mux` diamond). OWED: the `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` hardware integration test (gated on `rtsp ffmpeg wayland-sink`), a Linux run. |
-| **D4 — Mid-stream re-solve + β cascade over the DAG.** | Snapshot feasibility into each arm at startup. On mid-stream `CapsChanged`, walk the affected subgraph via topo + `in_edges`. Per-branch concurrent walks on a tee, per-input independent walks on a mux. | Fake-element regression: change source caps mid-stream, assert every downstream branch re-solves correctly, the rejecting branch fails its arm, the rest keep flowing. |
+| **D4 — Mid-stream re-solve + β cascade over the DAG.** DONE (M70). | Per-edge `graph_downstream_feasibility` snapshot; transform arms steer output via Caps-α; a node-keyed `GraphCoordinator` walks the sink's re-derived proposal upstream through tees via `in_edges` (source/muxer terminate). Per-branch tee re-solve, per-input muxer re-config. Strict-fail on a rejecting branch (matches fan-out); β across a muxer is owed (no per-pad re-cascade channel). | DONE: `m70_dag_recascade.rs` (tee diamond re-cascades each branch, no-change baseline, rejecting branch fails loud, muxer per-input re-config) + two solver feasibility unit tests. |
 | **D5 — Convenience wrappers + deprecation path.** | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
 
 D1 + D2 are pure `no_std` (the `Graph` and solver are computation, no I/O).
