@@ -23,13 +23,13 @@ use crate::clock::PipelineClock;
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, Reconfigure,
 };
-use crate::clock::ClockPriority;
+use crate::clock::{ClockCandidate, ClockPriority};
 use crate::format_element::CapsConstraint;
 use crate::runtime::solver::solve_linear;
 use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
-use crate::query::LatencyReport;
+use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, SenderSink};
 use crate::runtime::coordinator::report_nego_failure;
 use crate::runtime::join::join_all;
@@ -55,6 +55,18 @@ pub trait DynSourceLoop: ElementBound {
     ) -> BoxFuture<'a, Result<u64, G2gError>>;
 
     fn reconfigure(&mut self, request: Reconfigure) -> Result<Caps, G2gError>;
+
+    /// Dyn-safe mirror of [`SourceLoop::latency`], so the DAG runner folds a
+    /// source's latency contribution like the linear runner does.
+    fn latency(&self) -> LatencyReport;
+
+    /// Dyn-safe mirror of [`SourceLoop::provide_clock`], for the runner's clock
+    /// election.
+    fn provide_clock(&self) -> Option<ClockCandidate>;
+
+    /// Dyn-safe mirror of [`SourceLoop::configure_allocation`], the upstream end
+    /// of the M12 allocation cascade.
+    fn configure_allocation(&mut self, params: &AllocationParams);
 }
 
 /// Blanket adapter: every [`SourceLoop`] is usable as a [`DynSourceLoop`]
@@ -84,6 +96,18 @@ impl<T: SourceLoop> DynSourceLoop for T {
 
     fn reconfigure(&mut self, request: Reconfigure) -> Result<Caps, G2gError> {
         SourceLoop::reconfigure(self, request)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        SourceLoop::latency(self)
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        SourceLoop::provide_clock(self)
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        SourceLoop::configure_allocation(self, params)
     }
 }
 

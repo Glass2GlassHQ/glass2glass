@@ -312,21 +312,22 @@ async fn tee_diamond_recascades_each_branch() {
     assert_eq!(stats.frames_consumed, 8, "both branches delivered all 4 frames");
     assert_eq!(
         *log_a.lock().unwrap(),
-        vec![16 * 16],
-        "branch A transform records the sink's re-derived proposal (β)"
+        vec![8 * 8, 16 * 16],
+        "branch A transform records the startup proposal then the β re-cascade"
     );
     assert_eq!(
         *log_b.lock().unwrap(),
-        vec![16 * 16],
+        vec![8 * 8, 16 * 16],
         "branch B re-cascades independently of branch A"
     );
     assert!(stats.coordinator_events >= 2, "each sink reported its mid-stream change");
 }
 
-/// No mid-stream change: β never fires, so no branch transform is reconfigured.
-/// Proves the recorded entry above is the re-cascade, not a startup artifact.
+/// No mid-stream change: only the startup allocation cascade configures each
+/// branch transform; β never fires. Proves the second entry in the test above
+/// is the re-cascade, not a duplicate startup configure.
 #[tokio::test]
-async fn no_change_leaves_branches_unconfigured() {
+async fn no_change_leaves_branches_at_startup_proposal() {
     let log_a = Arc::new(Mutex::new(Vec::new()));
     let log_b = Arc::new(Mutex::new(Vec::new()));
 
@@ -350,8 +351,8 @@ async fn no_change_leaves_branches_unconfigured() {
 
     let stats = run_graph(g, &NullClock, 4).await.expect("tee diamond runs");
     assert_eq!(stats.frames_consumed, 8);
-    assert!(log_a.lock().unwrap().is_empty(), "no caps change, no β");
-    assert!(log_b.lock().unwrap().is_empty());
+    assert_eq!(*log_a.lock().unwrap(), vec![8 * 8], "startup cascade only, no β");
+    assert_eq!(*log_b.lock().unwrap(), vec![8 * 8]);
     assert_eq!(stats.coordinator_events, 0, "no reports without a mid-stream change");
 }
 

@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M71: DAG runner - M12 stat folds + muxer MX-1/MX-2 in `run_graph`
+
+- `run_graph` now reports the same M12 stats the linear runners do, so the
+  convenience wrappers can reduce to thin builders over it (D5 prerequisite). It
+  folds latency (`LatencyReport::aggregate` over every element node), elects the
+  pipeline clock (`elect_clock` over each node's `provide_clock`, with the elected
+  epoch as `base_time_ns`), and runs the M12 allocation cascade in reverse topo
+  order: each element absorbs the proposal on its output edge(s) and proposes from
+  its output-link caps; a tee joins its branch proposals (most-demanding), a
+  muxer is a boundary, and the source's absorbed proposal is the reported
+  `allocation`. For a linear chain this is byte-for-byte the linear runner's
+  sink->source fold.
+- `DynSourceLoop` gains dyn-safe `latency` / `provide_clock` / `configure_allocation`
+  mirrors (the source-side analog of `DynAsyncElement`'s), so the boxed sources in
+  a `Graph` contribute to those folds.
+- The graph muxer arm now runs the full `run_muxer_sink` mid-stream behavior:
+  MX-1 (re-solve the changed input pad against its constraint and reconfigure it,
+  consuming the input-side `CapsChanged` instead of leaking it to the output) and
+  MX-2 (re-derive the merged output and emit one downstream `CapsChanged` only
+  when it actually changed), replacing D4's simpler per-pad configure.
+- Tests: `m70_dag_recascade.rs` updated to assert the startup allocation cascade
+  now configures each branch transform (so a mid-stream change records
+  `[startup, β]`, no change records `[startup]`). VERIFIED on the dev host: `cargo
+  test --workspace` green; `cargo test -p g2g-core --features "std runtime"` green
+  (147); `cargo clippy -p g2g-core --features "std runtime" --all-targets` clean;
+  `cargo check -p g2g-core --target thumbv7em-none-eabihf` green.
+
 ### M70: DAG runner D4 - mid-stream re-solve + β allocation re-cascade
 
 - `run_graph` now handles a mid-stream `CapsChanged` over the whole DAG, not

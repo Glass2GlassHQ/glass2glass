@@ -30,7 +30,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet};
-use crate::clock::{ClockPriority, PipelineClock};
+use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink, Reconfigure,
 };
@@ -49,7 +49,7 @@ use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
 use crate::runtime::solver::{
-    graph_downstream_feasibility, resolve_forward_output, solve_graph, ForwardResolve,
+    graph_downstream_feasibility, resolve_forward_output, solve_graph, solve_linear, ForwardResolve,
     NodeConstraint,
 };
 
@@ -284,6 +284,74 @@ pub async fn run_graph<Clk: PipelineClock>(
         }
     }
 
+    // Phase 3.5: DAG-wide M12 folds, so the runner reports the same latency /
+    // clock / allocation the linear runners do (the convenience wrappers reduce
+    // to thin builders over this). Done before Phase 4 takes the elements.
+    //
+    // Allocation cascade in reverse topo order: each element absorbs the
+    // proposal arriving on its output edge(s) (`configure_allocation`), then
+    // proposes from its output-link caps; the proposal is stored on its input
+    // edge(s) for its upstream to absorb. A tee joins its branch proposals
+    // (most-demanding) onto its single input; a muxer is a boundary. The
+    // source's absorbed proposal is the reported `allocation`. For a linear
+    // chain this is byte-for-byte the linear runner's sink->source fold.
+    let nee = vg.edge_count();
+    let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
+    let mut allocation: Option<AllocationParams> = None;
+    for &node in topo.iter().rev() {
+        match vg.kind(node) {
+            NodeKind::Sink => {
+                let in_e = vg.in_edges(node)[0];
+                let caps = solution[in_e].clone();
+                edge_proposal[in_e] = element_propose(&vg, node, &caps);
+            }
+            NodeKind::Transform => {
+                let in_e = vg.in_edges(node)[0];
+                let out_e = vg.out_edges(node)[0];
+                if let Some(p) = edge_proposal[out_e] {
+                    element_configure_alloc(&mut vg, node, &p);
+                }
+                let caps = solution[out_e].clone();
+                edge_proposal[in_e] = element_propose(&vg, node, &caps);
+            }
+            NodeKind::Tee(_) => {
+                let in_e = vg.in_edges(node)[0];
+                let mut joined: Option<AllocationParams> = None;
+                for &oe in vg.out_edges(node) {
+                    joined = join_alloc(joined, edge_proposal[oe]);
+                }
+                edge_proposal[in_e] = joined;
+            }
+            NodeKind::Source => {
+                let out_e = vg.out_edges(node)[0];
+                if let Some(p) = edge_proposal[out_e] {
+                    if let GraphNode::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? {
+                        src.configure_allocation(&p);
+                    }
+                    allocation = Some(p);
+                }
+            }
+            NodeKind::Muxer(_) => {}
+        }
+    }
+
+    // Latency fold + clock election over every element node (tee is structural;
+    // a muxer contributes neither, like the fan-in runner).
+    let mut latencies: Vec<LatencyReport> = Vec::with_capacity(n);
+    let mut clocks: Vec<Option<ClockCandidate>> = Vec::with_capacity(n);
+    for &node in &topo {
+        if let Some(l) = element_latency(&vg, node) {
+            latencies.push(l);
+            clocks.push(element_clock(&vg, node));
+        }
+    }
+    let latency = LatencyReport::aggregate(latencies);
+    let elected = elect_clock(clocks);
+    let (clock_priority, base_time_ns) = match &elected {
+        Some(c) => (c.priority, c.clock.now_ns()),
+        None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
+
     // Phase 4: one bounded channel per edge, then one arm per node. Each arm
     // takes the senders of its outgoing edges and the receivers of its
     // incoming edges (a tee holds n senders, a sink one receiver, etc.).
@@ -350,6 +418,7 @@ pub async fn run_graph<Clk: PipelineClock>(
                 return Err(G2gError::CapsMismatch);
             };
             let out_tx = out_txs.pop().expect("muxer output edge");
+            let mux_out_caps = solution[out_e[0]].clone();
             let pads: Vec<usize> =
                 in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
             let input_count = in_rxs.len();
@@ -364,7 +433,7 @@ pub async fn run_graph<Clk: PipelineClock>(
             }
             drop(tagged_tx);
             let arm: BoxFuture<'static, Result<u64, G2gError>> =
-                Box::pin(muxer_arm(mux, tagged_rx, out_tx, input_count));
+                Box::pin(muxer_arm(mux, tagged_rx, out_tx, input_count, mux_out_caps));
             arms.push(arm);
             arm_kinds.push(kind);
             continue;
@@ -442,10 +511,10 @@ pub async fn run_graph<Clk: PipelineClock>(
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
-        latency: LatencyReport::ZERO,
-        allocation: None,
-        clock_priority: ClockPriority::SystemFallback,
-        base_time_ns: clock.now_ns(),
+        latency,
+        allocation,
+        clock_priority,
+        base_time_ns,
         coordinator_events,
     })
 }
@@ -457,6 +526,82 @@ fn element_ref(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<&dyn DynA
         GraphNode::Element(elem) => Some(&**elem),
         GraphNode::Source(_) | GraphNode::Muxer(_) => None,
     }
+}
+
+/// A transform/sink node's allocation proposal from `caps` (its output-link caps
+/// for a transform, its input-link caps for a sink). `None` for other kinds.
+fn element_propose(
+    vg: &ValidatedGraph<GraphNode>,
+    node: NodeId,
+    caps: &Caps,
+) -> Option<AllocationParams> {
+    match vg.element(node) {
+        Some(GraphNode::Element(elem)) => elem.propose_allocation(caps),
+        _ => None,
+    }
+}
+
+/// Apply a downstream-derived allocation proposal to a transform's own pool.
+fn element_configure_alloc(
+    vg: &mut ValidatedGraph<GraphNode>,
+    node: NodeId,
+    params: &AllocationParams,
+) {
+    if let Some(GraphNode::Element(elem)) = vg.element_mut(node) {
+        elem.configure_allocation(params);
+    }
+}
+
+/// A node's latency contribution. `None` for structural (tee) and muxer nodes.
+fn element_latency(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<LatencyReport> {
+    match vg.element(node) {
+        Some(GraphNode::Source(src)) => Some(src.latency()),
+        Some(GraphNode::Element(elem)) => Some(elem.latency()),
+        _ => None,
+    }
+}
+
+/// A node's offered clock for the pipeline clock election.
+fn element_clock(vg: &ValidatedGraph<GraphNode>, node: NodeId) -> Option<ClockCandidate> {
+    match vg.element(node) {
+        Some(GraphNode::Source(src)) => src.provide_clock(),
+        Some(GraphNode::Element(elem)) => elem.provide_clock(),
+        _ => None,
+    }
+}
+
+/// Join two allocation proposals at a tee's input: keep the most-demanding
+/// (largest `size_bytes`). No test exercises a divergent tee allocation yet; a
+/// full per-param intersection is a follow-up (the DAG plan's open question).
+fn join_alloc(
+    a: Option<AllocationParams>,
+    b: Option<AllocationParams>,
+) -> Option<AllocationParams> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.size_bytes > x.size_bytes { y } else { x }),
+        (Some(x), None) => Some(x),
+        (None, b) => b,
+    }
+}
+
+/// Re-solve one muxer input pad against the boundary's new caps (MX-1).
+fn solve_mux_input_dyn(
+    new_caps: &Caps,
+    mux: &dyn DynMultiInputElement,
+    pad: usize,
+) -> Result<Caps, G2gError> {
+    let src_c = CapsConstraint::LegacySource(new_caps.clone());
+    let mux_c = mux.caps_constraint_as_input(pad);
+    let links = solve_linear(&[&src_c, &mux_c]).map_err(|_| G2gError::CapsMismatch)?;
+    links.last().cloned().ok_or(G2gError::CapsMismatch)
+}
+
+/// Re-derive the merged muxer output from its current per-input config (MX-2).
+fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError> {
+    let mux_c = mux.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?;
+    let sink_c = CapsConstraint::AcceptsAny;
+    let links = solve_linear(&[&mux_c, &sink_c]).map_err(|_| G2gError::CapsMismatch)?;
+    links.last().cloned().ok_or(G2gError::CapsMismatch)
 }
 
 async fn source_arm(
@@ -678,6 +823,7 @@ async fn muxer_arm(
     tagged_rx: Receiver<(usize, PipelinePacket)>,
     out_tx: LinkSender,
     input_count: usize,
+    mut current_output: Caps,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut ended = 0usize;
@@ -691,15 +837,23 @@ async fn muxer_arm(
                     return Ok(0);
                 }
             }
-            Some((pad, PipelinePacket::CapsChanged(caps))) => {
-                // D4 per-input re-solve: re-configure just this pad, then hand
-                // the change to the element. A muxer is a β allocation boundary
-                // (its inputs carry no per-pad re-cascade channel), and a
-                // mid-stream `ReFixate` on an input pad is unsupported (the
-                // forwarder owns the reverse channel), so the outcome is applied
-                // and not propagated.
-                let _ = mux.configure_pipeline(pad, &caps)?;
-                mux.process(pad, PipelinePacket::CapsChanged(caps), &mut adapter).await?;
+            Some((pad, PipelinePacket::CapsChanged(new_caps))) => {
+                // MX-1: re-solve this input against its pad constraint and
+                // reconfigure the pad; the input-side `CapsChanged` is consumed,
+                // not forwarded as if it were the merged output. A muxer is a β
+                // allocation boundary (its inputs have no per-pad re-cascade
+                // channel).
+                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                if let ConfigureOutcome::ReFixate(_) = mux.configure_pipeline(pad, &input_caps)? {
+                    return Err(G2gError::FixationFailed);
+                }
+                // MX-2: the per-input change may shift the merged output. Emit one
+                // downstream `CapsChanged` only when it actually changed.
+                let new_output = solve_mux_output_dyn(&*mux)?;
+                if new_output != current_output {
+                    current_output = new_output.clone();
+                    adapter.push(PipelinePacket::CapsChanged(new_output)).await?;
+                }
             }
             Some((pad, packet)) => {
                 mux.process(pad, packet, &mut adapter).await?;
