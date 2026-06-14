@@ -834,13 +834,23 @@ fn apply_node<E>(
             NodeConstraint::Element(CapsConstraint::Produces(s)) => {
                 narrow_edge(graph, edges, out_e[0], s)
             }
+            // Legacy bridge: a `LegacySource` carries one fixated caps, the same
+            // as `Produces(one(caps))`.
+            NodeConstraint::Element(CapsConstraint::LegacySource(caps)) => {
+                narrow_edge(graph, edges, out_e[0], &CapsSet::one(caps.clone()))
+            }
             _ => Err(shape_err),
         },
         NodeKind::Sink => match nc {
             NodeConstraint::Element(CapsConstraint::Accepts(s)) => {
                 narrow_edge(graph, edges, in_e[0], s)
             }
-            NodeConstraint::Element(CapsConstraint::AcceptsAny) => Ok(()),
+            // `AcceptsAny` and a `LegacySink` both leave the input edge to carry
+            // whatever the upstream fixates: the legacy sink's `intercept` is the
+            // terminal accept (the runner configures it with the upstream caps,
+            // as `run_muxer_sink` did), so it imposes no solver narrowing.
+            NodeConstraint::Element(CapsConstraint::AcceptsAny)
+            | NodeConstraint::Element(CapsConstraint::LegacySink(_)) => Ok(()),
             _ => Err(shape_err),
         },
         NodeKind::Transform => match nc {
@@ -949,24 +959,39 @@ fn apply_transform_node<E>(
         CapsConstraint::DerivedOutput(f) => {
             // Fire once the input edge has fixated to a single concrete caps,
             // mirroring the linear solver.
-            if let Some(input_set) = &edges[in_e] {
-                if let Some(fixed_input) = input_set.fixate() {
-                    if input_set.alternatives().len() == 1
-                        && input_set.alternatives()[0] == fixed_input
-                    {
-                        let derived = f(&fixed_input);
-                        if derived.is_empty() {
-                            let (up, down) = edge_endpoints(graph, out_e);
-                            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
-                        }
-                        return narrow_edge(graph, edges, out_e, &derived);
-                    }
+            if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
+                let derived = f(&fixed_input);
+                if derived.is_empty() {
+                    let (up, down) = edge_endpoints(graph, out_e);
+                    return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
                 }
+                return narrow_edge(graph, edges, out_e, &derived);
+            }
+            Ok(())
+        }
+        // Legacy bridge: forward `intercept(input)` to the output once the input
+        // fixates, the same single-caps forward cascade `solve_legacy_cascade`
+        // runs (no backward coupling, like the mixed-cascade path).
+        CapsConstraint::LegacyTransform { intercept, .. } => {
+            if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
+                let out = intercept(&fixed_input).map_err(|_| {
+                    let (up, down) = edge_endpoints(graph, out_e);
+                    NegotiationFailure::EmptyLink { upstream: up, downstream: down }
+                })?;
+                return narrow_edge(graph, edges, out_e, &CapsSet::one(out));
             }
             Ok(())
         }
         _ => Err(NegotiationFailure::EndpointShapeMismatch { index: node.0 as usize }),
     }
+}
+
+/// The single concrete caps an edge has fixated to, or `None` if it still has
+/// multiple alternatives or ranged (`Any`) fields. Used by the forward-cascade
+/// constraints (`DerivedOutput`, `LegacyTransform`) that need a concrete input.
+fn fixed_single(set: &CapsSet) -> Option<Caps> {
+    let fixed = set.fixate()?;
+    (set.alternatives().len() == 1 && set.alternatives()[0] == fixed).then_some(fixed)
 }
 
 /// A tee fans its input caps out to every output unchanged: couple the input
@@ -1017,13 +1042,19 @@ fn apply_muxer_node<E>(
         let pad = graph.edge(eid).dst.index as usize;
         match inputs.get(pad) {
             Some(CapsConstraint::Accepts(set)) => narrow_edge(graph, edges, eid, set)?,
-            Some(CapsConstraint::AcceptsAny) => {}
+            // `AcceptsAny` and a legacy input pad both forward per-frame caps
+            // without narrowing the edge.
+            Some(CapsConstraint::AcceptsAny) | Some(CapsConstraint::LegacySink(_)) => {}
             _ => return Err(shape_err),
         }
     }
     let out_edge = graph.out_edges(node)[0];
     match output {
         CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set),
+        // A legacy muxer output carries one fixated merged caps.
+        CapsConstraint::LegacySource(caps) => {
+            narrow_edge(graph, edges, out_edge, &CapsSet::one(caps.clone()))
+        }
         _ => Err(shape_err),
     }
 }
@@ -1647,6 +1678,64 @@ mod tests {
         let sol = solve_graph(&v, &cs).expect("wildcard muxer solves");
         // a wildcard input pad leaves each input edge at its own source caps.
         assert_eq!(sol, vec![h264, aac, merged]);
+    }
+
+    #[test]
+    fn solve_graph_accepts_legacy_bridge_constraints() {
+        // A native source/muxer feeding a `LegacySink` (the default sink bridge,
+        // e.g. m10's CollectingSink). The legacy sink imposes no narrowing, so
+        // the merged output flows through unchanged. Previously this hit
+        // EndpointShapeMismatch; now `run_muxer_sink` can build it as a graph.
+        let h264 = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::LegacySource(h264.clone())),
+            NodeConstraint::Element(CapsConstraint::LegacySource(h264.clone())),
+            NodeConstraint::Muxer {
+                inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
+                output: CapsConstraint::Produces(CapsSet::one(h264.clone())),
+            },
+            NodeConstraint::Element(CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let s0 = g.add_source(());
+        let s1 = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(s0, mux.input(0)).unwrap();
+        g.link(s1, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("native muxer + legacy sink solves");
+        assert_eq!(sol, vec![h264.clone(), h264.clone(), h264]);
+    }
+
+    #[test]
+    fn solve_graph_forwards_legacy_transform() {
+        // src(LegacySource RGBA) -> LegacyTransform(RGBA->NV12) -> Accepts NV12.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::LegacySource(rgba.clone())),
+            NodeConstraint::Element(CapsConstraint::LegacyTransform {
+                intercept: Box::new({
+                    let nv12 = nv12.clone();
+                    move |_in: &Caps| Ok(nv12.clone())
+                }),
+                propose_output: Box::new(|c: &Caps| c.clone()),
+            }),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12.clone()))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tx = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, tx).unwrap();
+        g.link(tx, sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("legacy transform forwards");
+        assert_eq!(sol, vec![rgba, nv12]);
     }
 
     #[cfg(feature = "std")]

@@ -1217,9 +1217,12 @@ not map onto the current `Graph`/`solve_graph` without prerequisite work:
   constraints** (e.g. m10's `CollectingSink` uses the default `LegacySink`),
   but `solve_graph` only accepts native variants (`Produces`/`Accepts`/
   `Identity`/`AcceptsAny`/`Mapping`/`DerivedOutput`); a legacy sink hits
-  `EndpointShapeMismatch`. `run_muxer_sink` also bypassed the sink constraint
-  entirely (solved the muxer output against `AcceptsAny`). Prereq: legacy-bridge
-  support in `solve_graph`, or migrate every element to native constraints.
+  `EndpointShapeMismatch`. RESOLVED (M73): `solve_graph` now accepts the
+  `Legacy*` variants, and `run_muxer_sink` is a thin builder over `run_graph`.
+  `run_linear_chain` is still owed: its conversion additionally needs the
+  topology-derived rejection policy (graceful reverse-reconfigure on a
+  single-producer chain vs. strict fail behind a tee) so its mid-stream tests
+  (`m18_caps_resolve`, `m18_beta_nhop`) keep passing.
 
 D1 + D2 are pure `no_std` (the `Graph` and solver are computation, no I/O).
 D3 onwards is `std` because the runner is `tokio` / `flume`-coupled.

@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M73: legacy-bridge support in `solve_graph` + `run_muxer_sink` as a thin builder
+
+- `solve_graph` now accepts the `Legacy*` migration-bridge constraints, not just
+  the native variants, so a graph containing un-migrated elements solves: a
+  `LegacySource` narrows its output like `Produces(one)`, a `LegacyTransform`
+  forwards `intercept(input)` once the input fixates (the same single-caps
+  forward cascade `solve_legacy_cascade` runs), and a `LegacySink` / legacy muxer
+  input pad imposes no narrowing (the terminal accept the runner configures
+  directly, as `run_muxer_sink` did). Previously a legacy sink hit
+  `EndpointShapeMismatch`. This unblocks the D5 wrapper conversions.
+- `run_muxer_sink` is now a thin builder: it constructs a borrowing
+  `Graph<GraphNodeRef>` (muxer fan-in node + sources + sink) and delegates to
+  `run_graph`, which owns negotiation, the per-input forwarders, the single
+  merged Eos, and the MX-1 / MX-2 mid-stream re-solve. The bespoke fan-in data
+  plane (`solve_mux_input` / `solve_mux_output` and the inline arms) is deleted.
+  `run_graph` gained a `pub(crate) run_graph_inner` with an optional bus for the
+  `_with_bus` variant (posts a startup negotiation failure).
+- Tests: two solver unit tests (native muxer + `LegacySink` solves; a
+  `LegacyTransform` forwards). Existing `m10_muxer` (its `CollectingSink` uses
+  the default `LegacySink` bridge), `m18_mux_phase_c` (MX-1 / MX-2), and
+  `m69_dag_muxer` pass unmodified through the rebuilt wrapper. VERIFIED: `cargo
+  test --workspace` green; `cargo test -p g2g-core --features "std runtime"`
+  green (149); `cargo clippy -p g2g-core --features "std runtime" --all-targets`
+  clean; `cargo check -p g2g-core --target thumbv7em-none-eabihf` green.
+
 ### M72: lifetime-generic graph runner (borrowing graphs)
 
 - `run_graph`'s payload is now `GraphNodeRef<'a>` (boxes hold `+ 'a` elements);

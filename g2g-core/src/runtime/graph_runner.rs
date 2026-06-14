@@ -29,6 +29,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use crate::bus::BusHandle;
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
@@ -42,7 +43,7 @@ use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{MemoryDomain, SystemSlice};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
-use crate::runtime::coordinator::{realloc_local_dyn, ArmDirective};
+use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::join::{join_all, select2, Either};
 use crate::runtime::runner::{
@@ -197,6 +198,20 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
+    run_graph_inner(graph, clock, link_capacity, None).await
+}
+
+/// As [`run_graph`], but posts a structured
+/// [`BusMessage::NegotiationFailed`](crate::BusMessage::NegotiationFailed) to
+/// `bus` on a startup negotiation failure. The convenience wrappers' `_with_bus`
+/// variants build a borrowing `Graph` and route through here; `run_graph` passes
+/// `None`.
+pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: Option<&BusHandle>,
+) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
@@ -257,7 +272,10 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
             };
             constraints.push(nc);
         }
-        let solution = solve_graph(&vg, &constraints).map_err(|_| G2gError::CapsMismatch)?;
+        let solution = solve_graph(&vg, &constraints).map_err(|f| {
+            report_nego_failure(bus, f);
+            G2gError::CapsMismatch
+        })?;
         let feasibility = graph_downstream_feasibility(&vg, &constraints);
         (solution, feasibility)
     };
