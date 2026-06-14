@@ -194,13 +194,14 @@ pub(crate) fn coordinator_with_recascade(
 }
 
 /// β N-hop: build the control channel with one re-cascade leg per interior
-/// element of an `N`-element linear chain (`run_linear_chain`). Returns the
-/// per-arm [`ArmDirective`] receivers, ordered source-to-sink, that each
-/// interior arm selects on. `n == 0` yields an observe-only coordinator.
+/// element. Returns the per-arm [`ArmDirective`] receivers, ordered
+/// source-to-sink, that each interior arm selects on. `n == 0` yields an
+/// observe-only coordinator.
 ///
-/// Used only by the std-gated `run_linear_chain` (and its tests), so it is
-/// gated likewise to stay dead-code-free in no_std (embedded) builds.
-#[cfg(any(feature = "std", test))]
+/// Test-only since `run_linear_chain` became a thin builder over `run_graph`
+/// (whose `GraphCoordinator` owns the N-hop DAG walk); the tests still exercise
+/// the linear [`Coordinator`]'s multi-leg forwarding.
+#[cfg(test)]
 pub(crate) fn coordinator_with_recascade_n(
     capacity: usize,
     n: usize,

@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M74: `run_linear_chain` as a thin builder + topology-derived rejection policy
+
+- `run_linear_chain` is now a thin builder: it constructs a borrowing
+  `Graph<GraphNodeRef>` (source -> transform* -> sink) and delegates to
+  `run_graph`, which owns negotiation, the M12 stat folds, the β allocation
+  re-cascade, and the Caps-α mid-stream re-solve. Its ~290-line bespoke data
+  plane (the N-hop coordinator wiring, the per-arm `select2` loops, the inline
+  latency/clock/allocation folds) is deleted.
+- `run_graph` gained a topology-derived mid-stream rejection policy: a node on a
+  single-producer chain reverse-reconfigures and keeps flowing on a rejected
+  `CapsChanged` (posting the structured failure to the bus), while a node behind
+  a tee fails the run loud (the `run_source_fanout` strict default, since a
+  shared upstream can't honor a per-branch reconfigure). This reconciles the
+  linear runner's graceful behavior with the fan-out runner's strict one in a
+  single runner, keyed on whether a tee sits upstream (`behind_tee`).
+- `coordinator_with_recascade_n` (coordinator) and `downstream_feasibility`
+  (solver) are now test-only: `run_linear_chain` was their last production user,
+  and `run_graph`'s `GraphCoordinator` + edge-indexed `graph_downstream_feasibility`
+  supersede them. Their tests still pin the linear-form behavior.
+- Tests: `m18_beta_nhop` (β N-hop re-cascade), `m18_caps_resolve` (Caps-α
+  mid-stream steering), `m18_dyn_latency_clock` (interior-element latency/clock
+  folds), and `m18_multi_element` all pass unmodified through the rebuilt
+  wrapper. VERIFIED: `cargo test --workspace` green; `cargo test -p g2g-core
+  --features "std runtime"` green (149); `cargo clippy -p g2g-core --features
+  "std runtime" --all-targets` clean; `cargo check -p g2g-core --target
+  thumbv7em-none-eabihf` green.
+
 ### M73: legacy-bridge support in `solve_graph` + `run_muxer_sink` as a thin builder
 
 - `solve_graph` now accepts the `Legacy*` migration-bridge constraints, not just

@@ -18,15 +18,11 @@ use crate::runtime::coordinator::{
     report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
-use crate::runtime::coordinator::coordinator_with_recascade_n;
-#[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
 };
-#[cfg(feature = "std")]
-use crate::runtime::solver::downstream_feasibility;
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -35,7 +31,9 @@ use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
 use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiSenderSink};
 #[cfg(feature = "std")]
-use crate::runtime::channel::{LinkReceiver, LinkSender};
+use crate::graph::Graph;
+#[cfg(feature = "std")]
+use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 #[cfg(feature = "std")]
 use crate::runtime::join::join_all;
 
@@ -774,294 +772,21 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    let link_capacity: usize = link_capacity.into().get();
-    let mut transforms = transforms;
-    let n_tx = transforms.len();
-    let n_links = n_tx + 1;
-
-    // Negotiation: solve over source + every interior transform + sink at
-    // once. All constraints are built and consumed inside this scope so the
-    // borrows they hold on their elements (the source future, the legacy
-    // bridge closures) are released before the per-element configure below
-    // takes mutable access.
-    let (links, feasibility) = {
-        let src_c = source.caps_constraint().await?;
-        let tx_cs: Vec<CapsConstraint<'_>> = transforms
-            .iter()
-            .map(|t| t.caps_constraint_as_transform())
-            .collect();
-        let sink_c = sink.caps_constraint_as_sink();
-        let mut refs: Vec<&CapsConstraint<'_>> = Vec::with_capacity(n_tx + 2);
-        refs.push(&src_c);
-        refs.extend(tx_cs.iter());
-        refs.push(&sink_c);
-        let links = solve_linear(&refs).map_err(|f| {
-            report_nego_failure(bus, f);
-            G2gError::CapsMismatch
-        })?;
-        // Caps-α: snapshot the downstream feasibility per output link so each
-        // interior arm can steer a mid-stream caps change toward a
-        // downstream-acceptable output without reaching its peers at runtime.
-        let feasibility = downstream_feasibility(&refs);
-        (links, feasibility)
-    };
-    if links.len() != n_links {
-        return Err(G2gError::CapsMismatch);
+    // D5: thin builder over the DAG runner. A linear chain maps onto a
+    // source -> transform* -> sink path; `run_graph` owns negotiation, the M12
+    // stat folds, the β allocation re-cascade, and the Caps-α mid-stream
+    // re-solve (graceful on this single-producer chain: no tee upstream).
+    let mut g: Graph<GraphNodeRef<'_>> = Graph::new();
+    let mut prev = g.add_source(GraphNodeRef::source_ref(source));
+    for t in transforms {
+        let node = g.add_transform(GraphNodeRef::element_ref(t));
+        g.link(prev, node).map_err(|_| G2gError::CapsMismatch)?;
+        prev = node;
     }
+    let snk = g.add_sink(GraphNodeRef::element_ref(sink));
+    g.link(prev, snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    // Per-element configure with the element's input-side caps. The source
-    // has only its output link[0]; transform `i` consumes link[i]; the sink
-    // consumes the last link.
-    if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&links[0])? {
-        return Err(G2gError::FixationFailed);
-    }
-    for (i, t) in transforms.iter_mut().enumerate() {
-        if let ConfigureOutcome::ReFixate(_) = t.configure_pipeline(&links[i])? {
-            return Err(G2gError::FixationFailed);
-        }
-    }
-    if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&links[n_tx])? {
-        return Err(G2gError::FixationFailed);
-    }
-
-    // M12 allocation cascade: fold sink -> ... -> source. Each element absorbs
-    // the downstream proposal, then proposes from its own output-link caps.
-    let mut proposal = sink.propose_allocation(&links[n_tx]);
-    for i in (0..n_tx).rev() {
-        if let Some(p) = &proposal {
-            transforms[i].configure_allocation(p);
-        }
-        proposal = transforms[i].propose_allocation(&links[i + 1]);
-    }
-    if let Some(p) = &proposal {
-        source.configure_allocation(p);
-    }
-    let allocation = proposal;
-
-    // Clock / latency: fold source, every interior element, then sink in path
-    // order. Interior elements are `dyn`, so their contributions come through
-    // the dyn-safe `DynAsyncElement::latency` / `provide_clock` mirrors, so a
-    // buffering interior transform or one that paces to hardware now
-    // participates (before, only the source and sink did).
-    let mut latencies = Vec::with_capacity(n_tx + 2);
-    let mut clocks = Vec::with_capacity(n_tx + 2);
-    latencies.push(source.latency());
-    clocks.push(source.provide_clock());
-    for t in transforms.iter() {
-        latencies.push(t.latency());
-        clocks.push(t.provide_clock());
-    }
-    latencies.push(AsyncElement::latency(sink));
-    clocks.push(AsyncElement::provide_clock(sink));
-    let latency = LatencyReport::aggregate(latencies);
-    let elected = elect_clock(clocks);
-    let (clock_priority, base_time_ns) = match &elected {
-        Some(c) => (c.priority, c.clock.now_ns()),
-        None => (ClockPriority::SystemFallback, clock.now_ns()),
-    };
-
-    // Data plane: N+1 links distributed across N+2 arms. `Option::take` moves
-    // each endpoint into exactly one arm.
-    let mut txs: Vec<Option<LinkSender>> = Vec::with_capacity(n_links);
-    let mut rxs: Vec<Option<LinkReceiver>> = Vec::with_capacity(n_links);
-    for _ in 0..n_links {
-        let (tx, rx) = link(link_capacity);
-        txs.push(Some(tx));
-        rxs.push(Some(rx));
-    }
-
-    // M18 β N-hop: a coordinator owns one re-cascade control leg per interior
-    // arm. On a mid-stream `CapsChanged` the sink reports its proposal; the
-    // coordinator forwards it to the last interior arm, which applies
-    // `configure_allocation`, re-derives its own proposal from its output
-    // caps, and reports it back so the coordinator forwards one hop further
-    // up. The cascade applies during data flow; one triggered in the final
-    // frames before EOS is best-effort (arms exit on EOS), which is correct
-    // for a live stream that never reaches a final frame.
-    let (coord, coord_handle, arm_rxs) = coordinator_with_recascade_n(link_capacity, n_tx);
-
-    let src_tx = txs[0].take().expect("link 0 sender");
-    let source_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut adapter = SenderSink::new(src_tx);
-        source.run(&mut adapter).await
-    });
-
-    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(n_tx + 3);
-    arms.push(source_fut);
-
-    for ((i, t), arm_rx) in transforms.into_iter().enumerate().zip(arm_rxs) {
-        let in_rx = rxs[i].take().expect("transform input rx");
-        let out_tx = txs[i + 1].take().expect("transform output tx");
-        let arm_coord = coord_handle.clone();
-        // The arm's output-link caps, used to re-derive its proposal on a
-        // re-cascade. Tracks the caps it forwards downstream (now exact for a
-        // format-changing element too, since Caps-α derives the forwarded
-        // output below).
-        let mut out_caps = links[i + 1].clone();
-        // Caps-α: this arm's output-link downstream feasibility snapshot, and
-        // a bus clone for surfacing a mid-stream re-solve failure.
-        let downstream_feasible = feasibility[i + 1].clone();
-        let bus_for_arm = bus.cloned();
-        let arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-            let mut adapter = SenderSink::new(out_tx);
-            let mut control_open = true;
-            loop {
-                let packet = if control_open {
-                    match select2(arm_rx.recv(), in_rx.recv()).await {
-                        Either::Left(Some(ArmDirective::Recascade(params))) => {
-                            // β N-hop: absorb the downstream proposal, then
-                            // re-derive and report our own so the cascade
-                            // continues to our upstream neighbour.
-                            t.configure_allocation(&params);
-                            let proposal = t.propose_allocation(&out_caps);
-                            arm_coord
-                                .report(CoordinatorEvent::ArmProposal { index: i, proposal })
-                                .await;
-                            continue;
-                        }
-                        Either::Left(None) => {
-                            control_open = false;
-                            continue;
-                        }
-                        Either::Right(packet) => packet,
-                    }
-                } else {
-                    in_rx.recv().await
-                };
-                match packet {
-                    Some(PipelinePacket::Eos) => {
-                        t.process(PipelinePacket::Eos, &mut adapter).await?;
-                        adapter.push(PipelinePacket::Eos).await?;
-                        return Ok::<u64, G2gError>(0);
-                    }
-                    Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        // Caps-α (D3): the runner derives the forwarded output
-                        // from the element's constraint, steered by the
-                        // downstream feasibility snapshot, so a format-changing
-                        // element is pushed toward a downstream-acceptable
-                        // output instead of a greedy local choice. `Defer`
-                        // keeps the prior behavior (forward the incoming caps,
-                        // let `process` derive); `Infeasible` means downstream
-                        // positively rejects, surfaced loud as a reverse
-                        // reconfigure into this boundary.
-                        let forward_caps = {
-                            let constraint = t.caps_constraint_as_transform();
-                            match resolve_forward_output(
-                                &constraint,
-                                &new_caps,
-                                downstream_feasible.as_ref(),
-                            ) {
-                                ForwardResolve::Fixed(caps) => caps,
-                                ForwardResolve::Defer => new_caps.clone(),
-                                ForwardResolve::Infeasible(failure) => {
-                                    report_nego_failure(bus_for_arm.as_ref(), failure);
-                                    in_rx.request_reconfigure(Reconfigure::Renegotiate);
-                                    continue;
-                                }
-                            }
-                        };
-                        match t.configure_pipeline(&new_caps)? {
-                            ConfigureOutcome::Accepted => {
-                                // M18 α: interior element re-derives its own pool
-                                // from its re-fixated output caps.
-                                realloc_local_dyn(t, &forward_caps);
-                                out_caps = forward_caps.clone();
-                                t.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
-                                    .await?;
-                            }
-                            ConfigureOutcome::ReFixate(counter) => {
-                                in_rx.request_reconfigure(Reconfigure::Propose(counter));
-                            }
-                        }
-                    }
-                    Some(packet) => {
-                        t.process(packet, &mut adapter).await?;
-                    }
-                    None => return Ok(0),
-                }
-            }
-        });
-        arms.push(arm);
-    }
-
-    let sink_rx = rxs[n_tx].take().expect("sink input rx");
-    let bus_for_sink = bus.cloned();
-    let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let bus_for_sink = bus_for_sink;
-        // Move the original handle in (the interior arms each hold a clone);
-        // when every arm finishes, all handles drop and the coordinator ends.
-        let coord = coord_handle;
-        let mut null = NullSink;
-        let mut consumed: u64 = 0;
-        loop {
-            match sink_rx.recv().await {
-                Some(PipelinePacket::Eos) => {
-                    sink.process(PipelinePacket::Eos, &mut null).await?;
-                    return Ok::<u64, G2gError>(consumed);
-                }
-                Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    let sink_caps = match re_solve_downstream_sink(&new_caps, &*sink) {
-                        Ok(caps) => caps,
-                        Err(failure) => {
-                            report_nego_failure(bus_for_sink.as_ref(), failure);
-                            sink_rx.request_reconfigure(Reconfigure::Renegotiate);
-                            continue;
-                        }
-                    };
-                    match sink.configure_pipeline(&sink_caps)? {
-                        ConfigureOutcome::Accepted => {
-                            let proposal = realloc_local(sink, &sink_caps);
-                            // β N-hop: kick off the upstream re-cascade with the
-                            // sink's re-derived proposal.
-                            coord
-                                .report(CoordinatorEvent::CapsChanged {
-                                    caps: sink_caps.clone(),
-                                    proposal,
-                                })
-                                .await;
-                            sink.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
-                                .await?;
-                        }
-                        ConfigureOutcome::ReFixate(counter) => {
-                            sink_rx.request_reconfigure(Reconfigure::Propose(counter));
-                        }
-                    }
-                }
-                Some(packet) => {
-                    if matches!(packet, PipelinePacket::DataFrame(_)) {
-                        consumed += 1;
-                    }
-                    sink.process(packet, &mut null).await?;
-                }
-                None => return Ok(consumed),
-            }
-        }
-    });
-    arms.push(sink_fut);
-
-    // The coordinator drains the control channel until every arm drops its
-    // handle. Joined as the last arm; its `run` returns an event count.
-    arms.push(Box::pin(async move { Ok(coord.run().await) }));
-
-    let results = join_all(arms).await;
-    let mut counts = Vec::with_capacity(results.len());
-    for r in results {
-        counts.push(r?);
-    }
-    // Arm order: [source, t0, .., t_{n-1}, sink, coordinator].
-    let emitted = counts[0];
-    let consumed = counts[n_tx + 1];
-    let coordinator_events = counts[n_tx + 2];
-
-    Ok(RunStats {
-        frames_emitted: emitted,
-        frames_consumed: consumed,
-        latency,
-        allocation,
-        clock_priority,
-        base_time_ns,
-        coordinator_events,
-    })
+    run_graph_inner(g, clock, link_capacity, bus).await
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.

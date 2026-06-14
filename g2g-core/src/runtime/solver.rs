@@ -427,7 +427,11 @@ pub(crate) enum ForwardResolve {
 /// Computed once at startup and snapshotted per interior arm so the
 /// mid-stream re-solve can steer an element's output without reaching the
 /// downstream elements at runtime (`DESIGN-M18-caps-resolve.md` §3).
-#[cfg(feature = "std")]
+///
+/// Test-only since `run_linear_chain` became a thin builder over `run_graph`
+/// (which uses the edge-indexed [`graph_downstream_feasibility`]); the test
+/// still pins the per-link reverse-sweep behavior.
+#[cfg(all(test, feature = "std"))]
 pub(crate) fn downstream_feasibility(constraints: &[&CapsConstraint<'_>]) -> Vec<Option<CapsSet>> {
     let n = constraints.len();
     if n < 2 {

@@ -184,6 +184,27 @@ fn nearest_upstream_arm<E>(vg: &ValidatedGraph<E>, edge_id: usize) -> Option<Nod
     }
 }
 
+/// Whether a tee sits on the path from `node` up toward a source. A node behind
+/// a tee shares its upstream with sibling branches, so it can't reverse-
+/// reconfigure on a rejected mid-stream change and instead fails loud (the
+/// `run_source_fanout` strict default). A node on a single-producer chain
+/// (`run_linear_chain` / `run_source_transform_sink`) reverse-reconfigures and
+/// keeps flowing.
+fn behind_tee<E>(vg: &ValidatedGraph<E>, node: NodeId) -> bool {
+    let mut cur = node;
+    loop {
+        let ins = vg.in_edges(cur);
+        if ins.is_empty() {
+            return false;
+        }
+        let src = vg.edge(ins[0]).src.node;
+        if matches!(vg.kind(src), NodeKind::Tee(_)) {
+            return true;
+        }
+        cur = src;
+    }
+}
+
 /// Drive an arbitrary DAG to EOS. Negotiates the whole graph at once, then runs
 /// one arm per node over per-edge channels. `link_capacity` accepts a
 /// [`LatencyProfile`](crate::runtime::LatencyProfile) or a `usize` depth.
@@ -509,6 +530,8 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     node,
                     out_caps,
                     downstream_feasible,
+                    behind_tee(&vg, node),
+                    bus.cloned(),
                 ))
             }
             NodeKind::Sink => {
@@ -516,7 +539,14 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
-                Box::pin(sink_arm(elem, in_rx, coord_handle.clone(), node))
+                Box::pin(sink_arm(
+                    elem,
+                    in_rx,
+                    coord_handle.clone(),
+                    node,
+                    behind_tee(&vg, node),
+                    bus.cloned(),
+                ))
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
@@ -674,6 +704,8 @@ async fn transform_arm<'a>(
     node: NodeId,
     mut out_caps: Caps,
     downstream_feasible: Option<CapsSet>,
+    strict: bool,
+    bus: Option<BusHandle>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut control_open = true;
@@ -724,12 +756,17 @@ async fn transform_arm<'a>(
                     {
                         ForwardResolve::Fixed(caps) => caps,
                         ForwardResolve::Defer => new_caps.clone(),
-                        // Strict default (matches `run_source_fanout`): a branch
-                        // whose downstream positively rejects every output this
-                        // element can produce fails the whole graph loud. A
-                        // graceful per-branch drop is a future opt-in.
-                        ForwardResolve::Infeasible(_failure) => {
-                            return Err(G2gError::CapsMismatch);
+                        ForwardResolve::Infeasible(failure) => {
+                            // Behind a tee (shared upstream): fail loud
+                            // (`run_source_fanout` strict default). On a
+                            // single-producer chain: post the failure and reverse-
+                            // reconfigure into the boundary, then keep flowing.
+                            if strict {
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            report_nego_failure(bus.as_ref(), failure);
+                            in_rx.request_reconfigure(Reconfigure::Renegotiate);
+                            continue;
                         }
                     }
                 };
@@ -762,6 +799,8 @@ async fn sink_arm<'a>(
     in_rx: LinkReceiver,
     coord: GraphCoordHandle,
     node: NodeId,
+    strict: bool,
+    bus: Option<BusHandle>,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -772,12 +811,21 @@ async fn sink_arm<'a>(
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
-                // Strict default (matches `run_source_fanout`): a sink whose
-                // declared constraint rejects the boundary's new output fails
-                // the whole graph loud rather than reverse-reconfiguring a
-                // shared upstream a tee can't satisfy per-branch.
-                let sink_caps = re_solve_downstream_dyn_sink(&new_caps, &*elem)
-                    .map_err(|_| G2gError::CapsMismatch)?;
+                // Behind a tee (shared upstream): a rejected change fails loud
+                // (`run_source_fanout` strict default). On a single-producer
+                // chain: post the failure and reverse-reconfigure into the
+                // boundary that emitted the change, then keep flowing.
+                let sink_caps = match re_solve_downstream_dyn_sink(&new_caps, &*elem) {
+                    Ok(caps) => caps,
+                    Err(failure) => {
+                        if strict {
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        report_nego_failure(bus.as_ref(), failure);
+                        in_rx.request_reconfigure(Reconfigure::Renegotiate);
+                        continue;
+                    }
+                };
                 match elem.configure_pipeline(&sink_caps)? {
                     ConfigureOutcome::Accepted => {
                         let proposal = elem.propose_allocation(&sink_caps);
