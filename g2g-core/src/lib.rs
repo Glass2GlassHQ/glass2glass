@@ -24,6 +24,7 @@ pub mod memory;
 pub mod metrics;
 pub mod pool;
 pub mod query;
+pub mod segment;
 pub mod state;
 pub mod staticpool;
 
@@ -66,6 +67,7 @@ pub use memory::{
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
+pub use segment::{Seek, SeekFlags, SeekType, Segment};
 pub use state::{PipelineState, StateChangeReturn};
 pub use staticpool::{StaticAcquire, StaticBufferPool, StaticPooled};
 

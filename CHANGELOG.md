@@ -5,6 +5,47 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M79: seek + segment model (running-time / stream-time math)
+
+- First milestone of the Phase 1 seek track (DESIGN_TODO roadmap item 2). Pure,
+  `no_std` data + math foundation, no runner changes: a new ungated
+  `g2g-core::segment` module (pure `core`, not even `alloc`), so the
+  Cortex-M / wasm baseline carries it.
+- `Seek` request (the GStreamer seek-event analog): `rate`, `flags`,
+  `start_type`/`start`, `stop_type`/`stop` (ns). `SeekType` (`None`/`Set`/`End`)
+  and `SeekFlags` (a `u32` bitset: `FLUSH`, `ACCURATE`, `KEY_UNIT`, `SEGMENT`,
+  `TRICKMODE`, `SNAP_BEFORE`/`AFTER`, composing with `|`, queried by
+  `contains`). Conveniences: `Seek::flush_to(pos)`, `is_flush`, `is_reverse`.
+- `Segment` (the `GstSegment` analog, TIME format): `rate` / `applied_rate` /
+  `base` / `start` / `stop` / `time` / `position`, with the two conversions the
+  rest of the track depends on:
+  - `to_running_time(ts)` (pipeline-clock ns) is rate- and direction-aware:
+    forward `base + (ts - start) / |rate|`; reverse `base + (stop - ts) /
+    |rate|` (needs a finite `stop`); `None` outside the segment.
+  - `to_stream_time(ts)` (media position) is direction-agnostic, scaled by
+    `applied_rate`: `time + (ts - start) * |applied_rate|`.
+  - `clip(b_start, b_stop)` trims a buffer to the segment (the
+    `gst_segment_clip` analog); `contains`; and `for_flush_seek(seek, duration)`
+    builds the reset segment a flushing seek produces (`base = 0`, `End`-type
+    edges resolved against the duration). `f64::abs` is hand-rolled to stay
+    `no_std` (core has no libm).
+- Scope is data + math only. Deferred to M80 (the wiring milestone): a
+  `PipelinePacket::Segment` variant (a 48-file exhaustive-match ripple, hence
+  separated), a `Seekable` source trait, and flush-and-resume on the stateful
+  runner; the non-flushing (accumulating) `do_seek` that advances `base` by the
+  elapsed running time; and reverse/trick-mode frame handling.
+- Tests: eight `g2g-core` unit tests (flag compose/query; `flush_to` shape;
+  forward running time at rate 1; running time scaled at 2x / 0.5x; reverse
+  running time measured from `stop`, including the open-stop `None` case;
+  stream time via `applied_rate`; `clip` straddling start/stop/open-end and the
+  fully-outside drops; `for_flush_seek` reset + `SeekType::End` resolution).
+  VERIFIED on the dev host: `cargo test -p g2g-core --features "std runtime"
+  --lib` green (incl. 8 new); `cargo clippy -p g2g-core` (default `no_std`) and
+  `--features "std runtime" --all-targets` clean; `cargo test --workspace`
+  green; module `rustfmt`-clean. NOT verified in-session: `thumbv7em` / `wasm32`
+  cross-builds (sandbox toolchain can't supply `core`); the module is pure
+  `core`, so it stays in the baseline by construction.
+
 ### M78: state machine + preroll over the DAG runner
 
 - Rolls the M76/M77 flow gate into the production runner. New
