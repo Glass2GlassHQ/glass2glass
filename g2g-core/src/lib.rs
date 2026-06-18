@@ -24,6 +24,7 @@ pub mod memory;
 pub mod metrics;
 pub mod pool;
 pub mod query;
+pub mod state;
 pub mod staticpool;
 
 #[cfg(feature = "runtime")]
@@ -65,6 +66,7 @@ pub use memory::{
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
+pub use state::{PipelineState, StateChangeReturn};
 pub use staticpool::{StaticAcquire, StaticBufferPool, StaticPooled};
 
 #[cfg(feature = "runtime")]

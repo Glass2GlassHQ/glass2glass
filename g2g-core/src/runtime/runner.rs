@@ -23,6 +23,7 @@ use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
 };
+use crate::runtime::state::{Flow, StateController};
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -299,7 +300,31 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_simple_pipeline_inner(source, sink, clock, link_capacity, None).await
+    run_simple_pipeline_inner(source, sink, clock, link_capacity, None, None).await
+}
+
+/// As [`run_simple_pipeline`], but driven by a [`StateController`] (M76).
+///
+/// The sink arm gates on the controller: while the state is below
+/// `Playing` the sink stops pulling, the bounded link fills, and backpressure
+/// stalls the source. `set_state(Playing)` (from another task) opens the gate
+/// and data flows; `set_state(Null)` stops the sink arm and ends the run.
+/// Negotiation still runs eagerly at startup (it is resource acquisition, the
+/// `READY` step); only data flow is gated. Pass the controller starting in
+/// `Paused` for the common "build prerolled, then play" shape.
+pub async fn run_simple_pipeline_stateful<Src, Snk, Clk>(
+    source: &mut Src,
+    sink: &mut Snk,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    state: &StateController,
+) -> Result<RunStats, G2gError>
+where
+    Src: SourceLoop,
+    Snk: AsyncElement,
+    Clk: PipelineClock,
+{
+    run_simple_pipeline_inner(source, sink, clock, link_capacity, None, Some(state.clone())).await
 }
 
 /// As [`run_simple_pipeline`], but posts a structured
@@ -317,7 +342,7 @@ where
     Snk: AsyncElement,
     Clk: PipelineClock,
 {
-    run_simple_pipeline_inner(source, sink, clock, link_capacity, Some(bus)).await
+    run_simple_pipeline_inner(source, sink, clock, link_capacity, Some(bus), None).await
 }
 
 async fn run_simple_pipeline_inner<Src, Snk, Clk>(
@@ -326,6 +351,7 @@ async fn run_simple_pipeline_inner<Src, Snk, Clk>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
+    state: Option<StateController>,
 ) -> Result<RunStats, G2gError>
 where
     Src: SourceLoop,
@@ -401,14 +427,31 @@ where
     };
 
     let bus_for_sink = bus.cloned();
+    let state_for_sink = state;
     let sink_fut = async move {
         let bus_for_sink = bus_for_sink;
+        let state_for_sink = state_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
+            // Flow gate (M76/M77): below `Playing` the sink parks here, so it
+            // stops draining the link; the bounded channel fills and
+            // backpressure stalls the source. `Playing` opens the gate; `Null`
+            // ends the arm. In non-live `Paused` the gate admits exactly one
+            // buffer (the preroll frame) before it holds.
+            if let Some(sc) = &state_for_sink {
+                if sc.flow_gate().await == Flow::Stop {
+                    return Ok::<u64, G2gError>(consumed);
+                }
+            }
             match link_rx.recv().await {
                 Some(PipelinePacket::Eos) => {
                     sink.process(PipelinePacket::Eos, &mut null).await?;
+                    // M77: EOS during preroll still completes the async
+                    // `Paused` transition (idempotent; no-op once playing).
+                    if let Some(sc) = &state_for_sink {
+                        sc.notify_prerolled();
+                    }
                     return Ok::<u64, G2gError>(consumed);
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
@@ -459,10 +502,19 @@ where
                     }
                 }
                 Some(packet) => {
-                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                    let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
+                    if is_buffer {
                         consumed += 1;
                     }
                     sink.process(packet, &mut null).await?;
+                    // M77: the first buffer in non-live `Paused` is the preroll
+                    // frame; mark it so the gate flips from preroll-grant to
+                    // hold. Idempotent and a no-op while `Playing`.
+                    if is_buffer {
+                        if let Some(sc) = &state_for_sink {
+                            sc.notify_prerolled();
+                        }
+                    }
                 }
                 None => return Ok(consumed),
             }

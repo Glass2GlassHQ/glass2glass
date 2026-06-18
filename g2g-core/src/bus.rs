@@ -13,6 +13,7 @@
 use crate::error::G2gError;
 use crate::runtime::solver::NegotiationFailure;
 use crate::runtime::{bounded, Receiver, Sender};
+use crate::state::PipelineState;
 
 /// An out-of-band message from an element to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +30,20 @@ pub enum BusMessage {
     /// caller; this preserves the detail the error type can't, so the
     /// application can report the offending element pair (M18 item 7).
     NegotiationFailed(NegotiationFailure),
+    /// The pipeline's lifecycle state changed (M76). Posted by
+    /// [`StateController::set_state`](crate::runtime::StateController) on every
+    /// effective transition along the `NULL → READY → PAUSED → PLAYING` ladder.
+    StateChanged {
+        /// State before the change.
+        old: PipelineState,
+        /// State after the change.
+        new: PipelineState,
+    },
+    /// An async state change completed (M77): a non-live `Paused` transition
+    /// finished once the sink took its preroll buffer. The GStreamer
+    /// `ASYNC_DONE` analog; posted once per preroll by
+    /// [`StateController::notify_prerolled`](crate::runtime::StateController).
+    AsyncDone,
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

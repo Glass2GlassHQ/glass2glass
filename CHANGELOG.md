@@ -5,6 +5,95 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M77: preroll + live/non-live state changes
+
+- Completes the *semantics* of `Paused` on the stateful simple runner (M76 left
+  it a bare gate). A **non-live** pipeline in `Paused` admits exactly one buffer
+  (the preroll frame) and then holds; a **live** pipeline admits none. This is
+  the GStreamer preroll model: `set_state(Paused)` now returns
+  `StateChangeReturn::Async` (non-live, preroll pending) or `NoPreroll` (live),
+  and the async transition completes when the sink takes its preroll buffer.
+- `StateController` gains `set_live(bool)` / `is_live()`, `is_prerolled()`,
+  `notify_prerolled()` (idempotent; first call fires once), and
+  `await_prerolled() -> PrerollGate` (resolves when preroll completes or the
+  pipeline reaches `Playing`). The `FlowGate` Paused arm now returns `Go` for
+  the single preroll frame in non-live mode (then parks once prerolled), and
+  parks immediately in live mode. `Playing` marks prerolled (trivially
+  satisfied); a transition down to `Ready`/`Null` clears it so a later `Paused`
+  re-prerolls. `PrerollGate` uses the same lock-across-load+park discipline as
+  `FlowGate`, so no wakeup is lost against a concurrent `notify_prerolled`.
+- `BusMessage::AsyncDone` (the `ASYNC_DONE` analog): posted once per preroll, by
+  `notify_prerolled`, after the `Paused` `StateChanged`. The runner's sink arm
+  calls `notify_prerolled()` after the first `DataFrame` (and on `Eos`, so a
+  stream that ends during preroll still completes the transition).
+- No new public entry point: `run_simple_pipeline_stateful` is unchanged; the
+  preroll behavior is entirely in the controller + the existing sink-arm gate.
+- Tests: the six M76 unit tests reworked / extended to seven (`set_state`
+  returns reflect the preroll model; non-live `Paused` admits one preroll frame
+  then holds; live `Paused` full-holds and the parked gate wakes on `Playing`;
+  `notify_prerolled` resolves `await_prerolled` + posts a single `AsyncDone`;
+  `StateChanged` ordering now includes the trailing `AsyncDone`), plus a new
+  `m77_preroll` integration test (non-live prerolls exactly one frame,
+  `await_prerolled` resolves deterministically, one `AsyncDone`, then `Playing`
+  drains all 5; live reports `NoPreroll` and crosses 0 until `Playing`). The
+  M76 `m76_state_machine` "full hold" test is now marked live to keep its
+  0-frames-in-`Paused` assertion. VERIFIED on the dev host: `cargo test
+  --workspace` green (incl. 162 in g2g-plugins); `cargo test -p g2g-core
+  --features "std runtime" --lib` green; `cargo clippy -p g2g-core --features
+  "std runtime" --all-targets` clean; authored files `rustfmt`-clean. NOT
+  verified in-session: `thumbv7em` / `wasm32` cross-builds (sandbox toolchain
+  can't supply `core` for either; the added code uses only `core` + `alloc` +
+  `spin`, same as M76).
+- Deferred to M78: rolling the gate + preroll into `run_graph` (with N-sink
+  preroll aggregation, so the pipeline's async `Paused` completes when *all*
+  sinks preroll) and graceful mid-stream `Null` teardown.
+
+### M76: pipeline state machine foundation (NULL/READY/PAUSED/PLAYING)
+
+- First milestone of the Phase 1 runtime-lifecycle spine (DESIGN_TODO "Roadmap
+  to 80% GStreamer parity"). Adds the `PipelineState` ladder
+  (`Null < Ready < Paused < Playing`, ordered) + `StateChangeReturn`, mirroring
+  GStreamer's `GstState` / `GstStateChangeReturn`. Pure `core` enums in a new
+  ungated `g2g-core::state` module, so the no_std / Cortex-M / wasm baseline
+  carries them and the bus can reference them.
+- `StateController` (`g2g-core::runtime`, feature `runtime`): a cloneable
+  `Arc`-shared handle over an `AtomicU8` state plus a `Waker` registry. One task
+  drives `set_state(...)` while a runner's arm awaits `flow_gate()`. The data
+  plane gates at the **sink**: below `Playing` the sink parks on the gate, stops
+  draining its link, and backpressure stalls the whole chain upstream with no
+  per-element cooperation. `Playing` opens the gate; `Null` returns `Flow::Stop`
+  to end the arm. The gate holds the waker lock across its state-load + park and
+  `set_state` drains under the same lock *after* the atomic swap, so there is no
+  lost-wakeup window.
+- `BusMessage::StateChanged { old, new }`: `set_state` posts one per effective
+  transition (no-op transitions post nothing) when the controller is built with
+  `StateController::with_bus`.
+- `run_simple_pipeline_stateful` is the additive opt-in entry point (the chosen
+  approach: existing runners untouched, mirroring how the DAG runner landed
+  alongside the old ones). It threads an `Option<StateController>` through the
+  shared `run_simple_pipeline_inner`; `run_simple_pipeline` / `_with_bus` pass
+  `None` and are byte-for-byte unchanged. Negotiation still runs eagerly at
+  startup (resource acquisition, the READY step); only data flow is gated.
+- Scope is deliberately the foundation. Deferred to M77+: the one-frame preroll
+  hold in `Paused` (so `Async` / `NoPreroll` returns become live), rollout of
+  the gate to every runner shape (`run_graph` et al.), and graceful mid-stream
+  `Null` teardown semantics.
+- Tests: six `g2g-core` unit tests (ladder ordering + `u8` round-trip; gate
+  parks below `Playing` and a `set_state(Playing)` fires the parked waker; gate
+  returns `Stop` at `Null`; `StateChanged` posted per transition with the no-op
+  suppressed) and two `g2g-plugins` tokio integration tests (`m76_state_machine`:
+  a `Paused`-start pipeline provably crosses **0** frames while the source runs,
+  then drains all 5 once `Playing`, with the bus recording the
+  `Ready→Paused→Playing` ladder; and a `Playing`-from-start pipeline flows
+  immediately). VERIFIED on the dev host: `cargo test --workspace` green;
+  `cargo test -p g2g-core --features "std runtime" --lib` green (155);
+  `cargo clippy -p g2g-core --features "std runtime" --all-targets` clean; new
+  files `rustfmt`-clean. NOT verified in-session: the `thumbv7em` and `wasm32`
+  cross-builds (the sandbox toolchain can't supply `core` for either target, so
+  `spin` / `portable-atomic` fail to compile before reaching g2g code); the new
+  `state` module stays in the baseline by construction (pure `core` enums; the
+  controller uses only `core` + `alloc` + `spin`, identical to `channel.rs`).
+
 ### M75: `AacParse` ADTS header parser
 
 - The audio sibling of `H264Parse` / `H265Parse`: `AacParse` scans each access
