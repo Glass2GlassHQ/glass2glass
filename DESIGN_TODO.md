@@ -5,58 +5,47 @@ here are deferrals from the spec, follow-ups blocked on a concrete driver or
 upstream fix, and forward-looking tracks that the current architecture
 anticipates but hasn't yet built.
 
-## Status (2026-06)
+## Roadmap to 80% GStreamer parity (2026-06)
 
-Shipped this session (M55-M65, all on `master`):
+Sequenced plan agreed this session. The two hardest tracks (negotiation
+M8-M18, DAG runner M63-M74) are done and meet-or-beat GStreamer on the core
+runtime. The remaining gap to "80% / credible replacement" is (a) three
+runtime-lifecycle primitives and (b) element breadth. Elements are cheap to
+add once the spine exists, so the spine goes first.
 
-- **P1 software transforms:** `VideoScale` (M55), `VideoRate` (M56),
-  `VideoCrop` (M62), `VideoFlip` (M66), native + wasm32. `AudioResample`
-  still open.
-- **Browser decode groundwork:** the `MemoryDomain::WebGPUExternalTexture`
-  carrier (M57) and `WebCodecsDecode::with_gpu_output()` (M58) landed, but are
-  reachable only by the raw-`web_sys` GPU path (see the Phase 2 update below).
-- **Inference composition:** `OrtInference::with_tensor_input()` (M59) lets a
-  GPU preprocess feed inference directly; the native end-to-end ML pipeline
-  (`VideoConvert -> VideoScale -> WgpuPreprocess -> OrtInference`) is verified
-  on hardware (M61).
-- **DAG runner:** D1 `Graph` + validation (M63); D2 `solve_graph` topological
-  CSP, fan-out (M64) + muxer fan-in (M65); D3 `run_graph` over a
-  `GraphNode { Source | Element | Muxer }` payload, source/transform/sink/tee
-  fan-out (M67) + muxer fan-in (M69). `run_graph` now covers the full topology
-  (linear + fan-out + fan-in + diamonds).
+### Phase 1 - Runtime lifecycle spine (~10-13 sessions). The 80% unlock.
 
-New / reshaped follow-ups surfaced this session:
+This is the difference between "a live-streaming framework" and "a multimedia
+framework." All three remaining Critical items, sequenced because each sits on
+the previous.
 
-- **Browser MVP via `ort-web`** (replaces the shelved GPU-resident P2.4/P2.5;
-  see the Phase 2 update): a wasm32 inference element on the maintained
-  `ort-web` crate (CPU tensors), wiring `WebSocketSrc -> WebCodecsDecode
-  (system RGBA, M40) -> ort-web -> CanvasSink (M41)`, loaded from the same
-  `.onnx` as native, deployed as a plain static HTTPS site (no COOP/COEP). It
-  proves cross-target ONNX in-browser but is not GPU-resident.
-- **Muxer per-input-pad constraint API: DONE (M69).** `NodeConstraint::Muxer`
-  now holds per-pad `CapsConstraint` (was raw `CapsSet`), matching what
-  `MultiInputElement::caps_constraint_as_input` / `_for_output` expose, so
-  `run_graph` builds a muxer's constraint straight from the element and wires
-  the fan-in arm. `Graph::add_muxer` carries the element (`GraphNode::Muxer`).
-- **DAG D3 done (M67 fan-out, M69 fan-in):** `run_graph` over a
-  `GraphNode { Source | Element | Muxer }` payload handles
-  source/transform/sink/tee/muxer (the full topology) with fake-element tests.
-  One gap remains: a tee deep-copies `System` frames and fails loud on a GPU
-  domain because `PipelinePacket` is not `Clone` (GPU handles can't be) - a
-  refcounted shareable frame is the zero-copy-tee prerequisite.
-- **DAG D4 done (M70):** mid-stream re-solve + β allocation re-cascade over the
-  DAG. Per-edge `graph_downstream_feasibility` snapshot; transform arms steer
-  output (Caps-α) and a node-keyed `GraphCoordinator` walks the sink's proposal
-  upstream through tees via `in_edges`; per-input muxer re-config on a mid-stream
-  change. Strict-fail on a rejecting branch (matches fan-out). Remaining: a
-  graceful per-branch drop, a forward coordinator re-solve walk, and β across a
-  muxer (its inputs have no per-pad re-cascade channel). The hardware
-  `tee -> {decode, mux}` integration test is still owed a Linux run. **D5 next:**
-  re-express the convenience wrappers (`run_linear_chain`, `run_source_fanout`,
-  `run_muxer_sink`, `run_source_transform_sink`) as thin `Graph` builders.
-- **Raw-`web_sys` WebGPU path** (only if the GPU-resident browser claim is
-  revived): external-texture import + compute + `ort.Tensor.fromGpuBuffer` on
-  one ORT-owned `GPUDevice`, all outside `wgpu`. Large, browser-unverifiable.
+1. **M76+ Pipeline state machine** (NULL -> READY -> PAUSED -> PLAYING,
+   preroll, live-vs-non-live). 3-4 sessions. The substrate seek and auto-plug
+   both sit on. First milestone of the push.
+2. **Seek + SEGMENT + rate control.** 4-5 sessions. `seek(rate, start, stop)`,
+   `GstSegment`-equivalent running/stream/base time, reverse + trick play,
+   segment seeks. Builds on the existing `PipelinePacket::Flush` and the state
+   machine.
+3. **Auto-plug / element registry / `decodebin`-equivalent.** 4-5 sessions.
+   Runtime enumeration of the pad-template metadata we already have, the search
+   algorithm, returns a sub-graph onto the finished `run_graph`.
+
+### Phase 2 - Breadth + observability (~7-9 sessions, mostly parallelizable).
+
+- **`AudioResample`** (last Tier-1 transform), **`v4l2src`** (first real
+  capture source - turns g2g from "process streams" into "produce streams"),
+  **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
+- **Bus message coverage** (2 sessions): eos/error/warning/state-changed/qos/
+  buffering. High observability lever, low risk.
+- **Reserve the `FrameMeta` field** on `Frame` (1 session, behind a `metadata`
+  feature, ZST when off). Trivial now, expensive to retrofit. Full relation-
+  graph build stays deferred until a detection element needs it.
+
+### Phase 3 - Use-case-driven breadth (pick by product target).
+
+Compositor, HLS/DASH, RTMP/SRT, VP8/VP9/AV1/Opus, MKV/TS. Architectural cost is
+low (each is "add an element"); sequence against whatever product target
+matters. Detail for these lives in the sections below.
 
 ## GStreamer parity gaps
 
@@ -70,14 +59,14 @@ GStreamer replacement for this use case?"
 These block any non-trivial multimedia application, not just specific
 codecs or transports.
 
-- **`run_graph(Graph)` over an arbitrary DAG.** 5–6 sessions. Today's
-  runner has separate entry points (`run_linear_chain`,
-  `run_source_fanout`, `run_muxer_sink`, `run_fanin_sink`), so a `tee`
-  into both a display branch and a `mux` recording branch must be
-  expressed by manually nesting `BranchSlot`s. A single `Graph` builder
-  + `run_graph` entry point collapses the four runner shapes into one
-  and unlocks arbitrary production topologies. Phased plan +
-  load-bearing decisions: [DAG runner — detailed plan](#dag-runner--detailed-plan) below.
+`run_graph(Graph)` over an arbitrary DAG was the first Critical item and is
+now **DONE** (M63-M74): a single `Graph` builder + `run_graph` entry point
+covers linear / fan-out / fan-in / diamond topologies, and the four historical
+runners are thin builders over it (DESIGN.md §4.13.3). The three Critical items
+below remain, and are the Phase 1 lifecycle spine in the roadmap above.
+
+- **Pipeline state machine, then Seek, then Auto-plug** — sequenced in the
+  Phase 1 roadmap. Detail for each:
 
 - **Auto-plug / element registry / `decodebin`-equivalent.** 4–5
   sessions. We have static pad templates as type-level metadata (the
@@ -279,20 +268,10 @@ expects them. Grouped by category.
 
 ### Video transforms
 
-- **`videoscale`.** Spatial resampling (1080p → 720p, etc.). 1–2 sessions.
-  Software bilinear/bicubic baseline plus a wgpu variant for the GPU. Without
-  this we cannot resize video, which blocks multi-resolution output,
-  thumbnails, ML preprocessing at non-native resolution, and any device
-  whose input doesn't match the source.
-- **`videorate`.** Temporal resampling (30 fps → 10 fps for ML, 60 fps → 30 fps
-  for delivery). 1 session. Drops or duplicates frames against a target
-  framerate; preserves PTS continuity. ML inference at a target rate is the
-  driving use case.
-- **`videocrop`.** Crop a rectangular region. 1 session. Pairs with the
-  metadata system for ROI-driven cropping (detector emits boxes → cropper
-  extracts patches → classifier sees each patch).
-- **`videoflip` / `videorotate`.** 90° / 180° / 270° / mirror. 1 session.
-  Common for portrait-mode mobile sources fed to a landscape pipeline.
+`videoscale` (M55), `videorate` (M56), `videocrop` (M62), and
+`videoflip` / `videorotate` (M66) are DONE. A `WgpuVideoScale` GPU companion
+(DMABUF / D3D11Texture input, compute-shader resample) remains a follow-up.
+
 - **`videobalance`.** Brightness / contrast / hue / saturation. 1 session.
   Niche; deferrable.
 
@@ -383,19 +362,16 @@ modern web defaults to:
 
 For every codec we host, the bitstream parser (SPS / VPS / sequence-header
 extraction, framing detection, framerate / dimension recovery) is what feeds
-the negotiation. We have `H264Parse`; everything else is missing.
+the negotiation. `H264Parse`, `H265Parse` (M68), and `AacParse` (M75) are in;
+the codec-specific parsers below are still missing, and the two shipped
+parsers have follow-ups:
 
-- **`H265Parse`.** DONE (M68), dimensions. Recovers the coded picture
-  dimensions from the SPS (skipping `profile_tier_level`, applying the
-  conformance window) and refines caps mid-stream, the H.265 sibling of
-  `H264Parse`. Owed: framerate from the VUI `timing_info` (past the PCM /
-  ref-pic-set loops, deferred until a real-stream reference is available), and
-  validation against a real H.265 elementary stream.
-- **`AacParse`.** DONE (M75), ADTS. Scans each access unit for an ADTS header,
-  recovers channel count + sample rate, and refines caps mid-stream, the audio
-  sibling of `H264Parse` / `H265Parse`. Owed: LATM / LOAS framing (MPEG-TS /
-  broadcast), AudioSpecificConfig synthesis for a downstream decoder (needs the
-  metadata side channel), and validation against a real ADTS stream.
+- **`H265Parse` follow-ups.** Framerate from the VUI `timing_info` (past the
+  PCM / ref-pic-set loops, deferred until a real-stream reference is
+  available), and validation against a real H.265 elementary stream.
+- **`AacParse` follow-ups.** LATM / LOAS framing (MPEG-TS / broadcast),
+  AudioSpecificConfig synthesis for a downstream decoder (needs the metadata
+  side channel), and validation against a real ADTS stream.
 - **`Vp8Parse` / `Vp9Parse` / `Av1Parse` / `OpusParse`.** 1–2 sessions each,
   alongside the corresponding codec.
 
@@ -439,16 +415,15 @@ presentation. Similar 5–8 session shape to macOS.
 
 ### Priority summary
 
+`videoscale`, `videorate`, `videocrop`, and `videoflip` are DONE (M55 / M56 /
+M62 / M66) and dropped from this table.
+
 | Element | Sessions | Why it matters |
 | :--- | :--- | :--- |
-| `videoscale` | 1–2 | resize anything |
-| `videorate` | 1 | target-fps for ML / delivery |
-| `videocrop` | 1 | ROI-driven; pairs with metadata |
 | `audioresample` | 1–2 | any cross-rate audio path |
 | `v4l2src` / `pipewiresrc` / `mfvideosrc` | 2 each | live camera on Linux / Windows |
 | `UdpSrc` + RTP depay | 2 | raw RTP ingest |
 | `HttpSrc` | 2 | prereq for HLS / DASH / random URLs |
-| `H265Parse` + `AacParse` | DONE (M68 + M75) | restream codecs we already decode |
 | VP8 / VP9 / AV1 / Opus codecs | 3 + 3 + 3 + 2 | WebRTC + modern web |
 | MJPEG decode | 1 | low-end RTSP cameras |
 | Linux audio sinks | 1 each | host audio output |
@@ -461,9 +436,8 @@ presentation. Similar 5–8 session shape to macOS.
 | RTSP server | 4–5 | host endpoints |
 | WebRTC sendrecv | 5+ | full WebRTC media engine |
 
-The first four (`videoscale`, `videorate`, `videocrop`, `audioresample`)
-are the cheapest, highest-frequency gaps — almost every non-trivial
-pipeline hits at least one of them. The capture sources
+With the video transforms shipped, `audioresample` is the last of the
+cheap, highest-frequency transform gaps. The capture sources
 (`v4l2src` / `pipewiresrc` / `mfvideosrc`) are the next tier: without
 live camera input we're a "process incoming streams" framework, not a
 "produce streams" framework. Both tiers together are ~12 sessions and
@@ -476,8 +450,9 @@ developer evaluation: resize, reframe, crop, audio-resample, and live camera
 capture on Linux + Windows.
 
 **Status (2026-06):** Phase A transforms `VideoScale` (M55), `VideoRate`
-(M56), `VideoCrop` (M62), and `VideoFlip` (M66) shipped (native + wasm32).
-`AudioResample` (A4) and the Phase B capture sources remain.
+(M56), `VideoCrop` (M62), and `VideoFlip` (M66) are DONE (native + wasm32;
+see CHANGELOG). Only `AudioResample` (A4) and the Phase B capture sources
+remain; the shipped Phase A detail has been removed.
 
 Goal at end of sprint: a self-contained demo with no external feed —
 
@@ -490,54 +465,10 @@ v4l2src (camera) → videoscale → videorate → wgpupreprocess →
 through inference to display. Same shape on Windows with `mfvideosrc → ... →
 d3d11sink`. This is the "yes you can build a real thing" baseline.
 
-### Phase A — Software transforms (5 sessions)
+### Phase A — Software transforms (open remainder)
 
-All four transforms are software, `System` memory in / out, fully unit-
-testable against synthetic inputs (no hardware in the loop). Ordered
-cheapest first so the sprint shows progress quickly.
-
-**A1 — `VideoCrop` (1 session).** Simplest of the four — rectangular slice,
-no resampling. `DerivedOutput` constraint keyed on a configured crop rect:
-`with_rect(x, y, w, h)`. Per-plane copy honouring source pitch
-(I420: Y full-res, U/V half-res cropped to even coords; NV12: Y + interleaved
-UV). Output caps carry `(w, h)` from the rect, framerate / format
-unchanged.
-
-- *Verify:* feed a `VideoTestSrc` checker pattern, assert the cropped
-  output's checker cells are at the expected positions; reject odd
-  crop coords on 4:2:0 with loud `CapsMismatch`; constraint narrows
-  RawVideo / rejects CompressedVideo.
-- *Why first:* zero algorithmic risk, immediate ML value (ROI patches
-  feed `WgpuPreprocess` at a fixed input size).
-
-**A2 — `VideoRate` (1 session).** Temporal-only — no pixel math. Stateful
-on last-emitted PTS and the target inter-frame interval. On each input
-frame: compute the number of output frames whose deadlines fall on or
-before the input's PTS, emit duplicates / drop excess accordingly. Caps
-preserve `format`/`width`/`height`; framerate replaced with the configured
-target. `with_target_fps(f64)`.
-
-- *Verify:* feed a 30 fps `VideoTestSrc`, target 10 fps, assert 1-in-3
-  pass-through with correct PTS spacing; target 60 fps, assert 1→2
-  duplication with monotonic PTS; PTS-wraparound edge case.
-- *Why second:* trivial state machine, the "convert 30 fps live to 10 fps
-  for ML" recipe is one of the most common requests.
-
-**A3 — `VideoScale` (2 sessions).** The substantive one. Software bilinear
-baseline, separable (horizontal pass then vertical) for cache friendliness.
-Per-plane resample on I420 / NV12 with chroma at correct half-resolution.
-`DerivedOutput` keyed on `with_target_dims(w, h)`.
-
-- *Why bilinear, not bicubic or Lanczos:* baseline correctness over peak
-  quality; production users who care about quality pair this with a wgpu
-  variant later. Bilinear is < 200 lines per plane.
-- *Verify:* round-trip 1080p → 540p → 1080p, assert PSNR > 30 dB against
-  the source (sanity check, not a quality bar); 16-pixel-aligned input
-  and output dims, then non-aligned; reject 0/odd target dims on 4:2:0.
-- *Follow-up out of scope:* a `WgpuVideoScale` companion that takes a
-  GPU-resident input (DMABUF / D3D11Texture) and runs the resample in a
-  compute shader. Lands later, slots in via the existing surface-import
-  story.
+`VideoCrop`, `VideoRate`, `VideoScale`, and `VideoFlip` are DONE (M55 / M56 /
+M62 / M66). Only the audio transform remains.
 
 **A4 — `AudioResample` (1–2 sessions).** Sample-rate conversion using the
 `rubato` crate (pure Rust, designed for SRC, supports both fixed and
@@ -748,27 +679,10 @@ piece and should be derisked before the application work; P3 last
 because shipping the demo requires both prior phases to be done and
 validated.
 
-### Phase 1 — Minimum SW transforms (3 sessions)
+### Phase 1 — Minimum SW transforms — DONE
 
-Pulled from Tier-1 Phase A. Only the two transforms the demo critically
-needs; `VideoCrop` / `AudioResample` defer until a use case forces them.
-
-**Status: done.** `VideoScale` (M55) and `VideoRate` (M56) shipped, both
-verified on native + wasm32; `VideoCrop` also landed (M62).
-
-- **P1.1 — `VideoScale`** (2 sessions). Software bilinear, separable, per-
-  plane on I420 / NV12. The ML model wants a fixed input size
-  (e.g. 256×256 for a small segmentation network) and the camera /
-  stream geometry won't match. *Verify:* round-trip PSNR > 30 dB, reject
-  odd target dims on 4:2:0, runs in both native and wasm32 builds.
-- **P1.2 — `VideoRate`** (1 session). Target-fps drop / duplicate. The ML
-  network runs at a fixed rate (10–15 fps for browser ML is typical);
-  source rate won't match. *Verify:* monotonic PTS, correct 1-in-3 drop
-  / 1-into-2 duplicate, PTS-wraparound edge.
-
-Both elements ship as pure `g2g-plugins` `AsyncElement` impls in the
-existing CSP shape. **Verification gate before P2:** native +
-`wasm32-unknown-unknown` clean compile, unit tests green on both targets.
+`VideoScale` (M55), `VideoRate` (M56), and `VideoCrop` (M62) shipped, all
+verified on native + wasm32. The remaining product-path work is Phases 2-3.
 
 ### Phase 2 — Browser zero-copy chain (8 sessions)
 
@@ -1013,295 +927,6 @@ artifacts that back it. This is the artifact that earns the project
 the right to be evaluated against the broader plans in the rest of
 this document; without it, those plans are speculation.
 
-## DAG runner — detailed plan
-
-Plan, not implementation. Locks the shape of the `Graph` API, the generalized
-solver, and the runner-composition strategy before code lands. Phased so each
-landing is independently verifiable.
-
-### Goal
-
-A single entry point
-
-```rust
-run_graph(graph: Graph, clock: &Clk, profile: LatencyProfile) -> Result<RunStats, _>
-```
-
-that drives an arbitrary multimedia DAG: linear + fan-out + fan-in + nested
-branches in one topology, with whole-graph CSP negotiation, per-edge
-allocation cascade, mid-stream re-solve, and structured failure on bus.
-
-**Non-goals:**
-
-- A `gst-launch` text DSL. Orthogonal; trivially layered on top once the
-  `Graph` builder exists.
-- Element hot-swap under load (already a separate open item).
-- Dynamic pad add/remove at runtime (`tee::request-pad` shape). Phase 5 /
-  future; the static graph case is the bulk of the value.
-- Cycles. Multimedia DAGs are acyclic in practice; the rare feedback case
-  (ML re-entry) goes through a `LinkInterceptor` probe, not a graph edge.
-  Validation rejects cycles loud.
-
-### Proposed surface
-
-**Builder.**
-
-```rust
-let mut g = Graph::new();
-
-let src    = g.add_source(Box::new(RtspSrc::new(url)));
-let parse  = g.add_transform(Box::new(H264Parse::new()));
-let tee    = g.add_tee(2);                                   // 1 in, 2 out
-let dec    = g.add_transform(Box::new(FfmpegH264Dec::new()));
-let display= g.add_sink(Box::new(WaylandSink::new()));
-let mux    = g.add_muxer(Box::new(Mp4Sink::open("out.mp4")?));
-
-g.link(src,        parse)?;                                  // 1->1
-g.link(parse,      tee.input())?;
-g.link(tee.out(0), dec)?;
-g.link(dec,        display)?;
-g.link(tee.out(1), mux.input(0))?;                           // recorded encoded path
-
-let stats = run_graph(g, &clock, LatencyProfile::Live).await?;
-```
-
-The same shape with bus integration is `run_graph_with_bus(g, &clock,
-profile, &bus)`.
-
-**Node and pad handles.**
-
-```rust
-pub struct NodeId(u32);            // opaque index into the graph
-pub struct PadId  { node: NodeId, index: u8 }
-
-impl Tee     { pub fn input(&self) -> PadId; pub fn out(&self, i: u8) -> PadId; }
-impl Muxer   { pub fn input(&self, i: u8) -> PadId; pub fn output(&self) -> PadId; }
-impl Source  { /* implicit single output pad; `g.link(src, ...)` */ }
-impl Sink    { /* implicit single input pad */ }
-impl Transform { /* implicit 1-in-1-out */ }
-```
-
-Element kind is captured at insertion time (`add_source` / `add_transform` /
-`add_sink` / `add_tee` / `add_muxer`) so the builder knows the pad shape
-without runtime introspection. Most call sites stay in the 1-in-1-out
-shorthand `g.link(a, b)`.
-
-**Per-edge link policy.**
-
-```rust
-g.link_with(parse, tee.input(), LinkPolicy::Block)?;
-g.link_with(tee.out(1), mux.input(0), LinkPolicy::DropOldest)?;
-```
-
-Default policy is read from the `LatencyProfile`. Explicit per-edge policies
-override.
-
-**Validation.** `Graph::finish() -> Result<ValidatedGraph, GraphError>`
-(called by `run_graph` internally) checks:
-
-- exactly one source node has no incoming edge (or: every source node has
-  no incoming edge, allowing N sources for a muxer);
-- exactly one sink node has no outgoing edge (or: every leaf is a sink);
-- every transform / mux / tee pad is linked;
-- no cycles (DFS / Kahn);
-- shape matches the declared pad count (e.g. `Tee(2)` has exactly two
-  outgoing edges).
-
-Returns structured `GraphError { UnlinkedPad, Cycle { nodes }, OrphanNode,
-PadCountMismatch }`.
-
-### Internal representation
-
-Hand-rolled, no `petgraph` dep (consistent with the cudarc decision — only
-pull a dep when the surface grows past a handful of operations, and
-`petgraph` would force `std` while a portion of the validation logic should
-stay `no_std`).
-
-```rust
-pub struct Graph {
-    nodes: Vec<Node>,              // Slab of Box<dyn DynAsyncElement> / DynSourceLoop
-    edges: Vec<Edge>,              // Vec<(PadId src, PadId dst, LinkPolicy)>
-    kinds: Vec<NodeKind>,          // Source | Transform | Sink | Tee(n) | Muxer(n)
-}
-
-pub struct ValidatedGraph {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    kinds: Vec<NodeKind>,
-    topo:  Vec<NodeId>,            // topological sort, computed at validate time
-    in_edges:  Vec<Vec<EdgeId>>,   // index by NodeId
-    out_edges: Vec<Vec<EdgeId>>,   // index by NodeId
-}
-```
-
-`Node` holds the boxed element behind an `Option<Box<dyn DynAsyncElement>>`
-so the runner can `take()` it into the spawned arm and the original `Graph`
-becomes empty after `run_graph`. No `Arc<Mutex<>>` per element.
-
-### Solver generalization (`solve_graph`)
-
-The existing linear arc-consistency solver lifts cleanly:
-
-1. **Topological order** comes from validation (Kahn's algorithm; rejects
-   cycles).
-2. **Forward sweep** in topo order: for each node, intersect its
-   `caps_constraint_as_*` against the inbound edge sets (multiple inbound
-   edges for a muxer are independently constrained — each input pad has its
-   own `caps_constraint_as_input(idx)`). Output candidate sets per outbound
-   pad.
-3. **Backward sweep** in reverse topo order: propagate narrowing back from
-   sinks; per-output `Mapping` / `DerivedOutput` re-derived against the
-   narrowed input.
-4. **Iterate** to fixed point. Linear graphs converge in one round; DAGs
-   with diamond shapes (tee → ... → mux) may take a second round.
-5. **Fixate** each edge to its highest-preference concrete `Caps`.
-6. **`configure_pipeline`** every node with its per-pad caps.
-
-Structured failure stays the same `NegotiationFailure` enum;
-`EmptyLink { upstream, downstream, missed }` already carries the two element
-ids.
-
-`downstream_feasibility` generalizes from a backward fold over a chain to a
-reverse-topo fold over a DAG (a node's feasibility is the intersection over
-each outbound edge's downstream feasibility). The mid-stream re-solve
-mechanism (DESIGN.md §4.13.4) ports without further changes — each arm still
-gets its snapshot, the only difference is the snapshot was computed over a
-DAG instead of a chain.
-
-### Runner orchestration
-
-`run_graph` builds N tasks (one per element) joined under `join_all`:
-
-```
-For each node n in topo order:
-    Build inbound channels = for each in_edge(n): the receiver end created by upstream
-    Build outbound channels = for each out_edge(n): a new bounded mpsc<PipelinePacket>
-    Spawn arm(n):
-        match kind(n) {
-            Source     => DynSourceLoop::run(out_sender)
-            Transform  => for each pkt in in_recv: DynAsyncElement::process(pkt, out_sender)
-            Sink       => for each pkt in in_recv: DynAsyncElement::process(pkt, null_sink)
-            Tee(_)     => for each pkt in in_recv: clone to each out_sender   (LinkPolicy per out)
-            Muxer(_)   => select across in_recvs; DynAsyncElement::process(pkt_with_pad_idx)
-        }
-```
-
-Plus the coordinator task (already exists, DESIGN.md §4.13.5) wired to every
-arm via the per-arm control channel. Allocation re-cascade and mid-stream
-caps re-solve generalize from "walk up the chain" to "walk up the DAG via
-`in_edges[n]`", with concurrent walks on diamonds joined at the meet point.
-
-Tee and Muxer become first-class graph nodes rather than runner-shape
-selectors. The existing `mux` and per-branch fan-out logic is reused behind
-these node kinds.
-
-### Phasing
-
-Five focused phases. Each is independently verifiable.
-
-| Phase | Scope | Verifiable on its own |
-| :--- | :--- | :--- |
-| **D1 — `Graph` data structure + validation.** DONE (M63). | The builder, `NodeId` / `PadId`, `LinkPolicy` per edge, `finish() -> ValidatedGraph` with topo sort + cycle detection + pad-count + orphan checks. No solver, no runner. Generic over the element payload `E` to stay `no_std`. | Pure data-structure tests. Reject diamond-with-cycle, accept tee→mux diamond, accept linear, accept fan-out, accept fan-in. |
-| **D2 — `solve_graph` (topological CSP).** DONE (M64 fan-out, M65 muxer fan-in). | Generalize `solve_linear`'s forward + backward sweep to topo order over edges. Per-node `NodeConstraint` (single `CapsConstraint` for source/transform/sink; `Muxer { inputs, output }` per-input-pad for fan-in). `NegotiationFailure` unchanged. Reverse-topo `downstream_feasibility` fold not yet ported (only needed by D4). | Solver-only tests against fake elements: muxer fan-in narrows each input by its pad, tee fan-out couples branches, a rejecting branch strict-fails, linear regression matches `solve_linear` byte-for-byte. |
-| **D3 — `run_graph` (the runner).** DONE (M67 fan-out, M69 fan-in). | Spawn-per-node, edge-channels, `join_all`. Element ownership is a `GraphNode { Source(Box<dyn DynSourceLoop>) | Element(Box<dyn DynAsyncElement>) | Muxer(Box<dyn DynMultiInputElement>) }` payload. The coordinator / mid-stream re-cascade is D4, so an interior arm handles a `CapsChanged` locally (no β walk). A muxer runs the `run_muxer_sink` shape (per-input forwarders + one tagged channel + single merged Eos). Remaining gap: a tee can't share a `PipelinePacket` (not `Clone`, GPU handles), so it deep-copies `System` frames and fails loud on a GPU domain (zero-copy tee needs a refcounted shareable frame). | DONE: pure-fake DAG tests (linear chain, `tee(2)` fan-out, tee with per-branch transforms, incompatible-branch solve failure, two-source fan-in, `tee -> {flip, crop} -> mux` diamond). OWED: the `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` hardware integration test (gated on `rtsp ffmpeg wayland-sink`), a Linux run. |
-| **D4 — Mid-stream re-solve + β cascade over the DAG.** DONE (M70). | Per-edge `graph_downstream_feasibility` snapshot; transform arms steer output via Caps-α; a node-keyed `GraphCoordinator` walks the sink's re-derived proposal upstream through tees via `in_edges` (source/muxer terminate). Per-branch tee re-solve, per-input muxer re-config. Strict-fail on a rejecting branch (matches fan-out); β across a muxer is owed (no per-pad re-cascade channel). | DONE: `m70_dag_recascade.rs` (tee diamond re-cascades each branch, no-change baseline, rejecting branch fails loud, muxer per-input re-config) + two solver feasibility unit tests. |
-| **D5 — Convenience wrappers + deprecation path.** BLOCKED (see below). Enablers landed: M71 (`run_graph` M12 stat folds + muxer MX-1/MX-2), M72 (lifetime-generic `GraphNodeRef<'a>` + `&mut dyn` forwarding impls, so a wrapper can build a borrowing `Graph`). | `run_linear_chain` / `run_source_fanout` / `run_muxer_sink` / `run_source_transform_sink` become thin builders over `Graph` + `run_graph`. Public signatures stay the same; they construct the corresponding `Graph` internally. | Existing integration tests pass without modification. |
-
-**D5 blockers (found while attempting the conversions).** The four wrappers do
-not map onto the current `Graph`/`solve_graph` without prerequisite work:
-- **`run_source_transform_sink` + `run_simple_pipeline` are `no_std` baseline
-  exports**, but `run_graph` is `std`-gated (the dyn-element infra and `fanin`
-  are `std`). Delegating would add `std` to the baseline path (forbidden).
-  Prereq: a `no_std` `run_graph` (make the dyn-element traits + `fanin`
-  `no_std`), or leave these two as the `no_std` linear runners.
-- **`run_source_fanout` takes a selective `MultiOutputElement`** (e.g. `Router`
-  routes each frame to one branch), but the `Graph` only has a broadcast `Tee`
-  node. Prereq: a `MultiOutputElement` graph node kind.
-- **`run_muxer_sink` (and `run_linear_chain`) tolerate `Legacy*` bridge
-  constraints** (e.g. m10's `CollectingSink` uses the default `LegacySink`),
-  but `solve_graph` only accepts native variants (`Produces`/`Accepts`/
-  `Identity`/`AcceptsAny`/`Mapping`/`DerivedOutput`); a legacy sink hits
-  `EndpointShapeMismatch`. RESOLVED (M73 + M74): `solve_graph` now accepts the
-  `Legacy*` variants; `run_muxer_sink` (M73) and `run_linear_chain` (M74) are
-  thin builders over `run_graph`. M74 added the topology-derived rejection policy
-  (graceful reverse-reconfigure on a single-producer chain vs. strict fail behind
-  a tee).
-
-Status: two of the four D5 wrappers (`run_muxer_sink`, `run_linear_chain`) are
-converted. `run_source_transform_sink` (no_std baseline) and `run_source_fanout`
-(selective `MultiOutputElement` has no graph node) stay blocked on the first two
-prereqs above.
-
-D1 + D2 are pure `no_std` (the `Graph` and solver are computation, no I/O).
-D3 onwards is `std` because the runner is `tokio` / `flume`-coupled.
-
-Per-phase sizing: D1 ≈ 1, D2 ≈ 1, D3 ≈ 2, D4 ≈ 1, D5 ≈ 1. Total 5–6
-sessions, comparable to M16's scope.
-
-### Load-bearing decisions for sign-off
-
-**G1 — Element ownership: `Box<dyn DynAsyncElement>`, not `&mut`.** The
-current runners take `&mut Tx` because the chain is statically typed. An
-arbitrary DAG cannot be statically typed (heterogeneous element types at
-every node), so element ownership moves into the graph at
-`add_*(Box::new(...))` time. Cost: one allocation per element, no dynamic
-dispatch beyond the existing `DynAsyncElement` trait. Worth confirming
-before D1 lands because every downstream API shape depends on it.
-
-**G2 — `NodeKind` discriminator vs trait-only.** Carry `NodeKind::{Source,
-Transform, Sink, Tee(n), Muxer(n)}` alongside the boxed element so the
-runner knows how to spawn each arm (Tee fans out, Muxer fans in, etc.).
-Alternative: "everything is `DynAsyncElement`; the runner inspects
-`caps_constraint`" — but Tee and Muxer need topology semantics
-(`process(pkt)` to multiple outputs vs select-across-inputs) that the caps
-constraint doesn't describe. Decision: explicit `NodeKind`.
-
-**G3 — Cycles: reject loud at validation.** Trying to support cycles would
-force a backedge concept and break topo-sort fixation. Out of scope. The
-single real use case (feedback ML) goes through a `LinkInterceptor` probe,
-which doesn't show up as a graph edge.
-
-**G4 — Tee / Muxer as graph nodes vs runner shapes.** Currently the runner
-shape picks (fan-out vs fan-in vs linear); under DAG they become node kinds.
-The existing `mux` element and per-branch fan-out logic move behind
-`NodeKind::Muxer` and `NodeKind::Tee` adapters. No new behavior; just a
-refactor where the shape lives.
-
-**G5 — Backward compatibility.** D5 reframes the existing runners as thin
-wrappers that build a `Graph` + call `run_graph`. Public signatures and
-behavior stay identical, including the static-typed
-`run_source_transform_sink` which keeps its generic `Src, Tx, Snk`
-parameters and boxes them internally. Allows incremental adoption: callers
-keep their existing wiring and new pipelines use `Graph`.
-
-**G6 — `no_std` boundary.** D1 + D2 stay `no_std` so the graph builder and
-the solver are usable from the embedded / wasm sides too. D3 onwards is
-`std`-gated under the existing `multi-thread` shape. Same boundary as the
-rest of the runner.
-
-### Open questions
-
-- **`add_tee(n)` n-ary vs `add_tee()` + repeated `connect` calls.**
-  GStreamer's `tee` grows pads on demand. Phase 5 lifts the `n` parameter to
-  a runtime `Tee::add_branch()`; for now `n` is fixed at construction.
-- **Allocation policy across diamonds.** When two branches downstream of a
-  tee both propose different allocation params, the tee's outbound pool
-  needs a join policy. Default: most-restrictive intersection; loud failure
-  if intersection is empty. Phase 4 detail; spec it alongside `run_graph`
-  mid-stream.
-- **`Graph` clone / re-run.** After `run_graph` consumes the elements via
-  `take()`, the `Graph` is empty. For seek-and-replay scenarios, a
-  `GraphTemplate::instantiate() -> Graph` two-step is cleaner than making
-  `Graph` itself reusable. Defer to a follow-up.
-
-### Decisions needed before D1 starts
-
-- Sign off **G1** (element ownership: `Box<dyn>`).
-- Sign off **G2** (explicit `NodeKind`).
-- Sign off **G5** (backward-compatibility strategy: thin wrappers in D5).
-
-The rest can be iterated on as each phase lands.
-
 ## Negotiation (DESIGN.md §4.13)
 
 - **Forward coordinator re-solve walk** (Caps-β). The current mid-stream
@@ -1316,6 +941,25 @@ The rest can be iterated on as each phase lands.
 - **Dynamic pads / request pads.** `tee::request-pad` and
   `mux::request-pad` style runtime branch/input addition. The fan-out and
   muxer are currently static.
+- **Zero-copy tee.** `run_graph`'s tee deep-copies `System` frames and fails
+  loud on a GPU domain because `PipelinePacket` is not `Clone` (GPU handles
+  can't be). A refcounted shareable frame is the zero-copy-tee prerequisite.
+- **Graceful per-branch drop on fan-out.** A rejecting branch currently fails
+  the run loud (strict policy); a `FanOutPolicy::AllowBranchDrop` opt-in for
+  graceful degradation is anticipated.
+- **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad
+  re-cascade channel, so the DAG β walk terminates at a muxer.
+- **Allocation join policy across diamonds.** When two branches downstream of a
+  tee propose different allocation params, the tee's outbound pool needs a join
+  policy. Default sketch: most-restrictive intersection, loud failure on empty.
+- **`Graph` re-run / clone for seek-and-replay.** `run_graph` consumes the
+  elements via `take()`, leaving the `Graph` empty. A
+  `GraphTemplate::instantiate() -> Graph` two-step is cleaner than making
+  `Graph` reusable. Relevant to the Phase 1 seek work.
+- **Hardware `tee -> {decode, mux}` integration test.** The
+  `rtspsrc → parse → tee → {dec → wayland, mux → mp4}` diamond is covered by
+  fake-element tests; a Linux run on the `rtsp ffmpeg wayland-sink` features is
+  still owed.
 - **Mid-stream element hot-swap.** `ElementSlot::swap` scaffolding exists
   (§4.8.2); the live swap of a real element under load isn't wired up.
 - **Preference algebra.** `CapsPreferences` is a placeholder; the solver
@@ -1413,6 +1057,17 @@ The rest can be iterated on as each phase lands.
   thread; off-main-thread Workers need JS bootstrap infrastructure.
 - **HEVC in `WebCodecsDecode`.** The hook is parameterized; the
   per-codec setup parallels the H.264 path.
+- **Browser MVP via `ort-web`.** A wasm32 inference element on the maintained
+  `ort-web` crate (CPU tensors), wiring `WebSocketSrc -> WebCodecsDecode
+  (system RGBA, M40) -> ort-web -> CanvasSink (M41)`, loaded from the same
+  `.onnx` as native, deployed as a plain static HTTPS site (no COOP/COEP).
+  Proves cross-target ONNX in-browser but is not GPU-resident. (Replaces the
+  shelved GPU-resident P2.4/P2.5; `WebGPUExternalTexture` (M57) +
+  `WebCodecsDecode::with_gpu_output()` (M58) landed but are reachable only by
+  the raw-`web_sys` GPU path below.)
+- **Raw-`web_sys` WebGPU path** (only if the GPU-resident browser claim is
+  revived): external-texture import + compute + `ort.Tensor.fromGpuBuffer` on
+  one ORT-owned `GPUDevice`, all outside `wgpu`. Large, browser-unverifiable.
 
 ## ML (DESIGN.md §5)
 

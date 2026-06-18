@@ -709,14 +709,25 @@ backward fold from the sink that computes, per link, the set the downstream
 tail can still fixate **ignoring the upstream**. It's source-independent and
 serves as a snapshot for the mid-stream re-solve (§4.13.4).
 
-#### 4.13.3 Multi-element runner
+#### 4.13.3 The DAG runner
 
-`run_linear_chain(source, Vec<&mut dyn DynAsyncElement>, sink, ..)` drives
-any-length linear chains: whole-chain `solve_linear`, per-element configure,
-the allocation cascade (§4.13.5), and `N + 2` data arms over `N + 1` links.
-`run_source_transform_sink`, `run_simple_pipeline`, `run_source_fanout`, and
-`run_muxer_sink` are the single-transform, source-only, fan-out, and fan-in
-specializations.
+`run_graph(Graph<GraphNodeRef>, clock, link_capacity)` is the single runner.
+A `Graph` is built from `GraphNode { Source | Element | Muxer }` payloads and
+edges (each carrying a `LinkPolicy`); `finish()` validates topology (topo
+sort, cycle / orphan / pad-count checks) before the run. `run_graph` owns
+whole-graph `solve_graph` negotiation, per-node configure, the M12 latency /
+clock / allocation folds, one data arm per node over the edge channels, the
+β allocation re-cascade and the Caps-α mid-stream re-solve. It covers the
+full topology space: linear, fan-out (tee), fan-in (muxer), and diamonds.
+
+`run_linear_chain`, `run_source_transform_sink`, `run_simple_pipeline`,
+`run_source_fanout`, and `run_muxer_sink` are **thin builders**: each
+constructs the corresponding borrowing `Graph` and delegates to `run_graph`,
+so the four historical runner shapes share one negotiation + data plane. A
+node's mid-stream rejection policy is topology-derived: a node on a
+single-producer chain reverse-reconfigures and keeps flowing (posting the
+structured failure to the bus), while a node behind a tee fails the run loud
+(a shared upstream can't honor a per-branch reconfigure).
 
 #### 4.13.4 Mid-stream re-solve
 
@@ -784,6 +795,12 @@ output `CapsChanged` downstream when the merged output caps change as a
 function of an input change. `MultiInputElement` exposes
 `caps_constraint_as_input(idx)` and `caps_constraint_for_output()` for the
 solver to consult per-input.
+
+Over the DAG, a node-keyed `GraphCoordinator` walks a sink's re-derived
+allocation proposal upstream through tees via `in_edges` (sources and muxers
+terminate the walk), and a per-edge `graph_downstream_feasibility` snapshot
+steers each transform's Caps-α output on a mid-stream change. β across a
+muxer (per-input-pad re-cascade) is still owed.
 
 #### 4.13.7 Pad templates
 
