@@ -433,14 +433,15 @@ where
         let state_for_sink = state_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
+        let mut prerolled_self = false;
         loop {
             // Flow gate (M76/M77): below `Playing` the sink parks here, so it
             // stops draining the link; the bounded channel fills and
             // backpressure stalls the source. `Playing` opens the gate; `Null`
             // ends the arm. In non-live `Paused` the gate admits exactly one
-            // buffer (the preroll frame) before it holds.
+            // buffer (this sink's preroll frame) before it holds.
             if let Some(sc) = &state_for_sink {
-                if sc.flow_gate().await == Flow::Stop {
+                if sc.flow_gate(prerolled_self).await == Flow::Stop {
                     return Ok::<u64, G2gError>(consumed);
                 }
             }
@@ -508,9 +509,11 @@ where
                     }
                     sink.process(packet, &mut null).await?;
                     // M77: the first buffer in non-live `Paused` is the preroll
-                    // frame; mark it so the gate flips from preroll-grant to
-                    // hold. Idempotent and a no-op while `Playing`.
-                    if is_buffer {
+                    // frame; mark this arm prerolled so the gate flips from
+                    // preroll-grant to hold, and report it for aggregation.
+                    // Idempotent and a no-op while `Playing`.
+                    if is_buffer && !prerolled_self {
+                        prerolled_self = true;
                         if let Some(sc) = &state_for_sink {
                             sc.notify_prerolled();
                         }
@@ -838,7 +841,7 @@ where
     let snk = g.add_sink(GraphNodeRef::element_ref(sink));
     g.link(prev, snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus).await
+    run_graph_inner(g, clock, link_capacity, bus, None).await
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.

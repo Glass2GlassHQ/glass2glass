@@ -471,5 +471,5 @@ where
     }
     g.link(mux_node.output(), snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus).await
+    run_graph_inner(g, clock, link_capacity, bus, None).await
 }

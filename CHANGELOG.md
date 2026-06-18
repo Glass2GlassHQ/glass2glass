@@ -5,6 +5,46 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M78: state machine + preroll over the DAG runner
+
+- Rolls the M76/M77 flow gate into the production runner. New
+  `run_graph_stateful(graph, clock, link_capacity, &StateController)` gates
+  every `Sink` arm, so an arbitrary topology (linear / fan-out / fan-in /
+  diamond) honors `NULL → READY → PAUSED → PLAYING`. Since the thin-builder
+  runners delegate to `run_graph_inner`, the state machine is now reachable for
+  every real pipeline shape (the builders themselves still pass `None`; opt in
+  by building a `Graph` + `run_graph_stateful`, or use
+  `run_simple_pipeline_stateful` for the 2-element case).
+- **N-sink preroll aggregation.** `StateController` gains `expect_prerolls(n)`
+  (the runner calls it with the sink count) and a counting `notify_prerolled`
+  that decrements a `pending_preroll` counter; the `1 -> 0` edge (the last sink)
+  completes preroll and posts a single `AsyncDone`, so a fan-out to N sinks
+  yields exactly one async-done, not N. A `Playing` transition force-completes
+  any still-pending prerolls. The default count is `1`, so the single-sink
+  simple runner is unchanged.
+- **Per-sink vs aggregate preroll fix.** Preroll is per-sink, so `flow_gate`
+  now takes the arm's own `self_prerolled` flag (the sink arm tracks it locally)
+  rather than consulting the global latch; otherwise a not-yet-complete
+  aggregate latch would let an already-prerolled sink pull a second frame. The
+  aggregate counter/latch drives `is_prerolled` / `await_prerolled` /
+  `AsyncDone`; the per-arm flag drives the gate's one-frame grant.
+- Tests: two new `g2g-core` unit tests (two-sink aggregation completes on the
+  *last* preroll with a single `AsyncDone`; `Playing` force-completes pending
+  prerolls), the existing gate unit tests updated for the `self_prerolled`
+  parameter, and a new `m78_dag_state` integration test (a `tee` fan-out to two
+  `CountingSink`s: non-live prerolls exactly one frame *per sink* then holds,
+  `await_prerolled` resolves only when both have, a single `AsyncDone`, then
+  `Playing` drains the full stream to both; plus the live `NoPreroll` full-hold
+  across the fan-out). VERIFIED on the dev host: `cargo test --workspace` green
+  (164 in g2g-plugins); `cargo test -p g2g-core --features "std runtime
+  multi-thread" --lib` green (13 state tests); `cargo clippy` clean on both;
+  authored files `rustfmt`-clean. NOT verified in-session: `thumbv7em` /
+  `wasm32` cross-builds (sandbox toolchain can't supply `core`; added code uses
+  only `core` + `alloc` + `spin`).
+- Still open (no longer M-numbered here): graceful mid-stream `Null` teardown
+  (a clean source wind-down rather than relying on link-close), and re-preroll
+  after a flushing seek (tied to the seek milestone).
+
 ### M77: preroll + live/non-live state changes
 
 - Completes the *semantics* of `Paused` on the stateful simple runner (M76 left

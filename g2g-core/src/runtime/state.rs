@@ -1,4 +1,4 @@
-//! Shared pipeline state controller (M76 + M77).
+//! Shared pipeline state controller (M76 / M77 / M78).
 //!
 //! A cloneable handle over an atomic [`PipelineState`] plus a `Waker`
 //! registry, so an application can drive `set_state(Playing)` from one task
@@ -8,22 +8,32 @@
 //! with no per-element cooperation. `Playing` opens the gate.
 //!
 //! **Preroll (M77).** A non-live pipeline in `Paused` admits exactly one
-//! buffer (the preroll frame) and then holds; `set_state(Paused)` reports
-//! `Async` and completes once the sink prerolls ([`BusMessage::AsyncDone`],
-//! [`StateController::await_prerolled`]). A live pipeline produces no preroll
-//! buffer: `Paused` reports `NoPreroll` and the gate full-holds. Mark a
-//! pipeline live with [`StateController::set_live`].
+//! buffer per sink (its preroll frame) and then holds; `set_state(Paused)`
+//! reports `Async` and completes once the sinks preroll
+//! ([`BusMessage::AsyncDone`], [`StateController::await_prerolled`]). A live
+//! pipeline produces no preroll buffer: `Paused` reports `NoPreroll` and the
+//! gate full-holds. Mark a pipeline live with [`StateController::set_live`].
 //!
-//! This is the additive controller layer: the existing runners are untouched,
-//! and `run_simple_pipeline_stateful` opts in by taking a `&StateController`.
-//! Rolling the gate into every runner shape (`run_graph` et al.) and graceful
-//! mid-stream `Null` teardown are M78.
+//! **DAG (M78).** `run_graph_stateful` gates every `Sink` arm, so an arbitrary
+//! topology honors the ladder. Preroll aggregates across sinks: the runner
+//! calls [`StateController::expect_prerolls`] with the sink count, each sink's
+//! [`StateController::notify_prerolled`] decrements it, and the async `Paused`
+//! completes (one `AsyncDone`) only when the last sink prerolls. The per-sink
+//! "have I prerolled" flag is the arm's own (passed to [`flow_gate`]); the
+//! aggregate counter/latch is separate.
+//!
+//! This is the additive controller layer: the legacy runners
+//! (`run_simple_pipeline`, etc.) are untouched; `run_simple_pipeline_stateful`
+//! and `run_graph_stateful` opt in by taking a `&StateController`. Graceful
+//! mid-stream `Null` teardown (clean source wind-down) is still open.
+//!
+//! [`flow_gate`]: StateController::flow_gate
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -40,11 +50,16 @@ struct Inner {
     /// pipeline prerolls one buffer and reports `Async`. Set at build time via
     /// [`StateController::set_live`].
     live: AtomicBool,
-    /// Whether the (non-live) sink has taken its preroll buffer. Set by
-    /// [`StateController::notify_prerolled`] after the first buffer in `Paused`,
-    /// and unconditionally on the `Playing` transition; reset to `false` on a
+    /// Whether the pipeline has completed preroll: every sink has taken its
+    /// preroll buffer (or the pipeline reached `Playing`). Reset to `false` on a
     /// transition down to `Ready`/`Null` so a later `Paused` re-prerolls.
     prerolled: AtomicBool,
+    /// Number of sinks that still owe a preroll buffer before the async
+    /// `Paused` transition completes. Set by [`StateController::expect_prerolls`]
+    /// (the DAG runner, one per sink); defaults to `1` for the single-sink
+    /// simple runner. Each [`StateController::notify_prerolled`] decrements it;
+    /// the `1 -> 0` edge completes preroll.
+    pending_preroll: AtomicUsize,
     /// Flow-gate futures parked while data must not cross. Drained and woken on
     /// every state change so they re-evaluate.
     wakers: Mutex<Vec<Waker>>,
@@ -82,6 +97,7 @@ impl StateController {
                 state: AtomicU8::new(initial.as_u8()),
                 live: AtomicBool::new(false),
                 prerolled: AtomicBool::new(false),
+                pending_preroll: AtomicUsize::new(1),
                 wakers: Mutex::new(Vec::new()),
                 preroll_wakers: Mutex::new(Vec::new()),
                 bus,
@@ -151,7 +167,12 @@ impl StateController {
         // Preroll bookkeeping for the target state, after `StateChanged` so a
         // `Playing` transition posts `StateChanged` then `AsyncDone`.
         match new {
-            PipelineState::Playing => self.mark_prerolled(),
+            // Playing trivially satisfies preroll regardless of how many sinks
+            // were still pending.
+            PipelineState::Playing => {
+                self.inner.pending_preroll.store(0, Ordering::Release);
+                self.complete_preroll();
+            }
             PipelineState::Ready | PipelineState::Null => {
                 self.inner.prerolled.store(false, Ordering::Release);
             }
@@ -165,17 +186,48 @@ impl StateController {
         }
     }
 
-    /// Record that the sink has taken its preroll buffer, completing an async
-    /// `Paused` transition. Idempotent: the first call wakes
-    /// [`await_prerolled`](StateController::await_prerolled) waiters and posts
-    /// [`BusMessage::AsyncDone`]; later calls are no-ops. The
-    /// `run_simple_pipeline_stateful` sink arm calls this after the first
-    /// buffer it processes in non-live `Paused`.
-    pub fn notify_prerolled(&self) {
-        self.mark_prerolled();
+    /// Declare how many sinks must preroll before the async `Paused` transition
+    /// completes. The DAG runner calls this once at startup (one per `Sink`
+    /// node); the single-sink simple runner relies on the default of `1`.
+    /// `expect_prerolls(0)` (a graph with no sinks) completes preroll at once.
+    pub fn expect_prerolls(&self, sinks: usize) {
+        self.inner.pending_preroll.store(sinks, Ordering::Release);
+        if sinks == 0 {
+            self.complete_preroll();
+        }
     }
 
-    fn mark_prerolled(&self) {
+    /// Record that *one* sink took its preroll buffer. The DAG runner's sink
+    /// arms each call this after their first buffer in non-live `Paused`; the
+    /// `1 -> 0` edge (the last sink) completes the pipeline preroll, waking
+    /// [`await_prerolled`](StateController::await_prerolled) waiters and posting
+    /// [`BusMessage::AsyncDone`] exactly once. A call once preroll is already
+    /// complete is a no-op.
+    pub fn notify_prerolled(&self) {
+        let mut cur = self.inner.pending_preroll.load(Ordering::Acquire);
+        loop {
+            if cur == 0 {
+                return; // already complete
+            }
+            match self.inner.pending_preroll.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if cur == 1 {
+                        self.complete_preroll();
+                    }
+                    return;
+                }
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    /// Latch preroll complete: wake awaiters and post `AsyncDone` once.
+    fn complete_preroll(&self) {
         if !self.inner.prerolled.swap(true, Ordering::AcqRel) {
             let mut w = self.inner.preroll_wakers.lock();
             for waker in w.drain(..) {
@@ -188,12 +240,18 @@ impl StateController {
         }
     }
 
-    /// A future that resolves once the pipeline is flowing or torn down:
-    /// [`Flow::Go`] at `Playing` (and the one preroll buffer in non-live
-    /// `Paused`), [`Flow::Stop`] at `Null`, and `Pending` otherwise.
-    pub fn flow_gate(&self) -> FlowGate {
+    /// A future a sink arm awaits before pulling its next packet. `self_prerolled`
+    /// is the arm's own "I have already taken my preroll buffer" flag (preroll
+    /// is per-sink, so the arm tracks it locally, not via the aggregate latch):
+    ///
+    /// - `Playing` → [`Flow::Go`]; `Null` → [`Flow::Stop`].
+    /// - non-live `Paused` → `Go` while `!self_prerolled` (admit this sink's one
+    ///   preroll frame), then `Pending` until `Playing`.
+    /// - live `Paused` / `Ready` → `Pending` (no flow).
+    pub fn flow_gate(&self, self_prerolled: bool) -> FlowGate {
         FlowGate {
             inner: self.inner.clone(),
+            self_prerolled,
         }
     }
 
@@ -221,6 +279,7 @@ pub enum Flow {
 #[derive(Debug)]
 pub struct FlowGate {
     inner: Arc<Inner>,
+    self_prerolled: bool,
 }
 
 impl Future for FlowGate {
@@ -246,13 +305,12 @@ impl Future for FlowGate {
             PipelineState::Null => Poll::Ready(Flow::Stop),
             PipelineState::Playing => Poll::Ready(Flow::Go),
             PipelineState::Ready => go_or_park(&mut wakers, false),
-            // Non-live `Paused` admits exactly one buffer (the preroll frame):
-            // `Go` until the sink marks itself prerolled, then park until
-            // `Playing`. Live `Paused` admits nothing (no preroll buffer).
+            // Non-live `Paused` admits exactly one buffer per sink (its preroll
+            // frame): `Go` until this arm marks itself prerolled, then park
+            // until `Playing`. Live `Paused` admits nothing.
             PipelineState::Paused => {
-                let prerolled = self.inner.prerolled.load(Ordering::Acquire);
                 let live = self.inner.live.load(Ordering::Acquire);
-                go_or_park(&mut wakers, !live && !prerolled)
+                go_or_park(&mut wakers, !live && !self.self_prerolled)
             }
         }
     }
@@ -361,8 +419,8 @@ mod tests {
         let waker = flag_waker(flag);
         let mut cx = Context::from_waker(&waker);
 
-        // First poll in non-live `Paused`: the one preroll frame is admitted.
-        let mut gate = sc.flow_gate();
+        // A not-yet-prerolled arm gets `Go` (its one preroll frame).
+        let mut gate = sc.flow_gate(false);
         // SAFETY: `gate` pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
         assert_eq!(
@@ -371,9 +429,8 @@ mod tests {
             "preroll frame admitted"
         );
 
-        // The sink took its preroll buffer; the gate now holds until Playing.
-        sc.notify_prerolled();
-        let mut held = sc.flow_gate();
+        // Once the arm has prerolled, the gate holds until Playing.
+        let mut held = sc.flow_gate(true);
         // SAFETY: pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut held) };
         assert_eq!(pinned.poll(&mut cx), Poll::Pending, "holds after preroll");
@@ -392,7 +449,7 @@ mod tests {
         let waker = flag_waker(flag.clone());
         let mut cx = Context::from_waker(&waker);
 
-        let mut gate = sc.flow_gate();
+        let mut gate = sc.flow_gate(false);
         // Live `Paused` admits nothing: the gate parks immediately.
         // SAFETY: `gate` pinned to the stack for the poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
@@ -436,12 +493,61 @@ mod tests {
     }
 
     #[test]
+    fn multi_sink_preroll_aggregates_to_one_asyncdone() {
+        // M78: with two sinks, preroll completes only when the *last* one
+        // reports, and `AsyncDone` fires exactly once.
+        let (bus, handle) = Bus::new(8);
+        let sc = StateController::with_bus(PipelineState::Paused, handle);
+        sc.expect_prerolls(2);
+
+        sc.notify_prerolled();
+        assert!(
+            !sc.is_prerolled(),
+            "first sink alone does not complete preroll"
+        );
+        assert_eq!(
+            bus.try_recv(),
+            None,
+            "no AsyncDone until every sink prerolls"
+        );
+
+        sc.notify_prerolled();
+        assert!(sc.is_prerolled(), "last sink completes preroll");
+        assert_eq!(bus.try_recv(), Some(BusMessage::AsyncDone));
+
+        // Surplus notify (or a re-report) does not post a second AsyncDone.
+        sc.notify_prerolled();
+        assert_eq!(bus.try_recv(), None);
+    }
+
+    #[test]
+    fn playing_force_completes_pending_prerolls() {
+        // Going to Playing completes preroll even with sinks still pending.
+        let (bus, handle) = Bus::new(8);
+        let sc = StateController::with_bus(PipelineState::Paused, handle);
+        sc.expect_prerolls(3);
+        sc.notify_prerolled(); // 1 of 3
+        assert!(!sc.is_prerolled());
+
+        sc.set_state(PipelineState::Playing);
+        assert!(
+            sc.is_prerolled(),
+            "Playing satisfies the remaining prerolls"
+        );
+        // Drain StateChanged, expect exactly one AsyncDone.
+        let dones = core::iter::from_fn(|| bus.try_recv())
+            .filter(|m| matches!(m, BusMessage::AsyncDone))
+            .count();
+        assert_eq!(dones, 1);
+    }
+
+    #[test]
     fn gate_stops_on_null() {
         let sc = StateController::new(PipelineState::Null);
         let flag = Arc::new(core::sync::atomic::AtomicBool::new(false));
         let waker = flag_waker(flag);
         let mut cx = Context::from_waker(&waker);
-        let mut gate = sc.flow_gate();
+        let mut gate = sc.flow_gate(false);
         // SAFETY: `gate` pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
         assert_eq!(pinned.poll(&mut cx), Poll::Ready(Flow::Stop));

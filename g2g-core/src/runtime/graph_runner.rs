@@ -53,6 +53,7 @@ use crate::runtime::solver::{
     graph_downstream_feasibility, resolve_forward_output, solve_graph, solve_linear, ForwardResolve,
     NodeConstraint,
 };
+use crate::runtime::state::{Flow, StateController};
 
 /// Element payload for a [`Graph`] driven by [`run_graph`]. Sources,
 /// transforms/sinks, and muxers implement different traits (a source has no
@@ -219,7 +220,21 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None).await
+    run_graph_inner(graph, clock, link_capacity, None, None).await
+}
+
+/// As [`run_graph`], but driven by a [`StateController`] (M78): every `Sink`
+/// arm gates on the controller, so the whole DAG (linear / fan-out / fan-in /
+/// diamond) honors `NULL → READY → PAUSED → PLAYING`. Preroll aggregates: the
+/// async `Paused` transition completes only when *all* sinks have prerolled
+/// (the runner calls [`StateController::expect_prerolls`] with the sink count).
+pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    state: &StateController,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(graph, clock, link_capacity, None, Some(state.clone())).await
 }
 
 /// As [`run_graph`], but posts a structured
@@ -232,6 +247,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
+    state: Option<StateController>,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
@@ -240,6 +256,16 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         return Err(G2gError::CapsMismatch);
     }
     let topo = vg.topo().to_vec();
+
+    // M78: tell the controller how many sinks must preroll before the async
+    // `Paused` transition completes (aggregated `AsyncDone`).
+    if let Some(sc) = &state {
+        let sinks = topo
+            .iter()
+            .filter(|&&n| matches!(vg.kind(n), NodeKind::Sink))
+            .count();
+        sc.expect_prerolls(sinks);
+    }
 
     // Phase 1: probe each source's caps (async) into an owned map, releasing
     // the mutable borrow before the constraint phase borrows every node.
@@ -546,6 +572,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     node,
                     behind_tee(&vg, node),
                     bus.cloned(),
+                    state.clone(),
                 ))
             }
             NodeKind::Tee(_) => {
@@ -801,13 +828,26 @@ async fn sink_arm<'a>(
     node: NodeId,
     strict: bool,
     bus: Option<BusHandle>,
+    state: Option<StateController>,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
+    let mut prerolled_self = false;
     loop {
+        // M78 flow gate: below `Playing` the sink parks here, so it stops
+        // draining its edge and backpressure stalls the DAG upstream. Non-live
+        // `Paused` admits this sink's one preroll buffer; `Null` ends the arm.
+        if let Some(sc) = &state {
+            if sc.flow_gate(prerolled_self).await == Flow::Stop {
+                return Ok(consumed);
+            }
+        }
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
+                if let Some(sc) = &state {
+                    sc.notify_prerolled();
+                }
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
@@ -842,10 +882,21 @@ async fn sink_arm<'a>(
                 }
             }
             Some(packet) => {
-                if matches!(packet, PipelinePacket::DataFrame(_)) {
+                let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
+                if is_buffer {
                     consumed += 1;
                 }
                 elem.process(packet, &mut null).await?;
+                // M78: the first buffer in non-live `Paused` is this sink's
+                // preroll frame; mark this arm prerolled so the gate flips to a
+                // hold, and report it so the pipeline preroll aggregates toward
+                // a single `AsyncDone`.
+                if is_buffer && !prerolled_self {
+                    prerolled_self = true;
+                    if let Some(sc) = &state {
+                        sc.notify_prerolled();
+                    }
+                }
             }
             None => return Ok(consumed),
         }
