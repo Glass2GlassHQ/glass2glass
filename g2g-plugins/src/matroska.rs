@@ -16,9 +16,10 @@
 //!
 //! Scope (v1): a single Segment; definite-size elements (an unknown-size Segment
 //! is fine, the demuxer never needs its size, but unknown-size Clusters, the live
-//! streaming shape, are not handled); no-lacing SimpleBlock / Block frames (laced
-//! blocks are counted and skipped). Cues (seeking), BlockGroup reference
-//! tracking, and lacing are follow-ups.
+//! streaming shape, are not handled). SimpleBlock / Block frames, including all
+//! three lacing modes (Xiph / EBML / fixed), are split; laced frames share the
+//! block timestamp. Cues (seeking), BlockGroup reference tracking, and per-frame
+//! timestamp interpolation from DefaultDuration are follow-ups.
 
 use alloc::vec::Vec;
 
@@ -118,7 +119,6 @@ pub struct MatroskaDemuxer {
     timestamp_scale: u64,
     tracks: Vec<MkvTrack>,
     completed: Vec<MkvFrame>,
-    laced_skipped: u64,
 }
 
 impl Default for MatroskaDemuxer {
@@ -135,7 +135,6 @@ impl MatroskaDemuxer {
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             tracks: Vec::new(),
             completed: Vec::new(),
-            laced_skipped: 0,
         }
     }
 
@@ -147,11 +146,6 @@ impl MatroskaDemuxer {
     /// Drain the frames demuxed so far.
     pub fn take_frames(&mut self) -> Vec<MkvFrame> {
         core::mem::take(&mut self.completed)
-    }
-
-    /// Count of laced blocks skipped (v1 does not split lacing).
-    pub fn laced_blocks_skipped(&self) -> u64 {
-        self.laced_skipped
     }
 
     /// Feed container bytes. Complete top-level elements are parsed as they
@@ -197,12 +191,8 @@ impl MatroskaDemuxer {
                     }
                     ID_TRACKS => self.tracks = parse_tracks(&self.buf[header..total]),
                     ID_CLUSTER => {
-                        let (frames, laced) = parse_cluster(
-                            &self.buf[header..total],
-                            &self.tracks,
-                            self.timestamp_scale,
-                        );
-                        self.laced_skipped += laced;
+                        let frames =
+                            parse_cluster(&self.buf[header..total], &self.tracks, self.timestamp_scale);
                         self.completed.extend(frames);
                     }
                     _ => {} // SeekHead / Cues / Tags / Chapters / Void, etc.
@@ -302,71 +292,149 @@ fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
     })
 }
 
-/// Parse one Cluster's body into frames, returning `(frames, laced_skipped)`.
-/// The Cluster `Timestamp` precedes its blocks (spec-mandated), so it is set
-/// before any block is decoded.
-fn parse_cluster(body: &[u8], tracks: &[MkvTrack], scale: u64) -> (Vec<MkvFrame>, u64) {
+/// Parse one Cluster's body, appending its frames. The Cluster `Timestamp`
+/// precedes its blocks (spec-mandated), so it is set before any block is decoded.
+fn parse_cluster(body: &[u8], tracks: &[MkvTrack], scale: u64) -> Vec<MkvFrame> {
     let mut cluster_ts = 0u64;
     let mut frames = Vec::new();
-    let mut laced = 0u64;
     for (id, data) in children(body) {
         match id {
             ID_TIMESTAMP => cluster_ts = read_uint(data),
-            ID_SIMPLE_BLOCK => match parse_block(data, cluster_ts, scale, tracks) {
-                BlockResult::Frame(f) => frames.push(f),
-                BlockResult::Laced => laced += 1,
-                BlockResult::Drop => {}
-            },
+            ID_SIMPLE_BLOCK => parse_block(data, cluster_ts, scale, tracks, &mut frames),
             ID_BLOCK_GROUP => {
                 for (bid, bdata) in children(data) {
                     if bid == ID_BLOCK {
-                        match parse_block(bdata, cluster_ts, scale, tracks) {
-                            BlockResult::Frame(f) => frames.push(f),
-                            BlockResult::Laced => laced += 1,
-                            BlockResult::Drop => {}
-                        }
+                        parse_block(bdata, cluster_ts, scale, tracks, &mut frames);
                     }
                 }
             }
             _ => {}
         }
     }
-    (frames, laced)
+    frames
 }
 
-enum BlockResult {
-    Frame(MkvFrame),
-    Laced,
-    Drop,
-}
-
-/// Parse a (Simple)Block: track-number VINT, 2-byte signed relative timestamp,
-/// a flags byte, then the frame. Laced blocks are reported, not split (v1).
-fn parse_block(block: &[u8], cluster_ts: u64, scale: u64, tracks: &[MkvTrack]) -> BlockResult {
-    let Some((track, tn_len, _)) = read_size(block, 0) else { return BlockResult::Drop };
+/// Parse a (Simple)Block, appending its frame(s): a track-number VINT, a 2-byte
+/// signed relative timestamp, a flags byte, then the frame data. A laced block
+/// carries several frames (Xiph / EBML / fixed lacing) that share the block
+/// timestamp (per-frame interpolation from DefaultDuration is a follow-up). A
+/// malformed block is dropped.
+fn parse_block(
+    block: &[u8],
+    cluster_ts: u64,
+    scale: u64,
+    tracks: &[MkvTrack],
+    out: &mut Vec<MkvFrame>,
+) {
+    let Some((track, tn_len, _)) = read_size(block, 0) else { return };
     let mut pos = tn_len;
     if pos + 3 > block.len() {
-        return BlockResult::Drop;
+        return;
     }
     let rel = i16::from_be_bytes([block[pos], block[pos + 1]]);
     pos += 2;
     let flags = block[pos];
     pos += 1;
-    if (flags >> 1) & 0x03 != 0 {
-        return BlockResult::Laced; // Xiph / EBML / fixed lacing: not split in v1
-    }
     let Some(codec) = tracks.iter().find(|t| t.number == track).map(|t| t.codec) else {
-        return BlockResult::Drop;
+        return;
     };
     let abs = cluster_ts as i64 + rel as i64;
     let pts_ns = if abs < 0 { 0 } else { (abs as u64).saturating_mul(scale) };
-    BlockResult::Frame(MkvFrame {
-        track,
-        codec,
-        pts_ns,
-        keyframe: flags & 0x80 != 0,
-        data: block[pos..].to_vec(),
-    })
+    let keyframe = flags & 0x80 != 0;
+
+    let body = &block[pos..];
+    let lacing = (flags >> 1) & 0x03;
+    let frames = if lacing == 0 {
+        alloc::vec![body]
+    } else {
+        match split_laced(body, lacing) {
+            Some(v) => v,
+            None => return, // malformed lacing: drop the block
+        }
+    };
+    for data in frames {
+        out.push(MkvFrame { track, codec, pts_ns, keyframe, data: data.to_vec() });
+    }
+}
+
+/// Split a laced block body (`[frame_count-1][size headers][frame data]`) into
+/// per-frame slices. `lacing` is the 2-bit field: 1 = Xiph, 2 = fixed, 3 = EBML.
+fn split_laced(body: &[u8], lacing: u8) -> Option<Vec<&[u8]>> {
+    let (&count_minus_1, rest) = body.split_first()?;
+    let count = count_minus_1 as usize + 1;
+    match lacing {
+        1 => split_xiph(rest, count),
+        2 => split_fixed(rest, count),
+        3 => split_ebml(rest, count),
+        _ => None,
+    }
+}
+
+/// Fixed-size lacing: every frame is `len / count` bytes (exact division).
+fn split_fixed(data: &[u8], count: usize) -> Option<Vec<&[u8]>> {
+    if count == 0 || data.is_empty() || data.len() % count != 0 {
+        return None;
+    }
+    Some(data.chunks(data.len() / count).collect())
+}
+
+/// Xiph lacing: the first `count - 1` frame sizes are coded as 255-continuation
+/// byte runs; the last frame is the remainder.
+fn split_xiph(data: &[u8], count: usize) -> Option<Vec<&[u8]>> {
+    let mut sizes = Vec::with_capacity(count);
+    let mut pos = 0;
+    for _ in 0..count - 1 {
+        let mut size = 0usize;
+        loop {
+            let b = *data.get(pos)?;
+            pos += 1;
+            size += b as usize;
+            if b != 0xFF {
+                break;
+            }
+        }
+        sizes.push(size);
+    }
+    slice_frames(data, pos, &sizes)
+}
+
+/// EBML lacing: the first frame size is an unsigned VINT, each subsequent size a
+/// signed VINT delta from the previous; the last frame is the remainder. A signed
+/// VINT of byte-length `n` decodes as `unsigned - (2^(7n-1) - 1)`.
+fn split_ebml(data: &[u8], count: usize) -> Option<Vec<&[u8]>> {
+    let coded = count.checked_sub(1)?;
+    let mut sizes = Vec::with_capacity(count);
+    let mut pos = 0;
+    let mut cur = 0i64;
+    for i in 0..coded {
+        let (raw, len, _) = read_size(data, pos)?;
+        pos += len;
+        if i == 0 {
+            cur = raw as i64;
+        } else {
+            let bias = (1i64 << (7 * len - 1)) - 1;
+            cur += raw as i64 - bias;
+        }
+        if cur < 0 {
+            return None;
+        }
+        sizes.push(cur as usize);
+    }
+    slice_frames(data, pos, &sizes)
+}
+
+/// Slice frames out of `data` starting at `start`: one per entry in `sizes`, then
+/// a final frame holding the remainder (so `sizes.len() + 1` frames total).
+fn slice_frames<'a>(data: &'a [u8], start: usize, sizes: &[usize]) -> Option<Vec<&'a [u8]>> {
+    let mut frames = Vec::with_capacity(sizes.len() + 1);
+    let mut off = start;
+    for &sz in sizes {
+        let end = off.checked_add(sz)?;
+        frames.push(data.get(off..end)?);
+        off = end;
+    }
+    frames.push(data.get(off..)?);
+    Some(frames)
 }
 
 /// Read an EBML element ID (1..4 bytes, length marker kept).
@@ -580,16 +648,15 @@ mod tests {
     }
 
     #[test]
-    fn laced_block_is_counted_not_emitted() {
-        // A SimpleBlock with fixed lacing (flags 0x04) is skipped in v1.
-        let tracks = elem(
-            &[0x16, 0x54, 0xAE, 0x6B],
-            &track_entry(1, b"V_VP8", Some((16, 16)), None),
-        );
+    fn fixed_lacing_block_splits_into_frames() {
+        // A SimpleBlock with fixed lacing (flags bit 0x04), two frames, data
+        // [0xAA, 0xBB] -> one byte each, both at the cluster timestamp.
+        let tracks =
+            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
         let mut laced = vint(1); // track 1
         laced.extend_from_slice(&0i16.to_be_bytes());
         laced.push(0x04); // fixed lacing
-        laced.push(0x01); // (lace frame count - 1)
+        laced.push(0x01); // frame count - 1 = 1 (two frames)
         laced.extend_from_slice(&[0xAA, 0xBB]);
         let cluster = elem(
             &[0x1F, 0x43, 0xB6, 0x75],
@@ -600,7 +667,44 @@ mod tests {
 
         let mut d = MatroskaDemuxer::new();
         d.push_data(&file);
-        assert!(d.take_frames().is_empty(), "laced block not emitted");
-        assert_eq!(d.laced_blocks_skipped(), 1);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2, "fixed lacing splits into two frames");
+        assert_eq!(frames[0].data, vec![0xAA]);
+        assert_eq!(frames[1].data, vec![0xBB]);
+    }
+
+    #[test]
+    fn xiph_lacing_splits_with_255_continuation() {
+        // Two frames: a 255-byte frame (Xiph size 0xFF 0x00) then a 2-byte one.
+        let mut body = vec![1u8]; // frame count - 1 = 1
+        body.push(0xFF); // 255...
+        body.push(0x00); // ...+ 0 = size 255 for frame 0
+        body.extend(vec![0x11u8; 255]);
+        body.extend_from_slice(&[0xAB, 0xCD]);
+        let frames = split_laced(&body, 1).expect("xiph parses");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].len(), 255);
+        assert_eq!(frames[1], &[0xAB, 0xCD]);
+    }
+
+    #[test]
+    fn ebml_lacing_splits_with_signed_deltas() {
+        // Three frames sized 4, 6, 3. First size = unsigned vint 4 (0x84); the
+        // +2 delta is a signed 1-octet vint: unsigned 65 (0x41) -> 0xC1.
+        let mut body = vec![2u8]; // frame count - 1 = 2 (three frames)
+        body.push(0x84); // first size = 4
+        body.push(0xC1); // delta +2 -> second size = 6
+        body.extend(vec![0u8; 4 + 6 + 3]); // frame payloads
+        let frames = split_laced(&body, 3).expect("ebml parses");
+        let lens: Vec<usize> = frames.iter().map(|f| f.len()).collect();
+        assert_eq!(lens, vec![4, 6, 3]);
+    }
+
+    #[test]
+    fn fixed_lacing_rejects_inexact_division() {
+        // 5 bytes across two frames doesn't divide evenly: malformed.
+        let mut body = vec![1u8]; // two frames
+        body.extend_from_slice(&[1, 2, 3, 4, 5]);
+        assert!(split_laced(&body, 2).is_none());
     }
 }

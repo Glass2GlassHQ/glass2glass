@@ -1110,9 +1110,10 @@ it with the same per-codec `MkvStream` selection (H.264 / H.265 / VP8 / VP9 / AV
 video, AAC / Opus audio, default VP9). Unlike `TsDemux`, Matroska's Tracks element
 carries concrete geometry and audio parameters, so the demuxer refines the output
 caps itself via `CapsChanged` once Tracks is parsed, without a downstream bitstream
-parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator.
-Scope is one Segment with no-lacing, definite-size Clusters; lacing, unknown-size
-Clusters (live streaming), Cues (seeking), and the muxers are follow-ups.
+parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
+lacing (Xiph / EBML / fixed) is split (M113), so multi-frame audio blocks demux.
+Scope is one Segment with definite-size Clusters; unknown-size Clusters (live
+streaming), Cues (seeking), and the muxers are follow-ups.
 
 ---
 

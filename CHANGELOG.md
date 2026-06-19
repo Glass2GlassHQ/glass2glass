@@ -5,6 +5,19 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M113: Matroska block lacing (Xiph / EBML / fixed)
+
+- **`MatroskaDemuxer` splits laced blocks.** A SimpleBlock / Block can pack
+  several frames via lacing (common for Opus audio in WebM); M110 skipped them,
+  this splits all three modes: Xiph (255-continuation sizes), EBML (first size an
+  unsigned VINT, the rest signed-VINT deltas, decoded as `unsigned - (2^(7n-1)-1)`),
+  and fixed (equal division). Laced frames share the block timestamp (per-frame
+  interpolation from DefaultDuration is a follow-up); a malformed lace is dropped,
+  and the obsolete `laced_blocks_skipped` counter is gone.
+- Tested: each mode's size decoding (the Xiph 255-continuation and the EBML signed
+  delta directly), an end-to-end fixed-laced SimpleBlock split through the demuxer,
+  and inexact-fixed-division rejection.
+
 ### M112: filesrc byte-stream caps + content typefind
 
 - **`typefind::sniff` (no_std).** Guesses a `ByteStreamEncoding` from a stream's
