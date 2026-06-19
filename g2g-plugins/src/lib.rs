@@ -57,6 +57,10 @@ pub mod rtcp;
 // each gated to its source's feature.
 #[cfg(feature = "std")]
 pub mod uridecodebin;
+// A Registry pre-populated with the standard elements for parse_launch /
+// gst-inspect (M107). std (the Registry is std).
+#[cfg(feature = "std")]
+pub mod registry;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 pub mod videotestsrc;

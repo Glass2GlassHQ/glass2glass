@@ -189,10 +189,15 @@ Production-shape needs that block specific real-world use cases.
   elements by name (`LaunchFactory`, `make_source` / `make_element`) and dumps a
   `gst-inspect`-style `inspect(name)`. `runtime::parse_launch` turns a
   `"a key=v ! b ! sink"` string into a runnable `Graph`. Architecture: DESIGN.md
-  §4.16. **Remaining depth:** broaden property coverage beyond the first elements
-  (`VideoTestSrc` / `VideoFlip` / `VideoRate`); `gst-launch` branching (`tee` /
-  named pads) and caps-filter string syntax (needs a `Caps` text grammar +
-  `CapsFilter` as a property-bearing element); a value grammar for spaces /
+  §4.16. Property coverage broadened in M107 (`VideoScale` / `VideoCrop` /
+  `VideoConvert` / `AudioTestSrc` / `AudioConvert` / `AudioResample` / `FileSink` /
+  `FileSrc`) plus `g2g-plugins::registry::default_registry()` so `parse_launch`
+  works out of the box. **Remaining depth:** property-enable the
+  feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
+  `waylandsink`, ...) and register them in `default_registry` per feature;
+  `gst-launch` branching (`tee` / named pads) and caps-filter string syntax (needs
+  a `Caps` text grammar + `CapsFilter` as a property-bearing element, and a
+  `filesrc` that can take its caps that way); a value grammar for spaces /
   enums-as-named-flags; and a GUI/tooling introspection surface beyond the text
   dump.
 

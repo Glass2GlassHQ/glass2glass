@@ -28,7 +28,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 4] = [
@@ -222,7 +223,39 @@ impl AsyncElement for VideoScale {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEOSCALE_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "width" => {
+                self.target_w = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "height" => {
+                self.target_h = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "width" => Some(PropValue::Uint(self.target_w as u64)),
+            "height" => Some(PropValue::Uint(self.target_h as u64)),
+            _ => None,
+        }
+    }
 }
+
+/// `VideoScale`'s settable properties (M107).
+static VIDEOSCALE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("width", PropKind::Uint, "output width in pixels"),
+    PropertySpec::new("height", PropKind::Uint, "output height in pixels"),
+];
 
 impl PadTemplates for VideoScale {
     /// Static superset: any supported raw format in at any geometry; the

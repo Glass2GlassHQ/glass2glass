@@ -20,7 +20,8 @@ use std::path::PathBuf;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 /// Map a filesystem error to the structured `Hardware(Io)` variant, carrying
@@ -118,7 +119,32 @@ impl AsyncElement for FileSink {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        FILESINK_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "location" => {
+                self.path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
+            _ => None,
+        }
+    }
 }
+
+/// `FileSink`'s settable properties (M107): the output file path.
+static FILESINK_PROPS: &[PropertySpec] =
+    &[PropertySpec::new("location", PropKind::Str, "output file path")];
 
 impl PadTemplates for FileSink {
     /// Wildcard sink, matching the runtime `AcceptsAny` constraint.

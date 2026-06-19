@@ -21,7 +21,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// The PCM sample formats this element reads and writes.
@@ -197,6 +198,61 @@ impl AsyncElement for AudioConvert {
             }
             Ok(())
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        AUDIOCONVERT_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "format" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.target_format = audio_format_from_str(s).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "channels" => {
+                self.target_channels = value.as_uint().ok_or(PropError::Type)? as u8;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "format" => Some(PropValue::Str(audio_format_to_str(self.target_format).into())),
+            "channels" => Some(PropValue::Uint(self.target_channels as u64)),
+            _ => None,
+        }
+    }
+}
+
+/// `AudioConvert`'s settable properties (M107).
+static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("format", PropKind::Str, "output sample format: s16le | f32le | aac | opus"),
+    PropertySpec::new("channels", PropKind::Uint, "output channel count"),
+];
+
+/// Parse an audio-format property string to an [`AudioFormat`]. Shared with the
+/// `gst-launch` DSL.
+pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
+    match s {
+        "s16le" => Some(AudioFormat::PcmS16Le),
+        "f32le" => Some(AudioFormat::PcmF32Le),
+        "aac" => Some(AudioFormat::Aac),
+        "opus" => Some(AudioFormat::Opus),
+        _ => None,
+    }
+}
+
+/// The property string for an [`AudioFormat`].
+pub(crate) fn audio_format_to_str(f: AudioFormat) -> &'static str {
+    match f {
+        AudioFormat::PcmS16Le => "s16le",
+        AudioFormat::PcmF32Le => "f32le",
+        AudioFormat::Aac => "aac",
+        AudioFormat::Opus => "opus",
     }
 }
 

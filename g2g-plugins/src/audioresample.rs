@@ -23,7 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::audioconvert::{read_sample, sample_bytes, write_sample, PCM_FORMATS};
@@ -195,7 +196,32 @@ impl AsyncElement for AudioResample {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        AUDIORESAMPLE_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "samplerate" => {
+                self.target_rate = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "samplerate" => Some(PropValue::Uint(self.target_rate as u64)),
+            _ => None,
+        }
+    }
 }
+
+/// `AudioResample`'s settable properties (M107): the output sample rate.
+static AUDIORESAMPLE_PROPS: &[PropertySpec] =
+    &[PropertySpec::new("samplerate", PropKind::Uint, "output samples per second")];
 
 impl AudioResample {
     /// Resample one interleaved PCM buffer from `in_rate` to `self.target_rate`,

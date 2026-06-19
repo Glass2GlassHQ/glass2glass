@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M107: Property coverage + `default_registry` (gst-launch usable out of the box)
+
+- **Property-enabled the standard transforms / sources / sinks.** `VideoScale`
+  (`width` / `height`), `VideoCrop` (`x` / `y` / `width` / `height`),
+  `VideoConvert` (`format`), `AudioTestSrc` (`samplerate` / `channels` / `freq` /
+  `num-buffers` / `wave`), `AudioConvert` (`format` / `channels`), `AudioResample`
+  (`samplerate`), and `FileSink` / `FileSrc` (`location`) now implement the M104
+  property methods, joining `VideoTestSrc` / `VideoFlip` / `VideoRate`.
+- **`g2g-plugins::registry::default_registry()` (std).** A `Registry` pre-populated
+  with the standard `no_std`-baseline elements under their conventional names, so
+  `parse_launch` and `inspect` work without hand-registration:
+  `videotestsrc num-buffers=4 ! videoscale width=160 height=120 ! videoflip method=rotate-180 ! fakesink`
+  and `audiotestsrc num-buffers=3 freq=440 ! audioconvert channels=1 ! audioresample samplerate=16000 ! fakesink`
+  build and run. (`filesrc` is omitted: it needs output caps at construction that
+  the property bag cannot yet supply; feature-gated capture/decode/display
+  elements are added by the caller as their features are enabled.)
+- Tested: real video and audio chains parsed from text and run through
+  `run_graph` (frames reach the sink), `inspect` dumps for the new elements, and
+  by-name property round-trips. (Run the registry test with `--features std`.)
+
 ### M106: `gst-launch` text pipeline parser
 
 - **`g2g-core::runtime::parse_launch` (std).** Turns a `gst-launch`-style string

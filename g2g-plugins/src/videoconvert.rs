@@ -22,7 +22,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Formats this element can both consume and produce. The convert `target`
@@ -212,6 +213,59 @@ impl AsyncElement for VideoConvert {
             }
             Ok(())
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEOCONVERT_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "format" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.target = raw_format_from_str(s).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "format" => Some(PropValue::Str(raw_format_to_str(self.target).into())),
+            _ => None,
+        }
+    }
+}
+
+/// `VideoConvert`'s settable properties (M107): the output pixel format.
+static VIDEOCONVERT_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "format",
+    PropKind::Str,
+    "output pixel format: nv12 | i420 | rgba | bgra | yuyv",
+)];
+
+/// Parse a pixel-format property string to a [`RawVideoFormat`]. Shared name set
+/// for the `gst-launch` DSL.
+pub(crate) fn raw_format_from_str(s: &str) -> Option<RawVideoFormat> {
+    match s {
+        "nv12" => Some(RawVideoFormat::Nv12),
+        "i420" => Some(RawVideoFormat::I420),
+        "rgba" => Some(RawVideoFormat::Rgba8),
+        "bgra" => Some(RawVideoFormat::Bgra8),
+        "yuyv" => Some(RawVideoFormat::Yuyv),
+        _ => None,
+    }
+}
+
+/// The property string for a [`RawVideoFormat`].
+pub(crate) fn raw_format_to_str(f: RawVideoFormat) -> &'static str {
+    match f {
+        RawVideoFormat::Nv12 => "nv12",
+        RawVideoFormat::I420 => "i420",
+        RawVideoFormat::Rgba8 => "rgba",
+        RawVideoFormat::Bgra8 => "bgra",
+        RawVideoFormat::Yuyv => "yuyv",
     }
 }
 

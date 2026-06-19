@@ -17,7 +17,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// Samples per emitted buffer: 10 ms at the configured rate.
@@ -171,6 +172,71 @@ impl SourceLoop for AudioTestSrc {
             out.push(PipelinePacket::Eos).await?;
             Ok(self.target_buffers)
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        AUDIOTESTSRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "samplerate" => self.sample_rate = value.as_uint().ok_or(PropError::Type)? as u32,
+            "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
+            "freq" => self.tone_hz = value.as_uint().ok_or(PropError::Type)? as u32,
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            "wave" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.wave = wave_from_str(s).ok_or(PropError::Value)?;
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "samplerate" => Some(PropValue::Uint(self.sample_rate as u64)),
+            "channels" => Some(PropValue::Uint(self.channels as u64)),
+            "freq" => Some(PropValue::Uint(self.tone_hz as u64)),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
+            "wave" => Some(PropValue::Str(wave_to_str(self.wave).into())),
+            _ => None,
+        }
+    }
+}
+
+/// `AudioTestSrc`'s settable properties (M107).
+static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("samplerate", PropKind::Uint, "samples per second"),
+    PropertySpec::new("channels", PropKind::Uint, "channel count"),
+    PropertySpec::new("freq", PropKind::Uint, "test tone frequency in Hz"),
+    PropertySpec::new("num-buffers", PropKind::Int, "buffers to emit then EOS (-1 = forever)"),
+    PropertySpec::new("wave", PropKind::Str, "waveform: sine | square | silence"),
+];
+
+/// Parse a `wave` property string to a [`Wave`].
+fn wave_from_str(s: &str) -> Option<Wave> {
+    match s {
+        "sine" => Some(Wave::Sine),
+        "square" => Some(Wave::Square),
+        "silence" => Some(Wave::Silence),
+        _ => None,
+    }
+}
+
+/// The `wave` property string for a [`Wave`].
+fn wave_to_str(w: Wave) -> &'static str {
+    match w {
+        Wave::Sine => "sine",
+        Wave::Square => "square",
+        Wave::Silence => "silence",
     }
 }
 

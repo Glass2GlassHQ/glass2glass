@@ -18,7 +18,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 4] = [
@@ -215,7 +216,42 @@ impl AsyncElement for VideoCrop {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEOCROP_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        let v = value.as_uint().ok_or(PropError::Type)? as u32;
+        match name {
+            "x" => self.x = v,
+            "y" => self.y = v,
+            "width" => self.w = v,
+            "height" => self.h = v,
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        let v = match name {
+            "x" => self.x,
+            "y" => self.y,
+            "width" => self.w,
+            "height" => self.h,
+            _ => return None,
+        };
+        Some(PropValue::Uint(v as u64))
+    }
 }
+
+/// `VideoCrop`'s settable properties (M107): the crop rectangle on the input.
+static VIDEOCROP_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("x", PropKind::Uint, "crop rectangle left edge in pixels"),
+    PropertySpec::new("y", PropKind::Uint, "crop rectangle top edge in pixels"),
+    PropertySpec::new("width", PropKind::Uint, "crop rectangle width in pixels"),
+    PropertySpec::new("height", PropKind::Uint, "crop rectangle height in pixels"),
+];
 
 impl PadTemplates for VideoCrop {
     fn pad_templates() -> Vec<PadTemplate> {
