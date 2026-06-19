@@ -917,6 +917,23 @@ this document; without it, those plans are speculation.
   graceful degradation is anticipated.
 - **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad
   re-cascade channel, so the DAG β walk terminates at a muxer.
+- **Timestamp-ordered fan-in (synchronized mixing).** The muxer arm drains its
+  per-input channels round-robin (fair, no starvation) but in *arrival* order,
+  not PTS order, so a `MultiInputElement` sees inputs interleaved by whoever
+  produced first, not by frame time. The compositor papers over this for the
+  "background + overlays" shape: input 0 drives cadence, overlays are latched
+  best-effort (a startup buffer emits overlay-less on overflow so a late branch
+  still appears, but a branch can still run ahead of another by buffer depth).
+  The frame-accurate answer is a PTS-ordered merge in `muxer_arm`: buffer a
+  little per input, release the lowest-PTS packet once every live input has a
+  buffered frame at or beyond it (or a per-input deadline elapses), so inputs
+  advance together by frame time regardless of arrival skew. Prerequisite for
+  correct multi-camera grids, A/V interleave muxers, and PTS-synchronized
+  compositing; it subsumes the compositor's ad-hoc priming. Gated on a use case
+  that needs frame-accurate sync (e.g. lip-sync mux or a synchronized grid)
+  rather than the current cadence-driver overlay model. See M93 compositor
+  bring-up (CHANGELOG) for the failure modes the round-robin + startup buffer
+  currently mitigate.
 - **Allocation join policy across diamonds.** When two branches downstream of a
   tee propose different allocation params, the tee's outbound pool needs a join
   policy. Default sketch: most-restrictive intersection, loud failure on empty.
