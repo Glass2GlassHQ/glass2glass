@@ -28,6 +28,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::rtpdepay::RtpH264Depayloader;
+use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -46,6 +47,8 @@ pub struct UdpSrc {
     /// 0 means run until error / downstream shutdown; otherwise stop after this
     /// many access units and emit EOS (the test / bounded path).
     frame_limit: u64,
+    /// Reorder/loss-resilience policy for the receive path.
+    jitter: JitterConfig,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -62,6 +65,7 @@ impl UdpSrc {
             height: DEFAULT_HEIGHT,
             fps: DEFAULT_FPS,
             frame_limit: 0,
+            jitter: JitterConfig::default(),
             std_socket: None,
             configured: false,
         }
@@ -95,6 +99,15 @@ impl UdpSrc {
     /// until a socket error (RTP has no in-band end marker).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
+        self
+    }
+
+    /// Tune the receive-side jitter buffer: hold a gap up to `max_hold_ms`
+    /// before declaring it lost, and buffer at most `max_depth` packets. A
+    /// `max_depth` of 0 disables reordering (in-order passthrough). Default is
+    /// [`JitterConfig::default`] (50 ms / 64 packets).
+    pub fn with_jitter(mut self, max_hold_ms: u64, max_depth: usize) -> Self {
+        self.jitter = JitterConfig::new(max_hold_ms, max_depth);
         self
     }
 
@@ -155,6 +168,7 @@ impl SourceLoop for UdpSrc {
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
             let mut depay = RtpH264Depayloader::new();
+            let mut jitter = RtpJitterBuffer::new(self.jitter);
             let mut buf = vec![0u8; RECV_BUF];
             let limit = self.frame_limit;
             let mut seq = 0u64;
@@ -162,34 +176,59 @@ impl SourceLoop for UdpSrc {
             // sees PTS near zero.
             let mut ts_base: Option<u32> = None;
 
-            while limit == 0 || seq < limit {
-                let (n, _from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
-                let Some(au) = depay.depacketize(&buf[..n]) else {
-                    continue;
-                };
+            loop {
+                // Drain every packet the jitter buffer will release now, turning
+                // each completed access unit into a downstream frame.
+                while let Some(packet) = jitter.pop(g2g_core::metrics::monotonic_ns()) {
+                    let Some(au) = depay.depacketize(&packet) else {
+                        continue;
+                    };
+                    let base = *ts_base.get_or_insert(au.rtp_timestamp);
+                    let rel = au.rtp_timestamp.wrapping_sub(base) as u64;
+                    let pts = rel * 1_000_000_000 / RTP_CLOCK_HZ;
+                    let arrival_ns = g2g_core::metrics::monotonic_ns();
+                    let frame = Frame {
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(
+                            au.data.into_boxed_slice(),
+                        )),
+                        timing: FrameTiming {
+                            pts_ns: pts,
+                            dts_ns: pts,
+                            duration_ns: 0,
+                            capture_ns: pts,
+                            arrival_ns,
+                        },
+                        sequence: seq,
+                        meta: Default::default(),
+                    };
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    seq += 1;
+                    if limit != 0 && seq >= limit {
+                        out.push(PipelinePacket::Eos).await?;
+                        return Ok(seq);
+                    }
+                }
 
-                let base = *ts_base.get_or_insert(au.rtp_timestamp);
-                let rel = au.rtp_timestamp.wrapping_sub(base) as u64;
-                let pts = rel * 1_000_000_000 / RTP_CLOCK_HZ;
-                let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(au.data.into_boxed_slice())),
-                    timing: FrameTiming {
-                        pts_ns: pts,
-                        dts_ns: pts,
-                        duration_ns: 0,
-                        capture_ns: pts,
-                        arrival_ns,
-                    },
-                    sequence: seq,
-                    meta: Default::default(),
+                // Wait for the next datagram, but no longer than the head's hold
+                // deadline, so a packet stuck behind a lost predecessor still
+                // flushes when the network falls quiet. An empty buffer blocks.
+                let recv = socket.recv_from(&mut buf);
+                let received = match jitter.next_deadline_ns(g2g_core::metrics::monotonic_ns()) {
+                    Some(delay) if delay > 0 => {
+                        match tokio::time::timeout(core::time::Duration::from_nanos(delay), recv).await
+                        {
+                            Ok(r) => Some(r),
+                            // Deadline elapsed with no packet: loop to flush the gap.
+                            Err(_) => None,
+                        }
+                    }
+                    _ => Some(recv.await),
                 };
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-                seq += 1;
+                if let Some(r) = received {
+                    let (n, _from) = r.map_err(io_err)?;
+                    jitter.push(&buf[..n], g2g_core::metrics::monotonic_ns());
+                }
             }
-
-            out.push(PipelinePacket::Eos).await?;
-            Ok(seq)
         })
     }
 }

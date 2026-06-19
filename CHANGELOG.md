@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M94: RTP receive-side jitter buffer (network resilience for raw RTP ingest)
+
+- `rtpjitter::RtpJitterBuffer` (sans-IO, `no_std + alloc`): the reordering stage
+  between a socket and the `RtpH264Depayloader`. A UDP network delivers RTP
+  packets out of order, duplicated, or lost; feeding that straight to the
+  depayloader corrupts reassembly (a reorder looks like a loss and resets the
+  in-flight access unit). The buffer orders packets by sequence number and
+  releases them in order, holds a packet only until its missing predecessors are
+  filled or declared lost (bounded latency), and drops duplicates / too-late
+  packets. Keyed by an *extended* sequence number (the 16-bit RTP sequence
+  unrolled into a monotonic counter) so wraparound is handled cleanly.
+- `JitterConfig { max_hold_ns, max_depth }` (default 50 ms / 64 packets); a
+  missing packet is declared lost once the held head is overdue or the buffer
+  hits `max_depth`. `JitterStats` counts received / reordered / lost / duplicate
+  / late for observability. `max_depth == 0` is in-order passthrough.
+- `UdpSrc` drives it with a deadline-bounded receive loop
+  (`next_deadline_ns` -> `tokio::time::timeout`), so a packet stuck behind a lost
+  predecessor still flushes when the network falls quiet. New builder
+  `UdpSrc::with_jitter(max_hold_ms, max_depth)`.
+- Tested: sans-IO unit coverage (reorder into sequence, skip-after-deadline,
+  depth-forced release, duplicate/late drop, u16 wraparound, passthrough), plus
+  a loopback integration test sending out-of-order packets and asserting in-order
+  delivery with none lost (fails as a timeout with the buffer disabled).
+- Scope: reordering + loss/dup/late detection + bounded-latency release. RTCP
+  receiver reports, NACK/RTX retransmission, and FEC remain receive-side
+  follow-ups (DESIGN_TODO).
+
 ### M93: `Compositor` — software RGBA8 video mixer (videomixer / compositor)
 
 - First *pixel mixer* (vs `mux`'s track multiplexer): overlays N raw RGBA8 input

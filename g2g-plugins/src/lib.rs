@@ -30,6 +30,9 @@ pub mod videoflip;
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
+// Sans-IO RTP jitter buffer (reorder / loss / dup detection) between a socket
+// and the depayloader, the receive-side network-resilience stage.
+pub mod rtpjitter;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.
