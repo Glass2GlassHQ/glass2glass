@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M90: `V4l2Src` — Linux V4L2 capture source
+
+- First real **capture** source: streams packed YUYV (4:2:2) frames off a UVC
+  `/dev/videoN` device via V4L2 mmap streaming I/O. Turns g2g from "process
+  streams" into "produce streams". Behind a new `v4l2` feature (Linux-only,
+  implies std), wrapping the pure-Rust `v4l` crate (`v4l2-sys-mit`, no libv4l C
+  dependency).
+- V4L2's ioctls are blocking, so capture runs on a dedicated std thread that
+  feeds the async `run` loop over a bounded (`BUFFER_COUNT`) channel —
+  backpressure throttles capture instead of growing memory. The format is
+  negotiated up front in `intercept_caps` (the driver may snap the requested
+  geometry / rate to a supported mode), and the capture thread re-opens the
+  device under that exact format, sidestepping `Send`/borrow entanglement with
+  the mmap stream.
+- Builders: `with_size`, `with_fps`, `with_frame_limit` (0 = run until error /
+  downstream shutdown). Reports a live `LatencyReport` of one frame period.
+  Errors map to `G2gError::Hardware(HardwareError::V4l2(errno))`.
+- Pairs with `VideoConvert` (M89) for the YUYV unpack:
+  `V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`. Validated end-to-end against
+  a real integrated webcam (`v4l2_smoke`): capture -> convert -> FakeSink (30
+  frames, in order) and a live capture -> Wayland window (120 presented).
+
 ### M89: `RawVideoFormat::Yuyv` (packed 4:2:2) + videoconvert unpacking
 
 - Adds `RawVideoFormat::Yuyv` (packed 4:2:2, byte order Y0 U Y1 V; the V4L2

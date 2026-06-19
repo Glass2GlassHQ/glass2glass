@@ -16,9 +16,15 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
 
 ### Phase 2 - Breadth + observability (mostly parallelizable).
 
-- **`v4l2src`** (first real capture source - turns g2g from "process streams"
-  into "produce streams"), **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
-  Both are OS/network-coupled, validated on hardware, not in-sandbox.
+- **`v4l2src`** DONE (M90): first real capture source, turns g2g from "process
+  streams" into "produce streams". Streams packed YUYV (4:2:2) off a UVC
+  `/dev/videoN` via mmap on a dedicated blocking-capture thread feeding the
+  async run loop; `VideoConvert` unpacks YUYV (M89). Validated against a real
+  integrated webcam (capture -> convert -> FakeSink, and a live
+  capture -> Wayland window). **Remaining capture/URI work:** `HttpSrc` +
+  `UdpSrc` (prereq for HLS/DASH/raw-RTP), then a `uridecodebin`-equivalent
+  URI->source layer over the autoplug registry. MJPEG-mode UVC + format-flexible
+  negotiation (the source fixes YUYV today) is a follow-up.
 - Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
   runner (the design's stated `DropOldest` use case); the leaky setters are
   `std`-gated today since only `run_graph` configures per-edge policy.

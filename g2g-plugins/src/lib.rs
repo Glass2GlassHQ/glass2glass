@@ -119,6 +119,12 @@ mod yuv;
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]
 pub mod kmssink;
 
+// V4L2 capture source (UVC webcams etc.). Linux-only; streams packed YUYV
+// (4:2:2) off /dev/videoN via mmap on a dedicated capture thread. See module
+// docs.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2src;
+
 // Wayland display sink (NV12 -> XRGB8888 via wl_shm). Linux-only;
 // desktop-dev convenience sink — see module docs.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]

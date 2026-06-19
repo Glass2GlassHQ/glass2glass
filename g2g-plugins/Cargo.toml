@@ -51,6 +51,11 @@ vaapi = ["std", "dep:cros-codecs"]
 # libavutil-dev). This is the production-ready Linux decode path while the
 # `vaapi` feature is blocked on cros-codecs GBM/NV12 surface allocation.
 ffmpeg = ["std", "dep:ffmpeg-next"]
+# V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
+# /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
+# dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture
+# thread feeding the async run loop over a channel.
+v4l2 = ["std", "dep:v4l"]
 # Embassy RTOS clock backend (M43): EmbassyClock over embassy-time, the no_std
 # analog of WallClock. The tick rate is selected here; a HAL provides the time
 # driver at link. The embassy-futures block_on executor primitive (dev-dep)
@@ -155,6 +160,9 @@ windows = { version = "0.62", optional = true, features = [
 cros-codecs = { version = "0.0.6", optional = true, default-features = false, features = ["vaapi"] }
 drm = { version = "0.15", optional = true }
 drm-fourcc = { version = "2", optional = true }
+# Pure-Rust V4L2 bindings (v4l2-sys-mit, no libv4l). Drives the `v4l2` capture
+# source. Linux-only target-gate; the V4L2 ioctl ABI is Linux-specific.
+v4l = { version = "0.14", optional = true }
 # ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
 # Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
 # it (the underlying pkg-config probe doesn't fit those targets).
