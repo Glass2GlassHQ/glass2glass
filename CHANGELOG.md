@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M91: `UdpSrc` — UDP/RTP H.264 ingress (receive side)
+
+- `RtpH264Depayloader` (`rtpdepay.rs`): the sans-IO, `no_std`, host-testable
+  inverse of `RtpH264Packetizer`. Turns RTP packets back into Annex-B access
+  units — single-NAL and STAP-A pass through, FU-A fragments reassemble, the RTP
+  marker bit closes an access unit. A sequence gap drops in-flight reassembly so
+  loss/reorder never welds two access units together. Returns the access unit
+  plus its 90 kHz RTP timestamp.
+- `UdpSrc` (`udpsrc.rs`, `udp-ingress` feature): a `SourceLoop` that receives
+  RTP on a tokio `UdpSocket` and depayloads to `CompressedVideo` H.264 for a
+  downstream decoder — the receive-side inverse of `UdpSink`. Async I/O (no
+  capture thread). Builders: `with_video_size` / `with_framerate` (declared
+  geometry hint — raw RTP has no SDP, so the SPS is authoritative and a decoder
+  corrects it), `with_frame_limit`, plus `from_socket` to adopt an already-bound
+  socket (deterministic port for tests). Live `LatencyReport` of one frame
+  period; PTS rebased off the first RTP timestamp.
+- Validated over real localhost UDP (`udp_loopback`): packetize (with FU-A
+  fragmentation) -> send -> `UdpSrc` depayload -> `FakeSink`, 20 access units in
+  order. Receive-side jitter buffer (reorder/loss/RTCP) and SDP/SPS-driven caps
+  discovery remain follow-ups.
+
 ### M90: `V4l2Src` — Linux V4L2 capture source
 
 - First real **capture** source: streams packed YUYV (4:2:2) frames off a UVC

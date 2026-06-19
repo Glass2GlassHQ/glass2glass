@@ -16,11 +16,20 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
 
 ### Phase 2 - Breadth + observability (mostly parallelizable).
 
-- **Capture / URI source breadth.** `v4l2src` is done (DESIGN.md §4.12a).
-  Remaining: `HttpSrc` + `UdpSrc` (prereq for HLS/DASH/raw-RTP), then a
-  `uridecodebin`-equivalent URI->source layer over the autoplug registry. Also
-  MJPEG-mode UVC + format-flexible `v4l2src` negotiation (the source fixes YUYV
-  today). All OS/network-coupled, validated on hardware.
+- **Capture / URI source breadth.** `v4l2src` (DESIGN.md §4.12a) and `UdpSrc`
+  raw-RTP H.264 ingest (§4.12b) are done. Remaining: `HttpSrc` (blocked on a
+  byte-stream caps + a consumer; see below), then a `uridecodebin`-equivalent
+  URI->source layer over the autoplug registry. Also a receive-side RTP jitter
+  buffer (reorder/loss/RTCP) and SDP/SPS-driven `UdpSrc` caps discovery, plus
+  MJPEG-mode UVC + format-flexible `v4l2src` negotiation (it fixes YUYV today).
+- **`HttpSrc` needs a byte-stream type first.** A souphttpsrc-equivalent
+  produces an untyped byte stream, but `Caps` today is only
+  `CompressedVideo`/`RawVideo`/`Audio`/`Tensor` — there is no byte-stream
+  variant and nothing consumes one (mp4src reads a *path*, not a stream). So
+  `HttpSrc` is dead weight until either (a) a `Caps::ByteStream` variant + a
+  byte-stream demuxer (HLS/DASH playlist+segment, or a streaming mp4 demux)
+  lands, or (b) it is built specifically as the fetch layer of an HLS/DASH
+  element. Build it alongside that consumer, not before.
 - Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
   runner (the design's stated `DropOldest` use case); the leaky setters are
   `std`-gated today since only `run_graph` configures per-edge policy.
@@ -265,14 +274,18 @@ modern PipeWire path remain.
 
 ### Network sources
 
-- **`UdpSrc` + RTP depayloader.** 2 sessions. We have `UdpSink` egress; the
-  receive half (jitterbuffer + depayloader) is missing. Different from
-  `RtspSrc` (which is RTSP-over-TCP via retina) — raw RTP-over-UDP ingest is
-  the broadcast contribution shape.
-- **`souphttpsrc` / `HttpSrc`.** 2 sessions. HTTP / HTTPS source.
-  Blocks HLS / DASH / RTMP and any "fetch from a URL" use case. `reqwest` or
-  `hyper` as the backing crate. Prerequisite for the adaptive demuxers in
-  the parity-gaps list.
+- **RTP receive-side jitter buffer.** `UdpSrc` + the `RtpH264Depayloader` are
+  done (raw RTP-over-UDP ingest, DESIGN.md §4.12b) — the broadcast-contribution
+  shape, distinct from `RtspSrc` (RTSP-over-TCP via retina). The basic
+  depayloader assembles in order and drops on a sequence gap; a real jitter
+  buffer (packet reorder, loss concealment, RTCP RR/NACK) is the remaining
+  receive-side robustness work. Also SDP/SPS-driven caps discovery so `UdpSrc`
+  reports real geometry instead of a declared hint.
+- **`souphttpsrc` / `HttpSrc`.** 2 sessions. HTTP / HTTPS source. Blocked on a
+  byte-stream type + consumer (see the `HttpSrc` note in Phase 2 above): `Caps`
+  has no byte-stream variant and nothing consumes one today, so build it as the
+  fetch layer of an HLS/DASH element rather than standalone. `reqwest` or
+  `hyper` as the backing crate.
 - **`rtmpsrc`** (RTMP ingest). Tied to the RTMP transport in parity gaps.
 - **`srtsrc`** (SRT ingest). Tied to the SRT transport in parity gaps.
 
@@ -378,8 +391,8 @@ M62 / M66) and dropped from this table.
 | Element | Sessions | Why it matters |
 | :--- | :--- | :--- |
 | `pipewiresrc` / `mfvideosrc` | 2 each | live camera on PipeWire / Windows (`v4l2src` done) |
-| `UdpSrc` + RTP depay | 2 | raw RTP ingest |
-| `HttpSrc` | 2 | prereq for HLS / DASH / random URLs |
+| RTP jitter buffer | 2–3 | reorder/loss/RTCP (`UdpSrc` + depay done) |
+| `HttpSrc` | 2 | prereq for HLS / DASH (needs a byte-stream type + consumer first) |
 | VP8 / VP9 / AV1 / Opus codecs | 3 + 3 + 3 + 2 | WebRTC + modern web |
 | MJPEG decode | 1 | low-end RTSP cameras |
 | Linux audio sinks | 1 each | host audio output |
@@ -393,10 +406,11 @@ M62 / M66) and dropped from this table.
 | WebRTC sendrecv | 5+ | full WebRTC media engine |
 
 With the video transforms and `audioresample` shipped, the cheap,
-highest-frequency transform gaps are closed. `v4l2src` (DESIGN.md §4.12a) took
-g2g from a "process incoming streams" framework toward a "produce streams" one;
-the remaining capture tier (`pipewiresrc` / `mfvideosrc`, plus `UdpSrc` /
-`HttpSrc` network sources) extends that across platforms and makes g2g
+highest-frequency transform gaps are closed. `v4l2src` (DESIGN.md §4.12a) and
+`UdpSrc` raw-RTP ingest (§4.12b) took g2g from a "process incoming streams"
+framework toward a "produce streams" one; the remaining capture tier
+(`pipewiresrc` / `mfvideosrc` cameras, an RTP jitter buffer, and `HttpSrc` once
+it has a byte-stream consumer) extends that across platforms and makes g2g
 substantially more credible as a GStreamer replacement.
 
 ## Tier-1 element sprint — detailed plan

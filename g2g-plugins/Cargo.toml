@@ -18,6 +18,10 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
 udp-egress = ["std", "tokio/net"]
+# UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
+# depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
+# and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
+udp-ingress = ["std", "tokio/net"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]

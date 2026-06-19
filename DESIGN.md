@@ -676,9 +676,36 @@ Two design points carry the element:
   sidesteps `Send` / borrow entanglement with the stream. Errors surface as
   `G2gError::Hardware(HardwareError::V4l2(errno))`.
 
-MJPEG-mode UVC and format-flexible negotiation (the source fixes YUYV today),
-plus the `HttpSrc` / `UdpSrc` network sources and a `uridecodebin`-equivalent
-URI → source layer, are the remaining capture/ingress breadth (DESIGN_TODO).
+MJPEG-mode UVC and format-flexible negotiation (the source fixes YUYV today)
+are follow-ups (DESIGN_TODO).
+
+### 4.12b Live Ingress (UDP / RTP)
+
+`UdpSrc` (`udpsrc.rs`, `udp-ingress` feature) is the receive-side inverse of
+`UdpSink` (§4.12): it receives RTP on a tokio `UdpSocket` and depayloads H.264
+into Annex-B access units pushed downstream as `CompressedVideo` H.264, so the
+canonical chain is `UdpSrc -> FfmpegH264Dec -> sink`. The I/O is async, so
+unlike `V4l2Src` it needs no capture thread.
+
+The protocol logic is Sans-IO (§1), mirroring the egress split: `rtpdepay.rs`'s
+`RtpH264Depayloader` is a pure, `no_std`, host-testable function that inverts
+`RtpH264Packetizer`. Single-NAL and STAP-A payloads pass through; FU-A fragments
+reassemble (the original NAL header is rebuilt from the FU indicator's F|NRI and
+the FU header's type); the RTP marker bit closes an access unit. A sequence-
+number gap drops the in-flight reassembly so loss or reorder never welds two
+access units together.
+
+This is **raw RTP** with no RTSP/SDP, so there is no out-of-band stream
+description: the output geometry is a declared hint (`with_video_size` /
+`with_framerate`), and since H.264 carries its real dimensions in the SPS a
+downstream decoder re-derives and corrects them. A receive-side jitter buffer
+(packet reorder, loss concealment, RTCP) and SDP/SPS-driven caps discovery are
+the larger receive-side follow-ups; `RtspSrc` (via `retina`) already covers the
+RTSP case with its own jitter buffer (§4.11.4).
+
+The remaining capture/ingress breadth — `HttpSrc` (gated on a byte-stream caps
++ consumer; see DESIGN_TODO) and a `uridecodebin`-equivalent URI → source layer
+over the autoplug registry — is tracked in DESIGN_TODO.
 
 ### 4.13 CSP Caps Negotiation
 

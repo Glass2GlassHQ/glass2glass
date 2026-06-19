@@ -26,6 +26,8 @@ pub mod videocrop;
 pub mod videoflip;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
 pub mod rtppay;
+// Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
+pub mod rtpdepay;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 pub mod videotestsrc;
@@ -63,6 +65,12 @@ pub mod rtspsrc;
 // tokio UdpSocket, the send-side inverse of RtspSrc's receive path.
 #[cfg(feature = "udp-egress")]
 pub mod udpsink;
+
+// UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
+// H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
+// UdpSink. Raw RTP (no RTSP/SDP); see module docs.
+#[cfg(feature = "udp-ingress")]
+pub mod udpsrc;
 
 // Media Foundation decode is Windows-only. The `windows` dependency is
 // target-gated, so the module only exists when building for Windows with the
