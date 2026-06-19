@@ -351,6 +351,7 @@ pub enum VideoCodec {
     H264,
     H265,
     Av1,
+    Vp8,
     Vp9,
 }
 
@@ -362,6 +363,11 @@ pub enum ByteStreamEncoding {
     /// MPEG-2 Transport Stream (ISO/IEC 13818-1): 188-byte packets, PAT/PMT,
     /// PES. The broadcast / SRT / HLS-segment carrier.
     MpegTs,
+    /// Matroska / WebM (EBML): nested variable-length elements; Tracks describe
+    /// the elementary streams and Clusters carry the SimpleBlock frames. The
+    /// common file container, WebM being the browser-delivery subset (VP8 / VP9 /
+    /// AV1 video + Opus / Vorbis audio).
+    Matroska,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

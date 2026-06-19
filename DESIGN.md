@@ -1101,6 +1101,19 @@ advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
 `Mp4Src` / `Mp4Sink`; muxing (`mpegtsmux`), multi-program selection, and PCR-based
 timing are follow-ups.
 
+The Matroska / WebM demuxer (M110) is the second, the same parser + element split
+keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is
+a pure EBML parser (variable-length element IDs / sizes, descend into the Segment,
+read Tracks for the elementary streams and `Info` TimestampScale, parse each
+Cluster's SimpleBlock / Block frames with scaled timestamps), and `MkvDemux` wraps
+it with the same per-codec `MkvStream` selection (H.264 / H.265 / VP8 / VP9 / AV1
+video, AAC / Opus audio, default VP9). Unlike `TsDemux`, Matroska's Tracks element
+carries concrete geometry and audio parameters, so the demuxer refines the output
+caps itself via `CapsChanged` once Tracks is parsed, without a downstream bitstream
+parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator.
+Scope is one Segment with no-lacing, definite-size Clusters; lacing, unknown-size
+Clusters (live streaming), Cues (seeking), and the muxers are follow-ups.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

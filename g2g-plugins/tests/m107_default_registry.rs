@@ -114,3 +114,15 @@ fn demuxer_and_its_parsers_registered() {
     demux.set_property("stream", PropValue::Str("aac".into())).unwrap();
     assert_eq!(demux.get_property("stream"), Some(PropValue::Str("aac".into())));
 }
+
+#[test]
+fn matroska_demuxer_registered() {
+    // M110: the MKV / WebM demuxer joins the registry with its stream selector.
+    let reg = default_registry();
+    assert!(reg.inspect("matroskademux").unwrap().contains("stream"));
+
+    let mut mkv = reg.make_element("matroskademux").unwrap();
+    assert_eq!(mkv.get_property("stream"), Some(PropValue::Str("vp9".into())));
+    mkv.set_property("stream", PropValue::Str("opus".into())).unwrap();
+    assert_eq!(mkv.get_property("stream"), Some(PropValue::Str("opus".into())));
+}

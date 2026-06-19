@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M110: Matroska / WebM demuxer (`matroskademux`)
+
+- **`Caps::ByteStream{Matroska}` + `VideoCodec::Vp8` (g2g-core).** A second
+  byte-stream encoding for the EBML container, and the VP8 codec WebM needs
+  (VP9 / AV1 were already present). Both ride the existing caps algebra unchanged.
+- **`g2g-plugins::matroska::MatroskaDemuxer` (no_std + alloc).** A pure EBML /
+  Matroska parser, the `mpegts` precedent for MKV: a variable-length-integer
+  reader (element IDs kept whole, sizes marker-stripped, all-ones = unknown
+  size), incremental top-level traversal that descends into the Segment, reads
+  Tracks (TrackNumber / CodecID / geometry / audio params) and `Info`
+  TimestampScale, and parses each definite-size Cluster's SimpleBlock / Block
+  frames with scaled timestamps. CodecID maps to H.264 / H.265 / VP8 / VP9 / AV1
+  / AAC / Opus. Single Segment; no-lacing blocks (laced blocks counted +
+  skipped); unknown-size Clusters and Cues (seeking) deferred.
+- **`g2g-plugins::mkvdemux::MkvDemux` element (no_std).** Wraps the parser, the
+  `TsDemux` sibling: `Caps::ByteStream{Matroska}` in, one selected elementary
+  stream out (`MkvStream` / the `stream` property, default `vp9`). Video leaves
+  as `Caps::CompressedVideo`, audio as `Caps::Audio`. Because Tracks carries
+  concrete geometry / audio parameters, the demuxer refines the caps itself via
+  `CapsChanged` once parsed (no downstream parser needed for the dimensions),
+  unlike `TsDemux`. Registered in `default_registry` as `matroskademux`.
+- Tested: VINT / element-ID decode, Tracks + Cluster parse, byte-by-byte split
+  reassembly, laced-block skipping (parser unit tests); video / audio selection
+  with refined caps + the `stream` property (element tests); registry
+  registration; and end-to-end `ByteStream{Matroska}` -> `mkvdemux` -> sink for
+  both video and audio through `run_graph`.
+
 ### M109: TsDemux audio (AAC) + H.265 stream selection
 
 - **`g2g-plugins::tsdemux::TsStream` + stream selection.** The parser already

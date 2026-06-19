@@ -320,8 +320,15 @@ modern PipeWire path remain.
 
 ### Containers
 
-- **MKV / WebM (`matroskademux` / `matroskamux` / `webmmux`).** 3 sessions.
-  Common delivery format, especially WebM for browser delivery without DRM.
+- **MKV / WebM demux — DONE (M110).** Pure-Rust EBML / Matroska parser
+  (`g2g-plugins::matroska::MatroskaDemuxer` + the `MkvDemux` element), fed by the
+  new `Caps::ByteStream{Matroska}` link type: descends the Segment, reads Tracks
+  (CodecID -> H.264 / H.265 / VP8 / VP9 / AV1 / AAC / Opus, geometry, audio
+  params) and Cluster SimpleBlock / Block frames, with per-codec `MkvStream`
+  selection (`matroskademux stream=vp9`, default VP9) and `CapsChanged`-refined
+  output caps from Tracks. Registered as `matroskademux`. **Remaining:** lacing
+  (Xiph / EBML / fixed), unknown-size Clusters (live), Cues / seeking, and the
+  muxers (`matroskamux` / `webmmux`).
 - **MPEG-TS `tsdemux` — DONE (M108, M109).** Pure-Rust demuxer
   (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->
   elementary streams, fed by the `Caps::ByteStream{MpegTs}` link type

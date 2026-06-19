@@ -68,6 +68,11 @@ pub mod mpegts;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
 // the mpegts parser.
 pub mod tsdemux;
+// Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
+pub mod matroska;
+// Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one
+// selected elementary stream, wrapping the matroska parser.
+pub mod mkvdemux;
 pub mod videotestsrc;
 
 #[cfg(feature = "std")]
