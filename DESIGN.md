@@ -1073,6 +1073,27 @@ the last (M104-M106):
   hand-written Rust, the `gst-launch` analog. v1 is one linear chain; branching
   (`tee` / named pads) and caps-filter string syntax are follow-ups.
 
+### 4.17 Containers and Byte Streams
+
+A container demuxer splits one stored / transported byte stream into the typed
+elementary streams it carries. The link feeding a demuxer is
+[`Caps::ByteStream { encoding }`](crate caps), the first byte-stream caps variant:
+an opaque container stream not yet demuxed, tagged with a `ByteStreamEncoding`
+(e.g. `MpegTs`) so a demuxer accepts only the format it parses, the
+byte-stream-level analog of the codec/raw video split. A byte source declares it
+(`FileSrc::new(path, Caps::ByteStream{MpegTs})`), and the demuxer's transform
+constraint maps it to the elementary stream type.
+
+The MPEG-TS demuxer (M108) is the first: `g2g-plugins::mpegts::TsDemuxer` is a
+pure `no_std + alloc` parser (sync 188-byte packets, PAT -> PMT -> elementary
+streams, reassemble PES per PID into access units with PTS), and the `TsDemux`
+element wraps it as `ByteStream{MpegTs} -> CompressedVideo{H264}` (Annex-B),
+feeding `h264parse` and the decoders. The geometry is unknown until `h264parse`
+reads the SPS, so the demuxer advertises a fixatable placeholder `Range` refined
+downstream via `CapsChanged` (the `RtspSrc` pattern, §4.13). The decode-side
+container precedent is `Mp4Src` / `Mp4Sink`; muxing (`mpegtsmux`) and the audio /
+H.265 elementary streams the parser already identifies are follow-ups.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

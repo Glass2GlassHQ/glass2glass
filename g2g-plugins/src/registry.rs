@@ -33,6 +33,7 @@ use crate::videoflip::{FlipMethod, VideoFlip};
 use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
 use crate::videotestsrc::VideoTestSrc;
+use crate::tsdemux::TsDemux;
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -89,7 +90,8 @@ pub fn default_registry() -> Registry {
         Box::new(AudioResample::new(48_000))
     }));
 
-    // Parsers + passthrough.
+    // Demuxers + parsers + passthrough.
+    reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())

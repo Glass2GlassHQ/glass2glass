@@ -45,6 +45,14 @@ pub enum Caps {
         shape: TensorShape,
         layout: TensorLayout,
     },
+    /// An opaque container / elementary byte stream, not yet demuxed or parsed
+    /// into a typed media stream. The link type between a byte source (a file or
+    /// network source carrying e.g. an MPEG-TS) and a demuxer that splits it into
+    /// elementary streams. `encoding` names the wire format so a demuxer only
+    /// accepts a stream it understands.
+    ByteStream {
+        encoding: ByteStreamEncoding,
+    },
 }
 
 impl Caps {
@@ -86,6 +94,9 @@ impl Caps {
                 Caps::Tensor { dtype: da, shape: sha, layout: la },
                 Caps::Tensor { dtype: db, shape: shb, layout: lb },
             ) if da == db && sha == shb && la == lb => Ok(self.clone()),
+            (Caps::ByteStream { encoding: ea }, Caps::ByteStream { encoding: eb }) if ea == eb => {
+                Ok(self.clone())
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -124,7 +135,7 @@ impl Caps {
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
                 framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
             }),
-            Caps::Audio { .. } | Caps::Tensor { .. } => Ok(self.clone()),
+            Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => Ok(self.clone()),
         }
     }
 
@@ -136,7 +147,7 @@ impl Caps {
         match self {
             Caps::CompressedVideo { width, height, framerate, .. }
             | Caps::RawVideo { width, height, framerate, .. } => Some((width, height, framerate)),
-            Caps::Audio { .. } | Caps::Tensor { .. } => None,
+            Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => None,
         }
     }
 }
@@ -341,6 +352,16 @@ pub enum VideoCodec {
     H265,
     Av1,
     Vp9,
+}
+
+/// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the
+/// container it parses (an MPEG-TS demuxer rejects an arbitrary byte stream
+/// structurally, like the codec/raw split does for video).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ByteStreamEncoding {
+    /// MPEG-2 Transport Stream (ISO/IEC 13818-1): 188-byte packets, PAT/PMT,
+    /// PES. The broadcast / SRT / HLS-segment carrier.
+    MpegTs,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

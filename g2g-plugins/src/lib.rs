@@ -63,6 +63,11 @@ pub mod uridecodebin;
 pub mod registry;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
+// MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.
+pub mod mpegts;
+// MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
+// the mpegts parser.
+pub mod tsdemux;
 pub mod videotestsrc;
 
 #[cfg(feature = "std")]

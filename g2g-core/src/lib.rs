@@ -46,7 +46,8 @@ pub mod pad_template;
 pub mod slot;
 
 pub use caps::{
-    AudioFormat, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout, TensorShape, VideoCodec, RawVideoFormat,
+    AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout,
+    TensorShape, VideoCodec, RawVideoFormat,
 };
 pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, PipelineClock};
 pub use element::{

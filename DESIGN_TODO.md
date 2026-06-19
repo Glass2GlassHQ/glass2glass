@@ -322,8 +322,14 @@ modern PipeWire path remain.
 
 - **MKV / WebM (`matroskademux` / `matroskamux` / `webmmux`).** 3 sessions.
   Common delivery format, especially WebM for browser delivery without DRM.
-- **MPEG-TS (`mpegtsmux` / `tsdemux`).** 3 sessions. Broadcast carrier; the
-  payload format for SRT and a lot of professional ingest.
+- **MPEG-TS `tsdemux` — DONE (M108).** Pure-Rust demuxer
+  (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->
+  H.264 elementary stream, fed by the new `Caps::ByteStream{MpegTs}` link type
+  (`FileSrc(ByteStream) ! tsdemux ! h264parse ! ...`). **Remaining:** emit the
+  audio (AAC) + H.265 elementary streams the parser already identifies (the
+  output pad is H.264-typed today); multi-program selection; `mpegtsmux`
+  (the muxer); PCR-based timing. SRT/HLS feed TS over the wire (needs the network
+  byte-stream source path).
 - **FLV (`flvmux` / `flvdemux`).** 2 sessions. RTMP carrier.
 - **OGG (`oggmux` / `oggdemux`).** 1–2 sessions. Niche, mostly Opus delivery.
 - **CMAF / fMP4 segmented.** 2 sessions. Already have `Mp4Sink` /

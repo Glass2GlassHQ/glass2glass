@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M108: MPEG-TS demuxer + `Caps::ByteStream` (container breadth)
+
+- **`Caps::ByteStream { encoding }` (g2g-core).** The first byte-stream caps
+  variant: the link type between a byte source and a demuxer, with a
+  `ByteStreamEncoding` (currently `MpegTs`) so a demuxer only accepts the
+  container it parses. Threaded through the caps algebra (`intersect` / `fixate` /
+  `dims`). This is the byte-stream type the DESIGN_TODO HttpSrc/HLS note was
+  waiting on; it also lets `FileSrc::new(path, Caps::ByteStream{MpegTs})` feed a
+  demuxer with no FileSrc change.
+- **`g2g-plugins::mpegts::TsDemuxer` (no_std + alloc).** A pure MPEG-2 Transport
+  Stream parser: syncs 188-byte packets, reads the PAT for the PMT, reads the PMT
+  for the elementary streams, and reassembles PES packets per PID into access
+  units (PTS extracted, PES header stripped). Single program; PSI assumed
+  single-packet; PES reassembles across packets.
+- **`g2g-plugins::tsdemux::TsDemux` element (no_std).** Wraps the parser:
+  `Caps::ByteStream{MpegTs}` in, the H.264 video elementary stream out
+  (`Caps::CompressedVideo{H264}`, Annex-B), resyncing TS packets across input
+  frames and forwarding access units with their PTS, ready for `h264parse`.
+  Registered in `default_registry` as `tsdemux`. (v1: one H.264 video stream;
+  audio / H.265 are parsed by the core but not yet emitted.)
+- Tested: PAT/PMT/PES demux + cross-packet PES reassembly + PTS decode (parser
+  unit tests), `ByteStream`->H.264 element behavior, and an end-to-end
+  `ByteStream{MpegTs}` source -> `tsdemux` -> sink run through `run_graph` proving
+  the new caps variant negotiates.
+
 ### M107: Property coverage + `default_registry` (gst-launch usable out of the box)
 
 - **Property-enabled the standard transforms / sources / sinks.** `VideoScale`
