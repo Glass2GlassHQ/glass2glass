@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M103: `WgpuSink` GPU presentation sink (closes the keep-on-GPU loop)
+
+- **`g2g-plugins::wgpusink::WgpuSink` (`wgpu-sink` feature).** The consuming end
+  of the M102 keep-on-GPU overlay path: presents `MemoryDomain::WgpuTexture`
+  frames by sampling the texture in a fullscreen-triangle blit pass that writes
+  the target, with **no GPU->CPU readback**. Handles any format/size difference
+  (Vello's `Rgba8Unorm` source -> a surface's `Bgra8UnormSrgb`) and flips Y so a
+  top-left-origin frame lands upright. Two targets: `offscreen` (an owned texture,
+  read back via `read_target` -- a render-to-texture / screenshot sink and the
+  headlessly-testable path) and `with_surface` (a caller-built, configured
+  `wgpu::Surface` for on-screen display; window + event-loop ownership stays with
+  the application, as wgpu surfaces require).
+- **Shared `GpuContext` (`g2g-plugins::gpu`).** A wgpu texture is bound to the
+  device that created it, so a producer and a sink can only hand a `WgpuTexture`
+  across copy-free if they share one device. `GpuContext` (cloneable
+  instance/adapter/device/queue) is that handle; `VelloAnalyticsOverlay` gained
+  `with_context` to render on it, and `WgpuSink` takes it too. `headless()` for
+  the overlay/offscreen/tests, `for_surface()` for the on-screen device. The
+  overlay's keep-alive moved here as the public `WgpuTextureKeepAlive` +
+  `texture_of` so the sink recovers the texture by a shared concrete type.
+- Closes `decode -> tee -> {detect, video} -> overlay -> WgpuSink`: detection
+  boxes rendered on the GPU reach the display with no round-trip to system memory.
+- Tested: offscreen blit reproduces a source (orientation preserved), and the
+  full `overlay -> WgpuTexture -> sink` chain on one shared device renders a box
+  whose edge reads red over a dark interior after present. Both skip cleanly with
+  no wgpu adapter.
+
 ### M102: Vello GPU analytics overlay + `MemoryDomain::WgpuTexture`
 
 - **`MemoryDomain::WgpuTexture` (`g2g-core`).** A new GPU memory domain for a

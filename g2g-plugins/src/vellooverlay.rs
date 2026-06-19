@@ -26,10 +26,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{
     AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    HardwareError, MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, RawVideoFormat,
-    WgpuKeepAlive,
+    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
+use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use vello::kurbo::{Affine, Rect, Stroke};
 use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
@@ -44,6 +44,11 @@ pub struct VelloAnalyticsOverlay {
     thickness: f64,
     configured: bool,
     drawn: u64,
+    /// A shared device to render on, set via [`with_context`](Self::with_context)
+    /// (eg the same context the downstream `WgpuSink` presents on, so the texture
+    /// handoff is copy-free). When unset, [`ensure_gpu`](Self::ensure_gpu) opens
+    /// its own device on the first frame.
+    ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
 }
 
@@ -52,21 +57,6 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: Renderer,
-}
-
-/// Keep-alive owner for the rendered texture (the [`WgpuKeepAlive`] payload of
-/// [`MemoryDomain::WgpuTexture`]). Owns the `wgpu::Texture`; a wgpu-linking sink
-/// recovers it by downcasting [`as_any`](WgpuKeepAlive::as_any).
-#[derive(Debug)]
-// The texture is recovered by a downstream wgpu sink (or the test) via the
-// `as_any` downcast below; the field's job here is to own it (drop releases the
-// GPU allocation), so the lib itself never reads it directly.
-struct TextureKeepAlive(#[allow(dead_code)] wgpu::Texture);
-
-impl WgpuKeepAlive for TextureKeepAlive {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
 }
 
 impl core::fmt::Debug for VelloAnalyticsOverlay {
@@ -91,7 +81,23 @@ impl Default for VelloAnalyticsOverlay {
 impl VelloAnalyticsOverlay {
     /// A new overlay with a 3px stroke. Geometry and GPU are set lazily.
     pub fn new() -> Self {
-        Self { width: 0, height: 0, thickness: 3.0, configured: false, drawn: 0, gpu: None }
+        Self {
+            width: 0,
+            height: 0,
+            thickness: 3.0,
+            configured: false,
+            drawn: 0,
+            ctx: None,
+            gpu: None,
+        }
+    }
+
+    /// Render on a shared [`GpuContext`] instead of opening a private device.
+    /// Pass the same context the downstream [`WgpuSink`](crate::wgpusink) uses so
+    /// the produced texture lives on the sink's device and presents with no copy.
+    pub fn with_context(mut self, ctx: GpuContext) -> Self {
+        self.ctx = Some(ctx);
+        self
     }
 
     /// Set the box outline stroke width in pixels.
@@ -131,25 +137,13 @@ impl VelloAnalyticsOverlay {
         if self.gpu.is_some() {
             return Ok(());
         }
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                ..Default::default()
-            })
-            .await
-            .map_err(gpu_err)?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("vello-overlay"),
-                // Vello's full pipeline fits within the default limits on a
-                // discrete GPU; pass the adapter's so a constrained default tier
-                // does not reject renderer construction.
-                required_limits: adapter.limits(),
-                ..Default::default()
-            })
-            .await
-            .map_err(gpu_err)?;
+        // Use the shared context if one was provided, else open a private device.
+        let ctx = match self.ctx.clone() {
+            Some(ctx) => ctx,
+            None => GpuContext::headless().await?,
+        };
+        let device = ctx.device;
+        let queue = ctx.queue;
         let renderer = Renderer::new(
             &device,
             RendererOptions {
@@ -235,11 +229,6 @@ impl VelloAnalyticsOverlay {
     }
 }
 
-/// Map any Vello / wgpu failure to a structured hardware error.
-fn gpu_err<E>(_e: E) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
-
 /// A fixed, opaque per-class colour palette, matching the CPU overlay's so the
 /// two backends draw the same classes the same colour.
 fn class_color(label: u32) -> Color {
@@ -322,7 +311,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
                         self.height,
-                        Box::new(TextureKeepAlive(texture)),
+                        Box::new(WgpuTextureKeepAlive(texture)),
                     ));
                     let mut out_frame = Frame::new(domain, frame.timing, frame.sequence);
                     // Carry the analytics forward so a downstream stage still sees
@@ -492,12 +481,7 @@ mod tests {
             panic!("output is a GPU texture domain");
         };
         assert_eq!((owned.width, owned.height), (w, h));
-        let tex = &owned
-            .keep_alive()
-            .as_any()
-            .downcast_ref::<TextureKeepAlive>()
-            .expect("texture keep-alive")
-            .0;
+        let tex = crate::gpu::texture_of(owned).expect("texture keep-alive");
 
         let pixels = read_back(ov.gpu.as_ref().unwrap(), tex, w, h);
         let px = |x: u32, y: u32| {

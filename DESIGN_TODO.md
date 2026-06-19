@@ -117,13 +117,16 @@ Production-shape needs that block specific real-world use cases.
   `Classification` / `Tracking` nodes + directed relations, normalized bbox), with
   the first producer `g2g-ml::DetectionPostprocess` (YOLOv8 decode + NMS).
 
-  **Built (M100/M101/M102), documented in DESIGN.md §5.4:** metadata through
+  **Built (M100-M103), documented in DESIGN.md §5.4:** metadata through
   fan-out (`FrameMetaSet` holds `Arc<dyn FrameMeta>` + is `Clone`,
   `try_clone_packet` shares meta across a tee, `FrameMeta::clone_box` backs
-  copy-on-write in `get_mut`), and the detection overlay in two backends, the CPU
+  copy-on-write in `get_mut`); the detection overlay in two backends, the CPU
   `AnalyticsOverlay` (`analytics`) and the Vello GPU `VelloAnalyticsOverlay`
-  (`vello-overlay`), the latter emitting the new `MemoryDomain::WgpuTexture`
-  (kept on GPU).
+  (`vello-overlay`) emitting the new `MemoryDomain::WgpuTexture` (kept on GPU);
+  and `WgpuSink` (`wgpu-sink`), the GPU presentation sink that blits a
+  `WgpuTexture` onto an offscreen target or a caller-built `wgpu::Surface` with no
+  readback, the overlay and sink sharing one device via `gpu::GpuContext`. The
+  full path `decode -> tee -> {detect, video} -> overlay -> WgpuSink` is closed.
 
   Remaining follow-ups:
   - **A `Segmentation` node** (mask handle) to round out the GstAnalytics node
@@ -132,9 +135,10 @@ Production-shape needs that block specific real-world use cases.
     `FrameMetaSet::propagate(kind)` explicitly (push); whether the runner should
     intercept and apply it generically (pull) is open, deferred until more
     meta-aware transforms exist.
-  - **A GPU sink consuming `MemoryDomain::WgpuTexture`.** The Vello overlay keeps
-    the frame on the GPU, but no desktop sink yet presents a `WgpuTexture`
-    directly (wayland/kms take System RGBA), so the zero-copy display end is owed.
+  - **A turnkey windowed runner for `WgpuSink`.** The sink presents to an
+    app-supplied surface; a small winit/SCTK example that opens a window, builds
+    the surface, and drives the overlay->sink graph would give an out-of-the-box
+    on-screen demo (validated on a real display, like `wayland_smoke`).
 
 - **Remaining bus message types.** Core bus coverage is done (DESIGN.md §4.15).
   The GStreamer message types still missing are gated on subsystems we don't

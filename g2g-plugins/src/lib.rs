@@ -25,10 +25,18 @@ pub mod compositor;
 // Needs the per-frame metadata graph, so it is gated on `analytics`.
 #[cfg(feature = "analytics")]
 pub mod analyticsoverlay;
+// Shared wgpu device context for the GPU elements (M103): a producer and a sink
+// must share one device for a copy-free WgpuTexture handoff.
+#[cfg(any(feature = "vello-overlay", feature = "wgpu-sink"))]
+pub mod gpu;
 // Vello GPU companion to analyticsoverlay (M102): renders boxes with the Vello
 // 2D renderer into a wgpu texture (MemoryDomain::WgpuTexture, kept on GPU).
 #[cfg(feature = "vello-overlay")]
 pub mod vellooverlay;
+// GPU presentation sink (M103): presents MemoryDomain::WgpuTexture frames by
+// blitting onto an offscreen target or a caller-provided wgpu::Surface.
+#[cfg(feature = "wgpu-sink")]
+pub mod wgpusink;
 pub mod videoconvert;
 pub mod videoscale;
 pub mod videorate;

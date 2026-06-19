@@ -2734,6 +2734,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wayland-egl",
  "web-sys",
+ "wgpu",
  "windows",
 ]
 

@@ -1116,6 +1116,20 @@ picture. Two pieces, both `no_std`-friendly:
   wgpu) is the render-side analog of the decode-side CUDA / D3D11 texture
   domains: the rendered frame stays on the GPU with no readback, so a GPU sink
   presents it directly.
+- **The GPU sink (M103).** `g2g-plugins::wgpusink::WgpuSink` (`wgpu-sink`) is
+  that consumer: it presents a `WgpuTexture` frame by sampling it in a small
+  fullscreen blit pass onto its target (an owned offscreen texture for
+  render-to-texture / screenshots, or a caller-built `wgpu::Surface` for an
+  on-screen window), again with no readback. Because a wgpu texture is bound to
+  its device, the overlay and the sink share one device through a cloneable
+  `gpu::GpuContext` (the overlay's `with_context`, the sink's constructors), and
+  the producer's texture is recovered by the sink through the shared
+  `gpu::WgpuTextureKeepAlive` type. This closes the analytics path end to end:
+  `decode -> tee -> {detect, video} -> overlay -> WgpuSink`, detections rendered
+  on the GPU reaching the display with no system-memory round-trip. Window and
+  event-loop ownership stay with the application (wgpu surfaces are built from a
+  window handle and must drive the app's event loop), so the sink presents to a
+  surface the app supplies rather than opening its own window.
 
 ---
 
