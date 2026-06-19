@@ -117,20 +117,24 @@ Production-shape needs that block specific real-world use cases.
   `Classification` / `Tracking` nodes + directed relations, normalized bbox), with
   the first producer `g2g-ml::DetectionPostprocess` (YOLOv8 decode + NMS).
 
+  **Built (M100/M101/M102), documented in DESIGN.md §5.4:** metadata through
+  fan-out (`FrameMetaSet` holds `Arc<dyn FrameMeta>` + is `Clone`,
+  `try_clone_packet` shares meta across a tee, `FrameMeta::clone_box` backs
+  copy-on-write in `get_mut`), and the detection overlay in two backends, the CPU
+  `AnalyticsOverlay` (`analytics`) and the Vello GPU `VelloAnalyticsOverlay`
+  (`vello-overlay`), the latter emitting the new `MemoryDomain::WgpuTexture`
+  (kept on GPU).
+
   Remaining follow-ups:
-  - **Metadata through fan-out (push detections onto the *display* frame).** The
-    detector runs on the inference branch; carrying its `AnalyticsMeta` onto the
-    video frame for an overlay needs a tee that shares meta to both branches.
-    `try_clone_packet` starts a clone with empty meta today. Default sketch:
-    `AnalyticsMeta` shared via `Arc`, mutation COW, so branches don't alias.
   - **A `Segmentation` node** (mask handle) to round out the GstAnalytics node
     kinds, plus more standard metas (`GstVideoMeta`-style strides, ROI).
-  - **A detection overlay element** that reads `AnalyticsMeta` and draws boxes
-    (reusing the compositor blend), the visible end of detector -> overlay.
   - **`push` vs `pull` propagation across transforms.** Today an element calls
     `FrameMetaSet::propagate(kind)` explicitly (push); whether the runner should
     intercept and apply it generically (pull) is open, deferred until more
     meta-aware transforms exist.
+  - **A GPU sink consuming `MemoryDomain::WgpuTexture`.** The Vello overlay keeps
+    the frame on the GPU, but no desktop sink yet presents a `WgpuTexture`
+    directly (wayland/kms take System RGBA), so the zero-copy display end is owed.
 
 - **Remaining bus message types.** Core bus coverage is done (DESIGN.md §4.15).
   The GStreamer message types still missing are gated on subsystems we don't

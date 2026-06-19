@@ -1092,9 +1092,30 @@ picture. Two pieces, both `no_std`-friendly:
   Decodes a YOLOv8-style `[1, 4+C, A]` output tensor (confidence threshold +
   per-class NMS) into `ObjectDetection`s, attaches an `AnalyticsMeta`, and
   forwards the frame. A real client shaping the metadata API (rather than
-  speculation) is why the system was deferred to this point. Carrying detections
-  onto the *display* frame (vs the tensor) needs the metadata-through-fan-out
-  (tee + COW) path, tracked in DESIGN_TODO.
+  speculation) is why the system was deferred to this point.
+- **Metadata through fan-out (M100).** `FrameMetaSet` holds each `FrameMeta` as
+  an `Arc<dyn FrameMeta>` and is `Clone`, so a tee clone shares the analytics
+  graph by refcount rather than dropping it: the graph runner's
+  `try_clone_packet` carries `frame.meta.clone()`, landing the same
+  `AnalyticsMeta` on both branches of a `decode -> tee -> {detect, video}`
+  diamond. Mutation is copy-on-write via `FrameMeta::clone_box` (the GstMeta
+  `copy_func` analog): `FrameMetaSet::get_mut` deep-copies a shared entry before
+  the mutable borrow, so a branch editing its analytics never aliases the
+  sibling. Still a ZST no-op when the `metadata` feature is off.
+- **The overlay (M101 / M102).** The visible end of the detector chain reads the
+  `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
+  draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`
+  works. Two backends with a shared per-class palette: the CPU
+  `g2g-plugins::analyticsoverlay::AnalyticsOverlay` (`analytics` feature) paints
+  box outlines onto RGBA8 with the compositor's integer source-over blend (the
+  `no_std` baseline), and the GPU `vellooverlay::VelloAnalyticsOverlay`
+  (`vello-overlay` feature) strokes antialiased boxes over a full-frame image
+  with the Vello GPU 2D renderer, emitting the result in the new
+  `MemoryDomain::WgpuTexture` domain. That domain (an `OwnedWgpuTexture` whose
+  `wgpu::Texture` lives in a `WgpuKeepAlive` owner, since `g2g-core` never links
+  wgpu) is the render-side analog of the decode-side CUDA / D3D11 texture
+  domains: the rendered frame stays on the GPU with no readback, so a GPU sink
+  presents it directly.
 
 ---
 
