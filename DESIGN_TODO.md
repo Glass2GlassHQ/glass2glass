@@ -78,7 +78,8 @@ Production-shape needs that block specific real-world use cases.
 
 - **Per-frame metadata system (`FrameMeta` + ML relation graph).** 4–5
   sessions. `Frame` is currently `{ domain, timing, sequence }` with no
-  side-channel for per-frame data that travels with the buffer. GStreamer's
+  side-channel for per-frame data; **this is now built (M98/M99), see §5.4 and
+  the follow-ups below.** GStreamer's
   `GstMeta` (typed attachable per-buffer blobs: `GstVideoMeta` strides,
   `GstNetAddressMeta`, `GstReferenceTimestampMeta`,
   `GstVideoRegionOfInterestMeta`) and the newer `GstAnalyticsRelationMeta`
@@ -109,39 +110,27 @@ Production-shape needs that block specific real-world use cases.
     relation traversal instead of by tensor offset. Built on top of the
     `FrameMeta` primitive, not a separate system.
 
-  The cheap-now / expensive-to-retrofit half (reserving the `meta:
-  FrameMetaSet` field behind the `metadata` feature) is **done** and documented
-  in DESIGN.md §3.1. What remains below is the full build: the `FrameMeta` trait
-  body, the attach / iterate / propagate (transform / copy / free) contract, and
-  the `AnalyticsMeta` relation-graph layer.
+  **Built (M98/M99), documented in DESIGN.md §5.4:** the `FrameMeta` trait
+  (`as_any` + `propagate(Transform) -> Propagation`), the typed `FrameMetaSet`
+  (attach / typed-get / iterate / propagate, ZST when the `metadata` feature is
+  off), and the `AnalyticsMeta` relation graph (`ObjectDetection` /
+  `Classification` / `Tracking` nodes + directed relations, normalized bbox), with
+  the first producer `g2g-ml::DetectionPostprocess` (YOLOv8 decode + NMS).
 
-  **Design decision: defer the full build until a concrete ML detection
-  element needs it.** No in-tree element produces detection metadata today
-  (`TensorPostprocess::topk_classification` is whole-frame), so building
-  the framework first is the classic over-engineering trap. Right time is
-  alongside the first detection element (probably a YOLO-style ONNX
-  postprocess that surfaces N bounding boxes). Documented now so the
-  metadata system is shaped by a real client when it lands, and so the
-  `Frame` struct's extension point is reserved (a `meta: FrameMetaSet`
-  field, empty on `Default`, sized for the no_std case).
-
-  **Open questions for when the build starts:**
-  - Cost on the no_std baseline. A `Vec<Box<dyn FrameMeta>>` adds an
-    allocation per frame on every push. The Cortex-M / Embassy path
-    should be able to opt out at compile time (a `FrameMetaSet` newtype
-    that's a `()` ZST when the `metadata` feature is off).
-  - Transform callbacks: GstMeta's `transform_func` decides per-buffer
-    whether a meta is copied through `videoconvert` / dropped by
-    `videoscale` / serialized by `mp4mux`. The Rust analog is a
-    `Propagation` enum returned by a trait method; the question is
-    whether transforms call it proactively (push model) or whether the
-    framework intercepts and queries (pull model). GstMeta uses push;
-    pull is simpler but means every transform element has to know about
-    every meta type.
-  - Zero-copy of the relation graph through fan-out. If a `tee` clones a
-    frame to two branches, both see the same `AnalyticsMeta`; if branch
-    A's overlay mutates a label, does branch B see it? Default:
-    `AnalyticsMeta` is shared via `Arc`, mutation is COW.
+  Remaining follow-ups:
+  - **Metadata through fan-out (push detections onto the *display* frame).** The
+    detector runs on the inference branch; carrying its `AnalyticsMeta` onto the
+    video frame for an overlay needs a tee that shares meta to both branches.
+    `try_clone_packet` starts a clone with empty meta today. Default sketch:
+    `AnalyticsMeta` shared via `Arc`, mutation COW, so branches don't alias.
+  - **A `Segmentation` node** (mask handle) to round out the GstAnalytics node
+    kinds, plus more standard metas (`GstVideoMeta`-style strides, ROI).
+  - **A detection overlay element** that reads `AnalyticsMeta` and draws boxes
+    (reusing the compositor blend), the visible end of detector -> overlay.
+  - **`push` vs `pull` propagation across transforms.** Today an element calls
+    `FrameMetaSet::propagate(kind)` explicitly (push); whether the runner should
+    intercept and apply it generically (pull) is open, deferred until more
+    meta-aware transforms exist.
 
 - **Remaining bus message types.** Core bus coverage is done (DESIGN.md §4.15).
   The GStreamer message types still missing are gated on subsystems we don't

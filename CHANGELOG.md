@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M98-M99: Per-frame metadata system + detection post-processing (first-class ML)
+
+- **M98 metadata system (`g2g-core::meta`, `metadata` feature).** Builds out the
+  M88-reserved `FrameMetaSet` slot: a `FrameMeta` trait (`as_any` for typed
+  downcast + `propagate(Transform) -> Propagation`, the GstMeta transform_func
+  analog), a typed `FrameMetaSet` (attach / get / get_mut / iter / propagate),
+  and the standard `AnalyticsMeta` relation graph (the
+  GstAnalyticsRelationMeta analog): `ObjectDetection` / `Classification` /
+  `Tracking` nodes + directed relations, with normalized-`[0,1]` `BBox` (survives
+  a downstream scale/crop) and an `iou()` NMS helper. ZST when the feature is off,
+  so the no_std/RTOS baseline still pays nothing.
+- **M99 detection post-process (`g2g-ml::DetectionPostprocess`, `analytics`
+  feature).** The first metadata producer: decodes a YOLOv8 `[1, 4+C, A]` output
+  tensor (confidence threshold + per-class NMS) into `ObjectDetection`s, attaches
+  an `AnalyticsMeta`, and forwards the frame (identity pass-through carrying
+  metadata). `with_input_size` sets coordinate normalization; `C`/`A` parse from
+  the tensor caps.
+- Tested: metadata attach/typed-get/propagate + relation graph + IoU (core);
+  decode + NMS suppression + normalized coords + threshold + caps rejection (ml).
+- Follow-ups (DESIGN_TODO): metadata through fan-out (Arc/COW so detections reach
+  the display frame for an overlay), a `Segmentation` node, a detection overlay
+  element. Architecture: DESIGN.md §5.4.
+
 ### M97: Compositor per-pad scaling
 
 - `CompositorPad::with_size(width, height)` scales an input to a target on-canvas

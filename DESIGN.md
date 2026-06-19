@@ -1071,6 +1071,31 @@ The `g2g-enterprise` layer provides a lock-free, multi-channel execution sink th
 [ Camera Stream 3 ] ──► Async Channel ──┘     (Select / Timeout)
 ```
 
+### 5.4 Per-Frame Metadata & Detection Post-processing
+
+Inference output is only useful once it is structured and travels with the
+picture. Two pieces, both `no_std`-friendly:
+
+- **The metadata system (`g2g-core::meta`, `metadata` feature).** The `Frame`
+  carries a `FrameMetaSet`: a list of typed [`FrameMeta`] trait objects (the
+  GstMeta analog) with attach / typed-get / iterate and a `propagate(Transform)
+  -> Propagation` survival contract (a re-encode drops pixel-derived meta; a
+  scale / crop / copy keeps it). Off by default, so the RTOS baseline pays
+  nothing (`FrameMetaSet` is a ZST); the field was reserved at M88 and built out
+  here. The standard `AnalyticsMeta` is the `GstAnalyticsRelationMeta` analog: a
+  relation graph of `ObjectDetection` / `Classification` / `Tracking` nodes plus
+  directed edges, so a detector → tracker → classifier → overlay chain reads
+  results by node kind and traversal instead of re-deriving joins through tensor
+  offsets. Bounding boxes are normalized `[0,1]`, so they survive a downstream
+  resample without a coordinate rewrite.
+- **The first producer (`g2g-ml::DetectionPostprocess`, `analytics` feature).**
+  Decodes a YOLOv8-style `[1, 4+C, A]` output tensor (confidence threshold +
+  per-class NMS) into `ObjectDetection`s, attaches an `AnalyticsMeta`, and
+  forwards the frame. A real client shaping the metadata API (rather than
+  speculation) is why the system was deferred to this point. Carrying detections
+  onto the *display* frame (vs the tensor) needs the metadata-through-fan-out
+  (tee + COW) path, tracked in DESIGN_TODO.
+
 ---
 
 ## 6. Target Deployment Environments
