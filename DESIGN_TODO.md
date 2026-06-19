@@ -202,13 +202,14 @@ Production-shape needs that block specific real-world use cases.
     A's overlay mutates a label, does branch B see it? Default:
     `AnalyticsMeta` is shared via `Arc`, mutation is COW.
 
-- **Bus message coverage.** 2 sessions. `BusMessage` carries
-  `NegotiationFailed`. GStreamer's bus carries a dozen+ message types:
-  state-changed, eos, error, warning, info, tag, async-done,
-  segment-done, stream-status, buffering, latency, clock-lost, qos.
-  Applications can't react to "buffering 60%" or "decoder dropped a
-  frame" because we don't post those events. Low risk, high
-  observability lever.
+- **Bus message coverage.** DONE (M81/M85/M87). `BusMessage` now carries
+  `Eos`, `Error`, `Warning`, `NegotiationFailed`, `StateChanged`, `AsyncDone`,
+  `Qos` (M85: `SyncSink` late-frame drops), and `Buffering` (M87: link-occupancy
+  fill percent from the sink arm via `run_graph_with_bus`). Remaining GStreamer
+  message types are tied to subsystems we don't have yet: `tag` (tag system),
+  `segment-done` (segment seeks), `stream-status` (thread pool), `clock-lost`
+  (clock re-election). Follow-ups: buffering on interior links; periodic QoS;
+  QoS from the display sinks once they sync to the clock.
 
 - **Compositor / pixel mixer (`videomixer` / `compositor`).** 3–4
   sessions. Our `mux` is a fan-in *multiplexer* (combining encoded
