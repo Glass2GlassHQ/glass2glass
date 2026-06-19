@@ -347,6 +347,7 @@ impl AsyncElement for MfAacEncode {
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
+                    meta: Default::default(),
                 };
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

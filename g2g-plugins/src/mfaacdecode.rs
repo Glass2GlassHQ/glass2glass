@@ -323,6 +323,7 @@ impl AsyncElement for MfAacDecode {
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
+                    meta: Default::default(),
                 };
                 self.out_frames += n_frames;
                 self.emitted += 1;

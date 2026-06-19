@@ -178,6 +178,7 @@ impl WebCodecsDecode {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
             sequence: self.emitted,
+            meta: Default::default(),
         };
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;
@@ -201,6 +202,7 @@ impl WebCodecsDecode {
             domain,
             timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
             sequence: self.emitted,
+            meta: Default::default(),
         };
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;

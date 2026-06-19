@@ -111,6 +111,7 @@ fn frame(seq: u64) -> PipelinePacket {
         )),
         timing: FrameTiming::default(),
         sequence: seq,
+        meta: Default::default(),
     })
 }
 

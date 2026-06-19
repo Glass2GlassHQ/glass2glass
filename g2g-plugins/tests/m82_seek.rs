@@ -86,6 +86,7 @@ impl SourceLoop for SeekableSrc {
                         ..FrameTiming::default()
                     },
                     sequence: self.sequence,
+                    meta: Default::default(),
                 };
                 let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                 self.position += self.step_ns;

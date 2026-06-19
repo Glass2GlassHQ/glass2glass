@@ -166,6 +166,7 @@ impl AsyncElement for VideoConvert {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(converted)),
                         timing: frame.timing,
                         sequence: self.emitted,
+                        meta: Default::default(),
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;

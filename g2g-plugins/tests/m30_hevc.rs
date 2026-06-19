@@ -86,6 +86,7 @@ fn nv12_frame(index: usize) -> Frame {
             ..FrameTiming::default()
         },
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 
@@ -170,6 +171,7 @@ async fn hevc_encode_decode_round_trip_or_skip() {
             )),
             timing: f.timing,
             sequence: f.sequence,
+            meta: Default::default(),
         };
         dec.process(PipelinePacket::DataFrame(frame), &mut decoded)
             .await

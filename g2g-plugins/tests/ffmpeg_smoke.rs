@@ -87,6 +87,7 @@ async fn decode_once(output: OutputFormat) {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bitstream.into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence: 0,
+        meta: Default::default(),
     };
     dec.process(PipelinePacket::DataFrame(frame), &mut sink)
         .await

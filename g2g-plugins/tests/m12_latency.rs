@@ -40,6 +40,7 @@ fn make_frame(seq: u64) -> Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
         timing: FrameTiming::default(),
         sequence: seq,
+        meta: Default::default(),
     }
 }
 

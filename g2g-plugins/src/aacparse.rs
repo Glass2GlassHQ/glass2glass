@@ -269,6 +269,7 @@ mod tests {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
             timing: FrameTiming::default(),
             sequence: seq,
+            meta: Default::default(),
         }
     }
 

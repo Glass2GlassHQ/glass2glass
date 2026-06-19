@@ -123,7 +123,9 @@ impl AsyncElement for AssertingSink {
                     // PTS just jumped forward by 1s+ which is fine for
                     // the monotonic-non-decreasing check.
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Eos => {}
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Segment(_)
+                | PipelinePacket::Eos => {}
             }
             Ok(())
         })

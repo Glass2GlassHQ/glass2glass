@@ -151,6 +151,7 @@ impl TensorBatcher {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                 timing,
                 sequence: self.emitted,
+                meta: Default::default(),
             };
             self.emitted += 1;
             out.push(PipelinePacket::DataFrame(frame)).await?;

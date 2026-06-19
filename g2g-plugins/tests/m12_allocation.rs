@@ -85,6 +85,7 @@ impl SourceLoop for PoolSrc {
                 domain: MemoryDomain::System(SystemSlice::from_pool(buf, size)),
                 timing: FrameTiming::default(),
                 sequence: 0,
+                meta: Default::default(),
             };
             out.push(PipelinePacket::DataFrame(frame)).await?;
             out.push(PipelinePacket::Eos).await?;

@@ -145,6 +145,7 @@ impl SourceLoop for Mp4Src {
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                     },
                     sequence,
+                    meta: Default::default(),
                 };
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

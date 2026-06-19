@@ -67,6 +67,7 @@ fn frame(bytes: Vec<u8>, index: usize) -> Frame {
             ..FrameTiming::default()
         },
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 

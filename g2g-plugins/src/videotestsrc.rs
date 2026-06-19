@@ -163,6 +163,7 @@ impl SourceLoop for VideoTestSrc {
                         arrival_ns,
                     },
                     sequence: seq,
+                    meta: Default::default(),
                 };
 
                 out.push(PipelinePacket::DataFrame(frame)).await?;

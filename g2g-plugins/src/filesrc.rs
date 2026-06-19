@@ -122,6 +122,7 @@ impl SourceLoop for FileSrc {
                         ..FrameTiming::default()
                     },
                     sequence,
+                    meta: Default::default(),
                 };
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

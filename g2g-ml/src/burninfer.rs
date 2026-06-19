@@ -209,6 +209,7 @@ impl AsyncElement for BurnInference {
                         // stays traceable.
                         timing: frame.timing,
                         sequence: self.emitted,
+                        meta: Default::default(),
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(tensor)).await?;

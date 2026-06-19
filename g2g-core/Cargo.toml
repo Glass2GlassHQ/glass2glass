@@ -12,6 +12,10 @@ repository.workspace = true
 default = []
 std = []
 multi-thread = []
+# Reserve the per-frame `FrameMetaSet` side-channel as a real (non-ZST)
+# container of typed `FrameMeta` trait objects. Off by default so the no_std /
+# RTOS baseline keeps `Frame::meta` a zero-sized unit and pays nothing.
+metadata = []
 # Minimal async runtime: bounded channel + simple linear pipeline runner.
 # Sufficient for M1 smoke tests; will grow into a graph builder in M2.
 runtime = ["dep:spin"]

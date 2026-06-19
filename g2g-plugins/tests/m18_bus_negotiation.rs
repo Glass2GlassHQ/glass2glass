@@ -68,6 +68,7 @@ impl SourceLoop for RgbaSource {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
                     timing: FrameTiming::default(),
                     sequence: 0,
+                    meta: Default::default(),
                 }))
                 .await;
             Ok(0)
@@ -238,6 +239,7 @@ impl SourceLoop for Nv12Source {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
                     timing: FrameTiming::default(),
                     sequence: i as u64,
+                    meta: Default::default(),
                 }))
                 .await?;
             }

@@ -197,6 +197,7 @@ impl AsyncElement for VideoFlip {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
                         timing: frame.timing,
                         sequence: self.emitted,
+                        meta: Default::default(),
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;

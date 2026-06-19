@@ -82,6 +82,7 @@ fn nv12_frame(index: usize) -> Frame {
             ..FrameTiming::default()
         },
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 
@@ -185,6 +186,7 @@ async fn encode_decode_round_trip_recovers_all_frames() {
             )),
             timing: f.timing,
             sequence: f.sequence,
+            meta: Default::default(),
         };
         dec.process(PipelinePacket::DataFrame(frame), &mut sink)
             .await

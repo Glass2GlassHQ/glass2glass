@@ -120,6 +120,7 @@ impl SourceLoop for WebSocketSrc {
                     // parser/decoder, as with FileSrc.
                     timing: FrameTiming::default(),
                     sequence,
+                    meta: Default::default(),
                 };
                 sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;

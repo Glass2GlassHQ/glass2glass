@@ -124,6 +124,7 @@ impl SourceLoop for ScriptedSource {
                             )),
                             timing: FrameTiming::default(),
                             sequence: emitted,
+                            meta: Default::default(),
                         };
                         let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                         emitted += 1;
@@ -268,6 +269,7 @@ impl AsyncElement for FakeReorderDecoder {
                             )),
                             timing: FrameTiming::default(),
                             sequence: seq,
+                            meta: Default::default(),
                         };
                         out.push(PipelinePacket::DataFrame(drained)).await?;
                     }
@@ -302,6 +304,7 @@ impl AsyncElement for FakeReorderDecoder {
                             )),
                             timing: FrameTiming::default(),
                             sequence: seq,
+                            meta: Default::default(),
                         };
                         out.push(PipelinePacket::DataFrame(drained)).await?;
                     }
@@ -477,6 +480,7 @@ impl SourceLoop for ScriptedSourceBadCaps {
                             )),
                             timing: FrameTiming::default(),
                             sequence: emitted,
+                            meta: Default::default(),
                         };
                         let _ = out.push(PipelinePacket::DataFrame(frame)).await?;
                         emitted += 1;

@@ -61,6 +61,7 @@ fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
             ..FrameTiming::default()
         },
         sequence,
+        meta: Default::default(),
     }
 }
 

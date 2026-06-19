@@ -138,6 +138,7 @@ impl VideoRate {
                 arrival_ns,
             },
             sequence: self.emitted,
+            meta: Default::default(),
         };
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;

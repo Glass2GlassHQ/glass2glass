@@ -19,9 +19,6 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
 - **`v4l2src`** (first real capture source - turns g2g from "process streams"
   into "produce streams"), **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
   Both are OS/network-coupled, validated on hardware, not in-sandbox.
-- **Reserve the `FrameMeta` field** on `Frame` (behind a `metadata` feature, ZST
-  when off). Trivial now, expensive to retrofit. Full relation-graph build stays
-  deferred until a detection element needs it (see "High / Per-frame metadata").
 - Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
   runner (the design's stated `DropOldest` use case); the leaky setters are
   `std`-gated today since only `run_graph` configures per-edge policy.
@@ -96,16 +93,15 @@ Production-shape needs that block specific real-world use cases.
     relation traversal instead of by tensor offset. Built on top of the
     `FrameMeta` primitive, not a separate system.
 
-  **Reserve the extension point now (1 session).** Independently of the
-  full build, add a `meta: FrameMetaSet` field to `Frame` immediately,
-  gated behind a `metadata` cargo feature so the no_std / Cortex-M path
-  pays nothing when off. `FrameMetaSet` is a `()` ZST when the feature is
-  off, an empty `SmallVec<[Box<dyn FrameMeta>; 0]>` when on. No methods
-  yet, no trait body — just the field. Cost: one struct field added now,
-  prevents an SemVer break later. Every code path that constructs a
-  `Frame` (decoders, sources, transforms) gets one extra `..Default::default()`
-  or explicit `meta: FrameMetaSet::new()`. Trivial to land, expensive to
-  retrofit.
+  **Extension point reserved (M88, DONE).** `Frame` now carries a
+  `pub meta: FrameMetaSet` field behind the `metadata` cargo feature (off by
+  default): a `()`-style ZST when off (the no_std / Cortex-M path pays nothing),
+  a `Vec<Box<dyn FrameMeta>>` when on, with `FrameMeta` a minimal
+  `Debug + Send + Sync` trait shell. `Frame::new(domain, timing, sequence)` is
+  the future-proof constructor; existing literals fill the field with
+  `meta: Default::default()`. No attach / iterate / propagate API yet — that
+  lands with the full build below. This was the cheap-now / expensive-to-retrofit
+  half; the remainder (trait body + relation graph) stays deferred.
 
   **Design decision: defer the full build until a concrete ML detection
   element needs it.** No in-tree element produces detection metadata today

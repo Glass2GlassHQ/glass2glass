@@ -1087,6 +1087,9 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
                 timing: frame.timing,
                 sequence: frame.sequence,
+                // Tee clone: deep-meta propagation (Arc/COW) is deferred; a
+                // cloned frame starts with an empty metadata set for now.
+                meta: Default::default(),
             })
         }
     })
@@ -1102,6 +1105,7 @@ mod tests {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
             timing: FrameTiming { pts_ns: 7, ..FrameTiming::default() },
             sequence: seq,
+            meta: Default::default(),
         })
     }
 

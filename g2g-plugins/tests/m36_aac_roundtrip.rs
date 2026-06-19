@@ -57,6 +57,7 @@ fn pcm_buffer(index: usize) -> Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 
@@ -102,6 +103,7 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
             )),
             timing: f.timing,
             sequence: f.sequence,
+            meta: Default::default(),
         };
         dec.process(PipelinePacket::DataFrame(au), &mut decoded)
             .await

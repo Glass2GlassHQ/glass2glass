@@ -84,6 +84,7 @@ impl SourceLoop for NvSource {
                     )),
                     timing: FrameTiming::default(),
                     sequence: i as u64,
+                    meta: Default::default(),
                 };
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }

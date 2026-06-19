@@ -199,6 +199,7 @@ impl AsyncElement for VideoScale {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(scaled)),
                         timing: frame.timing,
                         sequence: self.emitted,
+                        meta: Default::default(),
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;

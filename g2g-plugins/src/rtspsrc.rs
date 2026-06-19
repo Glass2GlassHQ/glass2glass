@@ -447,6 +447,7 @@ async fn run_session(
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
             },
             sequence: *total_emitted,
+            meta: Default::default(),
         };
 
         if let Err(e) = out.push(PipelinePacket::DataFrame(frame)).await {

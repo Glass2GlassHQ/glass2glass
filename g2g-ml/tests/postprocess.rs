@@ -41,6 +41,7 @@ fn f32_frame(values: &[f32], sequence: u64) -> Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence,
+        meta: Default::default(),
     }
 }
 
@@ -164,6 +165,7 @@ async fn real_inference_into_argmax_finds_the_peak() {
         domain: MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence: 0,
+        meta: Default::default(),
     };
 
     let mut tensors = Collect::default();

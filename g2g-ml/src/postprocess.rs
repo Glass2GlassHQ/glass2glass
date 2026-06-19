@@ -180,6 +180,7 @@ impl AsyncElement for TensorPostprocess {
                         )),
                         timing: frame.timing,
                         sequence: self.emitted,
+                        meta: Default::default(),
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;

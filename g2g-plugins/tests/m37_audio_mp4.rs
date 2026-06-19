@@ -44,6 +44,7 @@ fn frame(bytes: Vec<u8>, index: usize) -> Frame {
             ..FrameTiming::default()
         },
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 
@@ -162,6 +163,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
             domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
             timing: FrameTiming::default(),
             sequence: i as u64,
+            meta: Default::default(),
         };
         enc.process(PipelinePacket::DataFrame(f), &mut encoded)
             .await
@@ -204,6 +206,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
             domain: MemoryDomain::System(SystemSlice::from_boxed(au.clone().into_boxed_slice())),
             timing: FrameTiming::default(),
             sequence: 0,
+            meta: Default::default(),
         };
         dec.process(PipelinePacket::DataFrame(f), &mut pcm).await.expect("decode");
     }

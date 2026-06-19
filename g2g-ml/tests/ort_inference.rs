@@ -60,6 +60,7 @@ fn rgba_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
         timing: FrameTiming::default(),
         sequence,
+        meta: Default::default(),
     }
 }
 

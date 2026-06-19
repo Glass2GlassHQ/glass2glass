@@ -78,6 +78,7 @@ fn nv12_frame(index: usize) -> Frame {
             ..FrameTiming::default()
         },
         sequence: index as u64,
+        meta: Default::default(),
     }
 }
 

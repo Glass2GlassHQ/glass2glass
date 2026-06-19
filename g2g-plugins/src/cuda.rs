@@ -136,6 +136,7 @@ impl AsyncElement for CudaDownload {
                                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
                                 timing: frame.timing,
                                 sequence: frame.sequence,
+                                meta: Default::default(),
                             }
                         }
                         // Already in system memory (software / cuvid backend);

@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M88: Reserve the `FrameMeta` extension point on `Frame`
+
+- Adds `pub meta: FrameMetaSet` to `Frame` (the GstMeta / per-buffer side-channel
+  analog), reserving the extension point so the metadata system can land later
+  without a breaking change to the `Frame` API. No behavior yet: every freshly
+  constructed frame carries an empty set.
+- Gated behind a new `metadata` cargo feature on `g2g-core`, **off by default**.
+  When off, `FrameMetaSet` is a zero-sized unit (`#[derive(..., Copy, Default)]`),
+  so the `no_std` / RTOS baseline pays nothing per frame. When on, it is a
+  `Vec<Box<dyn FrameMeta>>`; `FrameMeta` is a minimal `Debug + Send + Sync` trait
+  shell. The propagation contract (GstMeta `transform_func` / `copy_func`) and
+  the `AnalyticsMeta` relation-graph layer are deferred until the first
+  detection element needs them (see DESIGN_TODO "Per-frame metadata system").
+- Adds `Frame::new(domain, timing, sequence)`, the future-proof constructor that
+  fills `meta` so new call sites do not re-break on the next field addition.
+- Swept the new field across every `Frame { .. }` literal in the workspace
+  (~83 sites: sources, transforms, decoders, tests) via `meta: Default::default()`,
+  needing no new imports. The tee-clone path (`try_clone_packet`) gives the clone
+  a fresh empty set; deep meta propagation (Arc/COW through fan-out) is deferred.
+- Drive-by: fixed a pre-existing non-exhaustive match in the `rtsp_soak` test
+  (missing the `PipelinePacket::Segment` arm added in M80), only reachable when
+  `rtsp`+`ffmpeg` build together.
+
 ### M87: `Buffering` bus messages from link occupancy
 
 - Completes bus-message coverage (the GStreamer `GST_MESSAGE_BUFFERING` analog).
