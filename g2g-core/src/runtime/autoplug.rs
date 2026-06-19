@@ -309,6 +309,10 @@ mod factory {
         }
     }
 
+    /// A URI handler's build function: parse a [`Uri`] into a constructed source
+    /// plus the caps it produces (the `decodebin` input).
+    type UriSourceBuild = fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>;
+
     /// A URI-scheme handler: maps a parsed [`Uri`] to a constructed source and
     /// the source's declared output caps (the `decodebin` input). The analog of
     /// GStreamer's `GstURIHandler`. Unlike [`SourceFactory`] (a parameterless
@@ -316,17 +320,14 @@ mod factory {
     /// `udp://host:port` and `file://path` configure themselves.
     pub struct UriSourceFactory {
         scheme: &'static str,
-        build: fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>,
+        build: UriSourceBuild,
     }
 
     impl UriSourceFactory {
         /// Register a handler for `scheme` (e.g. `"rtsp"`, `"udp"`, `"file"`).
         /// `build` parses the URI's remainder, constructs the source, and
         /// returns it with the caps it produces.
-        pub fn new(
-            scheme: &'static str,
-            build: fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>,
-        ) -> Self {
+        pub fn new(scheme: &'static str, build: UriSourceBuild) -> Self {
             Self { scheme, build }
         }
     }

@@ -16,6 +16,12 @@ pub mod ortinfer;
 // no feature gate.
 pub mod postprocess;
 
+// Detection post-processing (DESIGN.md §5.3): decode a YOLO-style model output
+// tensor into AnalyticsMeta bounding-box detections (confidence threshold + NMS),
+// attached to the frame. Gated behind `analytics` (pulls g2g-core's `metadata`).
+#[cfg(feature = "analytics")]
+pub mod detect;
+
 // Inline GPU tensor preprocessing (DESIGN.md §5.1): NV12 -> normalized f32
 // NCHW RGB tensor in a wgpu compute shader, the hardware-first preprocessing
 // counterpart of OrtInference's CPU path.

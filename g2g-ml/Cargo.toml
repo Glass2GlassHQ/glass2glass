@@ -11,6 +11,10 @@ repository.workspace = true
 [features]
 default = ["std"]
 std = ["g2g-core/std"]
+# Detection post-processing + the per-frame analytics metadata graph. Decodes a
+# model output tensor into AnalyticsMeta detections (no inference engine needed);
+# enables g2g-core's `metadata` feature so frames carry the typed graph.
+analytics = ["g2g-core/metadata"]
 # Pure-Rust Burn backend with wgpu (DESIGN.md §5.2): BurnInference runs a
 # deterministic linear-layer inference on the GPU through burn's wgpu backend,
 # no C++ engine. Targets embedded / Wasm / RTOS / server alike.
