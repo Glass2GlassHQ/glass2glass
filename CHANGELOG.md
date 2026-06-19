@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M111: Multi-codec ffmpeg video decoder (VP8 / VP9 / AV1 / H.265)
+
+- **`FfmpegVideoDec` (Linux, `ffmpeg` feature).** Generalized the H.264-only
+  `FfmpegH264Dec` to decode any libavcodec video codec the negotiated caps name:
+  H.264 / H.265 / VP8 / VP9 / AV1. The codec is read from the input caps at
+  `configure_pipeline` and mapped to the libavcodec `AVCodecID` (software / CUDA
+  path) or the `*_cuvid` decoder name (NvdecCuvid backend); `intercept_caps`,
+  the `DerivedOutput` closure, and the mid-stream `CapsChanged` arm all accept
+  the supported set. `FfmpegVideoDec` is the new name, `FfmpegH264Dec` a
+  back-compat alias. This closes the loop the M108-M110 demuxers opened:
+  `mkvdemux stream=vp9 ! ffmpegdec` (and the tsdemux H.265 path) now decode
+  instead of dead-ending at the decoder.
+- **Autoplug:** the sink pad template advertises all five codecs, so `decodebin`
+  / `uridecodebin` autoplug the decoder for H.265 / VP8 / VP9 / AV1, not just
+  H.264 (closes the autoplug-depth "PadTemplates on the remaining decoders" gap).
+- Tested: codec -> `AVCodecID` / cuvid-name mapping, intercept + DerivedOutput
+  over the supported set (updated from the old H.264-only negative tests), and a
+  new VP9 fixture smoke variant (`G2G_VP9_FIXTURE`). Linux/`ffmpeg`-gated: built
+  and run on Linux, not verifiable on the Windows dev host.
+
 ### M110: Matroska / WebM demuxer (`matroskademux`)
 
 - **`Caps::ByteStream{Matroska}` + `VideoCodec::Vp8` (g2g-core).** A second

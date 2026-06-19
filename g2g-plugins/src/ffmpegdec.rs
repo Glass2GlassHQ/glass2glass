@@ -1,6 +1,13 @@
-//! Linux H.264 decode element using ffmpeg / libavcodec.
+//! Linux video decode element using ffmpeg / libavcodec.
 //!
-//! M13 (Linux production path): consumes Annex-B H.264 `DataFrame`s (the
+//! M13 shipped H.264; M111 generalized it to any libavcodec video decoder the
+//! negotiated caps name (H.264 / H.265 / VP8 / VP9 / AV1), so the MKV / TS
+//! demuxers' VP9 / AV1 elementary streams decode. Construction is unchanged: the
+//! codec is read from the input caps at `configure_pipeline` and the matching
+//! decoder opened. `FfmpegVideoDec` is the preferred name now (`FfmpegH264Dec`
+//! remains a back-compat alias).
+//!
+//! M13 (Linux production path): consumes Annex-B `DataFrame`s (the
 //! bitstream `RtspSrc` / `H264Parse` already emit, `MemoryDomain::System`)
 //! and produces decoded I420 frames, also `MemoryDomain::System` (CPU copy
 //! out of libavcodec's frame buffer). A `CapsChanged(I420, w, h)` is emitted
@@ -208,6 +215,10 @@ pub struct FfmpegH264Dec {
     /// `configure_pipeline`, so this is recorded by the time the decoder opens.
     requested_alloc: Option<AllocationParams>,
 }
+
+/// Preferred name now that this element decodes more than H.264 (also H.265 /
+/// VP8 / VP9 / AV1). The struct keeps its original name as a back-compat alias.
+pub type FfmpegVideoDec = FfmpegH264Dec;
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
 // `!Send` by default. The multi-thread runner requires `Send` so it can move
@@ -437,11 +448,12 @@ impl FfmpegH264Dec {
 }
 
 impl PadTemplates for FfmpegH264Dec {
-    /// Static superset for auto-plug: H.264 in (any geometry), raw NV12 or I420
-    /// out. A constructed instance narrows the source pad to its configured
-    /// `OutputFormat` via `caps_constraint_as_transform`; the template lists
-    /// both formats the type can ever emit so the registry search can route
-    /// either way.
+    /// Static superset for auto-plug: any supported codec in (any geometry), raw
+    /// NV12 or I420 out. A constructed instance narrows the source pad to its
+    /// configured `OutputFormat` via `caps_constraint_as_transform`; the template
+    /// lists both formats the type can ever emit so the registry search can route
+    /// either way, and every codec it can decode so `decodebin` autoplugs it for
+    /// H.265 / VP8 / VP9 / AV1 too, not just H.264.
     fn pad_templates() -> Vec<PadTemplate> {
         let any_geometry = |format| Caps::RawVideo {
             format,
@@ -449,13 +461,16 @@ impl PadTemplates for FfmpegH264Dec {
             height: Dim::Any,
             framerate: Rate::Any,
         };
+        let any_codec = |codec| Caps::CompressedVideo {
+            codec,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })),
+            PadTemplate::sink(CapsSet::from_alternatives(
+                SUPPORTED_CODECS.into_iter().map(any_codec).collect(),
+            )),
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
                 any_geometry(RawVideoFormat::Nv12),
                 any_geometry(RawVideoFormat::I420),
@@ -470,13 +485,18 @@ impl AsyncElement for FfmpegH264Dec {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        let supported = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
-        upstream_caps.intersect(&supported)
+        for codec in SUPPORTED_CODECS {
+            let candidate = Caps::CompressedVideo {
+                codec,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            };
+            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
     }
 
     /// M16 step 5k: native `DerivedOutput` — accepts H.264 with any
@@ -509,13 +529,10 @@ impl AsyncElement for FfmpegH264Dec {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            } => {}
+        let codec_kind = match absolute_caps {
+            Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => *codec,
             _ => return Err(G2gError::CapsMismatch),
-        }
+        };
 
         // ffmpeg::init() registers codecs once per process; calling it
         // repeatedly is safe and cheap.
@@ -528,15 +545,15 @@ impl AsyncElement for FfmpegH264Dec {
         }
 
         let codec = match self.backend {
-            // The generic `h264` decoder hosts the CUDA hwaccel; NvdecCuda
-            // attaches a CUDA device + get_format hook to it below.
-            Backend::Software | Backend::NvdecCuda => codec::decoder::find(Id::H264),
-            // `h264_cuvid` is a standalone codec entry, not a hwaccel hook,
-            // so it's found by name rather than by AVCodecID. If absent, the
-            // libavcodec build wasn't compiled with `--enable-cuvid` or
-            // libnvcuvid isn't loadable at runtime; either way the right
-            // answer is to fail loud so the caller picks Software explicitly.
-            Backend::NvdecCuvid => codec::decoder::find_by_name("h264_cuvid"),
+            // The generic decoder hosts the CUDA hwaccel; NvdecCuda attaches a
+            // CUDA device + get_format hook to it below.
+            Backend::Software | Backend::NvdecCuda => codec::decoder::find(codec_id(codec_kind)),
+            // The `*_cuvid` decoders are standalone codec entries, not hwaccel
+            // hooks, so they're found by name rather than by AVCodecID. If absent,
+            // the libavcodec build wasn't compiled with `--enable-cuvid` or
+            // libnvcuvid isn't loadable at runtime; either way the right answer is
+            // to fail loud so the caller picks Software explicitly.
+            Backend::NvdecCuvid => codec::decoder::find_by_name(cuvid_name(codec_kind)),
         }
         .ok_or(G2gError::Hardware(HardwareError::Other))?;
 
@@ -666,10 +683,9 @@ impl AsyncElement for FfmpegH264Dec {
                     //      decoded frame; suppress re-emission from the
                     //      decode loop by recording `last_caps`.
                     match &c {
-                        Caps::CompressedVideo {
-                            codec: VideoCodec::H264,
-                            ..
-                        } => {
+                        Caps::CompressedVideo { codec, .. }
+                            if SUPPORTED_CODECS.contains(codec) =>
+                        {
                             self.input_caps = Some(c);
                         }
                         Caps::RawVideo { format, .. }
@@ -757,19 +773,44 @@ impl AsyncElement for FfmpegH264Dec {
 /// Non-H.264 input yields an empty `CapsSet`: the solver treats that as a
 /// negotiation failure; the runtime mid-stream check refuses
 /// `CapsMismatch` before it ever reaches here.
+/// The compressed codecs this element can open via libavcodec.
+const SUPPORTED_CODECS: [VideoCodec; 5] =
+    [VideoCodec::H264, VideoCodec::H265, VideoCodec::Vp8, VideoCodec::Vp9, VideoCodec::Av1];
+
+/// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
+fn codec_id(codec: VideoCodec) -> Id {
+    match codec {
+        VideoCodec::H264 => Id::H264,
+        VideoCodec::H265 => Id::HEVC,
+        VideoCodec::Vp8 => Id::VP8,
+        VideoCodec::Vp9 => Id::VP9,
+        VideoCodec::Av1 => Id::AV1,
+    }
+}
+
+/// The standalone `*_cuvid` decoder name for a codec (NvdecCuvid backend).
+fn cuvid_name(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "h264_cuvid",
+        VideoCodec::H265 => "hevc_cuvid",
+        VideoCodec::Vp8 => "vp8_cuvid",
+        VideoCodec::Vp9 => "vp9_cuvid",
+        VideoCodec::Av1 => "av1_cuvid",
+    }
+}
+
 fn derive_output_caps(input: &Caps, out_fmt: RawVideoFormat) -> CapsSet {
     match input {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width,
-            height,
-            framerate,
-        } => CapsSet::one(Caps::RawVideo {
-            format: out_fmt,
-            width: width.clone(),
-            height: height.clone(),
-            framerate: framerate.clone(),
-        }),
+        Caps::CompressedVideo { codec, width, height, framerate }
+            if SUPPORTED_CODECS.contains(codec) =>
+        {
+            CapsSet::one(Caps::RawVideo {
+                format: out_fmt,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            })
+        }
         _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
     }
 }
@@ -1039,9 +1080,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn caps_constraint_is_derived_output_h264_to_chosen_format() {
-        // M16 step 5k: DerivedOutput closure validates H.264 input and
-        // emits the configured output format at the same dims/rate.
+    fn caps_constraint_derives_output_for_supported_codecs() {
+        // M16 step 5k: DerivedOutput closure validates a supported codec input
+        // and emits the configured output format at the same dims/rate.
         let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
         let c = dec.caps_constraint_as_transform();
         let CapsConstraint::DerivedOutput(f) = c else {
@@ -1064,14 +1105,30 @@ mod tests {
             }]
         );
 
-        // Non-H.264 input → empty CapsSet (solver rejects with EmptyLink).
+        // VP9 (and the other supported codecs) now derive output too (M111).
         let vp9 = Caps::CompressedVideo {
             codec: VideoCodec::Vp9,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
         };
-        assert!(f(&vp9).is_empty());
+        assert_eq!(
+            f(&vp9).alternatives(),
+            &[Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }]
+        );
+        // A non-compressed input has no codec to decode → empty CapsSet.
+        let raw = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(64),
+            framerate: Rate::Any,
+        };
+        assert!(f(&raw).is_empty());
     }
 
     #[test]
@@ -1112,15 +1169,26 @@ mod tests {
     }
 
     #[test]
-    fn intercept_rejects_non_h264() {
+    fn intercept_accepts_supported_codecs_rejects_raw() {
         let dec = FfmpegH264Dec::new();
-        let vp9 = Caps::CompressedVideo {
-            codec: VideoCodec::Vp9,
+        // VP9 / AV1 / H.265 are accepted now (M111), each narrowed to itself.
+        for codec in [VideoCodec::Vp9, VideoCodec::Av1, VideoCodec::H265, VideoCodec::Vp8] {
+            let caps = Caps::CompressedVideo {
+                codec,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            };
+            assert_eq!(dec.intercept_caps(&caps), Ok(caps));
+        }
+        // A raw input has no codec to decode and is rejected.
+        let raw = Caps::RawVideo {
+            format: RawVideoFormat::I420,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        assert_eq!(dec.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
+        assert_eq!(dec.intercept_caps(&raw), Err(G2gError::CapsMismatch));
     }
 
     #[test]
@@ -1133,6 +1201,18 @@ mod tests {
             framerate: Rate::Any,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
+    }
+
+    #[test]
+    fn codec_maps_to_libavcodec_id_and_cuvid_name() {
+        assert_eq!(codec_id(VideoCodec::H264), Id::H264);
+        assert_eq!(codec_id(VideoCodec::H265), Id::HEVC);
+        assert_eq!(codec_id(VideoCodec::Vp8), Id::VP8);
+        assert_eq!(codec_id(VideoCodec::Vp9), Id::VP9);
+        assert_eq!(codec_id(VideoCodec::Av1), Id::AV1);
+        assert_eq!(cuvid_name(VideoCodec::H264), "h264_cuvid");
+        assert_eq!(cuvid_name(VideoCodec::Vp9), "vp9_cuvid");
+        assert_eq!(cuvid_name(VideoCodec::Av1), "av1_cuvid");
     }
 
     #[test]

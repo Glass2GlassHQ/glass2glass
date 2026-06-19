@@ -66,11 +66,13 @@ these out is no longer blocking but still open:
   yet seek-aware.
 - **Auto-plug depth.** The `uridecodebin` URI front door is done (DESIGN.md
   §4.13.9). Remaining: richer factory construction params (geometry / device /
-  file path, beyond the chosen output caps), `PadTemplates` on the remaining
-  decoders (H.265, ...), and a hardware-backed end-to-end
+  file path, beyond the chosen output caps) and a hardware-backed end-to-end
   decode-through-`decodebin` run (the `ffmpeg` / `vaapi` autoplug tests read
   templates only, decode nothing; the `uridecodebin` ffmpeg test asserts the
   decoder is *spliced*, but does not run real media through it either).
+  `FfmpegVideoDec` now advertises all the codecs it decodes (H.264 / H.265 / VP8
+  / VP9 / AV1) on its sink template (M111), so autoplug routes them, not just
+  H.264.
 
 ### High
 
@@ -346,13 +348,17 @@ modern PipeWire path remain.
 
 ### Codecs
 
-H.264 / H.265 / AAC are in. The notable gaps are everything WebRTC and the
-modern web defaults to:
+H.264 / H.265 / AAC are in, and **VP8 / VP9 / AV1 / H.265 decode landed in M111**
+via the generalized `FfmpegVideoDec` (libavcodec; Linux / `ffmpeg` feature),
+which the M108-M110 demuxers feed. The notable remaining gaps are the encoders
+and the pure-Rust / browser decode paths:
 
-- **VP8 / VP9 decode + encode.** 3 sessions each. WebRTC default video.
-  ffmpeg has both; the wrappers parallel `FfmpegH264Dec`.
-- **AV1 decode + encode.** 3 sessions each. Modern WebRTC + streaming;
-  `libaom` / `dav1d` for decode, `libaom` / `SVT-AV1` for encode.
+- **VP8 / VP9 encode.** 3 sessions each. WebRTC default video; decode is done
+  (M111, ffmpeg). ffmpeg has the encoders too; wrappers parallel the encode
+  elements. A pure-Rust / wasm decode path (vs the libavcodec FFI) is separate.
+- **AV1 encode.** 3 sessions. Decode is done (M111, ffmpeg); `libaom` /
+  `SVT-AV1` for encode. `dav1d` / `rav1d` remain the pure-Rust decode option if
+  an ffmpeg-free path is wanted.
 - **Opus encode + decode.** 2 sessions. WebRTC audio default; we have AAC
   only. `opus` crate or libopus FFI.
 - **MJPEG decode.** 1 session. Low-end IP cameras (a huge installed base)
