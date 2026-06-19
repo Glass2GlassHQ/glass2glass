@@ -21,6 +21,7 @@ pub mod frame;
 pub mod graph;
 pub mod link;
 pub mod memory;
+pub mod meta;
 pub mod metrics;
 pub mod pool;
 pub mod query;
@@ -56,6 +57,12 @@ pub use format_element::{
     FormatElement,
 };
 pub use frame::{Frame, FrameTiming, PipelinePacket};
+pub use meta::FrameMetaSet;
+#[cfg(feature = "metadata")]
+pub use meta::{
+    AnalyticsMeta, AnalyticsNode, BBox, Classification, FrameMeta, ObjectDetection, Propagation,
+    Relation, RelationKind, Tracking, Transform,
+};
 pub use graph::{
     Edge, Graph, GraphError, Muxer, NodeId, NodeKind, PadDir, PadId, Tee, ValidatedGraph,
 };
