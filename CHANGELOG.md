@@ -5,6 +5,37 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M87: `Buffering` bus messages from link occupancy
+
+- Completes bus-message coverage (the GStreamer `GST_MESSAGE_BUFFERING` analog).
+  g2g has no `queue` element (M86: per-edge `LinkPolicy` is the leaky-queue
+  analog), so buffering reports the bounded link channel's own occupancy rather
+  than a queue's internal level.
+- `BusMessage::Buffering { percent }` (`g2g-core::bus`): the fill (0 = empty /
+  underrun, 100 = full) of a sink's input link. An app can wait for `100` before
+  starting, or show a "buffering..." indicator while it is low.
+- Channel occupancy API: `Receiver::fill_percent` + `LinkReceiver::fill_percent`
+  (len * 100 / capacity), a cheap snapshot for observability.
+- `run_graph_with_bus(graph, clock, capacity, bus)`: the bus-carrying DAG entry
+  (the `run_graph_inner` bus path was previously reachable only via the linear
+  `_with_bus` wrappers). The sink arm samples its input link before each receive
+  and posts `Buffering` when the fill crosses a quartile band (`buffering_bucket`,
+  0/25/50/75/100), so reports fire on level transitions, not every packet. The
+  first iteration samples the not-yet-full link, so a bus always sees at least
+  one report.
+- Tests: two `g2g-core` unit tests (`fill_percent` tracks occupancy as a link
+  fills and drains; `buffering_bucket` bands fill into quartiles) and
+  `m87_buffering` (a `run_graph_with_bus` run posts buffering levels, asserting
+  at least one report and every percent in 0..=100 -- deterministic guarantees,
+  since exact percents are scheduling-dependent). VERIFIED on the dev host:
+  `cargo test --workspace` green; `cargo clippy -p g2g-core --features
+  "std runtime multi-thread" --all-targets` clean; `cargo check -p g2g-core
+  --features runtime` (no_std baseline) clean.
+- Note: buffering is reported for sink input links via `run_graph_with_bus`.
+  Buffering on interior links, and an app-facing "pause until buffered" helper
+  (using the state machine's `Paused`), are follow-ups. With this, the planned
+  bus coverage (eos/error/warning/state-changed/qos/buffering) is complete.
+
 ### M86: leaky `LinkPolicy` (the g2g-native "queue") + drop observability
 
 - Implements the lossy backpressure modes that were declared but unwired:

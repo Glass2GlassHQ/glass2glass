@@ -61,6 +61,17 @@ pub enum BusMessage {
         /// Frames the sink has dropped so far (cumulative, this drop included).
         dropped: u64,
     },
+    /// Buffering level report (M87): the fill percent (0-100) of a monitored
+    /// link feeding a sink. The GStreamer `GST_MESSAGE_BUFFERING` analog. g2g
+    /// has no `queue` element (per-edge `LinkPolicy` is the leaky-queue analog),
+    /// so this reports the bounded link channel's own occupancy, posted by the
+    /// runner's sink arm when the level crosses a quartile band. An application
+    /// can pause until it sees `100`, or surface a "buffering..." indicator
+    /// while it is low.
+    Buffering {
+        /// Fill of the sink's input link, 0 (empty / underrun) to 100 (full).
+        percent: u8,
+    },
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

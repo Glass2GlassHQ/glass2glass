@@ -29,7 +29,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::bus::BusHandle;
+use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
 use crate::element::{
@@ -222,6 +222,26 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
     run_graph_inner(graph, clock, link_capacity, None, None).await
+}
+
+/// As [`run_graph`], but posts pipeline [`BusMessage`](crate::BusMessage)s to
+/// `bus`: a startup `NegotiationFailed`, and per sink a `Buffering` level report
+/// each time the sink's input link crosses a fill quartile (M87), so the app can
+/// show a buffering indicator or wait for a full buffer.
+pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(graph, clock, link_capacity, Some(bus), None).await
+}
+
+/// Coarsen a link fill percent into a 0..=4 quartile band, so a sink posts a
+/// `Buffering` message on a meaningful level transition (underrun, quarter
+/// steps, full) rather than on every packet.
+fn buffering_bucket(percent: u8) -> u8 {
+    (percent / 25).min(4)
 }
 
 /// As [`run_graph`], but driven by a [`StateController`] (M78): every `Sink`
@@ -861,6 +881,7 @@ async fn sink_arm<'a>(
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
+    let mut last_buffer_bucket: Option<u8> = None;
     loop {
         // M78 flow gate: below `Playing` the sink parks here, so it stops
         // draining its edge and backpressure stalls the DAG upstream. Non-live
@@ -868,6 +889,17 @@ async fn sink_arm<'a>(
         if let Some(sc) = &state {
             if sc.flow_gate(prerolled_self).await == Flow::Stop {
                 return Ok(consumed);
+            }
+        }
+        // M87 buffering: sample the input link's fill and post a `Buffering`
+        // report when it crosses a quartile band. The first iteration samples
+        // an as-yet-unfilled link, so a `bus` always sees at least one report.
+        if let Some(b) = &bus {
+            let pct = in_rx.fill_percent();
+            let bucket = buffering_bucket(pct);
+            if last_buffer_bucket != Some(bucket) {
+                last_buffer_bucket = Some(bucket);
+                b.try_post(BusMessage::Buffering { percent: pct });
             }
         }
         match in_rx.recv().await {
@@ -1071,6 +1103,18 @@ mod tests {
             timing: FrameTiming { pts_ns: 7, ..FrameTiming::default() },
             sequence: seq,
         })
+    }
+
+    #[test]
+    fn buffering_bucket_bands_fill_into_quartiles() {
+        // Empty, quarter steps, and full map to distinct bands; values within a
+        // band collapse so the sink posts only on a level transition.
+        assert_eq!(buffering_bucket(0), 0);
+        assert_eq!(buffering_bucket(24), 0);
+        assert_eq!(buffering_bucket(25), 1);
+        assert_eq!(buffering_bucket(50), 2);
+        assert_eq!(buffering_bucket(75), 3);
+        assert_eq!(buffering_bucket(100), 4);
     }
 
     #[test]

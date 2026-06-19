@@ -44,14 +44,13 @@ the previous.
   upgrade to windowed-sinc/polyphase deferred. Next: **`v4l2src`** (first real
   capture source - turns g2g from "process streams" into "produce streams"),
   **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
-- **Bus message coverage**: eos/error/warning/state-changed (done earlier) +
-  qos DONE (M85): `BusMessage::Qos` + `SyncSink` late-frame dropping
-  (`with_max_lateness_ns` / `with_bus`). Remaining: `Buffering`
-  (`GST_MESSAGE_BUFFERING`, fill percent). Note g2g has no `queue` *element*
-  (M86: per-edge `LinkPolicy` is the leaky-queue analog), so `Buffering` should
-  report **link channel occupancy** (the bounded channel already tracks
-  `len`/`capacity`), sampled and posted by the runner, not by a `Queue` element.
-  Also: periodic QoS (not just on-drop); QoS from the display sinks
+- **Bus message coverage** DONE (eos/error/warning/state-changed/qos/buffering).
+  M85: `BusMessage::Qos` + `SyncSink` late-frame dropping. M87: `BusMessage::
+  Buffering` from link occupancy (`fill_percent`), posted by the sink arm via
+  `run_graph_with_bus` on quartile crossings (g2g has no `queue` element, so it
+  reports the bounded channel's own fill). Follow-ups: buffering on interior
+  links; an app-facing "pause until buffered" helper (over the state machine's
+  `Paused`); periodic QoS (not just on-drop); QoS from the display sinks
   (`KmsSink` / `WaylandSink`) once they sync to the clock.
 
 - **Leaky `LinkPolicy`** DONE (M86): `DropOldest` / `DropNewest` are

@@ -52,7 +52,9 @@ pub use fanin::{
 };
 
 #[cfg(feature = "std")]
-pub use graph_runner::{run_graph, run_graph_stateful, GraphNode, GraphNodeRef};
+pub use graph_runner::{
+    run_graph, run_graph_stateful, run_graph_with_bus, GraphNode, GraphNodeRef,
+};
 
 #[cfg(feature = "std")]
 pub use autoplug::{

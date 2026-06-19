@@ -151,6 +151,13 @@ impl<T> Receiver<T> {
         RecvFuture { receiver: self }
     }
 
+    /// Current fill of the channel as a percent (0 = empty, 100 = full),
+    /// a snapshot for buffering observability. Capacity is always > 0.
+    pub fn fill_percent(&self) -> u8 {
+        let g = self.inner.lock();
+        ((g.queue.len() * 100) / g.capacity) as u8
+    }
+
     /// Non-blocking pop. Returns `None` when the queue is empty (whether or
     /// not senders remain). Lets a consumer drain without awaiting.
     pub fn try_recv(&self) -> Option<T> {
@@ -267,6 +274,11 @@ impl LinkReceiver {
     /// Non-blocking drain of one packet; `None` when the link is empty.
     pub fn try_recv(&self) -> Option<PipelinePacket> {
         self.data.try_recv()
+    }
+
+    /// Fill of this link as a percent (0-100), for buffering reports.
+    pub fn fill_percent(&self) -> u8 {
+        self.data.fill_percent()
     }
 
     /// Latest-wins: overwrites any pending request that the producer
@@ -701,6 +713,21 @@ mod link_tests {
 
         assert_eq!(drained_sequences(&rx), [1, 2], "drop-oldest keeps the newest");
         assert_eq!(*counter.lock(), 1);
+    }
+
+    #[test]
+    fn fill_percent_tracks_link_occupancy() {
+        let (tx, rx) = link(4);
+        assert_eq!(rx.fill_percent(), 0, "empty link reads 0%");
+        let mut sink = SenderSink::new(tx);
+        run_to_ready(sink.push(frame_seq(0))).unwrap();
+        run_to_ready(sink.push(frame_seq(1))).unwrap();
+        assert_eq!(rx.fill_percent(), 50, "2 of 4 slots = 50%");
+        run_to_ready(sink.push(frame_seq(2))).unwrap();
+        run_to_ready(sink.push(frame_seq(3))).unwrap();
+        assert_eq!(rx.fill_percent(), 100, "full link reads 100%");
+        rx.try_recv();
+        assert_eq!(rx.fill_percent(), 75, "after one drain, 3 of 4 = 75%");
     }
 
     #[test]
