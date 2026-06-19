@@ -20,12 +20,14 @@ use alloc::vec::Vec;
 use g2g_core::runtime::{LaunchFactory, Registry, SourceFactory};
 use g2g_core::{AudioFormat, Caps, Dim, Rate, RawVideoFormat};
 
+use crate::aacparse::AacParse;
 use crate::audioconvert::AudioConvert;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::h264parse::H264Parse;
+use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
 use crate::videoconvert::VideoConvert;
 use crate::videocrop::VideoCrop;
@@ -93,6 +95,8 @@ pub fn default_registry() -> Registry {
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
+    reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
+    reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));

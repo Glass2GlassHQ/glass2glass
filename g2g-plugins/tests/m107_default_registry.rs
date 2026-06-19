@@ -99,3 +99,18 @@ fn new_elements_property_round_trip_by_name() {
     ats.set_property("wave", PropValue::Str("square".into())).unwrap();
     assert_eq!(ats.get_property("wave"), Some(PropValue::Str("square".into())));
 }
+
+#[test]
+fn demuxer_and_its_parsers_registered() {
+    // M109: tsdemux gains a stream selector and the parsers it feeds (h265parse,
+    // aacparse) join the default registry so the audio / H.265 chains build by name.
+    let reg = default_registry();
+    assert!(reg.inspect("h265parse").is_some());
+    assert!(reg.inspect("aacparse").is_some());
+    assert!(reg.inspect("tsdemux").unwrap().contains("stream"));
+
+    let mut demux = reg.make_element("tsdemux").unwrap();
+    assert_eq!(demux.get_property("stream"), Some(PropValue::Str("h264".into())));
+    demux.set_property("stream", PropValue::Str("aac".into())).unwrap();
+    assert_eq!(demux.get_property("stream"), Some(PropValue::Str("aac".into())));
+}

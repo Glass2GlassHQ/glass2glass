@@ -1087,12 +1087,19 @@ constraint maps it to the elementary stream type.
 The MPEG-TS demuxer (M108) is the first: `g2g-plugins::mpegts::TsDemuxer` is a
 pure `no_std + alloc` parser (sync 188-byte packets, PAT -> PMT -> elementary
 streams, reassemble PES per PID into access units with PTS), and the `TsDemux`
-element wraps it as `ByteStream{MpegTs} -> CompressedVideo{H264}` (Annex-B),
-feeding `h264parse` and the decoders. The geometry is unknown until `h264parse`
-reads the SPS, so the demuxer advertises a fixatable placeholder `Range` refined
-downstream via `CapsChanged` (the `RtspSrc` pattern, §4.13). The decode-side
-container precedent is `Mp4Src` / `Mp4Sink`; muxing (`mpegtsmux`) and the audio /
-H.265 elementary streams the parser already identifies are follow-ups.
+element wraps it. The parser reassembles every elementary stream the PMT names;
+the element has one output pad, so a `TsStream` selection (M109: `H264` / `H265`
+video as `CompressedVideo`, `Aac` audio as `Audio`, default H.264) picks which to
+emit, and a second `tsdemux` selecting another stream demuxes the rest of the
+multiplex. The selection is by codec, not a runtime-discovered "first video",
+because the output pad's media type is fixed at negotiation before any packet is
+parsed (H.264 and H.265 are distinct downstream decoders, not a refinement). Video
+geometry is unknown until the bitstream parser reads the SPS, so the demuxer
+advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
+(the `RtspSrc` pattern, §4.13); AAC advertises the sentinel channels/rate that
+`aacparse` refines from the ADTS header. The decode-side container precedent is
+`Mp4Src` / `Mp4Sink`; muxing (`mpegtsmux`), multi-program selection, and PCR-based
+timing are follow-ups.
 
 ---
 

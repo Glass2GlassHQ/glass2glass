@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M109: TsDemux audio (AAC) + H.265 stream selection
+
+- **`g2g-plugins::tsdemux::TsStream` + stream selection.** The parser already
+  reassembles every elementary stream the PMT names; `TsDemux` now emits a chosen
+  one instead of only H.264. A `TsStream` (`H264` / `H265` / `Aac`, default
+  `H264`) picks it: H.264 / H.265 leave as `Caps::CompressedVideo`, AAC as
+  `Caps::Audio` (ADTS, sentinel channels/rate refined by `aacparse`). The choice
+  is by codec, not a runtime-discovered "first video", because the output pad's
+  media type is fixed at negotiation before any packet is parsed. One pad carries
+  one stream, so a second `tsdemux` selecting another stream demuxes the rest of
+  the multiplex. Set via the new `stream` string property (`tsdemux stream=aac`).
+- **`h265parse` / `aacparse` in `default_registry`.** Registered alongside
+  `tsdemux` / `h264parse` so `tsdemux stream=h265 ! h265parse` and
+  `tsdemux stream=aac ! aacparse` build by name out of the box.
+- Tested: selecting video vs audio from a single A/V multiplex (only the chosen
+  stream is emitted), output caps tracking the selection, the `stream` property
+  round-trip + DerivedOutput, registry registration, and end-to-end audio /
+  video selection through `run_graph` (the new `Caps::Audio` output negotiates).
+
 ### M108: MPEG-TS demuxer + `Caps::ByteStream` (container breadth)
 
 - **`Caps::ByteStream { encoding }` (g2g-core).** The first byte-stream caps
@@ -24,7 +43,7 @@ Nothing is published yet; all versions are `0.1.0`.
   (`Caps::CompressedVideo{H264}`, Annex-B), resyncing TS packets across input
   frames and forwarding access units with their PTS, ready for `h264parse`.
   Registered in `default_registry` as `tsdemux`. (v1: one H.264 video stream;
-  audio / H.265 are parsed by the core but not yet emitted.)
+  audio / H.265 selection landed in M109.)
 - Tested: PAT/PMT/PES demux + cross-packet PES reassembly + PTS decode (parser
   unit tests), `ByteStream`->H.264 element behavior, and an end-to-end
   `ByteStream{MpegTs}` source -> `tsdemux` -> sink run through `run_graph` proving
