@@ -28,6 +28,11 @@ pub mod videoflip;
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.
 pub mod rtpdepay;
+// uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
+// (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
+// each gated to its source's feature.
+#[cfg(feature = "std")]
+pub mod uridecodebin;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 pub mod videotestsrc;

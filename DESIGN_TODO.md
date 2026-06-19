@@ -16,12 +16,14 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
 
 ### Phase 2 - Breadth + observability (mostly parallelizable).
 
-- **Capture / URI source breadth.** `v4l2src` (DESIGN.md §4.12a) and `UdpSrc`
-  raw-RTP H.264 ingest (§4.12b) are done. Remaining: `HttpSrc` (blocked on a
-  byte-stream caps + a consumer; see below), then a `uridecodebin`-equivalent
-  URI->source layer over the autoplug registry. Also a receive-side RTP jitter
-  buffer (reorder/loss/RTCP) and SDP/SPS-driven `UdpSrc` caps discovery, plus
-  MJPEG-mode UVC + format-flexible `v4l2src` negotiation (it fixes YUYV today).
+- **Capture / URI source breadth.** `v4l2src` (DESIGN.md §4.12a), `UdpSrc`
+  raw-RTP H.264 ingest (§4.12b), and the `uridecodebin` URI front door (§4.13.9:
+  `build_uridecodebin` + scheme handlers for udp/file/rtsp/v4l2) are done.
+  Remaining: `HttpSrc` (blocked on a byte-stream caps + a consumer; see below);
+  a receive-side RTP jitter buffer (reorder/loss/RTCP) and SDP/SPS-driven
+  `UdpSrc` caps discovery; MJPEG-mode UVC + format-flexible `v4l2src`
+  negotiation (it fixes YUYV today). `uridecodebin` follow-ups: more schemes as
+  sources land, and an `http(s)://` handler once `HttpSrc` exists.
 - **`HttpSrc` needs a byte-stream type first.** A souphttpsrc-equivalent
   produces an untyped byte stream, but `Caps` today is only
   `CompressedVideo`/`RawVideo`/`Audio`/`Tensor` — there is no byte-stream
@@ -61,11 +63,13 @@ these out is no longer blocking but still open:
   seeks (CMAF / DASH transitions), re-preroll after a flushing seek when paused,
   and a real repositioning source (`Mp4Src` / `FileSrc`) — in-tree sources aren't
   yet seek-aware.
-- **Auto-plug depth.** A `uridecodebin` URI front door (see Medium), richer
-  factory construction params (geometry / device / file path, beyond the chosen
-  output caps), `PadTemplates` on the remaining decoders (H.265, ...), and a
-  hardware-backed end-to-end decode-through-`decodebin` run (the `ffmpeg` /
-  `vaapi` autoplug tests read templates only, decode nothing).
+- **Auto-plug depth.** The `uridecodebin` URI front door is done (DESIGN.md
+  §4.13.9). Remaining: richer factory construction params (geometry / device /
+  file path, beyond the chosen output caps), `PadTemplates` on the remaining
+  decoders (H.265, ...), and a hardware-backed end-to-end
+  decode-through-`decodebin` run (the `ffmpeg` / `vaapi` autoplug tests read
+  templates only, decode nothing; the `uridecodebin` ffmpeg test asserts the
+  decoder is *spliced*, but does not run real media through it either).
 
 ### High
 
@@ -184,10 +188,6 @@ Production-shape needs that block specific real-world use cases.
 
 Smaller-scope items, mostly orthogonal to the architecture.
 
-- **URI handlers (`uridecodebin`-equivalent).** 1 session. Map
-  `file://` / `http://` / `rtsp://` / `srt://` to the right source
-  element. Trivial layer once auto-plug + the relevant source
-  elements exist.
 - **Tag system.** 1 session. `GstTagList`-equivalent for stream
   metadata (title, encoder, language, artist). Container demuxers
   surface tags; applications consume them via the bus.

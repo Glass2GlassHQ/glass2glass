@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M92: `uridecodebin` — URI front door to the autoplug registry
+
+- `Registry::build_uridecodebin(uri, sink, target, max_depth)` (g2g-core
+  `autoplug`): the URI front door over `build_playbin`. Parses a URI (a minimal
+  `scheme://rest` split — core pulls no URL crate), dispatches on the scheme to
+  a registered `UriSourceFactory` that builds the source *from the URI*, then
+  auto-plugs `source -> decode chain -> sink` down to the target. New public
+  types: `Uri`, `UriError`, `UriSourceFactory`, plus `Registry::register_uri`.
+- Scheme handlers (`g2g-plugins::uridecodebin`), each gated to its source's
+  feature so an app registers only what its build supports: `udp://host:port` ->
+  `UdpSrc`, `file:///clip.mp4` -> `Mp4Src`, `rtsp://…` -> `RtspSrc`,
+  `v4l2:///dev/videoN` -> `V4l2Src`. The analog of GStreamer's `GstURIHandler`.
+- A handler reports the media *type* it produces (geometry resolves at
+  negotiation), which is all the chain search needs to pick the right decoder.
+- Tested: `Uri::parse` (core), and graph assembly (plugins `uridecodebin` test) —
+  malformed/unknown-scheme/bad-authority errors, empty-chain `udp://` -> H.264
+  target (source->sink), `NoChain` when no decoder is registered, and (ffmpeg)
+  a real `FfmpegH264Dec` auto-plugged for `udp://` -> raw (source->decoder->sink,
+  graph validated). Architecture in DESIGN.md §4.13.9.
+
 ### M91: `UdpSrc` — UDP/RTP H.264 ingress (receive side)
 
 - `RtpH264Depayloader` (`rtpdepay.rs`): the sans-IO, `no_std`, host-testable

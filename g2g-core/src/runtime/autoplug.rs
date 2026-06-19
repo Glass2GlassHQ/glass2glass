@@ -263,6 +263,80 @@ mod factory {
         }
     }
 
+    /// A parsed URI, split at `://` into a scheme and the remainder. The
+    /// remainder is left uninterpreted: each [`UriSourceFactory`] reads it the
+    /// way its scheme needs (a host:port for `udp://`, a filesystem path for
+    /// `file://`, the whole URI for `rtsp://`). Minimal by design, so core pulls
+    /// no URL-parsing dependency; scheme-specific parsing lives in the handler.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Uri<'a> {
+        /// The full URI as given, e.g. `rtsp://host:554/stream`.
+        pub raw: &'a str,
+        /// The scheme before `://`, lowercased-by-convention by the caller.
+        pub scheme: &'a str,
+        /// Everything after `://`: authority + path + query, uninterpreted.
+        pub rest: &'a str,
+    }
+
+    impl<'a> Uri<'a> {
+        /// Split `raw` at the first `://`. `None` if there is no `://` or the
+        /// scheme is empty.
+        pub fn parse(raw: &'a str) -> Option<Uri<'a>> {
+            let (scheme, rest) = raw.split_once("://")?;
+            if scheme.is_empty() {
+                return None;
+            }
+            Some(Uri { raw, scheme, rest })
+        }
+    }
+
+    /// Why [`Registry::build_uridecodebin`] could not assemble a graph.
+    #[derive(Debug)]
+    pub enum UriError {
+        /// The URI did not parse as `scheme://rest`, or a handler could not
+        /// interpret its scheme-specific remainder (e.g. a bad `host:port`).
+        Malformed,
+        /// No URI handler is registered for the scheme.
+        UnknownScheme,
+        /// The source's caps could not be decoded to the target (wraps the
+        /// `decodebin` failure).
+        Decode(DecodebinError),
+    }
+
+    impl From<DecodebinError> for UriError {
+        fn from(e: DecodebinError) -> Self {
+            UriError::Decode(e)
+        }
+    }
+
+    /// A URI-scheme handler: maps a parsed [`Uri`] to a constructed source and
+    /// the source's declared output caps (the `decodebin` input). The analog of
+    /// GStreamer's `GstURIHandler`. Unlike [`SourceFactory`] (a parameterless
+    /// `playbin` root named directly), this builds the source *from the URI*, so
+    /// `udp://host:port` and `file://path` configure themselves.
+    pub struct UriSourceFactory {
+        scheme: &'static str,
+        build: fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>,
+    }
+
+    impl UriSourceFactory {
+        /// Register a handler for `scheme` (e.g. `"rtsp"`, `"udp"`, `"file"`).
+        /// `build` parses the URI's remainder, constructs the source, and
+        /// returns it with the caps it produces.
+        pub fn new(
+            scheme: &'static str,
+            build: fn(&Uri) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError>,
+        ) -> Self {
+            Self { scheme, build }
+        }
+    }
+
+    impl core::fmt::Debug for UriSourceFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("UriSourceFactory").field("scheme", &self.scheme).finish_non_exhaustive()
+        }
+    }
+
     /// Why [`Registry::build_playbin`] could not assemble a graph.
     #[derive(Debug)]
     pub enum PlaybinError {
@@ -294,6 +368,7 @@ mod factory {
     pub struct Registry {
         factories: Vec<ElementFactory>,
         sources: Vec<SourceFactory>,
+        uris: Vec<UriSourceFactory>,
     }
 
     impl Registry {
@@ -313,6 +388,14 @@ mod factory {
         /// returning `&mut self` to chain calls.
         pub fn register_source(&mut self, source: SourceFactory) -> &mut Self {
             self.sources.push(source);
+            self
+        }
+
+        /// Register one URI-scheme handler (a graph root for
+        /// [`build_uridecodebin`](Self::build_uridecodebin)), returning
+        /// `&mut self` to chain calls.
+        pub fn register_uri(&mut self, handler: UriSourceFactory) -> &mut Self {
+            self.uris.push(handler);
             self
         }
 
@@ -418,12 +501,45 @@ mod factory {
             self.decodebin(&mut graph, src, snk, &source.output, target, max_depth)?;
             Ok(graph)
         }
+
+        /// `uridecodebin`-equivalent: the URI-scheme front door to
+        /// [`build_playbin`](Self::build_playbin). Parses `uri`, dispatches to
+        /// the registered [`UriSourceFactory`] for its scheme to construct the
+        /// source from the URI, then auto-plugs `source -> chain -> sink` down
+        /// to `target`, returning a graph ready for
+        /// [`run_graph`](crate::runtime::run_graph).
+        ///
+        /// `target` is a shape predicate (commonly [`is_raw_video`] for
+        /// playback); the source's runtime caps are resolved at negotiation, so
+        /// the handler's declared output caps only need to name the *media type*
+        /// the right decoder is plugged for.
+        pub fn build_uridecodebin<Sk: AsyncElement + 'static>(
+            &self,
+            uri: &str,
+            sink: Sk,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+        ) -> Result<Graph<GraphNode>, UriError> {
+            let parsed = Uri::parse(uri).ok_or(UriError::Malformed)?;
+            let handler = self
+                .uris
+                .iter()
+                .find(|h| h.scheme == parsed.scheme)
+                .ok_or(UriError::UnknownScheme)?;
+            let (source, output) = (handler.build)(&parsed)?;
+            let mut graph: Graph<GraphNode> = Graph::new();
+            let src = graph.add_source(GraphNodeRef::Source(source));
+            let snk = graph.add_sink(GraphNodeRef::element(sink));
+            self.decodebin(&mut graph, src, snk, &output, target, max_depth)?;
+            Ok(graph)
+        }
     }
 }
 
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, ElementFactory, PlaybinError, Registry, SourceFactory,
+    Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]
@@ -531,5 +647,28 @@ mod tests {
         let target = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. });
         assert!(find_chain(&descs, &h264(Dim::Any), &target, 1).is_none(), "1 hop is too shallow");
         assert!(find_chain(&descs, &h264(Dim::Any), &target, 2).is_some(), "2 hops suffice");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn uri_parse_splits_scheme_and_rest() {
+        let u = Uri::parse("rtsp://cam.local:554/stream1?tcp").expect("valid uri");
+        assert_eq!(u.scheme, "rtsp");
+        assert_eq!(u.rest, "cam.local:554/stream1?tcp");
+        assert_eq!(u.raw, "rtsp://cam.local:554/stream1?tcp");
+
+        let f = Uri::parse("file:///home/a/clip.mp4").expect("valid file uri");
+        assert_eq!(f.scheme, "file");
+        assert_eq!(f.rest, "/home/a/clip.mp4", "file:// leaves an absolute path");
+
+        let udp = Uri::parse("udp://0.0.0.0:5004").expect("valid udp uri");
+        assert_eq!((udp.scheme, udp.rest), ("udp", "0.0.0.0:5004"));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn uri_parse_rejects_malformed() {
+        assert!(Uri::parse("notauri").is_none(), "no scheme separator");
+        assert!(Uri::parse("://nohost").is_none(), "empty scheme");
     }
 }

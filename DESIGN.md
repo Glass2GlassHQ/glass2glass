@@ -928,8 +928,21 @@ solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
 
 Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
-known without sniffing the byte stream. A `uridecodebin`-equivalent
-source-selection layer (URI scheme → source element) is the remaining piece.
+known without sniffing the byte stream.
+
+- **playbin / uridecodebin** (`std`). `Registry::build_playbin(source_name,
+  sink, target, max_depth)` assembles a complete `source → chain → sink` graph
+  from a *named* registered source. `build_uridecodebin(uri, sink, target,
+  max_depth)` is the URI front door over it: it parses `uri` (a minimal
+  `scheme://rest` split — core pulls no URL crate), dispatches on the scheme to
+  a registered `UriSourceFactory` that builds the source *from the URI*
+  (`udp://host:port`, `file:///clip.mp4`, `rtsp://…`, `v4l2:///dev/videoN`), and
+  auto-plugs the decode chain to `target`. The scheme handlers are the analog of
+  GStreamer's `GstURIHandler`; the concrete ones live in `g2g-plugins`
+  (`uridecodebin.rs`), each gated to its source's feature, so an app registers
+  only the schemes its build supports. A handler reports the *media type* it
+  produces (geometry resolves at negotiation), which is all the chain search
+  needs to pick the right decoder.
 
 ### 4.14 Pipeline Lifecycle: State Machine, Preroll, and Seek
 
