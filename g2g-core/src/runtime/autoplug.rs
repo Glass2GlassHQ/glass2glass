@@ -160,9 +160,12 @@ mod factory {
     use super::*;
     use alloc::boxed::Box;
 
+    use alloc::string::String;
+
     use crate::element::{AsyncElement, DynAsyncElement};
     use crate::graph::{Graph, GraphError, NodeId, PadId};
-    use crate::pad_template::{PadCaps, PadDirection, PadTemplates};
+    use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
+    use crate::property::format_specs;
     use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
     /// A registered element type: its autoplug metadata plus a constructor
@@ -206,6 +209,72 @@ mod factory {
         pub fn desc(&self) -> &ElementDesc {
             &self.desc
         }
+    }
+
+    /// A named element factory for the `gst-launch` text parser and the
+    /// `gst-inspect` dump (M105): a *parameterless* constructor plus the element's
+    /// pad templates. Unlike [`ElementFactory`] (the autoplug factory, built from
+    /// the chosen output caps), this default-constructs the element so the parser
+    /// can then apply `key=value` properties to it, the
+    /// `gst_element_factory_make` + `g_object_set` model.
+    pub struct LaunchFactory {
+        name: &'static str,
+        templates: Vec<PadTemplate>,
+        build: fn() -> Box<dyn DynAsyncElement>,
+    }
+
+    impl LaunchFactory {
+        /// Register a transform / sink by name, pad templates, and a
+        /// parameterless constructor (`|| Box::new(MyElement::new())`).
+        pub fn new(
+            name: &'static str,
+            templates: Vec<PadTemplate>,
+            build: fn() -> Box<dyn DynAsyncElement>,
+        ) -> Self {
+            Self { name, templates, build }
+        }
+
+        /// Build from a [`PadTemplates`] type, pulling its templates from the
+        /// trait so the registration site names only the type and constructor.
+        pub fn of<E: PadTemplates>(
+            name: &'static str,
+            build: fn() -> Box<dyn DynAsyncElement>,
+        ) -> Self {
+            Self::new(name, E::pad_templates(), build)
+        }
+
+        /// This factory's element name.
+        pub fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    impl core::fmt::Debug for LaunchFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("LaunchFactory").field("name", &self.name).finish_non_exhaustive()
+        }
+    }
+
+    /// Format an element's pad templates the way `gst-inspect` lists them (one
+    /// line per pad: direction + the caps it accepts/produces).
+    fn format_templates(templates: &[PadTemplate]) -> String {
+        use core::fmt::Write;
+        let mut out = String::new();
+        for t in templates {
+            let dir = match t.direction {
+                PadDirection::Sink => "SINK",
+                PadDirection::Source => "SRC",
+            };
+            match &t.caps {
+                PadCaps::Fixed(set) => {
+                    let _ = writeln!(out, "  {dir}: {:?}", set.alternatives());
+                }
+                PadCaps::Any => {
+                    let _ = writeln!(out, "  {dir}: ANY");
+                }
+            }
+        }
+        out
     }
 
     /// Why [`Registry::decodebin`] could not splice a chain.
@@ -370,6 +439,7 @@ mod factory {
         factories: Vec<ElementFactory>,
         sources: Vec<SourceFactory>,
         uris: Vec<UriSourceFactory>,
+        launch: Vec<LaunchFactory>,
     }
 
     impl Registry {
@@ -398,6 +468,63 @@ mod factory {
         pub fn register_uri(&mut self, handler: UriSourceFactory) -> &mut Self {
             self.uris.push(handler);
             self
+        }
+
+        /// Register a named transform / sink for the `gst-launch` parser and
+        /// `gst-inspect` (M105), returning `&mut self` to chain calls.
+        pub fn register_launch(&mut self, factory: LaunchFactory) -> &mut Self {
+            self.launch.push(factory);
+            self
+        }
+
+        /// Construct a registered source by name (the parser's first element).
+        /// `None` if no source is registered under `name`.
+        pub fn make_source(&self, name: &str) -> Option<Box<dyn DynSourceLoop>> {
+            self.sources.iter().find(|s| s.name == name).map(|s| (s.build)())
+        }
+
+        /// Construct a registered transform / sink by name (a parser interior or
+        /// tail element), default-configured. `None` if `name` is not registered
+        /// via [`register_launch`](Self::register_launch).
+        pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
+            self.launch.iter().find(|f| f.name == name).map(|f| (f.build)())
+        }
+
+        /// The names of every element registerable by the parser: sources first,
+        /// then transforms / sinks, each in registration order. The `gst-inspect`
+        /// element list.
+        pub fn element_names(&self) -> Vec<&'static str> {
+            self.sources
+                .iter()
+                .map(|s| s.name)
+                .chain(self.launch.iter().map(|f| f.name))
+                .collect()
+        }
+
+        /// A `gst-inspect`-style dump for the named element: its role, its
+        /// settable properties, and (for a transform / sink) its pad templates.
+        /// `None` if the name is not registered. The element is default-built to
+        /// read its property table (the specs are `&'static`, behind an instance
+        /// method), so building must be side-effect-free, as the in-tree
+        /// constructors are.
+        pub fn inspect(&self, name: &str) -> Option<String> {
+            use core::fmt::Write;
+            let mut out = String::new();
+            if let Some(s) = self.sources.iter().find(|s| s.name == name) {
+                let src = (s.build)();
+                let _ = writeln!(out, "{name} (source)");
+                let _ = writeln!(out, "Output caps: {:?}", s.output);
+                let _ = write!(out, "Properties:\n{}", format_specs(src.properties()));
+                Some(out)
+            } else if let Some(f) = self.launch.iter().find(|f| f.name == name) {
+                let el = (f.build)();
+                let _ = writeln!(out, "{name} (element)");
+                let _ = write!(out, "Pad templates:\n{}", format_templates(&f.templates));
+                let _ = write!(out, "Properties:\n{}", format_specs(el.properties()));
+                Some(out)
+            } else {
+                None
+            }
         }
 
         /// The descriptors of every registered factory, in registration order,
@@ -539,8 +666,8 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, ElementFactory, PlaybinError, Registry, SourceFactory,
-    Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, PlaybinError, Registry,
+    SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]
