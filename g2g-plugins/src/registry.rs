@@ -29,6 +29,7 @@ use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
+use crate::flvdemux::FlvDemux;
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
@@ -112,6 +113,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
     reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
+    reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
     reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));

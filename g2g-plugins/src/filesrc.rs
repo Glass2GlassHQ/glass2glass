@@ -229,7 +229,7 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,
-        "container of a raw byte stream: mpegts | matroska | ogg | auto (sniff the header)",
+        "container of a raw byte stream: mpegts | matroska | ogg | flv | auto (sniff the header)",
     ),
 ];
 
@@ -240,6 +240,7 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "mpegts" | "ts" => Some(ByteStreamEncoding::MpegTs),
         "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
         "ogg" | "opus" => Some(ByteStreamEncoding::Ogg),
+        "flv" => Some(ByteStreamEncoding::Flv),
         _ => None,
     }
 }
@@ -250,5 +251,6 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::MpegTs => "mpegts",
         ByteStreamEncoding::Matroska => "matroska",
         ByteStreamEncoding::Ogg => "ogg",
+        ByteStreamEncoding::Flv => "flv",
     }
 }

@@ -371,6 +371,9 @@ pub enum ByteStreamEncoding {
     /// Ogg (RFC 3533): "OggS" pages with a segment-table lacing that frames the
     /// packets of a logical bitstream. The canonical Opus / Vorbis carrier.
     Ogg,
+    /// FLV (Flash Video): an "FLV" header then `PreviousTagSize` / tag pairs, each
+    /// tag a codec-tagged audio / video / script payload. The RTMP carrier.
+    Flv,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of

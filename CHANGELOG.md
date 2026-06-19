@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M119: FLV demuxer (`flvdemux`)
+
+- **`Caps::ByteStream{Flv}` (g2g-core).** A fourth byte-stream encoding, for the
+  FLV (Flash Video) container, the RTMP carrier.
+- **`g2g-plugins::flv::FlvDemuxer` (no_std).** A pure FLV parser: the "FLV" header
+  then `PreviousTagSize` / tag pairs, framing the audio / video / script tags by
+  their 11-byte headers. Forwards the H.264 (AVC, codec id 7) and AAC (sound
+  format 10) media access units with their millisecond timestamps; the sequence
+  headers (`AVCDecoderConfigurationRecord` / `AudioSpecificConfig`) and the
+  `onMetaData` script tag are skipped, other codecs ignored. Reassembles across
+  input-chunk boundaries.
+- **`g2g-plugins::flvdemux::FlvDemux` element (no_std).** `Caps::ByteStream{Flv}`
+  -> one selected elementary stream (`FlvStream` / the `stream` property: h264 |
+  aac, default h264), mirroring `tsdemux`. H.264 leaves as `CompressedVideo`
+  (AVCC), AAC as `Caps::Audio`; PTS is the FLV ms timestamp in ns. The runner's
+  transform arm forwards EOS, so the element does not (avoiding a double EOS).
+  Registered as `flvdemux`.
+- **typefind + filesrc.** "FLV" sniffs to `Flv`, and `filesrc`'s
+  `bytestream-format` takes `flv` (and `auto` detects it), so
+  `filesrc location=x.flv bytestream-format=auto ! flvdemux ! ...` runs as text.
+- Tested: tag framing / interleaved A-V / chunk reassembly / header + codec
+  skipping (parser units); the element's stream selection + PTS; the FLV sniff;
+  and end-to-end auto-sniffed video + explicit audio through `parse_launch` /
+  `run_graph`.
+
 ### M118: gst-launch branching (`tee` / named pads)
 
 - **Chain parser in `runtime::parse_launch` (std).** The linear stage splitter is

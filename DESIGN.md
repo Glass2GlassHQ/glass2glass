@@ -1134,9 +1134,19 @@ reassembly, sniff the codec from the first packet's `OpusHead`, skip the setup
 headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` with
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`). Granule-position timing,
-Vorbis output, and an `oggmux` are follow-ups. With MP4 (`Mp4Src`/`Mp4Sink`),
-MPEG-TS, Matroska/WebM, and Ogg, the demux/mux coverage spans the major
-containers.
+Vorbis output, and an `oggmux` are follow-ups.
+
+The FLV demuxer (M119) is the fourth, on `Caps::ByteStream{Flv}`.
+`g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,
+then `PreviousTagSize` / tag pairs, each tag's 11-byte header framing its body),
+and `FlvDemux` forwards the H.264 (AVC) video and AAC audio media access units
+with their millisecond timestamps, selected per `FlvStream` (h264 | aac, default
+h264) like `TsDemux`. The sequence-header tags (codec config) and the
+`onMetaData` script tag are skipped, the codec-config / extradata side channel
+being a shared demuxer follow-up. The container is auto-detectable (`typefind`
+"FLV", `filesrc bytestream-format=auto`); an `flvmux` and surfacing the script-tag
+metadata are follow-ups. With MP4 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM,
+Ogg, and FLV, the demux/mux coverage spans the major containers.
 
 ---
 

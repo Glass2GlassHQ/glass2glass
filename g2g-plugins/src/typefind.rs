@@ -16,6 +16,8 @@ const TS_SYNC: u8 = 0x47;
 const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 /// Ogg page capture pattern.
 const OGG_MAGIC: [u8; 4] = *b"OggS";
+/// FLV signature: the first three bytes of an FLV header.
+const FLV_MAGIC: [u8; 3] = *b"FLV";
 
 /// Guess the container encoding from a stream's leading bytes, or `None` if no
 /// signature matches. Pass at least a few hundred bytes so MPEG-TS can be
@@ -26,6 +28,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if header.starts_with(&OGG_MAGIC) {
         return Some(ByteStreamEncoding::Ogg);
+    }
+    if header.starts_with(&FLV_MAGIC) {
+        return Some(ByteStreamEncoding::Flv);
     }
     if looks_like_mpegts(header) {
         return Some(ByteStreamEncoding::MpegTs);
@@ -68,6 +73,11 @@ mod tests {
     #[test]
     fn detects_ogg_by_capture_pattern() {
         assert_eq!(sniff(b"OggS\0\x02\0\0"), Some(ByteStreamEncoding::Ogg));
+    }
+
+    #[test]
+    fn detects_flv_by_signature() {
+        assert_eq!(sniff(b"FLV\x01\x05\0\0\0\x09"), Some(ByteStreamEncoding::Flv));
     }
 
     #[test]
