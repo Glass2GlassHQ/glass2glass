@@ -1042,6 +1042,37 @@ application reacts to:
 Posting is non-blocking (`try_post`): a control message never stalls the data
 path; a full bus drops the report rather than applying backpressure.
 
+### 4.16 Properties, Introspection, and the `gst-launch` DSL
+
+The typed `with_*` builders are the zero-cost construction path and the only one
+the `no_std` / RTOS baseline needs, but tooling (a text-pipeline parser, an
+inspector, a future GUI) needs a *runtime* face: set a property by string name,
+read it back, enumerate what an element exposes. Three layers, each building on
+the last (M104-M106):
+
+- **The property bag (`g2g-core::property`, `no_std + alloc`).** `PropValue`
+  (`Bool` / `Int` / `Uint` / `Double` / `Fraction` / `Str`), `PropKind`, a static
+  `PropertySpec` (name + kind + blurb), and `PropError`, plus
+  `PropValue::parse(kind, "text")` for the `key=value` syntax. `AsyncElement` and
+  `SourceLoop` (and their dyn mirrors) gain `properties()` / `set_property()` /
+  `get_property()`, all defaulting to "no properties" the same zero-cost way
+  `latency()` defaults to zero, so the baseline pays nothing and an element opts in
+  only by overriding them. The GObject-property analog; the builders stay the
+  type-checked path, this is the string-keyed one.
+- **By-name construction + introspection (`Registry`, std).** `LaunchFactory`
+  registers a transform / sink under a name with a parameterless constructor and
+  its pad templates (sources reuse the parameterless `SourceFactory`).
+  `make_source` / `make_element` build by name; `inspect(name)` dumps an element's
+  role, properties, and pad templates, the `gst-inspect` analog.
+- **The text parser (`runtime::parse_launch`, std).** Turns
+  `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` into a
+  runnable `Graph`: each `!`-separated stage is `element-name key=value ...`;
+  the element is built by name, each value parsed for its property's `PropKind`
+  and applied, and the stages linked source -> transforms -> sink. The result
+  drops straight onto `run_graph`, so a pipeline is expressible as text without
+  hand-written Rust, the `gst-launch` analog. v1 is one linear chain; branching
+  (`tee` / named pads) and caps-filter string syntax are follow-ups.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

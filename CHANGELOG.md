@@ -5,6 +5,37 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M106: `gst-launch` text pipeline parser
+
+- **`g2g-core::runtime::parse_launch` (std).** Turns a `gst-launch`-style string
+  (`"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"`) into a
+  runnable `Graph`: each `!`-separated stage is `element-name key=value ...`; the
+  parser constructs the element by name from the `Registry` (M105), looks up each
+  property's `PropKind` to parse its textual value (M104), and applies it. First
+  stage is the source, last the sink, middle are transforms, linked in order. The
+  graph drops straight onto `run_graph`. This is the front door that makes g2g
+  usable without hand-writing Rust for every pipeline.
+- Structured `ParseError` (empty / too-few stages, unknown source / element,
+  malformed or unknown property, bad value, graph link error) with `Display`.
+- Scope (v1): one linear chain; `key=value` with no spaces in the value (a quoted
+  value without spaces is unquoted). Branching (`tee`/named pads) and caps-filter
+  string syntax are follow-ups.
+- Tested end to end: a parsed pipeline *runs* through `run_graph` with `num-buffers`
+  reaching the source and all frames flowing to the sink; plus the minimal
+  source-to-sink case and the error paths.
+
+### M105: Registry build-by-name + `gst-inspect` dump
+
+- **By-name construction.** `Registry` gained `LaunchFactory` (a parameterless
+  transform/sink constructor + pad templates), `make_source` / `make_element`
+  (sources reuse the existing parameterless `SourceFactory`), and `element_names`.
+  This is what the M106 parser builds graphs from.
+- **`inspect(name)`.** A `gst-inspect`-style dump of an element's role, its
+  settable properties (from the M104 specs), and (for a transform/sink) its pad
+  templates.
+- Tested: name listing, inspect dumps (properties + SINK/SRC templates), and
+  build-by-name with a property applied.
+
 ### M104: Runtime property system (foundation for gst-launch / gst-inspect)
 
 - **`g2g-core::property` (no_std + alloc).** A name/value property bag layered over

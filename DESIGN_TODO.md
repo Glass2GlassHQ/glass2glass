@@ -181,13 +181,20 @@ Production-shape needs that block specific real-world use cases.
     path is one-way; a separate track from NACK/RTX.
   `RtspSrc` via `retina` covers the RTSP case (retina has its own jitterbuffer).
 
-- **Property system + introspection.** 3 sessions. No name/value
-  property bag — `with_*` builder methods only, set at construction.
-  No `gst-launch foo bar=baz` runtime setting, no
-  `gst-inspect`-equivalent enumeration of available elements,
-  properties, and pad templates. Blocks the `gst-launch` text DSL
-  beyond the basics, blocks GUI editors, blocks any tooling that wants
-  to introspect a graph.
+- **Property system + introspection + `gst-launch` DSL — DONE (M104-M106).**
+  `g2g-core::property` adds a name/value bag over the `with_*` builders
+  (`PropValue` / `PropKind` / `PropertySpec` / `PropError`, no_std + alloc) and
+  `properties` / `set_property` / `get_property` on `AsyncElement` / `SourceLoop`
+  (+ dyn mirrors), zero-cost defaults like `latency()`. The `Registry` builds
+  elements by name (`LaunchFactory`, `make_source` / `make_element`) and dumps a
+  `gst-inspect`-style `inspect(name)`. `runtime::parse_launch` turns a
+  `"a key=v ! b ! sink"` string into a runnable `Graph`. Architecture: DESIGN.md
+  §4.16. **Remaining depth:** broaden property coverage beyond the first elements
+  (`VideoTestSrc` / `VideoFlip` / `VideoRate`); `gst-launch` branching (`tee` /
+  named pads) and caps-filter string syntax (needs a `Caps` text grammar +
+  `CapsFilter` as a property-bearing element); a value grammar for spaces /
+  enums-as-named-flags; and a GUI/tooling introspection surface beyond the text
+  dump.
 
 ### Medium / niche
 
@@ -205,10 +212,10 @@ Smaller-scope items, mostly orthogonal to the architecture.
   `gst-controller`-equivalent for animating properties over time
   (zoom 1.0 → 2.0 over 5 seconds). Niche but real for production
   graphics.
-- **`gst-launch` text DSL.** 2 sessions. A parser that takes
-  `"rtspsrc location=... ! h264parse ! avdec_h264 ! waylandsink"` and
-  builds a `Graph`. Trivial once the DAG runner + property system
-  exist.
+- **`gst-launch` text DSL — DONE (M106).** `runtime::parse_launch` takes
+  `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` and
+  builds a runnable `Graph` (linear chains; branching + caps-filter syntax owed).
+  See the property-system entry above and DESIGN.md §4.16.
 
 ### What we already do better
 

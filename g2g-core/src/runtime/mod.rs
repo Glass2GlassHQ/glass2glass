@@ -25,6 +25,9 @@ mod fanin;
 #[cfg(feature = "std")]
 mod graph_runner;
 
+#[cfg(feature = "std")]
+mod launch;
+
 pub use channel::{
     bounded, link, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot, Receiver,
     ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
@@ -61,3 +64,6 @@ pub use autoplug::{
     declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, PlaybinError, Registry,
     SourceFactory, Uri, UriError, UriSourceFactory,
 };
+
+#[cfg(feature = "std")]
+pub use launch::{parse_launch, ParseError};
