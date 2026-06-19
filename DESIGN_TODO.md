@@ -20,8 +20,9 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
   raw-RTP H.264 ingest (§4.12b), and the `uridecodebin` URI front door (§4.13.9:
   `build_uridecodebin` + scheme handlers for udp/file/rtsp/v4l2) are done.
   Remaining: `HttpSrc` (blocked on a byte-stream caps + a consumer; see below);
-  a receive-side RTP jitter buffer (reorder/loss/RTCP) and SDP/SPS-driven
-  `UdpSrc` caps discovery; MJPEG-mode UVC + format-flexible `v4l2src`
+  the receive-side RTP jitter buffer is done (M94, reorder + loss/dup, bounded
+  latency), leaving RTCP/NACK/RTX/FEC and SDP/SPS-driven `UdpSrc` caps
+  discovery; MJPEG-mode UVC + format-flexible `v4l2src`
   negotiation (it fixes YUYV today). `uridecodebin` follow-ups: more schemes as
   sources land, and an `http(s)://` handler once `HttpSrc` exists.
 - **`HttpSrc` needs a byte-stream type first.** A souphttpsrc-equivalent
@@ -167,13 +168,13 @@ Production-shape needs that block specific real-world use cases.
   needs a sans-IO protocol layer + a tokio I/O sink, paralleling the
   RTP packetizer + UDP sink split.
 
-- **RTP receive-side stack.** 3 sessions. We have the egress half
-  (`RtpH264Packetizer` + `UdpSink`). Receive-side jitterbuffer with
-  packet reordering, RTCP RR generation, NACK-based retransmission,
-  FEC, RTX are all missing. `RtspSrc` via `retina` covers the RTSP
-  case (retina has its own jitterbuffer), but for raw RTP ingest (the
-  broadcasting / video-contribution use case) there is no
-  network-resilience story.
+- **RTP receive-side stack.** ~2 sessions remaining. The reordering jitter
+  buffer is **done** (M94: `rtpjitter::RtpJitterBuffer` — sequence reorder,
+  loss/dup/late detection, bounded-latency release, wired into `UdpSrc` with a
+  deadline-bounded recv loop; see CHANGELOG). Still missing: RTCP RR generation,
+  NACK-based retransmission, RTX, and FEC. `RtspSrc` via `retina` covers the RTSP
+  case (retina has its own jitterbuffer); raw RTP ingest now reorders and conceals
+  loss but has no feedback/retransmission path yet.
 
 - **Property system + introspection.** 3 sessions. No name/value
   property bag — `with_*` builder methods only, set at construction.
