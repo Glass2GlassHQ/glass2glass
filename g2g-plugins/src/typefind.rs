@@ -14,6 +14,8 @@ const TS_PACKET_LEN: usize = 188;
 const TS_SYNC: u8 = 0x47;
 /// EBML magic (Matroska / WebM): the leading bytes of the EBML header element.
 const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
+/// Ogg page capture pattern.
+const OGG_MAGIC: [u8; 4] = *b"OggS";
 
 /// Guess the container encoding from a stream's leading bytes, or `None` if no
 /// signature matches. Pass at least a few hundred bytes so MPEG-TS can be
@@ -21,6 +23,9 @@ const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     if header.starts_with(&EBML_MAGIC) {
         return Some(ByteStreamEncoding::Matroska);
+    }
+    if header.starts_with(&OGG_MAGIC) {
+        return Some(ByteStreamEncoding::Ogg);
     }
     if looks_like_mpegts(header) {
         return Some(ByteStreamEncoding::MpegTs);
@@ -58,6 +63,11 @@ mod tests {
         let mut data = vec![0x1A, 0x45, 0xDF, 0xA3];
         data.extend_from_slice(&[0x01, 0x02, 0x03]);
         assert_eq!(sniff(&data), Some(ByteStreamEncoding::Matroska));
+    }
+
+    #[test]
+    fn detects_ogg_by_capture_pattern() {
+        assert_eq!(sniff(b"OggS\0\x02\0\0"), Some(ByteStreamEncoding::Ogg));
     }
 
     #[test]

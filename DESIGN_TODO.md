@@ -350,7 +350,13 @@ modern PipeWire path remain.
   muxing + selection; PCR-based timing. SRT/HLS feed TS over the wire (needs the
   network byte-stream source path).
 - **FLV (`flvmux` / `flvdemux`).** 2 sessions. RTMP carrier.
-- **OGG (`oggmux` / `oggdemux`).** 1–2 sessions. Niche, mostly Opus delivery.
+- **OGG demux — DONE (M116).** Pure RFC 3533 parser
+  (`g2g-plugins::ogg::OggDemuxer` + the `OggDemux` element), fed by the new
+  `Caps::ByteStream{Ogg}` link type: "OggS" pages, segment-table lacing with
+  cross-page packet reassembly, codec sniff from the first packet (`OpusHead`),
+  setup headers skipped. `ByteStream{Ogg} -> Audio{Opus}`; registered as
+  `oggdemux`, sniffed by `typefind`. **Remaining:** granule-position timing,
+  Vorbis output, multi-stream Ogg, and `oggmux`.
 - **CMAF / fMP4 segmented.** 2 sessions. Already have `Mp4Sink` /
   `Mp4Src` (fragmented); the CMAF-specific signalling for adaptive
   streaming is a thin layer on top.

@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M116: Ogg / Opus demuxer (`oggdemux`)
+
+- **`Caps::ByteStream{Ogg}` (g2g-core).** A third byte-stream encoding, for the
+  Ogg container.
+- **`g2g-plugins::ogg::OggDemuxer` (no_std).** A pure RFC 3533 parser: syncs to
+  "OggS" pages, frames packets via the segment-table lacing (255-continuation,
+  cross-page reassembly), sniffs the codec from the first packet (`OpusHead` ->
+  Opus, channel count read), and skips the codec setup headers. Single logical
+  bitstream (the first serial).
+- **`g2g-plugins::oggdemux::OggDemux` element (no_std).** `Caps::ByteStream{Ogg}`
+  -> `Caps::Audio{Opus}`, refining the channel count via `CapsChanged` from
+  `OpusHead`. Registered as `oggdemux`. v1: Opus output (a non-Opus Ogg is parsed
+  but not forwarded, since the pad is Opus-typed); granule-position timing is a
+  follow-up (packets carry no PTS yet).
+- **typefind + filesrc.** "OggS" sniffs to `Ogg`, and `filesrc`'s
+  `bytestream-format` takes `ogg` (and `auto` detects it), so
+  `filesrc location=x.opus bytestream-format=auto ! oggdemux ! ...` runs as text.
+- Tested: page parsing, cross-page packet reassembly, and second-stream skipping
+  (parser units); the element's Opus output + refined caps; and end-to-end
+  auto-sniffed + explicit Ogg through `parse_launch` / `run_graph`.
+
 ### M115: Matroska / WebM muxer (`matroskamux`)
 
 - **`g2g-plugins::matroska::MatroskaMuxer` (no_std).** The inverse of

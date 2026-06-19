@@ -79,6 +79,11 @@ pub mod mkvdemux;
 // Matroska / WebM muxer element (no_std): one elementary stream ->
 // Caps::ByteStream{Matroska}, the inverse of mkvdemux.
 pub mod mkvmux;
+// Ogg demuxer parsing core (no_std): OggS pages -> elementary-stream packets.
+pub mod ogg;
+// Ogg demuxer element (no_std): Caps::ByteStream{Ogg} -> Opus, wrapping the
+// ogg parser.
+pub mod oggdemux;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;

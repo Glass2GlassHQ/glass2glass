@@ -1120,6 +1120,17 @@ frame, with the `webm` DocType for the WebM codec subset. Scope is one Segment /
 one track with definite-size Clusters; unknown-size Clusters (live read), Cues
 (seeking), and multi-track muxing are follow-ups.
 
+The Ogg demuxer (M116) is the third, the same parser + element split on
+`Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages
+(sync to "OggS", frame packets via the segment-table lacing with cross-page
+reassembly, sniff the codec from the first packet's `OpusHead`, skip the setup
+headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` with
+the channel count refined from `OpusHead`. The container is auto-detectable
+(`typefind` "OggS", `filesrc bytestream-format=auto`). Granule-position timing,
+Vorbis output, and an `oggmux` are follow-ups. With MP4 (`Mp4Src`/`Mp4Sink`),
+MPEG-TS, Matroska/WebM, and Ogg, the demux/mux coverage spans the major
+containers.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

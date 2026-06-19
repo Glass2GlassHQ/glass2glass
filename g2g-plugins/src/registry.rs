@@ -33,6 +33,7 @@ use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
 use crate::mkvdemux::MkvDemux;
 use crate::mkvmux::MkvMux;
+use crate::oggdemux::OggDemux;
 use crate::videoconvert::VideoConvert;
 use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
@@ -109,6 +110,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || Box::new(MkvDemux::new())));
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
     reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
+    reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
     reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));

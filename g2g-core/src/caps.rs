@@ -368,6 +368,9 @@ pub enum ByteStreamEncoding {
     /// common file container, WebM being the browser-delivery subset (VP8 / VP9 /
     /// AV1 video + Opus / Vorbis audio).
     Matroska,
+    /// Ogg (RFC 3533): "OggS" pages with a segment-table lacing that frames the
+    /// packets of a logical bitstream. The canonical Opus / Vorbis carrier.
+    Ogg,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
