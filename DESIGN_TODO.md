@@ -44,8 +44,12 @@ the previous.
   upgrade to windowed-sinc/polyphase deferred. Next: **`v4l2src`** (first real
   capture source - turns g2g from "process streams" into "produce streams"),
   **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
-- **Bus message coverage** (2 sessions): eos/error/warning/state-changed/qos/
-  buffering. High observability lever, low risk.
+- **Bus message coverage**: eos/error/warning/state-changed (done earlier) +
+  qos DONE (M85): `BusMessage::Qos` + `SyncSink` late-frame dropping
+  (`with_max_lateness_ns` / `with_bus`). Remaining: `Buffering`
+  (`GST_MESSAGE_BUFFERING`, queue fill percent) once a `Queue` / buffering
+  element exists to source it; periodic QoS (not just on-drop); QoS from the
+  display sinks (`KmsSink` / `WaylandSink`) once they sync to the clock.
 - **Reserve the `FrameMeta` field** on `Frame` (1 session, behind a `metadata`
   feature, ZST when off). Trivial now, expensive to retrofit. Full relation-
   graph build stays deferred until a detection element needs it.

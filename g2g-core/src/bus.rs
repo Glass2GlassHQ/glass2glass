@@ -44,6 +44,23 @@ pub enum BusMessage {
     /// `ASYNC_DONE` analog; posted once per preroll by
     /// [`StateController::notify_prerolled`](crate::runtime::StateController).
     AsyncDone,
+    /// Quality-of-service report (M85): a sink is running behind the pipeline
+    /// clock and dropped a frame that arrived too late to present. The
+    /// GStreamer `GST_MESSAGE_QOS` analog. Posted by a synchronizing sink
+    /// (e.g. [`SyncSink`](../../g2g_plugins/syncsink/struct.SyncSink.html)) when
+    /// it drops a late frame, so the application can react (lower the source
+    /// rate, simplify the pipeline) instead of silently falling behind.
+    Qos {
+        /// Running time (PTS) of the frame this report concerns.
+        running_time_ns: u64,
+        /// How far past its deadline the frame was, in ns. Signed: positive is
+        /// late (behind the clock), negative early.
+        jitter_ns: i64,
+        /// Frames the sink has presented so far (cumulative).
+        processed: u64,
+        /// Frames the sink has dropped so far (cumulative, this drop included).
+        dropped: u64,
+    },
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

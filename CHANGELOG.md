@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M85: QoS bus messages + late-frame dropping in `SyncSink`
+
+- Phase 2 observability. Adds the QoS leg of bus-message coverage (the
+  GStreamer `GST_MESSAGE_QOS` analog) and, with it, real quality-of-service
+  behaviour: a synchronizing sink that has fallen behind the clock drops late
+  frames to catch up instead of compounding the lag.
+- `BusMessage::Qos { running_time_ns, jitter_ns, processed, dropped }`
+  (`g2g-core::bus`): `jitter_ns` is signed (positive = late), `processed` /
+  `dropped` are the sink's cumulative counts. Posted via the existing
+  non-blocking `try_post`, so a QoS report never stalls the data path.
+- `SyncSink` gains `with_max_lateness_ns(ns)` (drop a frame whose deadline is
+  past by more than `ns`; `0` drops anything late) and `with_bus(handle)`
+  (post a `Qos` per drop), plus a `dropped()` accessor. The default is
+  unchanged: no bound (`u64::MAX`), no bus, every frame presented however late,
+  so existing latency tests and pipelines are untouched. Drop check is
+  `now > pts + bound` (saturating) before sleeping to the deadline.
+- Tests: `m85_qos` drives `VideoTestSrc -> SyncSink` under a `FixedClock` set
+  1 s ahead of the frames, asserting all 4 frames drop, none present, and the
+  bus carries 4 `Qos` reports with positive jitter and a rising `dropped` count
+  (1,2,3,4); the on-time control (clock at 0) presents all 4 and posts nothing.
+  VERIFIED on the dev host: `cargo test --workspace` green; `cargo clippy
+  -p g2g-core --features "std runtime multi-thread" --all-targets` clean;
+  `cargo clippy -p g2g-plugins --lib` (no_std baseline) clean; `cargo check
+  --workspace` builds.
+- Still open (bus coverage tail): `Buffering` (`GST_MESSAGE_BUFFERING`, queue
+  fill percent) awaits a `Queue` / buffering element to source it; periodic
+  (not just on-drop) QoS reporting; and wiring QoS into the other sinks
+  (`KmsSink` / `WaylandSink`) once they synchronize to the clock.
+
 ### M84: `AudioResample` (last Tier-1 audio transform)
 
 - First Phase 2 breadth item. `AudioResample` (`g2g-plugins`, `no_std` baseline
