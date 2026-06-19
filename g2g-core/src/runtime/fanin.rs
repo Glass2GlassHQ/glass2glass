@@ -387,6 +387,7 @@ where
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
+        frames_dropped: 0,
         latency: LatencyReport::ZERO,
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,

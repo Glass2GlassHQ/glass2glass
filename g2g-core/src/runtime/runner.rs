@@ -220,6 +220,10 @@ impl From<LatencyProfile> for LinkCapacity {
 pub struct RunStats {
     pub frames_emitted: u64,
     pub frames_consumed: u64,
+    /// Frames dropped by leaky links (`LinkPolicy::DropOldest`/`DropNewest`)
+    /// under downstream stall. `0` for all-`Block` pipelines and for runners
+    /// that don't expose per-edge policy (only `run_graph` does today).
+    pub frames_dropped: u64,
     /// Aggregated source-to-sink latency (M12), computed once after
     /// negotiation. Linear runners fold every element's `latency()`; fan-in /
     /// fan-out runners leave this at `ZERO` (topology aggregation deferred).
@@ -561,6 +565,7 @@ where
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
+        frames_dropped: 0,
         latency,
         allocation,
         clock_priority,
@@ -775,6 +780,7 @@ where
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
+        frames_dropped: 0,
         latency: LatencyReport::ZERO,
         allocation: None,
         clock_priority: ClockPriority::SystemFallback,
@@ -1223,6 +1229,7 @@ where
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
+        frames_dropped: 0,
         latency,
         allocation,
         clock_priority,

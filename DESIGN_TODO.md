@@ -47,9 +47,19 @@ the previous.
 - **Bus message coverage**: eos/error/warning/state-changed (done earlier) +
   qos DONE (M85): `BusMessage::Qos` + `SyncSink` late-frame dropping
   (`with_max_lateness_ns` / `with_bus`). Remaining: `Buffering`
-  (`GST_MESSAGE_BUFFERING`, queue fill percent) once a `Queue` / buffering
-  element exists to source it; periodic QoS (not just on-drop); QoS from the
-  display sinks (`KmsSink` / `WaylandSink`) once they sync to the clock.
+  (`GST_MESSAGE_BUFFERING`, fill percent). Note g2g has no `queue` *element*
+  (M86: per-edge `LinkPolicy` is the leaky-queue analog), so `Buffering` should
+  report **link channel occupancy** (the bounded channel already tracks
+  `len`/`capacity`), sampled and posted by the runner, not by a `Queue` element.
+  Also: periodic QoS (not just on-drop); QoS from the display sinks
+  (`KmsSink` / `WaylandSink`) once they sync to the clock.
+
+- **Leaky `LinkPolicy`** DONE (M86): `DropOldest` / `DropNewest` are
+  implemented in `SenderSink` (control packets never dropped),
+  `RunStats::frames_dropped` reports the total, `run_graph` applies each edge's
+  policy. Follow-up: wire leaky links for a `no_std` live-camera runner (the
+  design's stated `DropOldest` use case); the leaky setters are `std`-gated
+  today since only `run_graph` configures per-edge policy.
 - **Reserve the `FrameMeta` field** on `Frame` (1 session, behind a `metadata`
   feature, ZST when off). Trivial now, expensive to retrofit. Full relation-
   graph build stays deferred until a detection element needs it.

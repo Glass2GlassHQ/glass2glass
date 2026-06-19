@@ -449,8 +449,16 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     let ne = vg.edge_count();
     let mut txs: Vec<Option<LinkSender>> = Vec::with_capacity(ne);
     let mut rxs: Vec<Option<LinkReceiver>> = Vec::with_capacity(ne);
-    for _ in 0..ne {
-        let (tx, rx) = link(link_capacity);
+    // Shared drop counter: leaky links (`LinkPolicy::DropOldest`/`DropNewest`)
+    // increment it per dropped frame, so the total surfaces in `RunStats`.
+    let dropped = alloc::sync::Arc::new(spin::Mutex::new(0u64));
+    for eid in 0..ne {
+        let (mut tx, rx) = link(link_capacity);
+        let policy = vg.edge(eid).policy;
+        tx.set_policy(policy);
+        if policy != crate::link::LinkPolicy::Block {
+            tx.set_drop_counter(dropped.clone());
+        }
         txs.push(Some(tx));
         rxs.push(Some(rx));
     }
@@ -621,9 +629,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         }
     }
 
+    let frames_dropped = *dropped.lock();
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
+        frames_dropped,
         latency,
         allocation,
         clock_priority,

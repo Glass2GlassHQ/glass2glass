@@ -10,6 +10,7 @@ use spin::Mutex;
 use crate::element::{BoxFuture, OutputSink, PushOutcome, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
+use crate::link::LinkPolicy;
 
 pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be > 0");
@@ -103,6 +104,17 @@ impl<T> Sender<T> {
 
     pub fn send(&self, value: T) -> SendFuture<'_, T> {
         SendFuture { sender: self, value: Some(value) }
+    }
+
+    /// Remove and return the front-most queued value matching `pred`, or
+    /// `None` if none match. Used by a leaky `DropOldest` link to evict the
+    /// oldest data frame and make room without disturbing queued control
+    /// packets. No waker is signalled: a receiver only parks when the queue is
+    /// empty, and eviction only runs on a full queue.
+    pub(crate) fn evict_front_matching(&self, pred: impl Fn(&T) -> bool) -> Option<T> {
+        let mut g = self.inner.lock();
+        let idx = g.queue.iter().position(pred)?;
+        g.queue.remove(idx)
     }
 }
 
@@ -205,6 +217,36 @@ impl ReconfigureSlot {
 pub struct LinkSender {
     pub(crate) data: Sender<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,
+    /// Backpressure policy for this link. `Block` (the default) awaits
+    /// capacity; the leaky variants drop data frames under a full channel.
+    pub(crate) policy: LinkPolicy,
+    /// Cumulative count of frames this link has dropped, shared with the
+    /// runner so the drop total surfaces in `RunStats`. `None` until the
+    /// runner installs one (leaky links only).
+    pub(crate) dropped: Option<Arc<Mutex<u64>>>,
+}
+
+impl LinkSender {
+    /// Set this link's backpressure policy (the runner applies the edge's
+    /// `LinkPolicy` after building the channel). Only the `std` graph runner
+    /// wires per-edge policy today; `no_std` runners use the `Block` default.
+    #[cfg(feature = "std")]
+    pub(crate) fn set_policy(&mut self, policy: LinkPolicy) {
+        self.policy = policy;
+    }
+
+    /// Install the shared drop counter so leaky drops are observable.
+    #[cfg(feature = "std")]
+    pub(crate) fn set_drop_counter(&mut self, counter: Arc<Mutex<u64>>) {
+        self.dropped = Some(counter);
+    }
+
+    /// Record one dropped frame, if a counter is installed.
+    fn record_drop(&self) {
+        if let Some(c) = &self.dropped {
+            *c.lock() += 1;
+        }
+    }
 }
 
 /// Downstream end of a bidirectional inter-element link. Held by the
@@ -241,7 +283,12 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
     let (data_tx, data_rx) = bounded::<PipelinePacket>(capacity);
     let slot = ReconfigureSlot::default();
     (
-        LinkSender { data: data_tx, reconfigure: slot.clone() },
+        LinkSender {
+            data: data_tx,
+            reconfigure: slot.clone(),
+            policy: LinkPolicy::Block,
+            dropped: None,
+        },
         LinkReceiver { data: data_rx, reconfigure: slot },
     )
 }
@@ -350,6 +397,60 @@ impl OutputSink for SenderSink {
             // `packet` (resend under agreed caps, drop, etc.).
             if let Some(r) = self.link.reconfigure.take() {
                 return Ok(PushOutcome::Reconfigure(r));
+            }
+            // Leaky links drop *data frames* under a full channel rather than
+            // applying backpressure; control packets (caps / segment / flush /
+            // eos) are never dropped, they always block so the stream stays
+            // correct. A non-leaky link (the default) always blocks.
+            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+            if is_data && self.link.policy != LinkPolicy::Block {
+                match self.link.policy {
+                    LinkPolicy::DropNewest => match self.link.data.try_send(packet) {
+                        Ok(()) => {}
+                        // Channel full: drop the incoming frame.
+                        Err((_dropped, SendError::Full)) => self.link.record_drop(),
+                        Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
+                    },
+                    LinkPolicy::DropOldest => match self.link.data.try_send(packet) {
+                        Ok(()) => {}
+                        Err((returned, SendError::Full)) => {
+                            // Evict the oldest queued data frame to make room.
+                            // If only control packets are queued, fall back to
+                            // blocking rather than dropping a control packet.
+                            if self
+                                .link
+                                .data
+                                .evict_front_matching(|p| {
+                                    matches!(p, PipelinePacket::DataFrame(_))
+                                })
+                                .is_some()
+                            {
+                                self.link.record_drop();
+                                match self.link.data.try_send(returned) {
+                                    Ok(()) => {}
+                                    Err((_v, SendError::Closed)) => {
+                                        return Err(G2gError::Shutdown)
+                                    }
+                                    Err((_v, SendError::Full)) => {
+                                        unreachable!("a slot was just freed by eviction")
+                                    }
+                                }
+                            } else {
+                                self.link
+                                    .data
+                                    .send(returned)
+                                    .await
+                                    .map_err(|_| G2gError::Shutdown)?;
+                            }
+                        }
+                        Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
+                    },
+                    LinkPolicy::Block => unreachable!("guarded by policy != Block"),
+                }
+                return Ok(match self.link.reconfigure.take() {
+                    Some(r) => PushOutcome::Reconfigure(r),
+                    None => PushOutcome::Accepted,
+                });
             }
             match self.link.data.send(packet).await {
                 Ok(()) => match self.link.reconfigure.take() {
@@ -555,5 +656,72 @@ mod link_tests {
             got.push(f.sequence);
         }
         assert_eq!(got, [3], "after remove(), the odd frame passes");
+    }
+
+    fn drained_sequences(rx: &LinkReceiver) -> Vec<u64> {
+        let mut got = Vec::new();
+        while let Some(PipelinePacket::DataFrame(f)) = rx.try_recv() {
+            got.push(f.sequence);
+        }
+        got
+    }
+
+    #[test]
+    fn drop_newest_discards_incoming_when_full() {
+        let (mut tx, rx) = link(2);
+        tx.set_policy(LinkPolicy::DropNewest);
+        let counter = Arc::new(Mutex::new(0u64));
+        tx.set_drop_counter(counter.clone());
+        let mut sink = SenderSink::new(tx);
+
+        // Fill capacity, then overflow: the incoming frame is dropped, the
+        // queued ones survive.
+        for seq in 0..2 {
+            assert_eq!(run_to_ready(sink.push(frame_seq(seq))).unwrap(), PushOutcome::Accepted);
+        }
+        assert_eq!(run_to_ready(sink.push(frame_seq(2))).unwrap(), PushOutcome::Accepted);
+
+        assert_eq!(drained_sequences(&rx), [0, 1], "drop-newest keeps the oldest");
+        assert_eq!(*counter.lock(), 1);
+    }
+
+    #[test]
+    fn drop_oldest_evicts_front_when_full() {
+        let (mut tx, rx) = link(2);
+        tx.set_policy(LinkPolicy::DropOldest);
+        let counter = Arc::new(Mutex::new(0u64));
+        tx.set_drop_counter(counter.clone());
+        let mut sink = SenderSink::new(tx);
+
+        for seq in 0..2 {
+            run_to_ready(sink.push(frame_seq(seq))).unwrap();
+        }
+        // Overflow evicts the oldest (seq 0) and enqueues the newcomer (seq 2).
+        assert_eq!(run_to_ready(sink.push(frame_seq(2))).unwrap(), PushOutcome::Accepted);
+
+        assert_eq!(drained_sequences(&rx), [1, 2], "drop-oldest keeps the newest");
+        assert_eq!(*counter.lock(), 1);
+    }
+
+    #[test]
+    fn leaky_links_never_drop_control_packets() {
+        // A capacity-1 leaky link, filled with a data frame. A control packet
+        // must not be dropped: with the link full it blocks (Pending) instead.
+        let (mut tx, rx) = link(1);
+        tx.set_policy(LinkPolicy::DropNewest);
+        let mut sink = SenderSink::new(tx);
+        run_to_ready(sink.push(frame_seq(0))).unwrap();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = sink.push(PipelinePacket::CapsChanged(proposed_caps()));
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "a control packet blocks on a full leaky link, never dropped"
+        );
+        drop(fut);
+
+        // The queued data frame is untouched.
+        assert_eq!(drained_sequences(&rx), [0]);
     }
 }

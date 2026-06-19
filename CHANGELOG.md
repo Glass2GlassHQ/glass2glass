@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M86: leaky `LinkPolicy` (the g2g-native "queue") + drop observability
+
+- Implements the lossy backpressure modes that were declared but unwired:
+  `LinkPolicy::DropOldest` / `DropNewest` (DESIGN.md §4.5). g2g has no `queue`
+  *element* by design, the DAG runner already gives every edge a bounded
+  backpressuring channel and its own scheduling arm, and `LinkPolicy` per edge
+  is the "queue leaky=..." analog (DESIGN_TODO: "`LinkPolicy` per edge replaces
+  explicit `queue` element insertion"). Until now every link silently behaved as
+  `Block`; the leaky variants are now real.
+- `SenderSink::push` (the per-edge data-plane sink) gained the leaky path:
+  under a full channel, `DropNewest` discards the incoming frame and
+  `DropOldest` evicts the oldest queued frame (new `Sender::evict_front_matching`)
+  to make room. **Only `DataFrame`s are ever dropped** -- control packets
+  (`CapsChanged` / `Segment` / `Flush` / `Eos`) always block, so a leaky link
+  never corrupts the stream; if a full queue holds only control packets,
+  `DropOldest` falls back to blocking rather than dropping one.
+- Observability (the design's "drops are pipeline-observable, never silent"):
+  `RunStats::frames_dropped` reports the leaky-drop total, summed from a shared
+  per-run counter the runner installs on each leaky edge. `run_graph` reads each
+  edge's `LinkPolicy` (set via `graph.link_with`) and applies it.
+- Tests: three channel unit tests pin the exact semantics (`DropNewest` keeps
+  the oldest, `DropOldest` keeps the newest, control packets block on a full
+  leaky link and are never dropped) plus the drop counter; `m86_leaky` runs
+  `DropOldest` / `DropNewest` / `Block` links through `run_graph` and asserts the
+  conservation invariant (`consumed + dropped == emitted`, deterministic under
+  any scheduling) and that `Block` drops nothing. VERIFIED on the dev host:
+  `cargo test --workspace` green; `cargo clippy -p g2g-core --features
+  "std runtime multi-thread" --all-targets` clean; `cargo check -p g2g-core
+  --features runtime` (no_std runtime baseline) clean.
+- Note: only `run_graph` wires per-edge policy today; the `no_std` simple
+  runners use the `Block` default (leaky setters are `std`-gated). Wiring leaky
+  links for a `no_std` live-camera runner (the design's stated `DropOldest`
+  use case) is a follow-up.
+
 ### M85: QoS bus messages + late-frame dropping in `SyncSink`
 
 - Phase 2 observability. Adds the QoS leg of bus-message coverage (the
