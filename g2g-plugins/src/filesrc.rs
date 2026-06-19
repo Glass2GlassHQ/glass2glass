@@ -8,6 +8,12 @@
 //! that declaration to the solver. Chunks carry no timing (`pts_ns` 0):
 //! timing for a compressed stream is recovered downstream (parser/decoder),
 //! matching how a raw recording loses per-frame boundaries.
+//!
+//! For a text pipeline / registry build the caps come from the
+//! `bytestream-format` property instead (M112): `mpegts` / `matroska` name the
+//! container directly, and `auto` sniffs the file header at negotiation (the one
+//! case `FileSrc` does I/O before `run`) so `filesrc location=x.webm
+//! bytestream-format=auto ! matroskademux` works without naming the container.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -22,8 +28,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -32,10 +38,17 @@ use crate::filesink::io_err;
 /// that a parser downstream sees steady progress.
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
+/// Bytes read to sniff the container in `bytestream-format=auto` mode. Enough to
+/// confirm an MPEG-TS sync byte across several 188-byte packets.
+const SNIFF_LEN: usize = 4 * 188;
+
 #[derive(Debug)]
 pub struct FileSrc {
     path: PathBuf,
     caps: Caps,
+    /// `bytestream-format=auto`: sniff the container from the file header at
+    /// negotiation, replacing `caps` with the detected `ByteStream{..}`.
+    auto_detect: bool,
     chunk_size: usize,
     configured: bool,
 }
@@ -49,9 +62,35 @@ impl FileSrc {
         Self {
             path: path.into(),
             caps,
+            auto_detect: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
             configured: false,
         }
+    }
+
+    /// Resolve `bytestream-format=auto`: read the file header once and sniff the
+    /// container, replacing `caps`. A no-op unless auto mode is armed; idempotent
+    /// (clears the flag), so calling it from both negotiation entry points reads
+    /// the header at most once.
+    fn resolve_auto_caps(&mut self) -> Result<(), G2gError> {
+        if !self.auto_detect {
+            return Ok(());
+        }
+        let mut file = File::open(&self.path).map_err(io_err)?;
+        let mut header = alloc::vec![0u8; SNIFF_LEN];
+        let mut filled = 0;
+        while filled < header.len() {
+            let n = file.read(&mut header[filled..]).map_err(io_err)?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        header.truncate(filled);
+        let encoding = crate::typefind::sniff(&header).ok_or(G2gError::CapsMismatch)?;
+        self.caps = Caps::ByteStream { encoding };
+        self.auto_detect = false;
+        Ok(())
     }
 
     /// Bytes per emitted `DataFrame`. Clamped to 1 so a misconfigured zero
@@ -72,15 +111,23 @@ impl SourceLoop for FileSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        if let Err(e) = self.resolve_auto_caps() {
+            return core::future::ready(Err(e));
+        }
         core::future::ready(Ok(self.caps.clone()))
     }
 
-    /// Produces exactly the caller-declared caps. Synchronous override (no
-    /// I/O during negotiation; the file is opened in `run`).
+    /// Produces the declared caps (or, in `auto` mode, the sniffed container).
+    /// Synchronous override; auto mode reads the file header once here, otherwise
+    /// the file is opened in `run`.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))))
+        let result = match self.resolve_auto_caps() {
+            Ok(()) => Ok(CapsConstraint::Produces(CapsSet::one(self.caps.clone()))),
+            Err(e) => Err(e),
+        };
+        core::future::ready(result)
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -143,6 +190,17 @@ impl SourceLoop for FileSrc {
                 self.path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
+            "bytestream-format" => {
+                match value.as_str().ok_or(PropError::Type)? {
+                    "auto" => self.auto_detect = true,
+                    s => {
+                        let encoding = encoding_from_str(s).ok_or(PropError::Value)?;
+                        self.caps = Caps::ByteStream { encoding };
+                        self.auto_detect = false;
+                    }
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -150,12 +208,45 @@ impl SourceLoop for FileSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
+            "bytestream-format" => {
+                if self.auto_detect {
+                    Some(PropValue::Str("auto".into()))
+                } else if let Caps::ByteStream { encoding } = &self.caps {
+                    Some(PropValue::Str(encoding_to_str(*encoding).into()))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
 }
 
-/// `FileSrc`'s settable properties (M107): the input file path. The output caps
-/// are still set at construction (a raw byte stream has no self-describing type).
-static FILESRC_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("location", PropKind::Str, "input file path")];
+/// `FileSrc`'s settable properties (M107, M112): the input file path, and the
+/// container of a raw byte stream (so a text pipeline can feed a demuxer).
+static FILESRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("location", PropKind::Str, "input file path"),
+    PropertySpec::new(
+        "bytestream-format",
+        PropKind::Str,
+        "container of a raw byte stream: mpegts | matroska | auto (sniff the header)",
+    ),
+];
+
+/// Parse a `bytestream-format` value to an encoding (the `auto` value is handled
+/// separately in `set_property`).
+fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
+    match s {
+        "mpegts" | "ts" => Some(ByteStreamEncoding::MpegTs),
+        "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
+        _ => None,
+    }
+}
+
+/// The canonical `bytestream-format` string for an encoding.
+fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
+    match encoding {
+        ByteStreamEncoding::MpegTs => "mpegts",
+        ByteStreamEncoding::Matroska => "matroska",
+    }
+}

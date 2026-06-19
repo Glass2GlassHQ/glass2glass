@@ -116,6 +116,21 @@ fn demuxer_and_its_parsers_registered() {
 }
 
 #[test]
+fn filesrc_registered_with_bytestream_format() {
+    // M112: filesrc joins the registry; its bytestream-format property supplies
+    // the container a raw byte stream lacks, so it can feed a demuxer as text.
+    let reg = default_registry();
+    assert!(reg.inspect("filesrc").unwrap().contains("bytestream-format"));
+
+    let mut src = reg.make_source("filesrc").unwrap();
+    src.set_property("location", PropValue::Str("/tmp/x.webm".into())).unwrap();
+    src.set_property("bytestream-format", PropValue::Str("matroska".into())).unwrap();
+    assert_eq!(src.get_property("bytestream-format"), Some(PropValue::Str("matroska".into())));
+    src.set_property("bytestream-format", PropValue::Str("auto".into())).unwrap();
+    assert_eq!(src.get_property("bytestream-format"), Some(PropValue::Str("auto".into())));
+}
+
+#[test]
 fn matroska_demuxer_registered() {
     // M110: the MKV / WebM demuxer joins the registry with its stream selector.
     let reg = default_registry();

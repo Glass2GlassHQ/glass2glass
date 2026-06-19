@@ -10,15 +10,16 @@
 //! `std`-only (the `Registry` is). Feature-gated capture / decode / display
 //! elements (`v4l2src`, `ffmpeg`, `waylandsink`, ...) are not registered here yet;
 //! a caller adds them to the returned registry with `register_source` /
-//! `register_launch` as their features are enabled. `filesrc` is also omitted: it
-//! needs output caps at construction (a raw byte stream has no self-describing
-//! type), which the property bag cannot yet supply.
+//! `register_launch` as their features are enabled. `filesrc` is registered
+//! (M112): its `bytestream-format` property supplies the container type a raw
+//! byte stream lacks, so `filesrc location=x.ts bytestream-format=mpegts ! tsdemux`
+//! works as text.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::runtime::{LaunchFactory, Registry, SourceFactory};
-use g2g_core::{AudioFormat, Caps, Dim, Rate, RawVideoFormat};
+use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
 use crate::audioconvert::AudioConvert;
@@ -26,6 +27,7 @@ use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
+use crate::filesrc::FileSrc;
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
@@ -65,6 +67,13 @@ pub fn default_registry() -> Registry {
         "audiotestsrc",
         Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
         || Box::new(AudioTestSrc::new(48_000, 2, 440, 0)),
+    ));
+    // The output caps are a nominal default; the `bytestream-format` property
+    // (incl. `auto`) sets the real container per instance before negotiation.
+    reg.register_source(SourceFactory::new(
+        "filesrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(FileSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
     ));
 
     // Video transforms.

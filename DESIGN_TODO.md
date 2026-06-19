@@ -25,14 +25,14 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
   discovery; MJPEG-mode UVC + format-flexible `v4l2src`
   negotiation (it fixes YUYV today). `uridecodebin` follow-ups: more schemes as
   sources land, and an `http(s)://` handler once `HttpSrc` exists.
-- **`HttpSrc` needs a byte-stream type first.** A souphttpsrc-equivalent
-  produces an untyped byte stream, but `Caps` today is only
-  `CompressedVideo`/`RawVideo`/`Audio`/`Tensor` — there is no byte-stream
-  variant and nothing consumes one (mp4src reads a *path*, not a stream). So
-  `HttpSrc` is dead weight until either (a) a `Caps::ByteStream` variant + a
-  byte-stream demuxer (HLS/DASH playlist+segment, or a streaming mp4 demux)
-  lands, or (b) it is built specifically as the fetch layer of an HLS/DASH
-  element. Build it alongside that consumer, not before.
+- **`HttpSrc` is unblocked now (byte-stream type + consumers exist).** A
+  souphttpsrc-equivalent produces a byte stream, which used to have no `Caps`
+  variant and nothing to consume it. M108-M112 fixed that: `Caps::ByteStream`,
+  the `tsdemux` / `matroskademux` demuxers, and the `filesrc` `bytestream-format`
+  (+ `typefind`) pattern. So `HttpSrc` can be built mirroring `FileSrc` (fetch
+  bytes via `reqwest` / `hyper`, declare the container by property or sniff),
+  then wired into `uridecodebin` as the `http(s)://` handler. Still pairs with an
+  HLS/DASH element but is no longer blocked on one.
 - Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
   runner (the design's stated `DropOldest` use case); the leaky setters are
   `std`-gated today since only `run_graph` configures per-edge policy.
@@ -198,10 +198,13 @@ Production-shape needs that block specific real-world use cases.
   feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
   `waylandsink`, ...) and register them in `default_registry` per feature;
   `gst-launch` branching (`tee` / named pads) and caps-filter string syntax (needs
-  a `Caps` text grammar + `CapsFilter` as a property-bearing element, and a
-  `filesrc` that can take its caps that way); a value grammar for spaces /
-  enums-as-named-flags; and a GUI/tooling introspection surface beyond the text
-  dump.
+  a `Caps` text grammar + `CapsFilter` as a property-bearing element); a value
+  grammar for spaces / enums-as-named-flags; and a GUI/tooling introspection
+  surface beyond the text dump. **Done (M112):** `filesrc` now takes its
+  byte-stream caps via a `bytestream-format` property (`mpegts` / `matroska` /
+  `auto`, the last sniffing the header via `typefind`) and is registered, so a
+  text pipeline feeds a demuxer from a file; the general `Caps` text grammar (for
+  compressed / raw caps) is still owed.
 
 ### Medium / niche
 

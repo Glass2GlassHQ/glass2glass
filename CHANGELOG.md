@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M112: filesrc byte-stream caps + content typefind
+
+- **`typefind::sniff` (no_std).** Guesses a `ByteStreamEncoding` from a stream's
+  leading bytes (EBML magic -> Matroska; the MPEG-TS sync byte recurring at the
+  188-byte stride -> MpegTs), the `typefind` analog. The typed `Caps` model has
+  no "untyped bytes" variant for a standalone content-detect element to sit
+  behind, so the sniff feeds a source's caps choice instead.
+- **`FileSrc` `bytestream-format` property.** Supplies the container a raw byte
+  stream lacks: `mpegts` / `matroska` name it directly; `auto` reads the file
+  header at negotiation and sniffs it (the one case `FileSrc` does I/O before
+  `run`). Lets a text pipeline feed a demuxer from a file.
+- **`filesrc` in `default_registry`.** Registered as a source, so
+  `filesrc location=x.ts bytestream-format=mpegts ! tsdemux ! h264parse ! fakesink`
+  and `filesrc location=x.webm bytestream-format=auto ! matroskademux stream=vp9 ! fakesink`
+  build and run from `parse_launch` (closes the property-system "a filesrc that
+  can take its caps that way" follow-up).
+- Tested: the sniffer (unit), the property round-trip through the registry, and
+  three end-to-end `parse_launch` runs (explicit TS, auto-sniffed TS, auto-sniffed
+  WebM) through `run_graph`.
+
 ### M111: Multi-codec ffmpeg video decoder (VP8 / VP9 / AV1 / H.265)
 
 - **`FfmpegVideoDec` (Linux, `ffmpeg` feature).** Generalized the H.264-only
