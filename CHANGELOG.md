@@ -5,6 +5,46 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M83a: auto-plug search + element registry (`decodebin` foundation)
+
+- First slice of the last Phase 1 lifecycle item (auto-plug / `decodebin`).
+  Splits cleanly along feature lines: the search is `runtime` (no_std), the
+  factory/registry layer is `std`.
+- `g2g-core::runtime::autoplug` (feature `runtime`): `ElementDesc` (a name + its
+  static pad templates) and `find_chain(descs, input, target, max_depth)` — a
+  breadth-first search over caps states that composes element pad templates into
+  the shortest chain converting an input caps to one satisfying a shape
+  predicate (`is_raw_video` is the canonical `decodebin` target). Acceptance at
+  each hop reuses the existing negotiation solver via `pad_link` (an `Unfixable`
+  link counts as compatible, matching `types_can_link`); an element is never
+  reused on a path, so same-shape parsers (H.264 -> H.264) don't loop. The
+  search picks element *types* only; geometry / framerate stay open and fixate
+  later at instance negotiation.
+- `Registry` + `ElementFactory` (feature `std`): a runtime collection pairing
+  each descriptor with a parameterless constructor (`ElementFactory::of::<E>`
+  pulls templates from the `PadTemplates` trait). `Registry::autoplug` runs the
+  search and instantiates the chain as boxed `DynAsyncElement`s ready to splice
+  onto `run_graph` as a sub-graph of transforms; `autoplug_names` reports the
+  chosen chain without building it.
+- Tests: five `g2g-core` unit tests over synthetic descriptors (single decoder
+  for H.264 -> raw; empty chain when already raw; forced two-element chain to a
+  specific format; no route with only a parser; `max_depth` honored) and
+  `m83_autoplug` (registry search over the real `H264Parse` plus a decoder
+  descriptor by name; parser-only registry reports no route; and an
+  end-to-end run where an auto-plugged `VideoConvert` is spliced between a real
+  source and sink and flows frames through `run_graph`). VERIFIED on the dev
+  host: `cargo test --workspace` green (180 plugins + core unit tests, 0
+  failed); `cargo clippy -p g2g-core --features "std runtime multi-thread"
+  --all-targets` clean; default `cargo check --workspace` (no_std) builds.
+- Still open (M83b, the rest of auto-plug): factories currently take no
+  construction parameters (a converter bakes its target format into the
+  registered closure), so target-derived element configuration is owed; a
+  `decodebin`-style convenience that splices the chain between an arbitrary
+  source and sink (rather than the caller wiring the `Graph`); wiring real
+  decoder factories (`PadTemplates` on `FfmpegDec` / `VaapiDec`) and a
+  hardware-backed end-to-end decode test; and a `uridecodebin`-equivalent
+  source-selection layer on top.
+
 ### M82: end-to-end flush seek (`SeekController` + seek-aware source)
 
 - Seek works end-to-end. New `SeekController` (`g2g-core::runtime`, feature

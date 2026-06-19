@@ -10,6 +10,7 @@
 //! M4 will replace the `spin::Mutex`-backed channel with a lock-free MPMC
 //! implementation.
 
+mod autoplug;
 mod channel;
 mod coordinator;
 mod join;
@@ -35,6 +36,7 @@ pub use runner::{
     run_source_transform_sink, run_source_transform_sink_with_bus, LatencyProfile, LinkCapacity,
     RunStats, SourceLoop,
 };
+pub use autoplug::{find_chain, is_raw_video, ElementDesc};
 pub use seek::SeekController;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;
@@ -51,3 +53,6 @@ pub use fanin::{
 
 #[cfg(feature = "std")]
 pub use graph_runner::{run_graph, run_graph_stateful, GraphNode, GraphNodeRef};
+
+#[cfg(feature = "std")]
+pub use autoplug::{ElementFactory, Registry};
