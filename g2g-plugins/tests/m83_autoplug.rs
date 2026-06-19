@@ -12,7 +12,8 @@
 //!   "decodebin returns a sub-graph" payoff, for a converter chain).
 
 use g2g_core::runtime::{
-    is_raw_video, run_graph, ElementFactory, GraphNode, GraphNodeRef, Registry, RunStats,
+    declared_source_caps, is_raw_video, run_graph, ElementFactory, GraphNode, GraphNodeRef,
+    PlaybinError, Registry, RunStats, SourceFactory,
 };
 use g2g_core::{
     Caps, CapsSet, Dim, Graph, PadTemplate, PipelineClock, Rate, RawVideoFormat, VideoCodec,
@@ -146,6 +147,34 @@ async fn decodebin_splices_chain_between_source_and_sink() {
     assert_eq!(stats.frames_consumed, 4);
 }
 
+#[tokio::test]
+async fn build_playbin_assembles_source_chain_and_sink() {
+    // The playbin convenience: name a registered source + a sink, get a runnable
+    // graph with the decode/convert chain auto-plugged in between.
+    let mut reg = Registry::new();
+    reg.register(videoconvert_factory());
+    // VideoTestSrc declares RGBA on its source pad; take that as the input caps.
+    let src_caps =
+        declared_source_caps::<VideoTestSrc>().expect("VideoTestSrc declares source caps");
+    reg.register_source(SourceFactory::new("videotestsrc", src_caps, || {
+        Box::new(VideoTestSrc::new(8, 8, 30, 4))
+    }));
+
+    let g = reg
+        .build_playbin("videotestsrc", FakeSink::new(), &is_nv12, 4)
+        .expect("playbin assembles source -> videoconvert -> sink");
+    let stats: RunStats = run_graph(g, &NullClock, 4).await.expect("assembled graph runs");
+    assert_eq!(stats.frames_emitted, 4);
+    assert_eq!(stats.frames_consumed, 4);
+}
+
+#[test]
+fn build_playbin_rejects_unknown_source() {
+    let reg = Registry::new();
+    let err = reg.build_playbin("no-such-source", FakeSink::new(), &is_raw_video, 4).unwrap_err();
+    assert!(matches!(err, PlaybinError::UnknownSource));
+}
+
 /// With the real `ffmpeg` decoder registered, the search routes H.264 to raw
 /// through it. Compile + run only under the `ffmpeg` feature (it reads the
 /// decoder's pad templates; no decode is performed, so no media is needed).
@@ -161,4 +190,21 @@ fn registry_finds_real_ffmpeg_decoder_for_h264() {
         .autoplug_names(&h264(Dim::Any), &is_raw_video, 4)
         .expect("ffmpegdec bridges H.264 to raw video");
     assert_eq!(chain, Vec::from(["ffmpegdec"]));
+}
+
+/// The VAAPI H.264 decoder's templates route H.264 to raw NV12. Compile + run
+/// only under the `vaapi` feature; reads templates only, no decode (so no GPU /
+/// libva surface is touched, which the AMD path can't allocate anyway).
+#[cfg(feature = "vaapi")]
+#[test]
+fn registry_finds_real_vaapi_decoder_for_h264() {
+    use g2g_plugins::vaapidec::VaapiH264Dec;
+    let mut reg = Registry::new();
+    reg.register(ElementFactory::of::<VaapiH264Dec>("vaapih264dec", |_caps| {
+        Box::new(VaapiH264Dec::new())
+    }));
+    let chain = reg
+        .autoplug_names(&h264(Dim::Any), &is_raw_video, 4)
+        .expect("vaapih264dec bridges H.264 to raw video");
+    assert_eq!(chain, Vec::from(["vaapih264dec"]));
 }

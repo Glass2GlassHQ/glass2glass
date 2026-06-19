@@ -5,6 +5,41 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M83c: source registry + `playbin`-style assembly + VAAPI decoder templates
+
+- Completes the auto-plug assembly story: the registry now knows graph *roots*
+  (sources), not just the transforms/sinks the search composes, so a caller can
+  go from "name a source + a sink" to a runnable graph in one call.
+- `SourceFactory` + `Registry::register_source` (feature `std`): a source is the
+  root of a graph (no input pad), so it carries its declared output caps
+  directly rather than being matched into a chain. `declared_source_caps::<S>()`
+  pulls those caps from a `PadTemplates` type's source template (the first
+  alternative). g2g sources declare caps statically, so this is the
+  `typefind`-free analog of sniffing the byte stream.
+- `Registry::build_playbin(source_name, sink, target, max_depth)` (new
+  `PlaybinError`): the `playbin`-equivalent. Looks up the source, takes its
+  declared caps as the `decodebin` input, and assembles
+  `source -> auto-plugged chain -> sink` into a `Graph<GraphNode>` ready for
+  `run_graph`. The "just play this" entry point, minus the URI-scheme front door
+  (the caller names the source rather than passing `uri=`).
+- `VaapiH264Dec` implements `PadTemplates` (H.264 in, NV12 out), so the Linux
+  hardware decoder is auto-pluggable alongside the `FfmpegH264Dec` software path.
+- Tests: `m83_autoplug` gains a `build_playbin` assembly-and-run case
+  (`VideoTestSrc` -> auto-plugged `VideoConvert` -> `FakeSink`, frames flow
+  through `run_graph`), an unknown-source rejection, and a `vaapi`-gated case
+  proving the search routes H.264 -> raw through the real `VaapiH264Dec`
+  (templates only, no GPU surface). VERIFIED on the dev host: `cargo test
+  --workspace` green; `cargo test -p g2g-plugins --features "vaapi multi-thread"
+  --test m83_autoplug` green (7/7); `cargo check -p g2g-plugins --features vaapi`
+  clean; `cargo clippy -p g2g-core --features "std runtime multi-thread"
+  --all-targets` clean.
+- Still open (auto-plug tail): a `uridecodebin`-equivalent URI-scheme front door
+  (map `rtsp://` / `file://` to a registered source); richer source/element
+  construction parameters (geometry, device, file path, beyond the output caps
+  the builder receives, so real parameterized sources can be registered); H.265
+  + other decoder `PadTemplates`; and a hardware-backed end-to-end
+  decode-through-`decodebin` run.
+
 ### M83b: caps-aware factories + `decodebin` splice + real decoder templates
 
 - Builds on M83a. Three things land: the search now reports its per-hop caps

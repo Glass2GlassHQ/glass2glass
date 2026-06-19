@@ -26,15 +26,16 @@ the previous.
    `GstSegment`-equivalent running/stream/base time, reverse + trick play,
    segment seeks. Builds on the existing `PipelinePacket::Flush` and the state
    machine.
-3. **Auto-plug / element registry / `decodebin`-equivalent.** M83a + M83b
+3. **Auto-plug / element registry / `decodebin`-equivalent.** M83a-c
    DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9): runtime `Registry`
-   over the pad-template metadata, the breadth-first `find_chain` search, and
-   `Registry::decodebin` splicing the result onto `run_graph`; `FfmpegH264Dec`
-   publishes `PadTemplates`. Remaining (M83c+): a `uridecodebin`-equivalent
-   source-selection layer; richer factory construction params (geometry /
-   device, beyond the chosen output caps); `PadTemplates` on the other decoders
-   (`VaapiDec`, ...); and a hardware-backed end-to-end decode-through-`decodebin`
-   run.
+   over the pad-template metadata, the breadth-first `find_chain` search,
+   `Registry::decodebin` splicing the result onto `run_graph`, and
+   `SourceFactory` / `build_playbin` assembling `source -> chain -> sink`;
+   `FfmpegH264Dec` + `VaapiH264Dec` publish `PadTemplates`. Remaining: a
+   `uridecodebin`-equivalent URI front door; richer factory construction params
+   (geometry / device / file path, beyond the chosen output caps); `PadTemplates`
+   on the other decoders (H.265, ...); and a hardware-backed end-to-end
+   decode-through-`decodebin` run.
 
 ### Phase 2 - Breadth + observability (~7-9 sessions, mostly parallelizable).
 
@@ -74,22 +75,24 @@ below remain, and are the Phase 1 lifecycle spine in the roadmap above.
 - **Pipeline state machine, then Seek, then Auto-plug** — sequenced in the
   Phase 1 roadmap. Detail for each:
 
-- **Auto-plug / element registry / `decodebin`-equivalent.** M83a + M83b
+- **Auto-plug / element registry / `decodebin`-equivalent.** M83a-c
   DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9). The runtime
   `Registry` enumerates registered element types over the `PadTemplates`
   metadata; `find_chain` is the breadth-first search ("compose pad
   templates from this input down to raw"); `Registry::decodebin` returns
-  the chain spliced into a `Graph<GraphNode>` onto `run_graph`. A user no
-  longer hand-picks the decoder, *given a registry*. **Remaining for the
-  full `playbin uri=...` experience (M83c+):** a `uridecodebin`-equivalent
-  that maps a URI scheme to a source element and reads its declared output
-  caps to feed `decodebin` (g2g sources declare caps via pad templates /
-  `caps_constraint`, so no byte-stream `typefind` is needed); richer
-  factory construction parameters (geometry / device selection, beyond the
-  per-hop output caps the builder already receives); `PadTemplates` on the
-  remaining decoders (`VaapiDec`, H.265, ...); and a hardware-backed
-  end-to-end decode-through-`decodebin` run (the `ffmpeg` test today reads
-  templates only and decodes nothing).
+  the chain spliced into a `Graph<GraphNode>` onto `run_graph`;
+  `SourceFactory` / `register_source` / `build_playbin` assemble
+  `source -> chain -> sink` from a source's declared caps; `FfmpegH264Dec`
+  and `VaapiH264Dec` publish `PadTemplates`. A user no longer hand-picks
+  the decoder, *given a registry*. **Remaining for the full
+  `playbin uri=...` experience:** the URI-scheme front door
+  (`uridecodebin`: map `rtsp://` / `file://` to a registered source);
+  richer source/element construction parameters (geometry / device / file
+  path, beyond the output caps the builder receives, so real parameterized
+  sources can be registered); `PadTemplates` on the remaining decoders
+  (H.265, ...); and a hardware-backed end-to-end decode-through-`decodebin`
+  run (the `ffmpeg` / `vaapi` tests today read templates only and decode
+  nothing).
 
 - **Pipeline state machine (NULL → READY → PAUSED → PLAYING).** 3–4
   sessions. No formal state transitions, no preroll (sink rendering

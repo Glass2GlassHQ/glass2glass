@@ -75,7 +75,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
+    VideoCodec, RawVideoFormat,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -263,6 +264,27 @@ impl VaapiH264Dec {
                 .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?;
         }
         self.drain_events(decoded)
+    }
+}
+
+impl PadTemplates for VaapiH264Dec {
+    /// Static superset for auto-plug: H.264 in (any geometry), raw NV12 out
+    /// (the only format the VAAPI path produces, copied from the GBM surface).
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
+            PadTemplate::source(CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
+        ])
     }
 }
 

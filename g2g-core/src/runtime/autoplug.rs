@@ -160,10 +160,10 @@ mod factory {
     use super::*;
     use alloc::boxed::Box;
 
-    use crate::element::DynAsyncElement;
+    use crate::element::{AsyncElement, DynAsyncElement};
     use crate::graph::{Graph, GraphError, NodeId, PadId};
-    use crate::pad_template::PadTemplates;
-    use crate::runtime::{GraphNode, GraphNodeRef};
+    use crate::pad_template::{PadCaps, PadDirection, PadTemplates};
+    use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
     /// A registered element type: its autoplug metadata plus a constructor
     /// producing a boxed transform/sink for the graph runner. The constructor
@@ -224,6 +224,61 @@ mod factory {
         }
     }
 
+    /// The representative caps a `PadTemplates` type declares on its source pad:
+    /// the first alternative of its first source template, or `None` if it has
+    /// no source pad or only a wildcard one. This is what a g2g source "knows it
+    /// produces" without byte-stream `typefind`, the input an auto-plugged
+    /// decode chain starts from.
+    pub fn declared_source_caps<S: PadTemplates>() -> Option<Caps> {
+        match S::pad_template(PadDirection::Source)?.caps {
+            PadCaps::Fixed(set) => set.alternatives().first().cloned(),
+            PadCaps::Any => None,
+        }
+    }
+
+    /// A registered source element: its declared output caps and a constructor.
+    /// Unlike [`ElementFactory`] (transforms / sinks, which the search composes),
+    /// a source is the *root* of a graph, so it carries its output caps directly
+    /// rather than being matched into a chain. Use [`declared_source_caps`] to
+    /// derive the caps from a [`PadTemplates`] type.
+    pub struct SourceFactory {
+        name: &'static str,
+        output: Caps,
+        build: fn() -> Box<dyn DynSourceLoop>,
+    }
+
+    impl SourceFactory {
+        /// Register a source by name, its declared output caps, and constructor.
+        pub fn new(name: &'static str, output: Caps, build: fn() -> Box<dyn DynSourceLoop>) -> Self {
+            Self { name, output, build }
+        }
+    }
+
+    impl core::fmt::Debug for SourceFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("SourceFactory")
+                .field("name", &self.name)
+                .field("output", &self.output)
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// Why [`Registry::build_playbin`] could not assemble a graph.
+    #[derive(Debug)]
+    pub enum PlaybinError {
+        /// No source is registered under the requested name.
+        UnknownSource,
+        /// The source's caps could not be decoded to the target (wraps the
+        /// `decodebin` failure: no chain, or a graph link error).
+        Decode(DecodebinError),
+    }
+
+    impl From<DecodebinError> for PlaybinError {
+        fn from(e: DecodebinError) -> Self {
+            PlaybinError::Decode(e)
+        }
+    }
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory").field("name", &self.desc.name).finish_non_exhaustive()
@@ -238,6 +293,7 @@ mod factory {
     #[derive(Debug, Default)]
     pub struct Registry {
         factories: Vec<ElementFactory>,
+        sources: Vec<SourceFactory>,
     }
 
     impl Registry {
@@ -246,9 +302,17 @@ mod factory {
             Self::default()
         }
 
-        /// Register one element factory, returning `&mut self` to chain calls.
+        /// Register one element factory (a transform / sink the search composes
+        /// into chains), returning `&mut self` to chain calls.
         pub fn register(&mut self, factory: ElementFactory) -> &mut Self {
             self.factories.push(factory);
+            self
+        }
+
+        /// Register one source factory (a graph root for [`build_playbin`]),
+        /// returning `&mut self` to chain calls.
+        pub fn register_source(&mut self, source: SourceFactory) -> &mut Self {
+            self.sources.push(source);
             self
         }
 
@@ -328,11 +392,39 @@ mod factory {
             graph.link(prev, to)?;
             Ok(inserted)
         }
+
+        /// `playbin`-equivalent: assemble a complete runnable graph from a
+        /// registered source name and a sink, auto-plugging the decode chain in
+        /// between. Looks up the source factory, takes its declared output caps
+        /// as the `decodebin` input, and returns `source -> chain -> sink` ready
+        /// for [`run_graph`](crate::runtime::run_graph). This is the "just play
+        /// this" entry point, minus the URI-scheme front door (the caller still
+        /// names the source rather than passing a `uri=`).
+        pub fn build_playbin<Sk: AsyncElement + 'static>(
+            &self,
+            source_name: &str,
+            sink: Sk,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+        ) -> Result<Graph<GraphNode>, PlaybinError> {
+            let source = self
+                .sources
+                .iter()
+                .find(|s| s.name == source_name)
+                .ok_or(PlaybinError::UnknownSource)?;
+            let mut graph: Graph<GraphNode> = Graph::new();
+            let src = graph.add_source(GraphNodeRef::Source((source.build)()));
+            let snk = graph.add_sink(GraphNodeRef::element(sink));
+            self.decodebin(&mut graph, src, snk, &source.output, target, max_depth)?;
+            Ok(graph)
+        }
     }
 }
 
 #[cfg(feature = "std")]
-pub use factory::{DecodebinError, ElementFactory, Registry};
+pub use factory::{
+    declared_source_caps, DecodebinError, ElementFactory, PlaybinError, Registry, SourceFactory,
+};
 
 #[cfg(test)]
 mod tests {

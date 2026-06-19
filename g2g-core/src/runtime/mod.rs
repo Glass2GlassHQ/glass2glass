@@ -55,4 +55,6 @@ pub use fanin::{
 pub use graph_runner::{run_graph, run_graph_stateful, GraphNode, GraphNodeRef};
 
 #[cfg(feature = "std")]
-pub use autoplug::{DecodebinError, ElementFactory, Registry};
+pub use autoplug::{
+    declared_source_caps, DecodebinError, ElementFactory, PlaybinError, Registry, SourceFactory,
+};
