@@ -1151,9 +1151,12 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
                 timing: frame.timing,
                 sequence: frame.sequence,
-                // Tee clone: deep-meta propagation (Arc/COW) is deferred; a
-                // cloned frame starts with an empty metadata set for now.
-                meta: Default::default(),
+                // Tee clone: per-frame metadata is shared with the original by
+                // Arc refcount (cheap), so a detector branch and a video branch
+                // both carry the same AnalyticsMeta. A branch that mutates it
+                // pays a copy-on-write deep copy then (FrameMetaSet::get_mut),
+                // so the branches never alias. A ZST no-op when `metadata` is off.
+                meta: frame.meta.clone(),
             })
         }
     })
@@ -1211,5 +1214,29 @@ mod tests {
             try_clone_packet(&PipelinePacket::Flush),
             Ok(PipelinePacket::Flush)
         ));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn tee_clone_carries_analytics_meta() {
+        use crate::meta::{AnalyticsMeta, BBox, ObjectDetection};
+        // A detector attaches analytics; the tee clone must carry it onto the
+        // sibling (video) branch so a downstream overlay can read it.
+        let PipelinePacket::DataFrame(mut original) = system_frame(&[0, 0, 0, 0], 1) else {
+            panic!("data frame");
+        };
+        let mut a = AnalyticsMeta::new();
+        a.add_detection(ObjectDetection {
+            bbox: BBox { x: 0.1, y: 0.1, w: 0.2, h: 0.2 },
+            label: 5,
+            confidence: 0.9,
+        });
+        original.meta.attach(a);
+
+        let cloned = try_clone_packet(&PipelinePacket::DataFrame(original)).expect("clone");
+        let PipelinePacket::DataFrame(b) = cloned else { panic!("data frame") };
+        let meta = b.meta.get::<AnalyticsMeta>().expect("meta carried to tee branch");
+        assert_eq!(meta.detections().count(), 1);
+        assert_eq!(meta.detections().next().unwrap().label, 5);
     }
 }

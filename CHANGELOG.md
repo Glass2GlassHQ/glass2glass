@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M100: Analytics metadata through fan-out (Arc/COW)
+
+- **Shareable per-frame metadata.** `FrameMetaSet` now holds each `FrameMeta` as
+  an `Arc<dyn FrameMeta>` instead of a `Box`, and is `Clone`. A fan-out (tee)
+  clone shares the metadata by refcount rather than dropping it: `try_clone_packet`
+  (`g2g-core` graph runner) carries `frame.meta.clone()`, so a detector branch and
+  a video branch both observe the same `AnalyticsMeta`. The `decode -> tee ->
+  {detect, video} -> overlay -> display` diamond can now land detections on the
+  display frame.
+- **Copy-on-write on mutation.** A new `FrameMeta::clone_box` (GstMeta `copy_func`
+  analog) backs `FrameMetaSet::get_mut`: if an entry is shared it is deep-copied
+  before the mutable borrow, so a branch that edits its analytics never leaks the
+  change to the sibling branch. Uniquely-owned entries mutate in place (no copy).
+- Still ZST when the `metadata` feature is off (the clone is a no-op unit copy),
+  so the no_std/RTOS baseline is unchanged.
+- Tested: clone shares then `get_mut` copies-on-write without aliasing (core meta);
+  `try_clone_packet` carries `AnalyticsMeta` to the tee branch (graph runner).
+
 ### M98-M99: Per-frame metadata system + detection post-processing (first-class ML)
 
 - **M98 metadata system (`g2g-core::meta`, `metadata` feature).** Builds out the

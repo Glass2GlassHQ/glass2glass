@@ -40,6 +40,7 @@ pub use on::*;
 #[cfg(feature = "metadata")]
 mod on {
     use alloc::boxed::Box;
+    use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::any::Any;
 
@@ -72,6 +73,11 @@ mod on {
     pub trait FrameMeta: core::fmt::Debug + Send + Sync {
         fn as_any(&self) -> &dyn Any;
         fn as_any_mut(&mut self) -> &mut dyn Any;
+        /// A boxed deep copy of this meta, the GstMeta `copy_func` analog. Backs
+        /// the copy-on-write of a shared meta when a tee branch mutates it (see
+        /// [`FrameMetaSet::get_mut`]); each `FrameMeta` impl is its own concrete
+        /// type, so the duplication can only be expressed on the trait.
+        fn clone_box(&self) -> Box<dyn FrameMeta>;
         /// How this meta survives `transform`. Default keeps it through
         /// everything; override to drop on transforms that invalidate it.
         fn propagate(&self, _transform: Transform) -> Propagation {
@@ -81,8 +87,14 @@ mod on {
 
     /// A list of typed [`FrameMeta`] attached to a frame. Empty (no allocation)
     /// on a freshly constructed frame.
-    #[derive(Debug, Default)]
-    pub struct FrameMetaSet(Vec<Box<dyn FrameMeta>>);
+    ///
+    /// Each entry is an [`Arc`] so a fan-out (tee) clone shares the metadata by
+    /// refcount instead of deep-copying it (cheap, and the analytics graph is
+    /// identical on both branches). A branch that mutates one entry pays a
+    /// copy-on-write deep copy only then (see [`get_mut`](Self::get_mut)), so the
+    /// other branch never observes the change.
+    #[derive(Debug, Default, Clone)]
+    pub struct FrameMetaSet(Vec<Arc<dyn FrameMeta>>);
 
     impl FrameMetaSet {
         /// An empty metadata set with no backing allocation.
@@ -93,7 +105,7 @@ mod on {
 
         /// Attach one piece of metadata.
         pub fn attach<T: FrameMeta + 'static>(&mut self, meta: T) {
-            self.0.push(Box::new(meta));
+            self.0.push(Arc::new(meta));
         }
 
         /// The first attached meta of type `T`, if any.
@@ -102,13 +114,26 @@ mod on {
         }
 
         /// Mutable access to the first attached meta of type `T`, if any.
+        ///
+        /// Copy-on-write: if the entry is shared with another frame (a tee
+        /// branch holds the same [`Arc`]), it is first deep-copied via
+        /// [`FrameMeta::clone_box`] so this mutation stays private to this frame.
+        /// When the entry is uniquely owned no copy is made.
         pub fn get_mut<T: FrameMeta + 'static>(&mut self) -> Option<&mut T> {
-            self.0.iter_mut().find_map(|m| m.as_any_mut().downcast_mut::<T>())
+            let idx = self.0.iter().position(|m| m.as_any().is::<T>())?;
+            // Ensure unique ownership before handing out a mutable reference.
+            if Arc::get_mut(&mut self.0[idx]).is_none() {
+                self.0[idx] = Arc::from(self.0[idx].clone_box());
+            }
+            Arc::get_mut(&mut self.0[idx])
+                .expect("entry is unique after the COW above")
+                .as_any_mut()
+                .downcast_mut::<T>()
         }
 
         /// Iterate every attached meta as a trait object.
         pub fn iter(&self) -> impl Iterator<Item = &dyn FrameMeta> {
-            self.0.iter().map(|b| b.as_ref())
+            self.0.iter().map(|m| m.as_ref())
         }
 
         pub fn len(&self) -> usize {
@@ -252,6 +277,9 @@ mod on {
         fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
         /// Normalized coordinates survive a scale / crop / copy unchanged; a
         /// re-encode to a compressed codec discards pixel-derived analytics.
         fn propagate(&self, transform: Transform) -> Propagation {
@@ -312,6 +340,32 @@ mod tests {
         a.relate(d, c, RelationKind::Classifies);
         assert_eq!(a.relations.len(), 1);
         assert_eq!(a.relations[0], Relation { from: d, to: c, kind: RelationKind::Classifies });
+    }
+
+    #[test]
+    fn clone_shares_then_get_mut_copies_on_write() {
+        // A tee clone shares the analytics graph by Arc; mutating one side must
+        // not leak into the other (copy-on-write deep copy on get_mut).
+        let mut a = FrameMetaSet::new();
+        a.attach({
+            let mut m = AnalyticsMeta::new();
+            m.add_detection(det(0.1, 0.1, 0.2, 0.2, 7, 0.9));
+            m
+        });
+        let mut b = a.clone();
+        assert_eq!(a.get::<AnalyticsMeta>().unwrap().nodes.len(), 1);
+        assert_eq!(b.get::<AnalyticsMeta>().unwrap().nodes.len(), 1);
+
+        // Mutate the clone: COW splits the shared entry.
+        b.get_mut::<AnalyticsMeta>()
+            .unwrap()
+            .add_detection(det(0.5, 0.5, 0.1, 0.1, 3, 0.8));
+        assert_eq!(b.get::<AnalyticsMeta>().unwrap().nodes.len(), 2, "clone mutated");
+        assert_eq!(
+            a.get::<AnalyticsMeta>().unwrap().nodes.len(),
+            1,
+            "original untouched after copy-on-write"
+        );
     }
 
     #[test]
