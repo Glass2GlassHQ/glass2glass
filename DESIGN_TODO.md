@@ -26,9 +26,15 @@ the previous.
    `GstSegment`-equivalent running/stream/base time, reverse + trick play,
    segment seeks. Builds on the existing `PipelinePacket::Flush` and the state
    machine.
-3. **Auto-plug / element registry / `decodebin`-equivalent.** 4-5 sessions.
-   Runtime enumeration of the pad-template metadata we already have, the search
-   algorithm, returns a sub-graph onto the finished `run_graph`.
+3. **Auto-plug / element registry / `decodebin`-equivalent.** M83a + M83b
+   DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9): runtime `Registry`
+   over the pad-template metadata, the breadth-first `find_chain` search, and
+   `Registry::decodebin` splicing the result onto `run_graph`; `FfmpegH264Dec`
+   publishes `PadTemplates`. Remaining (M83c+): a `uridecodebin`-equivalent
+   source-selection layer; richer factory construction params (geometry /
+   device, beyond the chosen output caps); `PadTemplates` on the other decoders
+   (`VaapiDec`, ...); and a hardware-backed end-to-end decode-through-`decodebin`
+   run.
 
 ### Phase 2 - Breadth + observability (~7-9 sessions, mostly parallelizable).
 
@@ -68,16 +74,22 @@ below remain, and are the Phase 1 lifecycle spine in the roadmap above.
 - **Pipeline state machine, then Seek, then Auto-plug** — sequenced in the
   Phase 1 roadmap. Detail for each:
 
-- **Auto-plug / element registry / `decodebin`-equivalent.** 4–5
-  sessions. We have static pad templates as type-level metadata (the
-  `PadTemplates` trait, §4.13.7) but no runtime registry to enumerate
-  them, no search algorithm, no `decodebin`-equivalent that takes input
-  caps and walks "find a chain of registered elements whose pad
-  templates compose to raw video." A user has to know their stream is
-  H.264 vs H.265 and pick the decoder by hand. GStreamer's `playbin
-  uri=...` is the canonical "just play this" experience and we have no
-  answer. `decodebin` returns a sub-graph, so this lands cleanly on top
-  of the DAG runner.
+- **Auto-plug / element registry / `decodebin`-equivalent.** M83a + M83b
+  DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9). The runtime
+  `Registry` enumerates registered element types over the `PadTemplates`
+  metadata; `find_chain` is the breadth-first search ("compose pad
+  templates from this input down to raw"); `Registry::decodebin` returns
+  the chain spliced into a `Graph<GraphNode>` onto `run_graph`. A user no
+  longer hand-picks the decoder, *given a registry*. **Remaining for the
+  full `playbin uri=...` experience (M83c+):** a `uridecodebin`-equivalent
+  that maps a URI scheme to a source element and reads its declared output
+  caps to feed `decodebin` (g2g sources declare caps via pad templates /
+  `caps_constraint`, so no byte-stream `typefind` is needed); richer
+  factory construction parameters (geometry / device selection, beyond the
+  per-hop output caps the builder already receives); `PadTemplates` on the
+  remaining decoders (`VaapiDec`, H.265, ...); and a hardware-backed
+  end-to-end decode-through-`decodebin` run (the `ffmpeg` test today reads
+  templates only and decodes nothing).
 
 - **Pipeline state machine (NULL → READY → PAUSED → PLAYING).** 3–4
   sessions. No formal state transitions, no preroll (sink rendering

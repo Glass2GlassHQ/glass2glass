@@ -821,6 +821,41 @@ Fall out of the constraint surface:
 - **`CapsFilter`** is an `Identity(specific_set)` pass-through. Inserted
   anywhere in a pipeline to force a narrowing.
 
+#### 4.13.9 Auto-plug and the element registry
+
+`decodebin`-equivalent, built on the pad-template metadata (§4.13.7) and the
+solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
+
+- **Search** (`runtime`, `no_std`). `ElementDesc` is a name plus an element
+  type's static pad templates. `find_chain(descs, input, target, max_depth)`
+  is a breadth-first search over caps states: each edge is an element whose
+  sink accepts the current caps (acceptance reuses `pad_link`, so an
+  `Unfixable` link counts as compatible, exactly as `types_can_link`), and the
+  search advances along that element's source-pad caps until one satisfies the
+  `target` shape predicate (`is_raw_video` is the canonical `decodebin`
+  target). The shortest chain wins; an element is never reused on a path, so a
+  same-media-type parser (H.264 → H.264) cannot loop. The result is an ordered
+  `Vec<ChainLink { index, output }>`: the search picks element *types* and the
+  source-pad caps each was matched to produce, leaving geometry / framerate to
+  fixate later at instance negotiation.
+
+- **Registry** (`std`). `Registry` pairs each `ElementDesc` with an
+  `ElementFactory` whose constructor is `fn(&Caps) -> Box<dyn DynAsyncElement>`,
+  receiving the per-hop chosen output caps so a format-flexible element (a
+  converter, a multi-format decoder) configures itself correctly.
+  `Registry::autoplug` runs the search and instantiates the chain;
+  `Registry::decodebin(graph, from, to, input, target, max_depth)` splices it
+  into a `Graph<GraphNode>` between two existing pads (an empty chain links
+  `from → to` directly), returning a sub-graph onto `run_graph`. Real element
+  types publish templates via the `PadTemplates` trait (`FfmpegH264Dec`:
+  H.264 → NV12 / I420), so a real decoder is registered and auto-plugged, not
+  just synthetic descriptors.
+
+Source-side `typefind` is not needed: a g2g source declares its output caps via
+its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
+known without sniffing the byte stream. A `uridecodebin`-equivalent
+source-selection layer (URI scheme → source element) is the remaining piece.
+
 ---
 
 ## 5. First-Class Machine Learning Integration
