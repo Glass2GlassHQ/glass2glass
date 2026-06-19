@@ -197,14 +197,14 @@ Production-shape needs that block specific real-world use cases.
   works out of the box. **Remaining depth:** property-enable the
   feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
   `waylandsink`, ...) and register them in `default_registry` per feature;
-  `gst-launch` branching (`tee` / named pads) and caps-filter string syntax (needs
-  a `Caps` text grammar + `CapsFilter` as a property-bearing element); a value
-  grammar for spaces / enums-as-named-flags; and a GUI/tooling introspection
-  surface beyond the text dump. **Done (M112):** `filesrc` now takes its
-  byte-stream caps via a `bytestream-format` property (`mpegts` / `matroska` /
-  `auto`, the last sniffing the header via `typefind`) and is registered, so a
-  text pipeline feeds a demuxer from a file; the general `Caps` text grammar (for
-  compressed / raw caps) is still owed.
+  `gst-launch` branching (`tee` / named pads); a value grammar for spaces /
+  enums-as-named-flags; and a GUI/tooling introspection surface beyond the text
+  dump. **Done (M112):** `filesrc` takes its byte-stream caps via a
+  `bytestream-format` property (`mpegts` / `matroska` / `ogg` / `auto`, the last
+  sniffing via `typefind`), so a text pipeline feeds a demuxer from a file.
+  **Done (M117):** the `Caps` text grammar (`capsfilter::parse_caps`) + the
+  property-bearing `CapsFilter`, with the inline `! video/x-raw,format=nv12,... !`
+  shorthand recognized by `parse_launch`.
 
 ### Medium / niche
 

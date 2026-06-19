@@ -25,6 +25,7 @@ use crate::aacparse::AacParse;
 use crate::audioconvert::AudioConvert;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
+use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
@@ -116,6 +117,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
+    }));
+    // The inline caps-filter shorthand (`! video/x-raw,width=320 !`) builds this
+    // by name with a `caps` property; see runtime::parse_launch.
+    reg.register_launch(LaunchFactory::new("capsfilter", Vec::new(), || {
+        Box::new(CapsFilter::default())
     }));
 
     // Sinks.

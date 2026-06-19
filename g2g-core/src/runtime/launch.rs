@@ -98,6 +98,13 @@ fn parse_stages(pipeline: &str) -> Result<Vec<Stage>, ParseError> {
         if name.is_empty() {
             return Err(ParseError::EmptyStage);
         }
+        // A bare caps description (`video/x-raw,format=nv12,width=320`, a single
+        // token with a media-type `/`) is the gst-launch shorthand for a
+        // capsfilter; rewrite it to that element with the whole token as `caps`.
+        if name.contains('/') {
+            stages.push(Stage { name: "capsfilter".to_string(), props: alloc::vec![("caps".to_string(), name)] });
+            continue;
+        }
         let mut props = Vec::new();
         for tok in tokens {
             let (key, value) = tok.split_once('=').ok_or_else(|| ParseError::MalformedProperty {
@@ -257,5 +264,18 @@ mod tests {
     fn malformed_property_is_reported() {
         let stages = parse_stages("videotestsrc bogus ! fakesink");
         assert!(matches!(stages, Err(ParseError::MalformedProperty { .. })));
+    }
+
+    #[test]
+    fn caps_description_becomes_capsfilter() {
+        // A bare `media/type,...` stage is the inline caps-filter shorthand.
+        let stages =
+            parse_stages("videotestsrc ! video/x-raw,format=nv12,width=320 ! fakesink").unwrap();
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[1].name, "capsfilter");
+        assert_eq!(
+            stages[1].props,
+            [("caps".to_string(), "video/x-raw,format=nv12,width=320".to_string())]
+        );
     }
 }

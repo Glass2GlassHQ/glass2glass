@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M117: gst-launch caps-filter syntax (Caps text grammar)
+
+- **`g2g-plugins::capsfilter::parse_caps` (no_std).** A Caps text grammar mapping
+  gst-launch caps descriptions to the typed `Caps`: `video/x-raw,format=nv12,
+  width=320,height=240,framerate=30/1` -> `RawVideo`; `video/x-h264 | h265 | vp8 |
+  vp9 | av1`, `audio/x-opus`, `audio/mpeg` (AAC), `audio/x-raw` -> the matching
+  variant. Omitted dims default to `Any`; framerate `num/den` parses to Q16.
+- **`CapsFilter` `caps` property + registration.** `CapsFilter` gains a `caps`
+  string property parsed by the grammar (driving its `Identity` filter), and is
+  registered as `capsfilter`.
+- **Inline caps-filter in `parse_launch`.** A bare `media/type,...` stage (the
+  gst-launch shorthand) is rewritten to a `capsfilter` with that `caps`, so
+  `videotestsrc ! video/x-raw,format=rgba,width=320,height=240 ! fakesink` pins
+  the format / geometry as text. Closes the property-system "caps-filter string
+  syntax" follow-up.
+- Tested: the grammar (raw / compressed / audio + rejects) and `caps` property
+  round-trip (plugins), the `parse_stages` rewrite (core), and an end-to-end
+  inline-caps pipeline through `parse_launch` / `run_graph`.
+
 ### M116: Ogg / Opus demuxer (`oggdemux`)
 
 - **`Caps::ByteStream{Ogg}` (g2g-core).** A third byte-stream encoding, for the

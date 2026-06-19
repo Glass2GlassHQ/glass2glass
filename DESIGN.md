@@ -1070,8 +1070,12 @@ the last (M104-M106):
   the element is built by name, each value parsed for its property's `PropKind`
   and applied, and the stages linked source -> transforms -> sink. The result
   drops straight onto `run_graph`, so a pipeline is expressible as text without
-  hand-written Rust, the `gst-launch` analog. v1 is one linear chain; branching
-  (`tee` / named pads) and caps-filter string syntax are follow-ups.
+  hand-written Rust, the `gst-launch` analog. A bare `media/type,field=value,...`
+  stage is the inline caps-filter shorthand (M117): `parse_launch` rewrites it to
+  a `capsfilter` whose `caps` property is parsed by `capsfilter::parse_caps` (the
+  `Caps` text grammar), so `videotestsrc ! video/x-raw,format=nv12,width=320 !
+  ...` pins a format / geometry as text. Still one linear chain; branching
+  (`tee` / named pads) is the remaining `gst-launch` gap.
 
 ### 4.17 Containers and Byte Streams
 

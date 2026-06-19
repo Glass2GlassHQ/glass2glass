@@ -53,6 +53,20 @@ async fn audio_chain_parses_and_runs() {
     assert_eq!(stats.frames_consumed, 3);
 }
 
+#[tokio::test]
+async fn inline_caps_filter_parses_and_runs() {
+    // M117: the gst-launch caps-description shorthand becomes a capsfilter,
+    // pinning videotestsrc's output format / geometry.
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 ! video/x-raw,format=rgba,width=320,height=240,framerate=30/1 ! fakesink",
+    )
+    .expect("inline caps pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("inline caps pipeline runs");
+    assert_eq!(stats.frames_consumed, 3, "frames pass the caps filter to the sink");
+}
+
 #[test]
 fn default_registry_inspects_new_elements() {
     let reg = default_registry();
