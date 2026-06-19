@@ -14,6 +14,7 @@ mod channel;
 mod coordinator;
 mod join;
 mod runner;
+mod seek;
 pub mod solver;
 mod state;
 
@@ -34,6 +35,7 @@ pub use runner::{
     run_source_transform_sink, run_source_transform_sink_with_bus, LatencyProfile, LinkCapacity,
     RunStats, SourceLoop,
 };
+pub use seek::SeekController;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;
 

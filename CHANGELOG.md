@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M82: end-to-end flush seek (`SeekController` + seek-aware source)
+
+- Seek works end-to-end. New `SeekController` (`g2g-core::runtime`, feature
+  `runtime`): a cloneable handle carrying a pending `Seek` from the application
+  to a seek-aware source. The app calls `seek(Seek)`; the source's run loop
+  calls `take_pending()` between frames and, on a flushing seek, emits `Flush`,
+  repositions, emits the post-flush `Segment` (via `Segment::for_flush_seek`,
+  which resets `base` so running time restarts), and resumes from the new
+  position. Latest-wins (a fast scrub only needs the final target); polling, not
+  waking (a producing source checks between frames; a parked source has nothing
+  to reposition until it resumes).
+- No runner changes: the data plane already forwards `Flush` (M-earlier) and
+  `Segment` (M80), so a seek flows through the existing runner. Seeks reach the
+  source GStreamer-style (upstream) without a back-reference: the app holds the
+  controller and a clone lives in the source.
+- Tests: three `g2g-core` unit tests (`take_pending` clears + returns;
+  latest-seek-wins; clones share one slot) and `m82_seek` (a `SeekableSrc` polls
+  the controller; a mid-stream flushing seek makes the sink observe exactly one
+  `Flush`, a second `Segment` starting at the seek target with `base == 0` and
+  the first post-seek frame mapping to running time 0, and all frames delivered;
+  plus a no-seek straight-through case: one opening segment, no flush). VERIFIED
+  on the dev host: `cargo test --workspace` green; `cargo clippy -p g2g-core
+  --features "std runtime multi-thread" --all-targets` clean; new files
+  `rustfmt`-clean.
+- Still open (the seek track's remaining depth): non-flushing (accumulating)
+  `do_seek` that advances `base` by the elapsed running time; reverse / trick-
+  mode frame handling at the sink; re-preroll after a flushing seek when paused;
+  and a real `Seekable` source (e.g. `Mp4Src` / `FileSrc` repositioning) — the
+  in-tree sources are not yet seek-aware.
+
 ### M81: runner emits the opening SEGMENT + error-priority fix
 
 - `run_simple_pipeline` and `run_graph` (and thus its thin-builder runners:
