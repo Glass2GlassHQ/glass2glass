@@ -21,6 +21,10 @@ pub mod identity;
 pub mod mux;
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
+// Analytics overlay (M101): draws AnalyticsMeta detection boxes onto RGBA8.
+// Needs the per-frame metadata graph, so it is gated on `analytics`.
+#[cfg(feature = "analytics")]
+pub mod analyticsoverlay;
 pub mod videoconvert;
 pub mod videoscale;
 pub mod videorate;

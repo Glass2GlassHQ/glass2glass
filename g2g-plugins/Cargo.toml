@@ -117,6 +117,11 @@ web-codecs = [
     "web-sys/VideoPixelFormat",
     "web-sys/PlaneLayout",
 ]
+# Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
+# onto a raw RGBA8 frame (the detector -> overlay visible end). Enables g2g-core's
+# `metadata` feature so frames carry the typed graph. CPU, no_std baseline; the
+# Vello GPU backend is the separate `vello-overlay` feature (M102).
+analytics = ["g2g-core/metadata"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }

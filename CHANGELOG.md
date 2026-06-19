@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M101: Analytics overlay element (CPU)
+
+- **`g2g-plugins::analyticsoverlay::AnalyticsOverlay` (`analytics` feature).** The
+  visible end of a detector -> overlay pipeline: reads the `AnalyticsMeta` carried
+  on a frame (via the M100 fan-out path) and paints each detection's bounding box
+  onto the raw RGBA8 picture. Identity transform on the pixels apart from the boxes
+  drawn; a frame with no `AnalyticsMeta` passes through untouched.
+- Per-class colour from a fixed 8-entry palette; configurable outline thickness
+  (`with_thickness`). Boxes are denormalized from `[0,1]` at the negotiated
+  geometry, so the element works at any frame size; the integer source-over blend
+  matches the compositor's and clips to the canvas (no OOB on edge-crossing boxes).
+- Closes the loop with M99/M100: `decode -> tee -> {detect, video} -> overlay ->
+  display` now lands detection boxes on the displayed frame. CPU, `no_std`
+  baseline; the `analytics` feature enables `g2g-core/metadata`. The Vello GPU
+  backend is the separate `vello-overlay` feature (M102).
+- Tested: border-painted / interior-untouched render, edge clipping, the async
+  `process` meta path, no-meta pass-through, and non-RGBA caps rejection.
+
 ### M100: Analytics metadata through fan-out (Arc/COW)
 
 - **Shareable per-frame metadata.** `FrameMetaSet` now holds each `FrameMeta` as
