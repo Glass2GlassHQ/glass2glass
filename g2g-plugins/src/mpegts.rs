@@ -273,6 +273,174 @@ fn decode_timestamp(b: &[u8]) -> u64 {
         | ((b[4] >> 1) & 0x7F) as u64
 }
 
+// --- Muxing (M114): the inverse of the demuxer above. ---
+
+/// Fixed PID layout for the single-program mux: the PMT and the one elementary
+/// stream. (The demuxer discovers these from the tables, so any values pair.)
+const MUX_PMT_PID: u16 = 0x1000;
+const MUX_ES_PID: u16 = 0x0100;
+
+/// MPEG-TS multiplexer for a single elementary stream (M114): wraps access units
+/// in PES packets and 188-byte TS packets, emitting PAT + PMT once up front. The
+/// inverse of [`TsDemuxer`]; the [`crate::tsmux::TsMux`] element wraps it.
+///
+/// Scope (v1): one program, one stream, fixed PID layout, no PCR (a PCR in the
+/// adaptation field is a follow-up; lenient decoders and the demuxer here do not
+/// need it). The PSI carries a real MPEG-2 CRC-32, so the output is a valid TS.
+#[derive(Debug)]
+pub struct TsMuxer {
+    stream_type: u8,
+    stream_id: u8,
+    es_cc: u8,
+    pat_cc: u8,
+    pmt_cc: u8,
+    tables_written: bool,
+}
+
+impl TsMuxer {
+    /// `stream_type` is the PMT value (e.g. [`STREAM_TYPE_H264`]); the PES
+    /// `stream_id` is derived from it (audio vs video range).
+    pub fn new(stream_type: u8) -> Self {
+        let stream_id = if stream_type == STREAM_TYPE_AAC { 0xC0 } else { 0xE0 };
+        Self { stream_type, stream_id, es_cc: 0, pat_cc: 0, pmt_cc: 0, tables_written: false }
+    }
+
+    /// Mux one access unit into TS bytes, preceded by PAT + PMT on the first call.
+    /// `pts_90khz`, when present, is written into the PES header.
+    pub fn push_au(&mut self, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.tables_written {
+            self.pat_packet(&mut out);
+            self.pmt_packet(&mut out);
+            self.tables_written = true;
+        }
+        let pes = build_pes(self.stream_id, au, pts_90khz);
+        let mut off = 0;
+        let mut pusi = true;
+        while off < pes.len() {
+            let take = (pes.len() - off).min(TS_PACKET_LEN - 4);
+            ts_packet(MUX_ES_PID, pusi, self.es_cc, &pes[off..off + take], &mut out);
+            self.es_cc = (self.es_cc + 1) & 0x0F;
+            pusi = false;
+            off += take;
+        }
+        out
+    }
+
+    fn pat_packet(&mut self, out: &mut Vec<u8>) {
+        let body = [
+            0x00, 0x01, // transport_stream_id
+            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
+            0x00, 0x01, // program_number 1
+            0xE0 | (MUX_PMT_PID >> 8) as u8 & 0x1F, MUX_PMT_PID as u8,
+        ];
+        let cc = self.pat_cc;
+        self.pat_cc = (self.pat_cc + 1) & 0x0F;
+        psi_packet(PID_PAT, 0x00, &body, cc, out);
+    }
+
+    fn pmt_packet(&mut self, out: &mut Vec<u8>) {
+        let body = [
+            0x00, 0x01, // program_number
+            0xC1, 0x00, 0x00, // version, section/last
+            0xE0 | (MUX_ES_PID >> 8) as u8 & 0x1F, MUX_ES_PID as u8, // PCR_PID (= ES)
+            0xF0, 0x00, // program_info_length = 0
+            self.stream_type,
+            0xE0 | (MUX_ES_PID >> 8) as u8 & 0x1F, MUX_ES_PID as u8, // elementary_PID
+            0xF0, 0x00, // ES_info_length = 0
+        ];
+        let cc = self.pmt_cc;
+        self.pmt_cc = (self.pmt_cc + 1) & 0x0F;
+        psi_packet(MUX_PMT_PID, 0x02, &body, cc, out);
+    }
+}
+
+/// Build a PES packet for one access unit (start code + stream_id + length + an
+/// optional header carrying the PTS), matching what [`parse_pes_header`] reads.
+fn build_pes(stream_id: u8, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.push(0x80); // marker '10'
+    header.push(if pts_90khz.is_some() { 0x80 } else { 0x00 }); // PTS_DTS_flags
+    if let Some(pts) = pts_90khz {
+        header.push(5); // PES_header_data_length
+        encode_timestamp(0x2, pts, &mut header); // '0010' prefix for PTS-only
+    } else {
+        header.push(0);
+    }
+    let pes_payload_len = header.len() + au.len();
+    let mut pes = alloc::vec![0x00, 0x00, 0x01, stream_id];
+    // PES_packet_length: the real length when it fits, else 0 (unbounded, the
+    // standard video case). The demuxer delimits by TS packet boundaries anyway.
+    let len_field = u16::try_from(pes_payload_len).unwrap_or(0);
+    pes.push((len_field >> 8) as u8);
+    pes.push(len_field as u8);
+    pes.extend_from_slice(&header);
+    pes.extend_from_slice(au);
+    pes
+}
+
+/// Append a 5-byte PTS/DTS field (`prefix` is `0010` for PTS-only) in 90 kHz
+/// units, the inverse of [`decode_timestamp`].
+fn encode_timestamp(prefix: u8, ts: u64, out: &mut Vec<u8>) {
+    out.push((prefix << 4) | (((ts >> 30) & 0x07) as u8) << 1 | 0x01);
+    out.push(((ts >> 22) & 0xFF) as u8);
+    out.push((((ts >> 15) & 0x7F) as u8) << 1 | 0x01);
+    out.push(((ts >> 7) & 0xFF) as u8);
+    out.push(((ts & 0x7F) as u8) << 1 | 0x01);
+}
+
+/// Write one 188-byte TS packet to `out`: a payload of up to 184 bytes, padded
+/// with an adaptation-field stuffing run when shorter (the last packet of a PES).
+fn ts_packet(pid: u16, pusi: bool, cc: u8, payload: &[u8], out: &mut Vec<u8>) {
+    const PAYLOAD_MAX: usize = TS_PACKET_LEN - 4;
+    debug_assert!(payload.len() <= PAYLOAD_MAX);
+    out.push(SYNC_BYTE);
+    out.push((if pusi { 0x40 } else { 0 }) | ((pid >> 8) as u8 & 0x1F));
+    out.push(pid as u8);
+    let l = payload.len();
+    if l == PAYLOAD_MAX {
+        out.push(0x10 | (cc & 0x0F)); // payload only
+        out.extend_from_slice(payload);
+    } else {
+        out.push(0x30 | (cc & 0x0F)); // adaptation field + payload
+        let af_len = PAYLOAD_MAX - 1 - l; // bytes after the AF length byte
+        out.push(af_len as u8);
+        if af_len >= 1 {
+            out.push(0x00); // AF flags (no PCR / no options)
+            out.resize(out.len() + (af_len - 1), 0xFF); // stuffing
+        }
+        out.extend_from_slice(payload);
+    }
+}
+
+/// Write a single-packet PSI section (pointer field + table + MPEG-2 CRC-32).
+fn psi_packet(pid: u16, table_id: u8, body: &[u8], cc: u8, out: &mut Vec<u8>) {
+    let section_length = body.len() + 4; // body + 4-byte CRC
+    let mut section = Vec::with_capacity(3 + section_length);
+    section.push(table_id);
+    section.push(0xB0 | ((section_length >> 8) as u8 & 0x0F)); // syntax=1, reserved, len hi
+    section.push((section_length & 0xFF) as u8);
+    section.extend_from_slice(body);
+    let crc = mpeg_crc32(&section); // over table_id .. end of body
+    section.extend_from_slice(&crc.to_be_bytes());
+    let mut payload = alloc::vec![0u8]; // pointer_field = 0
+    payload.extend_from_slice(&section);
+    ts_packet(pid, true, cc, &payload, out);
+}
+
+/// MPEG-2 systems CRC-32 (poly 0x04C11DB7, init all-ones, no final xor, MSB
+/// first), as the PSI section trailer.
+fn mpeg_crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= (b as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ 0x04C1_1DB7 } else { crc << 1 };
+        }
+    }
+    crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,5 +596,35 @@ mod tests {
         d.push_packet(&ts_packet(0x0123, true, &[1, 2, 3])); // unknown PID, no PMT
         assert!(d.take_units().is_empty());
         assert!(d.streams().is_empty());
+    }
+
+    #[test]
+    fn mux_demux_round_trip() {
+        // Mux two H.264 access units with PTS, then demux the TS back to them.
+        let au0 = [0u8, 0, 0, 1, 0x65, 0xAA, 0xBB];
+        let au1 = [0u8, 0, 0, 1, 0x41, 0xCC];
+        let mut mux = TsMuxer::new(STREAM_TYPE_H264);
+        let mut bytes = mux.push_au(&au0, Some(900_000));
+        bytes.extend(mux.push_au(&au1, Some(903_000)));
+        assert_eq!(bytes.len() % TS_PACKET_LEN, 0, "output is whole TS packets");
+
+        let mut d = TsDemuxer::new();
+        for pkt in bytes.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units.len(), 2, "both AUs survive the round trip");
+        assert_eq!(units[0].stream_type, STREAM_TYPE_H264);
+        assert_eq!(units[0].data, au0, "AU bytes intact");
+        assert_eq!(units[0].pts_90khz, Some(900_000));
+        assert_eq!(units[1].data, au1);
+        assert_eq!(units[1].pts_90khz, Some(903_000));
+    }
+
+    #[test]
+    fn mpeg_crc32_matches_known_vector() {
+        // The documented CRC-32/MPEG-2 check value for ASCII "123456789".
+        assert_eq!(mpeg_crc32(b"123456789"), 0x0376_E6E7);
     }
 }

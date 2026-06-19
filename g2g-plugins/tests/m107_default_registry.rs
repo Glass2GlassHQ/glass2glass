@@ -107,6 +107,7 @@ fn demuxer_and_its_parsers_registered() {
     let reg = default_registry();
     assert!(reg.inspect("h265parse").is_some());
     assert!(reg.inspect("aacparse").is_some());
+    assert!(reg.inspect("mpegtsmux").is_some()); // M114: the TS muxer
     assert!(reg.inspect("tsdemux").unwrap().contains("stream"));
 
     let mut demux = reg.make_element("tsdemux").unwrap();

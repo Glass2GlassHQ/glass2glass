@@ -39,6 +39,7 @@ use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
 use crate::videotestsrc::VideoTestSrc;
 use crate::tsdemux::TsDemux;
+use crate::tsmux::TsMux;
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -105,6 +106,7 @@ pub fn default_registry() -> Registry {
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || Box::new(MkvDemux::new())));
+    reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
     reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));

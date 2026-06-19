@@ -341,9 +341,11 @@ modern PipeWire path remain.
   (`FileSrc(ByteStream) ! tsdemux ! h264parse ! ...`). M109 added per-stream
   selection (`TsStream` / the `stream` property): H.264 / H.265 video and AAC
   audio, one selected stream per output pad (`tsdemux stream=aac ! aacparse`),
-  with `h265parse` / `aacparse` registered in `default_registry`. **Remaining:**
-  multi-program selection; `mpegtsmux` (the muxer); PCR-based timing. SRT/HLS feed
-  TS over the wire (needs the network byte-stream source path).
+  with `h265parse` / `aacparse` registered in `default_registry`. The muxer
+  `mpegtsmux` (`g2g-plugins::mpegts::TsMuxer` + the `TsMux` element, single
+  stream, real PSI CRC) landed in M114. **Remaining:** multi-stream / multi-program
+  muxing + selection; PCR-based timing. SRT/HLS feed TS over the wire (needs the
+  network byte-stream source path).
 - **FLV (`flvmux` / `flvdemux`).** 2 sessions. RTMP carrier.
 - **OGG (`oggmux` / `oggdemux`).** 1–2 sessions. Niche, mostly Opus delivery.
 - **CMAF / fMP4 segmented.** 2 sessions. Already have `Mp4Sink` /

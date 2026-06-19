@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M114: MPEG-TS muxer (`mpegtsmux`)
+
+- **`g2g-plugins::mpegts::TsMuxer` (no_std).** The inverse of `TsDemuxer`: wraps
+  one elementary stream's access units in PES packets and 188-byte TS packets,
+  emitting PAT + PMT once up front with a real MPEG-2 CRC-32 (the output is a
+  valid TS, not a placeholder-CRC one). Single program / single stream, fixed PID
+  layout; no PCR yet.
+- **`g2g-plugins::tsmux::TsMux` element (no_std).** `Caps::CompressedVideo{H264 |
+  H265}` or `Caps::Audio{Aac}` in, `Caps::ByteStream{MpegTs}` out, the inverse of
+  `TsDemux`. The PMT stream type is read from the input caps at configure; PTS is
+  carried from the frame timing into the PES header. Registered in
+  `default_registry` as `mpegtsmux`.
+- Tested: a pure mux -> demux round trip (AU bytes + PTS recovered) and the
+  CRC-32/MPEG-2 known-vector check; the element round trip through `TsDemux`; and
+  an end-to-end H.264 source -> mpegtsmux -> tsdemux -> sink run through
+  `run_graph`, exercising `Caps::ByteStream` as an interior link between two
+  transforms.
+
 ### M113: Matroska block lacing (Xiph / EBML / fixed)
 
 - **`MatroskaDemuxer` splits laced blocks.** A SimpleBlock / Block can pack
