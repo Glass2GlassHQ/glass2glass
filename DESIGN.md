@@ -1144,9 +1144,12 @@ with their millisecond timestamps, selected per `FlvStream` (h264 | aac, default
 h264) like `TsDemux`. The sequence-header tags (codec config) and the
 `onMetaData` script tag are skipped, the codec-config / extradata side channel
 being a shared demuxer follow-up. The container is auto-detectable (`typefind`
-"FLV", `filesrc bytestream-format=auto`); an `flvmux` and surfacing the script-tag
-metadata are follow-ups. With MP4 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM,
-Ogg, and FLV, the demux/mux coverage spans the major containers.
+"FLV", `filesrc bytestream-format=auto`). The FLV muxer (`flvmux`:
+`g2g-plugins::flv::FlvMuxer` + the `FlvMux` element, M120) is the inverse path,
+wrapping one elementary stream's access units back into FLV tags (media frames
+only; the sequence header / extradata and the `onMetaData` script tag are
+follow-ups). With MP4 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV,
+the demux/mux coverage spans the major containers.
 
 ---
 

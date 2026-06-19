@@ -352,12 +352,13 @@ modern PipeWire path remain.
   stream, real PSI CRC) landed in M114. **Remaining:** multi-stream / multi-program
   muxing + selection; PCR-based timing. SRT/HLS feed TS over the wire (needs the
   network byte-stream source path).
-- **FLV demux (`flvdemux`) — DONE (M119).** Pure FLV parser
-  (`g2g-plugins::flv::FlvDemuxer` + the `FlvDemux` element) on the new
-  `Caps::ByteStream{Flv}`: the "FLV" header then `PreviousTagSize` / tag pairs,
-  forwarding the H.264 (AVC) video and AAC audio access units per `FlvStream`
-  selection (h264 | aac), sniffed by `typefind`. **Remaining:** the `onMetaData`
-  script-tag metadata, codec-config / extradata plumbing, and an `flvmux`.
+- **FLV demux + mux (`flvdemux` / `flvmux`) — DONE (M119 / M120).** Pure FLV
+  parser + muxer (`g2g-plugins::flv::FlvDemuxer` / `FlvMuxer` + the `FlvDemux` /
+  `FlvMux` elements) on the new `Caps::ByteStream{Flv}`: the "FLV" header then
+  `PreviousTagSize` / tag pairs, the demuxer forwarding and the muxer wrapping the
+  H.264 (AVC) video and AAC audio access units per `FlvStream` selection (h264 |
+  aac), sniffed by `typefind`. **Remaining:** the `onMetaData` script-tag
+  metadata, codec-config / extradata plumbing, and multi-track muxing.
 - **OGG demux — DONE (M116).** Pure RFC 3533 parser
   (`g2g-plugins::ogg::OggDemuxer` + the `OggDemux` element), fed by the new
   `Caps::ByteStream{Ogg}` link type: "OggS" pages, segment-table lacing with

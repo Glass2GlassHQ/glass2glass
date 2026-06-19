@@ -5,6 +5,22 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M120: FLV muxer (`flvmux`)
+
+- **`g2g-plugins::flv::FlvMuxer` (no_std).** The inverse of `FlvDemuxer`: wrap each
+  access unit of one elementary stream into an FLV tag, the "FLV" header ahead of
+  the first, each tag prefixed by the previous tag's size (the layout the demuxer
+  reads, so a mux -> demux round trip recovers the access units). v1 writes media
+  frames only (no sequence header), mirroring the demuxer's scope.
+- **`g2g-plugins::flvmux::FlvMux` element (no_std).** One elementary stream
+  (`Caps::CompressedVideo{H264}` AVCC or `Caps::Audio{Aac}`) ->
+  `Caps::ByteStream{Flv}`, the track read from the input caps at configure,
+  mirroring `mpegtsmux`. The runner's transform arm forwards EOS, so the element
+  does not. Registered as `flvmux`.
+- Tested: the muxer's bytes round-trip through `FlvDemuxer` (parser) and through
+  `FlvDemux` (element); an end-to-end H.264 -> `flvmux` -> `flvdemux` -> sink run
+  through `run_graph` recovers both access units.
+
 ### M119: FLV demuxer (`flvdemux`)
 
 - **`Caps::ByteStream{Flv}` (g2g-core).** A fourth byte-stream encoding, for the

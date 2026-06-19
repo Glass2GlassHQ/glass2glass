@@ -89,6 +89,9 @@ pub mod flv;
 // FLV demuxer element (no_std): Caps::ByteStream{Flv} -> H.264 / AAC, wrapping
 // the flv parser.
 pub mod flvdemux;
+// FLV muxer element (no_std): one elementary stream -> Caps::ByteStream{Flv}, the
+// inverse of flvdemux.
+pub mod flvmux;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;

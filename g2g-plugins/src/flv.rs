@@ -137,6 +137,74 @@ impl FlvDemuxer {
     }
 }
 
+/// Append a 3-byte big-endian integer (the FLV size / timestamp width).
+fn write_u24(out: &mut Vec<u8>, v: u32) {
+    out.push((v >> 16) as u8);
+    out.push((v >> 8) as u8);
+    out.push(v as u8);
+}
+
+/// Incremental FLV muxer, the inverse of [`FlvDemuxer`]: wrap each access unit of
+/// one elementary stream into an FLV tag. The "FLV" header is written ahead of the
+/// first tag; thereafter each tag is preceded by the previous tag's size, matching
+/// the layout [`FlvDemuxer`] reads (so a mux -> demux round trip recovers the
+/// access units). v1 writes media frames only (no sequence header), mirroring the
+/// demuxer's scope.
+#[derive(Debug)]
+pub struct FlvMuxer {
+    track: FlvTrack,
+    header_written: bool,
+    prev_tag_size: u32,
+}
+
+impl FlvMuxer {
+    pub fn new(track: FlvTrack) -> Self {
+        Self { track, header_written: false, prev_tag_size: 0 }
+    }
+
+    /// Wrap one access unit (an AVCC unit for video, a raw AAC frame for audio)
+    /// into the FLV bytes to emit, prepending the file header on the first call.
+    pub fn push_au(&mut self, data: &[u8], pts_ms: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.header_written {
+            out.extend_from_slice(b"FLV");
+            out.push(1); // version
+            // Flags: bit 0 video present, bit 2 audio present.
+            out.push(match self.track {
+                FlvTrack::Video => 0x01,
+                FlvTrack::Audio => 0x04,
+            });
+            out.extend_from_slice(&(FLV_HEADER_MIN as u32).to_be_bytes()); // data offset
+            self.header_written = true;
+        }
+        // PreviousTagSize: 0 before the first tag, then the prior tag's length.
+        out.extend_from_slice(&self.prev_tag_size.to_be_bytes());
+        let tag = self.build_tag(data, pts_ms);
+        self.prev_tag_size = tag.len() as u32;
+        out.extend_from_slice(&tag);
+        out
+    }
+
+    /// Build one tag (11-byte header + codec-tagged body) for an access unit.
+    fn build_tag(&self, data: &[u8], pts_ms: u32) -> Vec<u8> {
+        let (tag_type, mut body) = match self.track {
+            // keyframe | AVC, NALU packet, composition time 0.
+            FlvTrack::Video => (TAG_VIDEO, alloc::vec![0x17u8, 0x01, 0x00, 0x00, 0x00]),
+            // AAC | 44k | 16-bit | stereo, raw frame.
+            FlvTrack::Audio => (TAG_AUDIO, alloc::vec![0xAFu8, 0x01]),
+        };
+        body.extend_from_slice(data);
+
+        let mut tag = alloc::vec![tag_type];
+        write_u24(&mut tag, body.len() as u32);
+        write_u24(&mut tag, pts_ms & 0x00FF_FFFF);
+        tag.push((pts_ms >> 24) as u8); // timestamp extension
+        write_u24(&mut tag, 0); // stream id
+        tag.extend_from_slice(&body);
+        tag
+    }
+}
+
 /// Map one FLV tag to an access unit, or `None` for a tag this parser skips
 /// (a sequence header, an unsupported codec, or a script/metadata tag).
 fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
@@ -284,6 +352,40 @@ mod tests {
         assert_eq!(units[0].data, vec![0x65, 0x11, 0x22]);
         assert_eq!(units[1].track, FlvTrack::Audio);
         assert_eq!(units[1].pts_ms, 10);
+    }
+
+    #[test]
+    fn mux_round_trips_through_demuxer() {
+        // The muxer's FLV bytes feed straight back through the demuxer, recovering
+        // the access units, their order, and their timestamps.
+        let aus: [&[u8]; 2] = [&[0x65, 0xAA, 0xBB], &[0x41, 0xCC]];
+        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&mux.push_au(aus[0], 0));
+        stream.extend_from_slice(&mux.push_au(aus[1], 33));
+
+        let mut demux = FlvDemuxer::new();
+        demux.push_data(&stream);
+        let units = demux.take_units();
+        assert_eq!(
+            units,
+            vec![
+                FlvUnit { track: FlvTrack::Video, data: aus[0].to_vec(), pts_ms: 0 },
+                FlvUnit { track: FlvTrack::Video, data: aus[1].to_vec(), pts_ms: 33 },
+            ]
+        );
+    }
+
+    #[test]
+    fn mux_writes_audio_tags() {
+        let mut mux = FlvMuxer::new(FlvTrack::Audio);
+        let bytes = mux.push_au(&[0x11, 0x22], 10);
+        // "FLV" header, then a demuxer recovers the AAC frame.
+        assert_eq!(&bytes[0..3], b"FLV");
+        let mut demux = FlvDemuxer::new();
+        demux.push_data(&bytes);
+        let units = demux.take_units();
+        assert_eq!(units, vec![FlvUnit { track: FlvTrack::Audio, data: vec![0x11, 0x22], pts_ms: 10 }]);
     }
 
     #[test]
