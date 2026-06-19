@@ -25,6 +25,10 @@ pub mod compositor;
 // Needs the per-frame metadata graph, so it is gated on `analytics`.
 #[cfg(feature = "analytics")]
 pub mod analyticsoverlay;
+// Vello GPU companion to analyticsoverlay (M102): renders boxes with the Vello
+// 2D renderer into a wgpu texture (MemoryDomain::WgpuTexture, kept on GPU).
+#[cfg(feature = "vello-overlay")]
+pub mod vellooverlay;
 pub mod videoconvert;
 pub mod videoscale;
 pub mod videorate;

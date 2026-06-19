@@ -27,6 +27,15 @@ pub enum MemoryDomain {
     /// [`OwnedWebGPUExternalTexture`]. The browser analog of
     /// [`MemoryDomain::D3D11Texture`].
     WebGPUExternalTexture(OwnedWebGPUExternalTexture),
+    /// A picture rendered into a native wgpu GPU texture (desktop Vulkan / Metal
+    /// / D3D12). The render-side analog of the decode-side CUDA / D3D11 domains:
+    /// a GPU element (eg the Vello analytics overlay) draws straight into a
+    /// `wgpu::Texture` and forwards the frame with no GPU->CPU copy, so a GPU
+    /// sink presents it directly. `g2g-core` never links wgpu, so the texture is
+    /// owned by a [`WgpuKeepAlive`] the producing element boxes; a consumer that
+    /// links wgpu recovers it via [`WgpuKeepAlive::as_any`]. See
+    /// [`OwnedWgpuTexture`].
+    WgpuTexture(OwnedWgpuTexture),
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
@@ -42,6 +51,7 @@ pub enum MemoryDomainKind {
     Cuda,
     D3D11Texture,
     WebGPUExternalTexture,
+    WgpuTexture,
 }
 
 impl MemoryDomain {
@@ -55,6 +65,7 @@ impl MemoryDomain {
             MemoryDomain::Cuda(_) => MemoryDomainKind::Cuda,
             MemoryDomain::D3D11Texture(_) => MemoryDomainKind::D3D11Texture,
             MemoryDomain::WebGPUExternalTexture(_) => MemoryDomainKind::WebGPUExternalTexture,
+            MemoryDomain::WgpuTexture(_) => MemoryDomainKind::WgpuTexture,
         }
     }
 }
@@ -352,6 +363,46 @@ pub trait WebGPUKeepAlive: core::fmt::Debug + Send {
     /// Recover the concrete owner so a consumer can extract the `VideoFrame`.
     /// Mirrors the raw-pointer access the CUDA / D3D11 domains expose
     /// directly; here the payload lives in the owner, so downcast is the route.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
+/// A picture rendered into a native wgpu GPU texture (the payload of
+/// [`MemoryDomain::WgpuTexture`]). Carries the visible dimensions; the
+/// `wgpu::Texture` itself lives inside the [`WgpuKeepAlive`] owner because
+/// `g2g-core` never links wgpu. The desktop render-side analog of
+/// [`OwnedWebGPUExternalTexture`] (which is the browser/import side).
+#[derive(Debug)]
+pub struct OwnedWgpuTexture {
+    /// Visible picture dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Owns the backing `wgpu::Texture` for as long as the frame is referenced.
+    keep_alive: Box<dyn WgpuKeepAlive>,
+}
+
+impl OwnedWgpuTexture {
+    /// Wrap a rendered texture's dimensions with the owner that keeps the
+    /// backing `wgpu::Texture` alive.
+    pub fn new(width: u32, height: u32, keep_alive: Box<dyn WgpuKeepAlive>) -> Self {
+        Self { width, height, keep_alive }
+    }
+
+    /// The keep-alive owner, for a consumer that links wgpu to downcast via
+    /// [`WgpuKeepAlive::as_any`] and recover the `wgpu::Texture` to present, or
+    /// to take shared ownership.
+    pub fn keep_alive(&self) -> &dyn WgpuKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedWgpuTexture`]. Owns the backing
+/// `wgpu::Texture`; the producing element boxes its handle as this trait object
+/// and a consumer that links wgpu downcasts via [`as_any`](Self::as_any) to
+/// recover the texture for presentation or further GPU work. Dropping the box
+/// releases the texture. `Send + Sync` because `wgpu::Texture` is, so a frame
+/// crosses the multi-thread runner's worker boundaries like every other domain.
+pub trait WgpuKeepAlive: core::fmt::Debug + Send + Sync {
+    /// Recover the concrete owner so a consumer can extract the `wgpu::Texture`.
     fn as_any(&self) -> &dyn core::any::Any;
 }
 

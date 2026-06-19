@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M102: Vello GPU analytics overlay + `MemoryDomain::WgpuTexture`
+
+- **`MemoryDomain::WgpuTexture` (`g2g-core`).** A new GPU memory domain for a
+  native wgpu texture (desktop Vulkan / Metal / D3D12), the render-side analog of
+  the decode-side CUDA / D3D11 domains. `OwnedWgpuTexture` carries the dimensions;
+  the `wgpu::Texture` lives in a `WgpuKeepAlive` owner (core never links wgpu), so
+  a producing element keeps a rendered frame on the GPU and a wgpu sink recovers
+  the texture via `as_any` downcast. No `no_std`/baseline cost (a new enum arm).
+- **`g2g-plugins::vellooverlay::VelloAnalyticsOverlay` (`vello-overlay` feature).**
+  The GPU companion to the CPU `AnalyticsOverlay`: renders the `AnalyticsMeta`
+  detection boxes with the Vello GPU 2D renderer (wgpu 29). The input picture is
+  drawn into a Vello scene as a full-frame image and the boxes are stroked
+  (antialiased) on top; the scene renders into a `wgpu::Texture` emitted as
+  `MemoryDomain::WgpuTexture` and **kept on the GPU** (no readback), so a GPU sink
+  presents it directly. Per-class palette matches the CPU backend; caps are
+  identity (only the memory domain changes). Lazy device/renderer init fails
+  cleanly (structured `HardwareError`) on a host with no adapter.
+- `vello-overlay` implies `std` + `analytics`; the CPU overlay stays the `no_std`
+  baseline. This is the HD / many-box path.
+- Tested: non-RGBA caps rejection, and a real GPU render (Vello strokes a box onto
+  a 64x64 frame, the texture is read back and the box edge verified red over a
+  dark interior) that skips gracefully when no wgpu adapter is present.
+
 ### M101: Analytics overlay element (CPU)
 
 - **`g2g-plugins::analyticsoverlay::AnalyticsOverlay` (`analytics` feature).** The

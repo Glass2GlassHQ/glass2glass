@@ -122,6 +122,12 @@ web-codecs = [
 # `metadata` feature so frames carry the typed graph. CPU, no_std baseline; the
 # Vello GPU backend is the separate `vello-overlay` feature (M102).
 analytics = ["g2g-core/metadata"]
+# Vello GPU analytics overlay (M102): VelloAnalyticsOverlay renders the
+# AnalyticsMeta detection boxes with the Vello GPU 2D renderer (wgpu) into a
+# wgpu texture, output as MemoryDomain::WgpuTexture (kept on GPU, no readback).
+# Pulls vello (+ wgpu 29); implies std + analytics. The CPU AnalyticsOverlay is
+# the no_std baseline; this is the HD / many-box GPU companion.
+vello-overlay = ["std", "analytics", "dep:vello"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -130,6 +136,9 @@ retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
+# Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
+# into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
+vello = { version = "0.9", optional = true }
 # Embassy RTOS clock backend (embassy feature, M43). no_std; embassy-time needs
 # a HAL-provided time driver registered at link (owed to hardware).
 embassy-time = { version = "0.5", optional = true, default-features = false }
