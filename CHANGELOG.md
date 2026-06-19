@@ -5,6 +5,18 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M97: Compositor per-pad scaling
+
+- `CompositorPad::with_size(width, height)` scales an input to a target on-canvas
+  size as it composites (integer bilinear, `no_std`-safe, no float intrinsics),
+  so a downscaled inset no longer needs an upstream `VideoScale`. `None` keeps the
+  native-geometry fast path unchanged.
+- The native and scaled blend paths share one source-over `blend_px` helper.
+- `pip_smoke` drops its inset `VideoScale` and scales via the pad instead.
+- Tested: solid-source upsample and a compose-path downscale into an inset.
+  Remaining compositor depth (NV12/I420 mixing without an RGBA round-trip,
+  configurable background colour, wgpu variant) stays in DESIGN_TODO.
+
 ### M96: RTCP feedback loop + NACK-based retransmission (RTP resilience, cont.)
 
 - Wires the M95 RTCP module into the live UDP path, completing the

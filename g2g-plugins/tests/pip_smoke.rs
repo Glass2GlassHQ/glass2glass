@@ -26,7 +26,6 @@ use g2g_core::{Graph, PipelineClock, RawVideoFormat};
 use g2g_plugins::compositor::{Compositor, CompositorPad};
 use g2g_plugins::v4l2src::V4l2Src;
 use g2g_plugins::videoconvert::VideoConvert;
-use g2g_plugins::videoscale::VideoScale;
 use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
 use g2g_plugins::waylandsink::WaylandSink;
 
@@ -71,9 +70,10 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
     let cam = g.add_source(GraphNode::source(
         V4l2Src::new(device).with_size(640, 480).with_fps(30).with_frame_limit(frames),
     ));
+    // The inset branch only converts to RGBA; the compositor pad scales it to
+    // the inset size (no upstream VideoScale needed, M97 per-pad scaling).
     let cam_tee = g.add_tee(2);
     let cam_rgba = g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Rgba8)));
-    let cam_small = g.add_transform(GraphNode::element(VideoScale::new(PIP_W, PIP_H)));
 
     // Reference branch: raw webcam -> NV12 -> its own Wayland sink.
     let cam_nv12 = g.add_transform(GraphNode::element(VideoConvert::new(RawVideoFormat::Nv12)));
@@ -90,7 +90,7 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
             CANVAS_H,
             Vec::from([
                 CompositorPad::at(0, 0),
-                CompositorPad::at(inset_x, inset_y).with_zorder(1),
+                CompositorPad::at(inset_x, inset_y).with_zorder(1).with_size(PIP_W, PIP_H),
             ]),
         )),
         2,
@@ -104,10 +104,9 @@ async fn webcam_picture_in_picture_over_a_test_pattern() {
 
     g.link(bg, comp.input(0)).unwrap();
     g.link(cam, cam_tee.input()).unwrap();
-    // Tee branch 0 -> compositor inset.
+    // Tee branch 0 -> RGBA -> compositor inset (scaled by the pad).
     g.link(cam_tee.out(0), cam_rgba).unwrap();
-    g.link(cam_rgba, cam_small).unwrap();
-    g.link(cam_small, comp.input(1)).unwrap();
+    g.link(cam_rgba, comp.input(1)).unwrap();
     // Tee branch 1 -> standalone webcam window.
     g.link(cam_tee.out(1), cam_nv12).unwrap();
     g.link(cam_nv12, cam_sink).unwrap();

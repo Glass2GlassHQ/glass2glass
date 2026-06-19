@@ -151,11 +151,10 @@ Production-shape needs that block specific real-world use cases.
   the clock.
 
 - **Compositor GPU companion + depth.** The CPU `Compositor` (RGBA8 pixel
-  mixer: position / z-order / per-pad alpha, input-0-driven cadence) is done
-  (DESIGN.md §4.13.6). Remaining: a wgpu compute variant for HD/many-input
-  scale; per-input scaling (resize an input as it composites, instead of
-  requiring an upstream `videoscale`); NV12/I420 mixing without a round-trip
-  through RGBA; and configurable output cadence / background colour.
+  mixer: position / z-order / per-pad alpha, input-0-driven cadence, plus per-pad
+  bilinear scaling via `with_size`, M97) is done (DESIGN.md §4.13.6). Remaining:
+  a wgpu compute variant for HD/many-input scale; NV12/I420 mixing without a
+  round-trip through RGBA; and configurable output cadence / background colour.
 
 - **Adaptive streaming demuxers (HLS, DASH).** 2–4 sessions each.
   Playlist parsing + ABR rate selection + per-segment fetch +

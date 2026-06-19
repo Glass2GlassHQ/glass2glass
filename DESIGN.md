@@ -912,7 +912,9 @@ so a late-starting overlay (camera warm-up) still appears; on buffer overflow th
 oldest is emitted overlay-less rather than dropped, so a free-running background
 never stalls or latches the overlay on one stale frame. The output canvas size
 and framerate are fixed at construction; per-input geometry is whatever each
-input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed canvas).
+input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed canvas). A pad
+may also scale its input as it composites (`CompositorPad::with_size`, integer
+bilinear), so a downscaled camera inset needs no upstream `VideoScale`.
 
 #### 4.13.7 Pad templates
 

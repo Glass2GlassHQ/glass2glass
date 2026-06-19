@@ -54,12 +54,16 @@ pub struct CompositorPad {
     /// Per-pad alpha 0..=255, multiplied with each pixel's source alpha. 255 is
     /// fully opaque (modulo the source's own alpha channel).
     pub alpha: u8,
+    /// On-canvas size `(width, height)` to scale this input to as it composites.
+    /// `None` draws the input at its native geometry; `Some` resamples it
+    /// (bilinear), so a downscaled camera needs no upstream `VideoScale`.
+    pub size: Option<(u32, u32)>,
 }
 
 impl CompositorPad {
-    /// An opaque pad at `(xpos, ypos)`, z-order 0.
+    /// An opaque pad at `(xpos, ypos)`, z-order 0, drawn at native size.
     pub fn at(xpos: i32, ypos: i32) -> Self {
-        Self { xpos, ypos, zorder: 0, alpha: 255 }
+        Self { xpos, ypos, zorder: 0, alpha: 255, size: None }
     }
 
     /// Set the paint order (lower is painted first / further back).
@@ -71,6 +75,13 @@ impl CompositorPad {
     /// Set the per-pad alpha (0 transparent, 255 opaque).
     pub fn with_alpha(mut self, alpha: u8) -> Self {
         self.alpha = alpha;
+        self
+    }
+
+    /// Scale this input to `width` x `height` on the canvas (bilinear), instead
+    /// of compositing it at its native geometry.
+    pub fn with_size(mut self, width: u32, height: u32) -> Self {
+        self.size = Some((width, height));
         self
     }
 }
@@ -170,7 +181,18 @@ impl Compositor {
                 }
             };
             let pad = self.pads[i];
-            blend_over(&mut canvas, cw, ch, src, w as usize, h as usize, pad.xpos, pad.ypos, pad.alpha);
+            let (sw, sh) = (w as usize, h as usize);
+            let (dw, dh) = pad
+                .size
+                .map(|(dw, dh)| (dw as usize, dh as usize))
+                .unwrap_or((sw, sh));
+            if (dw, dh) == (sw, sh) {
+                blend_over(&mut canvas, cw, ch, src, sw, sh, pad.xpos, pad.ypos, pad.alpha);
+            } else {
+                blend_over_scaled(
+                    &mut canvas, cw, ch, src, sw, sh, pad.xpos, pad.ypos, dw, dh, pad.alpha,
+                );
+            }
         }
         canvas.into_boxed_slice()
     }
@@ -218,15 +240,86 @@ fn blend_over(
             }
             let s = (sy * sw + sx) * 4;
             let d = (dy as usize * cw + dx as usize) * 4;
-            // Effective source alpha = src_a * galpha (0..=255).
-            let a = (src[s + 3] as u32 * galpha as u32 + 127) / 255;
-            let inv = 255 - a;
-            for c in 0..3 {
-                canvas[d + c] =
-                    ((src[s + c] as u32 * a + canvas[d + c] as u32 * inv + 127) / 255) as u8;
+            let px = [src[s], src[s + 1], src[s + 2], src[s + 3]];
+            blend_px(canvas, d, px, galpha);
+        }
+    }
+}
+
+/// Source-over blend of one RGBA `src` pixel onto the canvas at byte offset `d`,
+/// modulating the source alpha by `galpha`. Integer math; keeps an opaque canvas
+/// opaque. Shared by the native and scaled blend paths.
+#[inline]
+fn blend_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
+    // Effective source alpha = src_a * galpha (0..=255).
+    let a = (src[3] as u32 * galpha as u32 + 127) / 255;
+    let inv = 255 - a;
+    for c in 0..3 {
+        canvas[d + c] = ((src[c] as u32 * a + canvas[d + c] as u32 * inv + 127) / 255) as u8;
+    }
+    canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
+}
+
+/// Alpha-blend a `sw` x `sh` RGBA8 source onto the canvas, resampled (bilinear)
+/// to a `dw` x `dh` rectangle with its top-left at `(x0, y0)`. Same source-over
+/// math as [`blend_over`], with integer fixed-point sampling (no float intrinsics
+/// for the `no_std` baseline). Pixels outside the canvas are clipped.
+#[allow(clippy::too_many_arguments)]
+fn blend_over_scaled(
+    canvas: &mut [u8],
+    cw: usize,
+    ch: usize,
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    x0: i32,
+    y0: i32,
+    dw: usize,
+    dh: usize,
+    galpha: u8,
+) {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return;
+    }
+    // Center-aligned source coordinate for a destination index, in Q16 fixed
+    // point: ((d + 0.5) * s / dst - 0.5). Clamped into the source extent.
+    let map = |d: usize, s: usize, dst: usize, max: i64| -> i64 {
+        let q = ((2 * d as i64 + 1) * s as i64 * 32768) / dst as i64 - 32768;
+        q.clamp(0, max)
+    };
+    let max_x = ((sw - 1) as i64) << 16;
+    let max_y = ((sh - 1) as i64) << 16;
+    for ddy in 0..dh {
+        let dy = y0 + ddy as i32;
+        if dy < 0 || dy as usize >= ch {
+            continue;
+        }
+        let fy = map(ddy, sh, dh, max_y);
+        let y0i = (fy >> 16) as usize;
+        let y1i = (y0i + 1).min(sh - 1);
+        let ty = ((fy >> 8) & 0xFF) as u32;
+        for ddx in 0..dw {
+            let dx = x0 + ddx as i32;
+            if dx < 0 || dx as usize >= cw {
+                continue;
             }
-            // Composite the alpha channel too (keeps an opaque canvas opaque).
-            canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
+            let fx = map(ddx, sw, dw, max_x);
+            let x0i = (fx >> 16) as usize;
+            let x1i = (x0i + 1).min(sw - 1);
+            let tx = ((fx >> 8) & 0xFF) as u32;
+            // Bilinear: interpolate the 2x2 source neighbourhood per channel.
+            let i00 = (y0i * sw + x0i) * 4;
+            let i01 = (y0i * sw + x1i) * 4;
+            let i10 = (y1i * sw + x0i) * 4;
+            let i11 = (y1i * sw + x1i) * 4;
+            let mut px = [0u8; 4];
+            for c in 0..4 {
+                let top = src[i00 + c] as u32 * (256 - tx) + src[i01 + c] as u32 * tx;
+                let bot = src[i10 + c] as u32 * (256 - tx) + src[i11 + c] as u32 * tx;
+                px[c] = ((top * (256 - ty) + bot * ty) >> 16) as u8;
+            }
+            let d = (dy as usize * cw + dx as usize) * 4;
+            blend_px(canvas, d, px, galpha);
         }
     }
 }
@@ -429,6 +522,43 @@ mod tests {
         assert_eq!(px(&canvas, 4, 0, 0), [0, 255, 0, 255], "top-left now green");
         assert_eq!(px(&canvas, 4, 1, 1), [0, 255, 0, 255], "still in the clipped region");
         assert_eq!(px(&canvas, 4, 2, 2), [0, 0, 0, 255], "beyond the source stays black");
+    }
+
+    #[test]
+    fn scaled_blend_upsamples_a_solid_source() {
+        // A 2x2 blue source scaled into a 4x4 region at (1,1) on a 6x6 red
+        // canvas: the whole region is blue (uniform bilinear is exact), the
+        // border stays red.
+        let mut canvas = solid(6, 6, [255, 0, 0, 255]);
+        let blue = solid(2, 2, [0, 0, 255, 255]);
+        blend_over_scaled(&mut canvas, 6, 6, &blue, 2, 2, 1, 1, 4, 4, 255);
+        assert_eq!(px(&canvas, 6, 0, 0), [255, 0, 0, 255], "border stays red");
+        assert_eq!(px(&canvas, 6, 1, 1), [0, 0, 255, 255], "region top-left blue");
+        assert_eq!(px(&canvas, 6, 4, 4), [0, 0, 255, 255], "region bottom-right blue");
+        assert_eq!(px(&canvas, 6, 5, 5), [255, 0, 0, 255], "beyond the region red");
+    }
+
+    #[test]
+    fn pad_with_size_downscales_overlay_into_the_inset() {
+        // Background 8x8 red; a native 4x4 green overlay scaled down to a 2x2
+        // inset at (2,2). The inset is green, everything else red.
+        let mut comp = Compositor::new(
+            8,
+            8,
+            Vec::from([
+                CompositorPad::at(0, 0),
+                CompositorPad::at(2, 2).with_zorder(1).with_size(2, 2),
+            ]),
+        );
+        comp.inputs[0] = Some((8, 8));
+        comp.inputs[1] = Some((4, 4)); // native overlay geometry
+        let red = solid(8, 8, [255, 0, 0, 255]);
+        comp.latest[1] = Some(solid(4, 4, [0, 255, 0, 255]).into());
+        let out = comp.compose(&red);
+        assert_eq!(px(&out, 8, 0, 0), [255, 0, 0, 255], "background red");
+        assert_eq!(px(&out, 8, 2, 2), [0, 255, 0, 255], "inset top-left green");
+        assert_eq!(px(&out, 8, 3, 3), [0, 255, 0, 255], "inset bottom-right green");
+        assert_eq!(px(&out, 8, 4, 4), [255, 0, 0, 255], "beyond the 2x2 inset red");
     }
 
     #[test]
