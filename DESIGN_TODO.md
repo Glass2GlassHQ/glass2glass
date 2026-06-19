@@ -196,15 +196,18 @@ Production-shape needs that block specific real-world use cases.
   `FileSrc`) plus `g2g-plugins::registry::default_registry()` so `parse_launch`
   works out of the box. **Remaining depth:** property-enable the
   feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
-  `waylandsink`, ...) and register them in `default_registry` per feature;
-  `gst-launch` branching (`tee` / named pads); a value grammar for spaces /
-  enums-as-named-flags; and a GUI/tooling introspection surface beyond the text
-  dump. **Done (M112):** `filesrc` takes its byte-stream caps via a
+  `waylandsink`, ...) and register them in `default_registry` per feature; a value
+  grammar for spaces / enums-as-named-flags; and a GUI/tooling introspection
+  surface beyond the text dump. **Done (M112):** `filesrc` takes its byte-stream caps via a
   `bytestream-format` property (`mpegts` / `matroska` / `ogg` / `auto`, the last
   sniffing via `typefind`), so a text pipeline feeds a demuxer from a file.
   **Done (M117):** the `Caps` text grammar (`capsfilter::parse_caps`) + the
   property-bearing `CapsFilter`, with the inline `! video/x-raw,format=nv12,... !`
   shorthand recognized by `parse_launch`.
+  **Done (M118):** `gst-launch` branching, a chain parser where `name=t` names an
+  element and a `t.` reference opens a branch; `tee` is the structural fan-out
+  node, its output width derived from the branch count, broadcasting each frame to
+  every branch. Text muxer fan-in remains.
 
 ### Medium / niche
 
@@ -224,7 +227,7 @@ Smaller-scope items, mostly orthogonal to the architecture.
   graphics.
 - **`gst-launch` text DSL — DONE (M106).** `runtime::parse_launch` takes
   `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` and
-  builds a runnable `Graph` (linear chains; branching + caps-filter syntax owed).
+  builds a runnable `Graph` (caps-filter syntax landed M117, branching M118).
   See the property-system entry above and DESIGN.md §4.16.
 
 ### What we already do better

@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M118: gst-launch branching (`tee` / named pads)
+
+- **Chain parser in `runtime::parse_launch` (std).** The linear stage splitter is
+  now a chain parser: `!` links nodes within a chain, `name=t` names an element
+  (the instance handle, never applied as a property), and a `t.` pad reference
+  opens a branch, starting a chain (a head ref, linking *from* the named element)
+  or, right after a `!`, ending one (a tail ref, linking *into* it). Element roles
+  follow connectivity (no incoming link -> source, no outgoing -> sink, else
+  transform), so a linear pipeline builds exactly as before.
+- **`tee` is the structural fan-out node.** A `tee` maps to `Graph::add_tee`, its
+  output width derived from how many branches reference it (one inline branch plus
+  each `t.`); the runner broadcasts every frame to all branches. So
+  `videotestsrc ! tee name=t ! fakesink   t. ! fakesink` feeds two sinks.
+- **Named errors for the common mistakes.** `UnknownReference` (a `t.` with no
+  matching `name=`), `DuplicateName`, `FanOutWithoutTee` (a non-tee output linked
+  more than once), and `UnsupportedFanIn` (text muxer fan-in is a follow-up) name
+  the offending element instead of surfacing a raw `GraphError`.
+- Tested: chain parsing (linear / caps shorthand / quote strip / tee structure)
+  and the new error cases (core units); end-to-end two-way / three-way tees and a
+  branch-with-transform broadcasting through `run_graph`, plus the fan-out-without-tee
+  rejection (plugins).
+- Closes the last `gst-launch` grammar gap (DESIGN.md §4.16).
+
 ### M117: gst-launch caps-filter syntax (Caps text grammar)
 
 - **`g2g-plugins::capsfilter::parse_caps` (no_std).** A Caps text grammar mapping

@@ -1,26 +1,36 @@
-//! `gst-launch`-style text pipeline parser (M106): turn
+//! `gst-launch`-style text pipeline parser (M106, M117, M118): turn
 //! `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` into a
 //! runnable [`Graph`], the front door that makes g2g usable without hand-writing
 //! Rust for every pipeline.
 //!
 //! Built on the M104 property system and the M105 by-name registry: each `!`
-//! separated stage is `element-name key=value ...`; the parser constructs the
+//! separated node is `element-name key=value ...`; the parser constructs the
 //! element by name from the [`Registry`], looks up each property's
-//! [`PropKind`](crate::PropKind) to parse its textual value, and applies it. The
-//! first stage is the source, the last is the sink, the middle are transforms,
-//! linked in order. The result drops straight onto
-//! [`run_graph`](crate::runtime::run_graph).
+//! [`PropKind`](crate::PropKind) to parse its textual value, and applies it.
+//! Roles follow connectivity: an element with no incoming link is a source, one
+//! with no outgoing link a sink, the rest transforms (so a linear chain is still
+//! source -> transforms -> sink).
 //!
-//! Scope (v1): a single linear chain; `key=value` with no spaces in the value
-//! (double quotes around a value are stripped). Branching (`tee`/named pads) and
-//! caps-filter string syntax are follow-ups.
+//! Branching (M118): `tee name=t` fans one output to many. A `tee` is the
+//! structural fan-out node (no element), its output width derived from how many
+//! branches reference it; a branch is a `t.` pad reference that starts a chain (a
+//! head ref, linking *from* the named element) or, right after a `!`, ends one (a
+//! tail ref, linking *into* it). So
+//! `videotestsrc ! tee name=t ! fakesink   t. ! fakesink` broadcasts each frame
+//! to two sinks. The caps shorthand (`! video/x-raw,format=nv12,... !`, M117) is
+//! a bare media-type node rewritten to a `capsfilter`.
+//!
+//! Scope: `key=value` with no spaces in the value (double quotes around a value
+//! are stripped). Fan-in (several links into one muxer element) from text is a
+//! follow-up; a pad-name suffix on a reference (`t.src_0`) is accepted but
+//! ignored (pads are positional).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::element::DynAsyncElement;
-use crate::graph::{Graph, GraphError};
+use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::property::PropValue;
 use crate::runtime::autoplug::Registry;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
@@ -30,14 +40,14 @@ use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 pub enum ParseError {
     /// The pipeline string was empty or all whitespace.
     Empty,
-    /// A stage between `!` separators had no element name.
+    /// A node between `!` separators had no element name.
     EmptyStage,
-    /// Fewer than two stages: a runnable pipeline needs at least a source and a
+    /// Fewer than two elements: a runnable pipeline needs at least a source and a
     /// sink.
     TooFewStages,
-    /// The first stage names no registered source.
+    /// A source-position element names no registered source.
     UnknownSource(String),
-    /// A non-first stage names no registered transform / sink.
+    /// A transform / sink-position element names no registered element.
     UnknownElement(String),
     /// A property token had no `=` (expected `key=value`).
     MalformedProperty { element: String, token: String },
@@ -45,7 +55,17 @@ pub enum ParseError {
     UnknownProperty { element: String, key: String },
     /// The value did not parse for the property's kind, or was rejected.
     BadValue { element: String, key: String, value: String },
-    /// Linking two stages into the graph failed.
+    /// A `name.` reference names no element declared with that `name=`.
+    UnknownReference(String),
+    /// Two elements share the same `name=` handle.
+    DuplicateName(String),
+    /// A non-`tee` element's output links more than once: a pad peers with one
+    /// other pad, so an explicit `tee` must express the fan-out.
+    FanOutWithoutTee(String),
+    /// More than one link feeds one element's input; muxer fan-in from text is a
+    /// follow-up.
+    UnsupportedFanIn(String),
+    /// Linking two nodes into the graph failed.
     Graph(GraphError),
 }
 
@@ -59,7 +79,7 @@ impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ParseError::Empty => f.write_str("empty pipeline"),
-            ParseError::EmptyStage => f.write_str("empty stage between '!' separators"),
+            ParseError::EmptyStage => f.write_str("empty node between '!' separators"),
             ParseError::TooFewStages => f.write_str("pipeline needs at least a source and a sink"),
             ParseError::UnknownSource(n) => write!(f, "unknown source element: {n}"),
             ParseError::UnknownElement(n) => write!(f, "unknown element: {n}"),
@@ -72,52 +92,167 @@ impl core::fmt::Display for ParseError {
             ParseError::BadValue { element, key, value } => {
                 write!(f, "{element}: invalid value '{value}' for property '{key}'")
             }
+            ParseError::UnknownReference(n) => write!(f, "reference to undeclared element name: {n}"),
+            ParseError::DuplicateName(n) => write!(f, "duplicate element name: {n}"),
+            ParseError::FanOutWithoutTee(n) => {
+                write!(f, "{n}: output fans out to more than one consumer; insert a 'tee' to branch")
+            }
+            ParseError::UnsupportedFanIn(n) => {
+                write!(f, "{n}: fan-in (multiple inputs) needs a muxer, not yet supported in text")
+            }
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
         }
     }
 }
 
-/// One parsed stage: the element name and its `key=value` properties, all owned
-/// so error messages can name them.
-struct Stage {
+/// One parsed element: factory name plus its `key=value` properties (all owned so
+/// errors can name them), and the optional `name=` handle that pad references
+/// resolve against. `name` is special-cased here, never applied as a property.
+struct ElementSpec {
     name: String,
     props: Vec<(String, String)>,
+    instance: Option<String>,
 }
 
-/// Split a `gst-launch` pipeline string into stages, each an element name plus
-/// its parsed `key=value` properties.
-fn parse_stages(pipeline: &str) -> Result<Vec<Stage>, ParseError> {
+/// An item in a chain: an element to build, or a `t.` reference to a named
+/// element declared elsewhere (the branching / link-by-name syntax).
+enum Item {
+    Element(ElementSpec),
+    Ref(String),
+}
+
+/// A run of items linked left-to-right by `!`. Branches are separate chains
+/// joined through named references.
+type Chain = Vec<Item>;
+
+/// A caps description node (`video/x-raw,format=nv12,...`): a media type whose
+/// `/` precedes any `=` field. A property value's `/` (a path or a fraction)
+/// comes after its `=`, so it is not mistaken for caps.
+fn is_caps_token(tok: &str) -> bool {
+    match (tok.find('/'), tok.find('=')) {
+        (Some(slash), Some(eq)) => slash < eq,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// A pad reference (`t.` or `t.src_0`): a name, a `.`, and no `=` / `/`. Returns
+/// the referenced element name; the pad suffix is ignored (pads are positional).
+fn as_ref_name(tok: &str) -> Option<&str> {
+    if tok.contains('=') || tok.contains('/') || !tok.contains('.') {
+        return None;
+    }
+    let name = tok.split('.').next().unwrap_or("");
+    (!name.is_empty()).then_some(name)
+}
+
+/// Consume an element's `key=value` properties from the token stream, stopping at
+/// a `!`, a caps node, or a pad reference (the next node begins). A bare token
+/// with no `=` is a malformed property (the gst typo case), reported by name.
+fn consume_element<'a, I: Iterator<Item = &'a str>>(
+    name: &str,
+    tokens: &mut core::iter::Peekable<I>,
+) -> Result<ElementSpec, ParseError> {
+    let mut spec = ElementSpec { name: name.to_string(), props: Vec::new(), instance: None };
+    while let Some(&tok) = tokens.peek() {
+        if tok == "!" || is_caps_token(tok) || as_ref_name(tok).is_some() {
+            break;
+        }
+        let (key, value) = tok.split_once('=').ok_or_else(|| ParseError::MalformedProperty {
+            element: name.to_string(),
+            token: tok.to_string(),
+        })?;
+        tokens.next();
+        // Strip a single layer of surrounding double quotes from the value.
+        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+        if key == "name" {
+            spec.instance = Some(value.to_string());
+        } else {
+            spec.props.push((key.to_string(), value.to_string()));
+        }
+    }
+    Ok(spec)
+}
+
+/// Split a `gst-launch` pipeline string into chains: runs of nodes linked by `!`,
+/// with branches expressed as separate chains joined through `name=` / `t.`.
+fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
     let trimmed = pipeline.trim();
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
     }
-    let mut stages = Vec::new();
-    for raw in trimmed.split('!') {
-        let mut tokens = raw.split_whitespace();
-        let name = tokens.next().ok_or(ParseError::EmptyStage)?.to_string();
-        if name.is_empty() {
-            return Err(ParseError::EmptyStage);
-        }
-        // A bare caps description (`video/x-raw,format=nv12,width=320`, a single
-        // token with a media-type `/`) is the gst-launch shorthand for a
-        // capsfilter; rewrite it to that element with the whole token as `caps`.
-        if name.contains('/') {
-            stages.push(Stage { name: "capsfilter".to_string(), props: alloc::vec![("caps".to_string(), name)] });
-            continue;
-        }
-        let mut props = Vec::new();
-        for tok in tokens {
-            let (key, value) = tok.split_once('=').ok_or_else(|| ParseError::MalformedProperty {
-                element: name.clone(),
-                token: tok.to_string(),
-            })?;
-            // Strip a single layer of surrounding double quotes from the value.
-            let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
-            props.push((key.to_string(), value.to_string()));
-        }
-        stages.push(Stage { name, props });
+    // Make every `!` a standalone token regardless of surrounding spaces, then
+    // split on whitespace. (A value containing spaces is the documented v1 gap.)
+    let spaced = trimmed.replace('!', " ! ");
+    let mut tokens = spaced.split_whitespace().peekable();
+
+    #[derive(Clone, Copy)]
+    enum St {
+        Start,
+        AfterBang,
+        AfterNode,
     }
-    Ok(stages)
+
+    let mut chains: Vec<Chain> = Vec::new();
+    let mut cur: Chain = Vec::new();
+    let mut st = St::Start;
+
+    loop {
+        match st {
+            St::Start | St::AfterBang => {
+                let after_bang = matches!(st, St::AfterBang);
+                let Some(tok) = tokens.next() else {
+                    if after_bang {
+                        return Err(ParseError::EmptyStage); // trailing `!`
+                    }
+                    break;
+                };
+                if tok == "!" {
+                    return Err(ParseError::EmptyStage); // leading or doubled `!`
+                }
+                if is_caps_token(tok) {
+                    cur.push(Item::Element(ElementSpec {
+                        name: "capsfilter".to_string(),
+                        props: alloc::vec![("caps".to_string(), tok.to_string())],
+                        instance: None,
+                    }));
+                    st = St::AfterNode;
+                } else if let Some(name) = as_ref_name(tok) {
+                    cur.push(Item::Ref(name.to_string()));
+                    if after_bang {
+                        // Tail ref (`! t.`): links the upstream node into the
+                        // named element and ends the chain.
+                        chains.push(core::mem::take(&mut cur));
+                        st = St::Start;
+                    } else {
+                        // Head ref (`t. ! ...`): feeds the chain from it.
+                        st = St::AfterNode;
+                    }
+                } else {
+                    cur.push(Item::Element(consume_element(tok, &mut tokens)?));
+                    st = St::AfterNode;
+                }
+            }
+            St::AfterNode => match tokens.peek() {
+                Some(&"!") => {
+                    tokens.next();
+                    st = St::AfterBang;
+                }
+                Some(_) => {
+                    // A node not joined by `!`: the current chain ends here and a
+                    // new one starts at this token (reprocessed as a head).
+                    chains.push(core::mem::take(&mut cur));
+                    st = St::Start;
+                }
+                None => break,
+            },
+        }
+    }
+
+    if !cur.is_empty() {
+        chains.push(cur);
+    }
+    Ok(chains)
 }
 
 /// Apply parsed `key=value` props to a source, parsing each value for its
@@ -175,82 +310,215 @@ fn apply_element_props(
     Ok(())
 }
 
-/// Parse a `gst-launch`-style pipeline string into a runnable [`Graph`], building
-/// each stage by name from `registry` and applying its `key=value` properties.
-///
-/// The first stage is the source, the last the sink, the middle transforms,
-/// linked in order. The graph is ready for
-/// [`run_graph`](crate::runtime::run_graph).
-///
-/// ```text
-/// videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink
-/// ```
-pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
-    let stages = parse_stages(pipeline)?;
-    if stages.len() < 2 {
+/// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
+/// `t.` references into directed links, derive each element's role (and any tee's
+/// fan-out width) from its link degree, then construct and wire the nodes.
+fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {
+    // A chain endpoint after flattening: a concrete element index, or a still
+    // unresolved reference by name.
+    enum Endpoint {
+        Element(usize),
+        Ref(String),
+    }
+
+    let mut specs: Vec<ElementSpec> = Vec::new();
+    let mut names: Vec<(String, usize)> = Vec::new();
+    let mut chain_eps: Vec<Vec<Endpoint>> = Vec::with_capacity(chains.len());
+
+    for chain in chains {
+        let mut eps = Vec::with_capacity(chain.len());
+        for item in chain {
+            match item {
+                Item::Element(spec) => {
+                    let ei = specs.len();
+                    if let Some(inst) = &spec.instance {
+                        if names.iter().any(|(n, _)| n == inst) {
+                            return Err(ParseError::DuplicateName(inst.clone()));
+                        }
+                        names.push((inst.clone(), ei));
+                    }
+                    specs.push(spec);
+                    eps.push(Endpoint::Element(ei));
+                }
+                Item::Ref(name) => eps.push(Endpoint::Ref(name)),
+            }
+        }
+        chain_eps.push(eps);
+    }
+
+    if specs.len() < 2 {
         return Err(ParseError::TooFewStages);
     }
 
-    let mut graph: Graph<GraphNode> = Graph::new();
-
-    // First stage: the source.
-    let head = &stages[0];
-    let mut source = registry
-        .make_source(&head.name)
-        .ok_or_else(|| ParseError::UnknownSource(head.name.clone()))?;
-    apply_source_props(&mut source, &head.name, &head.props)?;
-    let mut prev = graph.add_source(GraphNodeRef::Source(source));
-
-    // Interior stages: transforms.
-    let last = stages.len() - 1;
-    for stage in &stages[1..last] {
-        let mut el = registry
-            .make_element(&stage.name)
-            .ok_or_else(|| ParseError::UnknownElement(stage.name.clone()))?;
-        apply_element_props(&mut el, &stage.name, &stage.props)?;
-        let node = graph.add_transform(GraphNodeRef::Element(el));
-        graph.link(prev, node)?;
-        prev = node;
+    // Resolve references and collect the directed links (by element index).
+    let mut links: Vec<(usize, usize)> = Vec::new();
+    for eps in &chain_eps {
+        let mut idxs: Vec<usize> = Vec::with_capacity(eps.len());
+        for ep in eps {
+            idxs.push(match ep {
+                Endpoint::Element(ei) => *ei,
+                Endpoint::Ref(name) => names
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, i)| *i)
+                    .ok_or_else(|| ParseError::UnknownReference(name.clone()))?,
+            });
+        }
+        for w in idxs.windows(2) {
+            links.push((w[0], w[1]));
+        }
     }
 
-    // Last stage: the sink.
-    let tail = &stages[last];
-    let mut sink = registry
-        .make_element(&tail.name)
-        .ok_or_else(|| ParseError::UnknownElement(tail.name.clone()))?;
-    apply_element_props(&mut sink, &tail.name, &tail.props)?;
-    let sink_node = graph.add_sink(GraphNodeRef::Element(sink));
-    graph.link(prev, sink_node)?;
+    // Link degree per element fixes its role and any tee's output width.
+    let mut in_deg = alloc::vec![0usize; specs.len()];
+    let mut out_deg = alloc::vec![0usize; specs.len()];
+    for &(s, d) in &links {
+        out_deg[s] += 1;
+        in_deg[d] += 1;
+    }
+
+    let is_tee = |ei: usize| specs[ei].name == "tee";
+    for ei in 0..specs.len() {
+        if !is_tee(ei) && out_deg[ei] > 1 {
+            return Err(ParseError::FanOutWithoutTee(specs[ei].name.clone()));
+        }
+        if in_deg[ei] > 1 {
+            return Err(ParseError::UnsupportedFanIn(specs[ei].name.clone()));
+        }
+        if is_tee(ei) && !specs[ei].props.is_empty() {
+            // The structural tee carries no element, so it has no properties.
+            return Err(ParseError::UnknownProperty {
+                element: "tee".to_string(),
+                key: specs[ei].props[0].0.clone(),
+            });
+        }
+    }
+
+    // Construct nodes in element-index order so `node_of[ei]` lines up.
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let mut node_of: Vec<NodeId> = Vec::with_capacity(specs.len());
+    for ei in 0..specs.len() {
+        let spec = &specs[ei];
+        let node = if is_tee(ei) {
+            graph.add_tee(out_deg[ei] as u8).node()
+        } else if in_deg[ei] == 0 {
+            let mut src = registry
+                .make_source(&spec.name)
+                .ok_or_else(|| ParseError::UnknownSource(spec.name.clone()))?;
+            apply_source_props(&mut src, &spec.name, &spec.props)?;
+            graph.add_source(GraphNodeRef::Source(src))
+        } else if out_deg[ei] == 0 {
+            let mut el = registry
+                .make_element(&spec.name)
+                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            apply_element_props(&mut el, &spec.name, &spec.props)?;
+            graph.add_sink(GraphNodeRef::Element(el))
+        } else {
+            let mut el = registry
+                .make_element(&spec.name)
+                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            apply_element_props(&mut el, &spec.name, &spec.props)?;
+            graph.add_transform(GraphNodeRef::Element(el))
+        };
+        node_of.push(node);
+    }
+
+    // Wire edges. Each tee branch takes a distinct output pad (0..n); every other
+    // output and every input is pad 0.
+    let mut tee_next = alloc::vec![0u8; specs.len()];
+    for &(s, d) in &links {
+        let src = if is_tee(s) {
+            let index = tee_next[s];
+            tee_next[s] += 1;
+            PadId { node: node_of[s], index }
+        } else {
+            PadId::from(node_of[s])
+        };
+        graph.link(src, PadId::from(node_of[d]))?;
+    }
 
     Ok(graph)
+}
+
+/// Parse a `gst-launch`-style pipeline string into a runnable [`Graph`], building
+/// each element by name from `registry`, applying its `key=value` properties, and
+/// linking the chains (including `tee` branches) into the DAG. Roles follow
+/// connectivity. The result drops straight onto
+/// [`run_graph`](crate::runtime::run_graph).
+///
+/// ```text
+/// videotestsrc num-buffers=3 ! tee name=t ! fakesink   t. ! videoflip ! fakesink
+/// ```
+pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
+    let chains = parse_chains(pipeline)?;
+    build_graph(registry, chains)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_stages_splits_names_and_props() {
-        let stages =
-            parse_stages("videotestsrc num-buffers=3 pattern=snow ! videoflip method=rotate-180 ! fakesink")
-                .unwrap();
-        assert_eq!(stages.len(), 3);
-        assert_eq!(stages[0].name, "videotestsrc");
-        assert_eq!(
-            stages[0].props,
-            [("num-buffers".to_string(), "3".to_string()), ("pattern".into(), "snow".into())]
-        );
-        assert_eq!(stages[1].name, "videoflip");
-        assert_eq!(stages[2].name, "fakesink");
-        assert!(stages[2].props.is_empty());
+    fn item_names(chain: &Chain) -> Vec<&str> {
+        chain
+            .iter()
+            .map(|i| match i {
+                Item::Element(s) => s.name.as_str(),
+                Item::Ref(n) => n.as_str(),
+            })
+            .collect()
     }
 
     #[test]
-    fn parse_stages_strips_quoted_values() {
+    fn parse_chains_splits_names_and_props() {
+        let chains = parse_chains(
+            "videotestsrc num-buffers=3 pattern=snow ! videoflip method=rotate-180 ! fakesink",
+        )
+        .unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(item_names(&chains[0]), ["videotestsrc", "videoflip", "fakesink"]);
+        let Item::Element(src) = &chains[0][0] else { panic!("first is an element") };
+        assert_eq!(
+            src.props,
+            [("num-buffers".to_string(), "3".to_string()), ("pattern".into(), "snow".into())]
+        );
+        let Item::Element(sink) = &chains[0][2] else { panic!("last is an element") };
+        assert!(sink.props.is_empty());
+    }
+
+    #[test]
+    fn parse_chains_strips_quoted_values() {
         // A double-quoted value (no spaces) has its quotes stripped. Values with
         // spaces are a known v1 gap (the whitespace tokenizer would split them).
-        let stages = parse_stages("filesrc location=\"file.mp4\" ! fakesink").unwrap();
-        assert_eq!(stages[0].props[0], ("location".to_string(), "file.mp4".to_string()));
+        let chains = parse_chains("filesrc location=\"file.mp4\" ! fakesink").unwrap();
+        let Item::Element(src) = &chains[0][0] else { panic!("element") };
+        assert_eq!(src.props[0], ("location".to_string(), "file.mp4".to_string()));
+    }
+
+    #[test]
+    fn caps_description_becomes_capsfilter() {
+        // A bare `media/type,...` node is the inline caps-filter shorthand.
+        let chains =
+            parse_chains("videotestsrc ! video/x-raw,format=nv12,width=320 ! fakesink").unwrap();
+        assert_eq!(item_names(&chains[0]), ["videotestsrc", "capsfilter", "fakesink"]);
+        let Item::Element(caps) = &chains[0][1] else { panic!("element") };
+        assert_eq!(
+            caps.props,
+            [("caps".to_string(), "video/x-raw,format=nv12,width=320".to_string())]
+        );
+    }
+
+    #[test]
+    fn tee_branch_parses_into_two_chains() {
+        // `name=` is the instance handle (not a property); `t.` opens the branch.
+        let chains =
+            parse_chains("videotestsrc ! tee name=t ! fakesink t. ! videoflip ! fakesink").unwrap();
+        assert_eq!(chains.len(), 2);
+        assert_eq!(item_names(&chains[0]), ["videotestsrc", "tee", "fakesink"]);
+        assert_eq!(item_names(&chains[1]), ["t", "videoflip", "fakesink"]);
+        let Item::Element(tee) = &chains[0][1] else { panic!("element") };
+        assert_eq!(tee.instance.as_deref(), Some("t"));
+        assert!(tee.props.is_empty(), "name= is the handle, not a property");
+        assert!(matches!(&chains[1][0], Item::Ref(n) if n == "t"));
     }
 
     #[test]
@@ -262,20 +530,36 @@ mod tests {
 
     #[test]
     fn malformed_property_is_reported() {
-        let stages = parse_stages("videotestsrc bogus ! fakesink");
-        assert!(matches!(stages, Err(ParseError::MalformedProperty { .. })));
+        assert!(matches!(
+            parse_chains("videotestsrc bogus ! fakesink"),
+            Err(ParseError::MalformedProperty { .. })
+        ));
     }
 
     #[test]
-    fn caps_description_becomes_capsfilter() {
-        // A bare `media/type,...` stage is the inline caps-filter shorthand.
-        let stages =
-            parse_stages("videotestsrc ! video/x-raw,format=nv12,width=320 ! fakesink").unwrap();
-        assert_eq!(stages.len(), 3);
-        assert_eq!(stages[1].name, "capsfilter");
-        assert_eq!(
-            stages[1].props,
-            [("caps".to_string(), "video/x-raw,format=nv12,width=320".to_string())]
-        );
+    fn unknown_reference_is_reported() {
+        // The degree / reference checks precede registry construction, so an
+        // empty registry still surfaces them.
+        let reg = Registry::new();
+        let err =
+            parse_launch(&reg, "videotestsrc ! tee name=t ! fakesink nope. ! fakesink").unwrap_err();
+        assert_eq!(err, ParseError::UnknownReference("nope".to_string()));
+    }
+
+    #[test]
+    fn duplicate_name_is_reported() {
+        let reg = Registry::new();
+        let err =
+            parse_launch(&reg, "videotestsrc name=x ! videoflip name=x ! fakesink").unwrap_err();
+        assert_eq!(err, ParseError::DuplicateName("x".to_string()));
+    }
+
+    #[test]
+    fn fan_out_without_tee_is_reported() {
+        let reg = Registry::new();
+        // `s` is not a tee, yet it feeds the inline sink and the `s.` branch.
+        let err =
+            parse_launch(&reg, "videotestsrc name=s ! fakesink s. ! fakesink").unwrap_err();
+        assert_eq!(err, ParseError::FanOutWithoutTee("videotestsrc".to_string()));
     }
 }

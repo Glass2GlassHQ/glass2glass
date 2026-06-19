@@ -1074,8 +1074,11 @@ the last (M104-M106):
   stage is the inline caps-filter shorthand (M117): `parse_launch` rewrites it to
   a `capsfilter` whose `caps` property is parsed by `capsfilter::parse_caps` (the
   `Caps` text grammar), so `videotestsrc ! video/x-raw,format=nv12,width=320 !
-  ...` pins a format / geometry as text. Still one linear chain; branching
-  (`tee` / named pads) is the remaining `gst-launch` gap.
+  ...` pins a format / geometry as text. Branching (M118) makes this a chain
+  parser: `name=t` names an element and a `t.` reference opens a branch, with
+  `tee` the structural fan-out node (its width derived from the branch count)
+  broadcasting to every branch; roles follow connectivity. Text muxer fan-in is
+  the remaining `gst-launch` gap.
 
 ### 4.17 Containers and Byte Streams
 
