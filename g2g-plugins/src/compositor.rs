@@ -192,7 +192,9 @@ impl Compositor {
 /// Alpha-blend a `sw` x `sh` RGBA8 source onto a `cw` x `ch` RGBA8 canvas with
 /// its top-left at `(x0, y0)` (may be negative), modulating source alpha by
 /// `galpha`. Straight "source-over" compositing, integer math; pixels outside
-/// the canvas are clipped.
+/// the canvas are clipped. The arguments are the canvas + source geometry and
+/// the placement: a flat parameter list keeps this inner loop allocation-free.
+#[allow(clippy::too_many_arguments)]
 fn blend_over(
     canvas: &mut [u8],
     cw: usize,

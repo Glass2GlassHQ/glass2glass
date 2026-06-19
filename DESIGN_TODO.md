@@ -168,13 +168,22 @@ Production-shape needs that block specific real-world use cases.
   needs a sans-IO protocol layer + a tokio I/O sink, paralleling the
   RTP packetizer + UDP sink split.
 
-- **RTP receive-side stack.** ~2 sessions remaining. The reordering jitter
-  buffer is **done** (M94: `rtpjitter::RtpJitterBuffer` — sequence reorder,
-  loss/dup/late detection, bounded-latency release, wired into `UdpSrc` with a
-  deadline-bounded recv loop; see CHANGELOG). Still missing: RTCP RR generation,
-  NACK-based retransmission, RTX, and FEC. `RtspSrc` via `retina` covers the RTSP
-  case (retina has its own jitterbuffer); raw RTP ingest now reorders and conceals
-  loss but has no feedback/retransmission path yet.
+- **RTP receive-side stack.** Largely **done**; RTX/FEC remain. The reordering
+  jitter buffer (M94: `rtpjitter::RtpJitterBuffer`), the RTCP control protocol
+  (M95: `rtcp` — SR/RR/BYE + RFC 4585 Generic NACK build/parse + RFC 3550
+  reception stats), and the feedback loop (M96: `UdpSrc` sends RR + NACK,
+  `UdpSink` honors NACK by retransmitting from a bounded history, RTP/RTCP muxed
+  per RFC 5761) all shipped. Remaining:
+  - **RFC 4588 RTX.** Today a retransmit is a plain same-stream resend (the
+    jitter buffer dedups and reorders it). RTX wraps the retransmission in a
+    distinct payload type with the original sequence (OSN) prepended, so it is
+    distinguishable for stats and unambiguous under heavy loss. The marker bit is
+    not carried by OSN alone, so a faithful RTX apply must reconstruct the
+    original header; that subtlety is why plain resend was chosen first.
+  - **FEC** (ULPFEC / FlexFEC). Forward error correction trades bandwidth for
+    latency-free recovery (no round-trip), the better fit when RTT is high or the
+    path is one-way; a separate track from NACK/RTX.
+  `RtspSrc` via `retina` covers the RTSP case (retina has its own jitterbuffer).
 
 - **Property system + introspection.** 3 sessions. No name/value
   property bag — `with_*` builder methods only, set at construction.

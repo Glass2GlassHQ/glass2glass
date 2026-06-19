@@ -293,8 +293,8 @@ fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize, interleaved: bool) -> Box<[u8]
             // average the two rows (cy*2, cy*2+1) for the 4:2:0 sample.
             let row0 = ((cy * 2) * w + cx * 2) * 2;
             let row1 = ((cy * 2 + 1) * w + cx * 2) * 2;
-            let u = (src[row0 + 1] as u32 + src[row1 + 1] as u32 + 1) / 2;
-            let v = (src[row0 + 3] as u32 + src[row1 + 3] as u32 + 1) / 2;
+            let u = (src[row0 + 1] as u32 + src[row1 + 1] as u32).div_ceil(2);
+            let v = (src[row0 + 3] as u32 + src[row1 + 3] as u32).div_ceil(2);
             let ci = cy * cw + cx;
             if interleaved {
                 dst[luma + 2 * ci] = u as u8;
