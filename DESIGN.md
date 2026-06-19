@@ -53,8 +53,26 @@ pub struct Frame {
     /// capture time and preserved unchanged across the pipeline. Used
     /// for drop detection and tracing, never for AV sync.
     pub sequence: u64,
+    /// Reserved per-frame attachable metadata (the GstMeta /
+    /// GstAnalyticsRelationMeta analog). Empty on construction.
+    pub meta: FrameMetaSet,
 }
 ```
+
+**Per-frame metadata (`FrameMetaSet`).** `Frame` carries a reserved `meta`
+side-channel for typed blobs that travel with the buffer (ML detection /
+classification / tracking results, region-of-interest, reference timestamps).
+It is gated behind the `metadata` cargo feature, **off by default**: when off it
+is a zero-sized unit, so the `no_std` / RTOS baseline pays nothing per frame;
+when on it is a `Vec<Box<dyn FrameMeta>>` where `FrameMeta` is a
+`Debug + Send + Sync` trait. The field exists unconditionally so the metadata
+system can be filled in without a breaking change to the `Frame` API. The
+attach / iterate / propagate contract (GstMeta's `transform_func` / `copy_func`,
+plus the `AnalyticsMeta` relation-graph layer) lands with the first
+metadata-producing element; until then every frame's set is empty. Construct
+frames via `Frame::new(domain, timing, sequence)` so future field additions do
+not break call sites. The tee fan-out path gives each clone a fresh empty set
+(deep COW propagation is deferred to the full build).
 
 **Caps live on the link, not on the frame.** A `Frame` does not carry its
 `Caps`. The current caps of a link are established by the most recent
@@ -631,6 +649,36 @@ and a thin sink does the UDP I/O.
   90 kHz image of `FrameTiming::pts_ns`; sequence numbers and the per-AU
   marker bit come from the packetizer. `with_rtp(pt, ssrc)` and
   `with_max_payload(mtu)` configure the flow.
+
+### 4.12a Live Capture (V4L2)
+
+`V4l2Src` (`v4l2src.rs`, `v4l2` feature, Linux-only) is the first real capture
+source: it streams packed **YUYV** (4:2:2, the near-universal UVC output) off a
+`/dev/videoN` device via V4L2 mmap streaming I/O, wrapping the pure-Rust `v4l`
+crate (no libv4l C dependency). `VideoConvert` unpacks YUYV to a planar / RGB
+target (§3.1 raw formats), so the canonical chain is
+`V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
+
+Two design points carry the element:
+
+- **Blocking ioctls off the async path.** V4L2 dequeue is a blocking ioctl, so
+  capture runs on a dedicated `std::thread` that owns the device and the mmap
+  stream (which borrows the device) and copies each frame's payload into a
+  bounded channel. The `SourceLoop::run` future drains that channel and pushes
+  `DataFrame`s. The channel bound (`BUFFER_COUNT`) applies backpressure: the
+  capture thread blocks rather than growing memory when the pipeline falls
+  behind. The source reports a live `LatencyReport` of one frame period.
+- **Up-front format negotiation, re-open for capture.** `intercept_caps` opens
+  the device, sets YUYV at the requested geometry, and reads back what the
+  driver actually chose (it may snap to a supported mode); the probe device is
+  then dropped. The capture thread re-opens the device under that exact format.
+  Keeping no device handle in the struct between negotiation and `run`
+  sidesteps `Send` / borrow entanglement with the stream. Errors surface as
+  `G2gError::Hardware(HardwareError::V4l2(errno))`.
+
+MJPEG-mode UVC and format-flexible negotiation (the source fixes YUYV today),
+plus the `HttpSrc` / `UdpSrc` network sources and a `uridecodebin`-equivalent
+URI → source layer, are the remaining capture/ingress breadth (DESIGN_TODO).
 
 ### 4.13 CSP Caps Negotiation
 

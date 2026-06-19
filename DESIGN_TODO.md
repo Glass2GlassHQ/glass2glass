@@ -16,15 +16,11 @@ remaining gap to "80% / credible replacement" is element + subsystem breadth.
 
 ### Phase 2 - Breadth + observability (mostly parallelizable).
 
-- **`v4l2src`** DONE (M90): first real capture source, turns g2g from "process
-  streams" into "produce streams". Streams packed YUYV (4:2:2) off a UVC
-  `/dev/videoN` via mmap on a dedicated blocking-capture thread feeding the
-  async run loop; `VideoConvert` unpacks YUYV (M89). Validated against a real
-  integrated webcam (capture -> convert -> FakeSink, and a live
-  capture -> Wayland window). **Remaining capture/URI work:** `HttpSrc` +
-  `UdpSrc` (prereq for HLS/DASH/raw-RTP), then a `uridecodebin`-equivalent
-  URI->source layer over the autoplug registry. MJPEG-mode UVC + format-flexible
-  negotiation (the source fixes YUYV today) is a follow-up.
+- **Capture / URI source breadth.** `v4l2src` is done (DESIGN.md §4.12a).
+  Remaining: `HttpSrc` + `UdpSrc` (prereq for HLS/DASH/raw-RTP), then a
+  `uridecodebin`-equivalent URI->source layer over the autoplug registry. Also
+  MJPEG-mode UVC + format-flexible `v4l2src` negotiation (the source fixes YUYV
+  today). All OS/network-coupled, validated on hardware.
 - Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
   runner (the design's stated `DropOldest` use case); the leaky setters are
   `std`-gated today since only `run_graph` configures per-edge policy.
@@ -99,15 +95,11 @@ Production-shape needs that block specific real-world use cases.
     relation traversal instead of by tensor offset. Built on top of the
     `FrameMeta` primitive, not a separate system.
 
-  **Extension point reserved (M88, DONE).** `Frame` now carries a
-  `pub meta: FrameMetaSet` field behind the `metadata` cargo feature (off by
-  default): a `()`-style ZST when off (the no_std / Cortex-M path pays nothing),
-  a `Vec<Box<dyn FrameMeta>>` when on, with `FrameMeta` a minimal
-  `Debug + Send + Sync` trait shell. `Frame::new(domain, timing, sequence)` is
-  the future-proof constructor; existing literals fill the field with
-  `meta: Default::default()`. No attach / iterate / propagate API yet — that
-  lands with the full build below. This was the cheap-now / expensive-to-retrofit
-  half; the remainder (trait body + relation graph) stays deferred.
+  The cheap-now / expensive-to-retrofit half (reserving the `meta:
+  FrameMetaSet` field behind the `metadata` feature) is **done** and documented
+  in DESIGN.md §3.1. What remains below is the full build: the `FrameMeta` trait
+  body, the attach / iterate / propagate (transform / copy / free) contract, and
+  the `AnalyticsMeta` relation-graph layer.
 
   **Design decision: defer the full build until a concrete ML detection
   element needs it.** No in-tree element produces detection metadata today
@@ -249,13 +241,14 @@ expects them. Grouped by category.
 
 ### Capture sources
 
-A whole platform-coverage gap: today we have no live camera capture on any
-platform. WASAPI covers Windows audio in/out, but video capture and Linux
-audio are unaddressed.
+Platform-coverage. Linux video capture is done (`v4l2src`, DESIGN.md §4.12a);
+WASAPI covers Windows audio in/out. Windows video capture, Linux audio, and the
+modern PipeWire path remain.
 
-- **`v4l2src`** (Linux video capture). 2 sessions. The Linux camera baseline;
-  MMAP DMABUF output already maps to our `MemoryDomain::DmaBuf`. Needed for
-  any Linux-side production capture.
+- **`v4l2src` follow-ups.** The element streams system-memory YUYV today. Next:
+  MMAP DMABUF output (maps to `MemoryDomain::DmaBuf` for zero-copy into the GPU
+  decode/display path) and format-flexible negotiation (MJPEG-mode UVC, other
+  fourccs) instead of the fixed YUYV.
 - **`pipewiresrc`** (Linux PipeWire video + audio, screen capture).
   2–3 sessions. PipeWire is the modern Linux media layer (replacing v4l2 +
   PulseAudio + screen-capture-via-DBUS); a single element covers camera +
@@ -384,8 +377,7 @@ M62 / M66) and dropped from this table.
 
 | Element | Sessions | Why it matters |
 | :--- | :--- | :--- |
-| `audioresample` | 1–2 | any cross-rate audio path |
-| `v4l2src` / `pipewiresrc` / `mfvideosrc` | 2 each | live camera on Linux / Windows |
+| `pipewiresrc` / `mfvideosrc` | 2 each | live camera on PipeWire / Windows (`v4l2src` done) |
 | `UdpSrc` + RTP depay | 2 | raw RTP ingest |
 | `HttpSrc` | 2 | prereq for HLS / DASH / random URLs |
 | VP8 / VP9 / AV1 / Opus codecs | 3 + 3 + 3 + 2 | WebRTC + modern web |
@@ -400,12 +392,12 @@ M62 / M66) and dropped from this table.
 | RTSP server | 4–5 | host endpoints |
 | WebRTC sendrecv | 5+ | full WebRTC media engine |
 
-With the video transforms shipped, `audioresample` is the last of the
-cheap, highest-frequency transform gaps. The capture sources
-(`v4l2src` / `pipewiresrc` / `mfvideosrc`) are the next tier: without
-live camera input we're a "process incoming streams" framework, not a
-"produce streams" framework. Both tiers together are ~12 sessions and
-make g2g substantially more credible as a GStreamer replacement.
+With the video transforms and `audioresample` shipped, the cheap,
+highest-frequency transform gaps are closed. `v4l2src` (DESIGN.md §4.12a) took
+g2g from a "process incoming streams" framework toward a "produce streams" one;
+the remaining capture tier (`pipewiresrc` / `mfvideosrc`, plus `UdpSrc` /
+`HttpSrc` network sources) extends that across platforms and makes g2g
+substantially more credible as a GStreamer replacement.
 
 ## Tier-1 element sprint — detailed plan
 
