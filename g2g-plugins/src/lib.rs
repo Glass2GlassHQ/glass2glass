@@ -11,6 +11,7 @@ extern crate alloc;
 
 pub mod aacparse;
 pub mod audioconvert;
+pub mod audioresample;
 pub mod audiotestsrc;
 pub mod capsfilter;
 pub mod fakesink;

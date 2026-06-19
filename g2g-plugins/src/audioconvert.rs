@@ -88,7 +88,7 @@ fn channel_map_supported(in_ch: u8, out_ch: u8) -> bool {
     in_ch == out_ch || in_ch == 1 || out_ch == 1
 }
 
-fn sample_bytes(format: AudioFormat) -> usize {
+pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
     match format {
         AudioFormat::PcmS16Le => 2,
         AudioFormat::PcmF32Le => 4,
@@ -96,6 +96,9 @@ fn sample_bytes(format: AudioFormat) -> usize {
         _ => 0,
     }
 }
+
+/// The PCM sample formats `AudioConvert` / `AudioResample` read and write.
+pub(crate) const PCM_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
 
 impl AsyncElement for AudioConvert {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -258,7 +261,7 @@ fn map_channel(in_samples: &[f32], oc: usize, out_ch: usize) -> f32 {
 }
 
 /// Decode one sample to f32 in [-1, 1). The slice starts at the sample.
-fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
+pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     match format {
         AudioFormat::PcmS16Le => {
             let s = i16::from_le_bytes([at[0], at[1]]);
@@ -270,7 +273,7 @@ fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
 }
 
 /// Encode one f32 sample, appending its little-endian bytes.
-fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
+pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
     match format {
         AudioFormat::PcmS16Le => {
             let scaled = v.clamp(-1.0, 1.0) * 32767.0;

@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M84: `AudioResample` (last Tier-1 audio transform)
+
+- First Phase 2 breadth item. `AudioResample` (`g2g-plugins`, `no_std` baseline
+  alongside `AudioConvert`) converts interleaved PCM (`PcmS16Le` / `PcmF32Le`)
+  from its input sample rate to a configured target rate, preserving format and
+  channel count, so audio chains bridge a rate mismatch (e.g. `WasapiSrc
+  44.1 kHz -> AudioResample 48 kHz -> AacEncode`). This was the resampler
+  `AudioConvert` deliberately left out (M34).
+- Algorithm: per-channel linear interpolation. A resampler is stateful (the
+  output grid does not align to buffer boundaries), so the element carries each
+  channel's last input sample plus a fractional read position across `process`
+  calls; the boundary sample interpolates against the real predecessor. Exact at
+  rate 1:1. `no_std` and libm-free: floor is done by integer truncation with a
+  negative-correction (the same "no libm" discipline `AudioConvert` uses for
+  rounding), not `f64::floor` (which is std-only and would break the baseline).
+- `DerivedOutput` caps constraint retargets the rate only; `intercept_caps` /
+  `configure_pipeline` accept PCM and reject compressed audio; `Flush` and a
+  mid-stream rate/format `CapsChanged` reset the carried state. `PadTemplates`
+  published (PCM in/out) so it is registry-visible.
+- Tests: six element unit tests (rate-only `DerivedOutput`; 1:1 passthrough;
+  2x upsample interpolates midpoints; 2x downsample; phase continuity across two
+  buffers using the carried boundary sample; ragged-input rejection) and
+  `m84_audioresample` (end-to-end `AudioTestSrc 44.1 kHz -> AudioResample
+  48 kHz -> FakeSink` through `run_graph`, asserting frames flow and the sink
+  observes the retargeted 48 kHz caps). VERIFIED on the dev host: `cargo test
+  --workspace` green; `cargo clippy -p g2g-plugins --lib` (no_std baseline)
+  clean; `cargo check --workspace` builds.
+- Follow-up: linear interpolation is the cheap baseline; a windowed-sinc /
+  polyphase filter is the quality upgrade when audio fidelity matters.
+
 ### M83c: source registry + `playbin`-style assembly + VAAPI decoder templates
 
 - Completes the auto-plug assembly story: the registry now knows graph *roots*

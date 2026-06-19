@@ -39,7 +39,9 @@ the previous.
 
 ### Phase 2 - Breadth + observability (~7-9 sessions, mostly parallelizable).
 
-- **`AudioResample`** (last Tier-1 transform), **`v4l2src`** (first real
+- **`AudioResample`** (last Tier-1 transform) DONE (M84): linear-interpolation
+  PCM resampler, `no_std` baseline, stateful phase carry across buffers; quality
+  upgrade to windowed-sinc/polyphase deferred. Next: **`v4l2src`** (first real
   capture source - turns g2g from "process streams" into "produce streams"),
   **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
 - **Bus message coverage** (2 sessions): eos/error/warning/state-changed/qos/
