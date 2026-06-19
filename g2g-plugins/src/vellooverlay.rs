@@ -327,6 +327,8 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     }
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
+                // The runner's transform arm forwards EOS; don't double it.
+                PipelinePacket::Eos => {}
                 other => {
                     out.push(other).await?;
                 }

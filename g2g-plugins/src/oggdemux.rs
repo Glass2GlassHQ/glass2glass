@@ -151,8 +151,8 @@ impl AsyncElement for OggDemux {
                     self.emit_ready(out).await?;
                 }
                 PipelinePacket::Eos => {
+                    // Emit any final packets; the runner's transform arm forwards EOS.
                     self.emit_ready(out).await?;
-                    out.push(PipelinePacket::Eos).await?;
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
@@ -285,7 +285,7 @@ mod tests {
             alloc::vec![Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }]
         );
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x33]]);
-        assert!(sink.eos);
+        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
         assert_eq!(d.emitted(), 2);
     }
 }

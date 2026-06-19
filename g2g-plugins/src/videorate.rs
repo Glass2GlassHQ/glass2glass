@@ -290,7 +290,7 @@ impl AsyncElement for VideoRate {
                                 .await?;
                         }
                     }
-                    out.push(PipelinePacket::Eos).await?;
+                    // the transform arm forwards EOS; the element only flushes here.
                 }
             }
             Ok(())

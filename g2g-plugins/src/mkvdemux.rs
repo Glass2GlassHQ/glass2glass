@@ -238,8 +238,8 @@ impl AsyncElement for MkvDemux {
                     self.emit_ready(out).await?;
                 }
                 PipelinePacket::Eos => {
+                    // Emit any final frames; the runner's transform arm forwards EOS.
                     self.emit_ready(out).await?;
-                    out.push(PipelinePacket::Eos).await?;
                 }
                 // ByteStream caps carry no geometry; nothing to forward.
                 PipelinePacket::CapsChanged(_) => {}
@@ -474,7 +474,7 @@ mod tests {
             }]
         );
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x55, 0x66]]);
-        assert!(sink.eos);
+        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
     }
 
     #[tokio::test]

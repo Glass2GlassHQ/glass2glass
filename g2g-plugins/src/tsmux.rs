@@ -145,9 +145,8 @@ impl AsyncElement for TsMux {
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
-                PipelinePacket::Eos => {
-                    out.push(PipelinePacket::Eos).await?;
-                }
+                // The runner's transform arm forwards EOS; nothing to flush here.
+                PipelinePacket::Eos => {}
                 // Input geometry / params don't change the TS framing.
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
@@ -249,7 +248,7 @@ mod tests {
         mux.process(h264_frame(au0.clone(), 10_000_000), &mut ts_sink).await.unwrap();
         mux.process(h264_frame(au1.clone(), 20_000_000), &mut ts_sink).await.unwrap();
         mux.process(PipelinePacket::Eos, &mut ts_sink).await.unwrap();
-        assert!(ts_sink.eos);
+        assert!(!ts_sink.eos, "EOS is forwarded by the runner's arm, not the element");
 
         // Feed the muxed TS bytes back through the demuxer.
         let mut ts = Vec::new();

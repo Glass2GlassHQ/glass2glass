@@ -5,6 +5,22 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M121: fix double-EOS forward in demux/mux/overlay transforms
+
+- **Bug.** Six transforms (`tsdemux`, `oggdemux`, `mkvdemux`, `tsmux`, `mkvmux`,
+  `videorate`) pushed EOS in `process(Eos)`, and two overlays (`AnalyticsOverlay`,
+  `VelloAnalyticsOverlay`) forwarded it via their catch-all arm. The runner's
+  `transform_arm` already forwards EOS after `process(Eos)` returns (the documented
+  contract, see `identity`), so this double-pushed: with no EOS dedup in
+  `SenderSink`, the second EOS hits a closed sink once the demux->sink link fills
+  exactly (frame count == link capacity) and surfaces as a bare `Shutdown`. Latent
+  in those eight; hit in M119 with a 2-frame FLV at capacity 4.
+- **Fix.** The eight elements now emit only their final frames on `Eos` and leave
+  the EOS forward to the runner, matching `identity` / `flvdemux` / `flvmux`. The
+  five demux/mux unit tests now assert the element does *not* forward EOS itself.
+- Verified: the full `g2g-plugins --features std` suite, the `analytics` overlay
+  tests, and a `vello-overlay` compile-check.
+
 ### M120: FLV muxer (`flvmux`)
 
 - **`g2g-plugins::flv::FlvMuxer` (no_std).** The inverse of `FlvDemuxer`: wrap each

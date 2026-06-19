@@ -173,9 +173,8 @@ impl AsyncElement for MkvMux {
                         self.caps = Some(c);
                     }
                 }
-                PipelinePacket::Eos => {
-                    out.push(PipelinePacket::Eos).await?;
-                }
+                // The runner's transform arm forwards EOS; nothing to flush here.
+                PipelinePacket::Eos => {}
                 other => {
                     out.push(other).await?;
                 }
@@ -300,7 +299,7 @@ mod tests {
         mux.process(frame(f0.clone(), 0), &mut mkv_sink).await.unwrap();
         mux.process(frame(f1.clone(), 40_000_000), &mut mkv_sink).await.unwrap();
         mux.process(PipelinePacket::Eos, &mut mkv_sink).await.unwrap();
-        assert!(mkv_sink.eos);
+        assert!(!mkv_sink.eos, "EOS is forwarded by the runner's arm, not the element");
 
         let mut mkv = Vec::new();
         for f in &mkv_sink.frames {

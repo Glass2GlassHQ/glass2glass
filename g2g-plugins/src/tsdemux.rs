@@ -248,11 +248,11 @@ impl AsyncElement for TsDemux {
                     self.emit_units(units, out).await?;
                 }
                 PipelinePacket::Eos => {
-                    // Flush the final in-flight PES, emit it, then forward EOS.
+                    // Flush the final in-flight PES and emit it; the runner's
+                    // transform arm forwards the EOS itself.
                     self.demux.flush();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
-                    out.push(PipelinePacket::Eos).await?;
                 }
                 // ByteStream caps don't carry geometry; nothing to forward, and
                 // a Segment passes through.
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(sink.frames.len(), 2, "two H.264 access units demuxed");
         assert_eq!(sink.frames[0], au0, "first AU bytes intact (PES header stripped)");
         assert_eq!(sink.frames[1], au1);
-        assert!(sink.eos, "EOS forwarded");
+        assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
         assert_eq!(d.emitted(), 2);
     }
 
