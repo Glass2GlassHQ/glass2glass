@@ -14,6 +14,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
@@ -24,6 +25,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
@@ -32,6 +34,9 @@ const RTP_CLOCK_HZ: u64 = 90_000;
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 /// Default max RTP payload bytes, leaving headroom under a 1500-byte MTU.
 const DEFAULT_MAX_PAYLOAD: usize = 1400;
+/// Default depth of the retransmission history (recently sent packets kept for
+/// NACK-triggered resend).
+const DEFAULT_RETX_CAPACITY: usize = 1024;
 
 /// The H.264-at-any-geometry caps the sink accepts. Geometry rides in-band in
 /// the SPS, so the sink imposes no concrete dimensions.
@@ -56,9 +61,16 @@ pub struct UdpSink {
     // is guaranteed (`UdpSocket::from_std` requires one).
     std_socket: Option<StdUdpSocket>,
     socket: Option<tokio::net::UdpSocket>,
+    /// Honor RTPFB NACK by resending from the retransmission history.
+    retransmit: bool,
+    /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
+    /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
+    retx_buf: VecDeque<(u16, Vec<u8>)>,
+    retx_cap: usize,
     packets_sent: u64,
     bytes_sent: u64,
     frames_sent: u64,
+    retransmits_sent: u64,
     eos_seen: bool,
 }
 
@@ -72,9 +84,13 @@ impl UdpSink {
             packetizer: None,
             std_socket: None,
             socket: None,
+            retransmit: true,
+            retx_buf: VecDeque::new(),
+            retx_cap: DEFAULT_RETX_CAPACITY,
             packets_sent: 0,
             bytes_sent: 0,
             frames_sent: 0,
+            retransmits_sent: 0,
             eos_seen: false,
         }
     }
@@ -91,6 +107,19 @@ impl UdpSink {
     pub fn with_max_payload(mut self, bytes: usize) -> Self {
         self.max_payload = bytes;
         self
+    }
+
+    /// Enable/disable NACK-triggered retransmission and size the history of
+    /// recently sent packets kept for resend. Default: on, 1024 packets.
+    pub fn with_retransmit(mut self, enabled: bool, capacity: usize) -> Self {
+        self.retransmit = enabled;
+        self.retx_cap = capacity.max(1);
+        self
+    }
+
+    /// Retransmitted packets sent in response to NACK feedback.
+    pub fn retransmits_sent(&self) -> u64 {
+        self.retransmits_sent
     }
 
     pub fn packets_sent(&self) -> u64 {
@@ -121,6 +150,40 @@ impl UdpSink {
             self.socket = Some(tokio::net::UdpSocket::from_std(std).map_err(io_err)?);
         }
         Ok(())
+    }
+
+    /// Drain any pending RTCP (RTP/RTCP-muxed on the send socket) without
+    /// blocking, and retransmit every requested-and-still-buffered packet.
+    /// Returns the number of packets resent.
+    async fn service_nacks(&mut self) -> Result<u64, G2gError> {
+        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+        // Collect requested packets first so the resend loop does not borrow the
+        // history while sending.
+        let mut to_resend: Vec<Vec<u8>> = Vec::new();
+        let mut rb = [0u8; 1500];
+        loop {
+            match socket.try_recv(&mut rb) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for p in rtcp::parse_compound(&rb[..n]) {
+                        if let RtcpPacket::Nack { missing, .. } = p {
+                            for seq in missing {
+                                if let Some((_, pkt)) = self.retx_buf.iter().find(|(s, _)| *s == seq)
+                                {
+                                    to_resend.push(pkt.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                // WouldBlock (no more datagrams) or a transient error: stop.
+                Err(_) => break,
+            }
+        }
+        for pkt in &to_resend {
+            socket.send(pkt).await.map_err(io_err)?;
+        }
+        Ok(to_resend.len() as u64)
     }
 }
 
@@ -171,17 +234,37 @@ impl AsyncElement for UdpSink {
                         packetizer.packetize(slice.as_slice(), timestamp)
                     };
                     self.ensure_socket()?;
-                    let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                     let mut sent = 0u64;
                     let mut bytes = 0u64;
-                    for pkt in &packets {
-                        socket.send(pkt).await.map_err(io_err)?;
-                        sent += 1;
-                        bytes += pkt.len() as u64;
+                    {
+                        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                        for pkt in &packets {
+                            socket.send(pkt).await.map_err(io_err)?;
+                            sent += 1;
+                            bytes += pkt.len() as u64;
+                        }
+                    }
+                    // Keep each sent packet in the bounded retransmission history,
+                    // keyed by its RTP sequence, for NACK-triggered resend.
+                    if self.retransmit {
+                        for pkt in packets {
+                            let s = u16::from_be_bytes([pkt[2], pkt[3]]);
+                            if self.retx_buf.len() >= self.retx_cap {
+                                self.retx_buf.pop_front();
+                            }
+                            self.retx_buf.push_back((s, pkt));
+                        }
                     }
                     self.packets_sent += sent;
                     self.bytes_sent += bytes;
                     self.frames_sent += 1;
+
+                    // Service any NACK feedback that arrived (non-blocking),
+                    // resending the requested sequences from the history.
+                    if self.retransmit {
+                        let resent = self.service_nacks().await?;
+                        self.retransmits_sent += resent;
+                    }
                 }
                 // RTP carries no in-band end marker; an RTCP BYE is the M47
                 // follow-up. Sequence numbers persist so a receiver sees clean

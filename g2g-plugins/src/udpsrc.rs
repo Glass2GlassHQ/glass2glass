@@ -27,6 +27,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
 
@@ -37,6 +38,13 @@ const RECV_BUF: usize = 65_536;
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
+/// Default receiver-report cadence.
+const DEFAULT_RR_INTERVAL_MS: u64 = 1000;
+/// Minimum spacing between NACK feedback packets, so a persistent gap is not
+/// re-requested every datagram (give a retransmit time to arrive).
+const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
+/// Our own SSRC as the RTCP reporter (`g2g` + 1).
+const LOCAL_SSRC: u32 = 0x6732_6701;
 
 #[derive(Debug)]
 pub struct UdpSrc {
@@ -49,6 +57,10 @@ pub struct UdpSrc {
     frame_limit: u64,
     /// Reorder/loss-resilience policy for the receive path.
     jitter: JitterConfig,
+    /// RTCP receiver-report cadence in ms (0 disables RTCP feedback entirely).
+    rtcp_rr_interval_ms: u64,
+    /// Emit RTPFB Generic NACK for detected gaps (requests retransmission).
+    nack_enabled: bool,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -66,6 +78,8 @@ impl UdpSrc {
             fps: DEFAULT_FPS,
             frame_limit: 0,
             jitter: JitterConfig::default(),
+            rtcp_rr_interval_ms: DEFAULT_RR_INTERVAL_MS,
+            nack_enabled: true,
             std_socket: None,
             configured: false,
         }
@@ -108,6 +122,16 @@ impl UdpSrc {
     /// [`JitterConfig::default`] (50 ms / 64 packets).
     pub fn with_jitter(mut self, max_hold_ms: u64, max_depth: usize) -> Self {
         self.jitter = JitterConfig::new(max_hold_ms, max_depth);
+        self
+    }
+
+    /// Configure RTCP feedback (RTP/RTCP-muxed on the same socket, RFC 5761):
+    /// send a receiver report every `rr_interval_ms` (0 disables RTCP), and emit
+    /// a Generic NACK for each detected gap when `nack` is set. Default is on
+    /// (1 s reports, NACK enabled).
+    pub fn with_rtcp(mut self, rr_interval_ms: u64, nack: bool) -> Self {
+        self.rtcp_rr_interval_ms = rr_interval_ms;
+        self.nack_enabled = nack;
         self
     }
 
@@ -169,12 +193,21 @@ impl SourceLoop for UdpSrc {
 
             let mut depay = RtpH264Depayloader::new();
             let mut jitter = RtpJitterBuffer::new(self.jitter);
+            let mut stats = ReceptionStats::new(0, RTP_CLOCK_HZ as u32);
             let mut buf = vec![0u8; RECV_BUF];
             let limit = self.frame_limit;
             let mut seq = 0u64;
             // RTP timestamps start at a random offset; rebase so downstream
             // sees PTS near zero.
             let mut ts_base: Option<u32> = None;
+
+            // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to
+            // report to (learned from the first datagram) and report timers.
+            let rtcp_on = self.rtcp_rr_interval_ms > 0;
+            let rr_interval_ns = self.rtcp_rr_interval_ms * 1_000_000;
+            let mut peer: Option<SocketAddr> = None;
+            let mut last_rr_ns = g2g_core::metrics::monotonic_ns();
+            let mut last_nack_ns = 0u64;
 
             loop {
                 // Drain every packet the jitter buffer will release now, turning
@@ -209,24 +242,82 @@ impl SourceLoop for UdpSrc {
                     }
                 }
 
-                // Wait for the next datagram, but no longer than the head's hold
-                // deadline, so a packet stuck behind a lost predecessor still
-                // flushes when the network falls quiet. An empty buffer blocks.
+                // Periodic receiver report back to the peer (best-effort).
+                let now = g2g_core::metrics::monotonic_ns();
+                if rtcp_on {
+                    if let Some(dest) = peer {
+                        if now.saturating_sub(last_rr_ns) >= rr_interval_ns {
+                            let rr = rtcp::build_receiver_report(LOCAL_SSRC, &[stats.report_block(now)]);
+                            let _ = socket.send_to(&rr, dest).await;
+                            last_rr_ns = now;
+                        }
+                    }
+                }
+
+                // Wait for the next datagram, but no longer than the soonest of
+                // the jitter hold deadline (flush a gap) and the next report.
+                let now = g2g_core::metrics::monotonic_ns();
+                let jitter_deadline = jitter.next_deadline_ns(now);
+                let rr_deadline = if rtcp_on && peer.is_some() {
+                    Some(rr_interval_ns.saturating_sub(now.saturating_sub(last_rr_ns)))
+                } else {
+                    None
+                };
+                let timeout = match (jitter_deadline, rr_deadline) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+
                 let recv = socket.recv_from(&mut buf);
-                let received = match jitter.next_deadline_ns(g2g_core::metrics::monotonic_ns()) {
+                let received = match timeout {
                     Some(delay) if delay > 0 => {
                         match tokio::time::timeout(core::time::Duration::from_nanos(delay), recv).await
                         {
                             Ok(r) => Some(r),
-                            // Deadline elapsed with no packet: loop to flush the gap.
+                            // Deadline elapsed with no packet: loop to flush / report.
                             Err(_) => None,
                         }
                     }
-                    _ => Some(recv.await),
+                    Some(_) => Some(recv.await),
+                    None => Some(recv.await),
                 };
-                if let Some(r) = received {
-                    let (n, _from) = r.map_err(io_err)?;
-                    jitter.push(&buf[..n], g2g_core::metrics::monotonic_ns());
+
+                let Some(r) = received else { continue };
+                let (n, from) = r.map_err(io_err)?;
+                let now = g2g_core::metrics::monotonic_ns();
+
+                // RTCP (muxed) feedback from the sender: a sender report fills the
+                // LSR/DLSR fields for round-trip estimation.
+                if rtcp_on && rtcp::is_rtcp(&buf[..n]) {
+                    for p in rtcp::parse_compound(&buf[..n]) {
+                        if let RtcpPacket::SenderReport { ntp, .. } = p {
+                            stats.on_sender_report(ntp, now);
+                        }
+                    }
+                    continue;
+                }
+
+                // RTP media: account it for reception stats, buffer it for
+                // reordering, and remember the peer for feedback.
+                if n >= 12 {
+                    let media_ssrc = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                    let pkt_seq = u16::from_be_bytes([buf[2], buf[3]]);
+                    let rtp_ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
+                    peer = Some(from);
+                    jitter.push(&buf[..n], now);
+
+                    // Request retransmission of any open gaps, rate-limited.
+                    if self.nack_enabled && now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {
+                        let missing = jitter.missing_seqs();
+                        if !missing.is_empty() {
+                            let nack = rtcp::build_nack(LOCAL_SSRC, media_ssrc, &missing);
+                            let _ = socket.send_to(&nack, from).await;
+                            last_nack_ns = now;
+                        }
+                    }
                 }
             }
         })

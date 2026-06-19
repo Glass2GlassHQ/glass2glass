@@ -206,6 +206,23 @@ impl RtpJitterBuffer {
         None
     }
 
+    /// The 16-bit sequence numbers currently missing: holes between the next
+    /// expected sequence and the highest one buffered. Used to build NACK
+    /// feedback; the span is bounded by the buffer depth.
+    pub fn missing_seqs(&self) -> Vec<u16> {
+        let mut out = Vec::new();
+        let Some(next) = self.next else { return out };
+        let Some((&last, _)) = self.packets.iter().next_back() else { return out };
+        let mut ext = next;
+        while ext < last {
+            if !self.packets.contains_key(&ext) {
+                out.push((ext & 0xFFFF) as u16);
+            }
+            ext += 1;
+        }
+        out
+    }
+
     /// Nanoseconds until [`pop`](Self::pop) would next release a packet without
     /// any new arrival: `Some(0)` if one is ready now, `Some(delay)` if the head
     /// is waiting on a deadline, `None` if the buffer is empty (block on the
@@ -321,6 +338,18 @@ mod tests {
         }
         assert_eq!(out, alloc::vec![10, 11, 12, 13], "monotonic across the u16 wrap");
         assert_eq!(jb.stats().lost, 0);
+    }
+
+    #[test]
+    fn missing_seqs_reports_holes_up_to_the_highest_buffered() {
+        let mut jb = RtpJitterBuffer::new(JitterConfig::new(50, 64));
+        // Buffer 0, then 2 and 4 with 1 and 3 missing.
+        for s in [0u16, 2, 4] {
+            jb.push(&pkt(s, s as u8), 0);
+        }
+        assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0), "release the contiguous head");
+        // Now next=1; holes before the highest buffered (4) are 1 and 3.
+        assert_eq!(jb.missing_seqs(), alloc::vec![1, 3]);
     }
 
     #[test]

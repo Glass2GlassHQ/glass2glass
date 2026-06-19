@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M96: RTCP feedback loop + NACK-based retransmission (RTP resilience, cont.)
+
+- Wires the M95 RTCP module into the live UDP path, completing the
+  reorder + loss-recovery story for raw RTP. RTP/RTCP are muxed on one socket
+  (RFC 5761; `rtcp::is_rtcp` demuxes by packet-type byte).
+- **Receiver (`UdpSrc`):** tracks RFC 3550 reception statistics per source and
+  sends a periodic Receiver Report back to the peer; on a detected gap it emits
+  an RTPFB Generic NACK (rate-limited) requesting the missing sequences, and
+  consumes incoming Sender Reports for round-trip timing. New builder
+  `UdpSrc::with_rtcp(rr_interval_ms, nack)` (default on: 1 s reports, NACK on;
+  `rr_interval_ms == 0` disables RTCP). `RtpJitterBuffer::missing_seqs()` reports
+  the open gaps that drive NACK.
+- **Sender (`UdpSink`):** keeps a bounded history of recently sent packets and,
+  on each frame, drains incoming RTCP non-blocking and retransmits every
+  NACKed-and-still-buffered packet. New builder
+  `UdpSink::with_retransmit(enabled, capacity)` (default on, 1024 packets) and a
+  `retransmits_sent()` counter.
+- Tested: a loopback integration test routes sender -> a lossy proxy that drops
+  chosen sequences once -> receiver; the receiver NACKs, the sender retransmits,
+  and every access unit is recovered in order (with retransmission disabled the
+  same test loses exactly the dropped sequences, confirming the loop does the
+  work).
+- Deferred (documented in DESIGN_TODO): RFC 4588 RTX as a distinct retransmission
+  payload (plain same-stream resend is used today, which the jitter buffer dedups
+  and reorders), and FEC. NACK/RTX is the right fit for the contribution use case;
+  FEC trades bandwidth for latency-free recovery and is a separate track.
+
 ### M94: RTP receive-side jitter buffer (network resilience for raw RTP ingest)
 
 - `rtpjitter::RtpJitterBuffer` (sans-IO, `no_std + alloc`): the reordering stage
