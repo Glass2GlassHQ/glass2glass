@@ -5,63 +5,26 @@ here are deferrals from the spec, follow-ups blocked on a concrete driver or
 upstream fix, and forward-looking tracks that the current architecture
 anticipates but hasn't yet built.
 
-## Roadmap to 80% GStreamer parity (2026-06)
+## Roadmap to 80% GStreamer parity
 
-Sequenced plan agreed this session. The two hardest tracks (negotiation
-M8-M18, DAG runner M63-M74) are done and meet-or-beat GStreamer on the core
-runtime. The remaining gap to "80% / credible replacement" is (a) three
-runtime-lifecycle primitives and (b) element breadth. Elements are cheap to
-add once the spine exists, so the spine goes first.
+The two hardest tracks (negotiation, the DAG runner) and the entire Phase 1
+lifecycle spine (state machine + preroll, seek + SEGMENT, auto-plug /
+`decodebin` / `playbin`) are complete and meet-or-beat GStreamer on the core
+runtime (DESIGN.md §4.13, §4.14). Observability (full bus coverage) and the last
+Tier-1 transform (`AudioResample`) are done too (DESIGN.md §4.15, §4.5). The
+remaining gap to "80% / credible replacement" is element + subsystem breadth.
 
-### Phase 1 - Runtime lifecycle spine (~10-13 sessions). The 80% unlock.
+### Phase 2 - Breadth + observability (mostly parallelizable).
 
-This is the difference between "a live-streaming framework" and "a multimedia
-framework." All three remaining Critical items, sequenced because each sits on
-the previous.
-
-1. **M76+ Pipeline state machine** (NULL -> READY -> PAUSED -> PLAYING,
-   preroll, live-vs-non-live). 3-4 sessions. The substrate seek and auto-plug
-   both sit on. First milestone of the push.
-2. **Seek + SEGMENT + rate control.** 4-5 sessions. `seek(rate, start, stop)`,
-   `GstSegment`-equivalent running/stream/base time, reverse + trick play,
-   segment seeks. Builds on the existing `PipelinePacket::Flush` and the state
-   machine.
-3. **Auto-plug / element registry / `decodebin`-equivalent.** M83a-c
-   DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9): runtime `Registry`
-   over the pad-template metadata, the breadth-first `find_chain` search,
-   `Registry::decodebin` splicing the result onto `run_graph`, and
-   `SourceFactory` / `build_playbin` assembling `source -> chain -> sink`;
-   `FfmpegH264Dec` + `VaapiH264Dec` publish `PadTemplates`. Remaining: a
-   `uridecodebin`-equivalent URI front door; richer factory construction params
-   (geometry / device / file path, beyond the chosen output caps); `PadTemplates`
-   on the other decoders (H.265, ...); and a hardware-backed end-to-end
-   decode-through-`decodebin` run.
-
-### Phase 2 - Breadth + observability (~7-9 sessions, mostly parallelizable).
-
-- **`AudioResample`** (last Tier-1 transform) DONE (M84): linear-interpolation
-  PCM resampler, `no_std` baseline, stateful phase carry across buffers; quality
-  upgrade to windowed-sinc/polyphase deferred. Next: **`v4l2src`** (first real
-  capture source - turns g2g from "process streams" into "produce streams"),
-  **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
-- **Bus message coverage** DONE (eos/error/warning/state-changed/qos/buffering).
-  M85: `BusMessage::Qos` + `SyncSink` late-frame dropping. M87: `BusMessage::
-  Buffering` from link occupancy (`fill_percent`), posted by the sink arm via
-  `run_graph_with_bus` on quartile crossings (g2g has no `queue` element, so it
-  reports the bounded channel's own fill). Follow-ups: buffering on interior
-  links; an app-facing "pause until buffered" helper (over the state machine's
-  `Paused`); periodic QoS (not just on-drop); QoS from the display sinks
-  (`KmsSink` / `WaylandSink`) once they sync to the clock.
-
-- **Leaky `LinkPolicy`** DONE (M86): `DropOldest` / `DropNewest` are
-  implemented in `SenderSink` (control packets never dropped),
-  `RunStats::frames_dropped` reports the total, `run_graph` applies each edge's
-  policy. Follow-up: wire leaky links for a `no_std` live-camera runner (the
-  design's stated `DropOldest` use case); the leaky setters are `std`-gated
-  today since only `run_graph` configures per-edge policy.
-- **Reserve the `FrameMeta` field** on `Frame` (1 session, behind a `metadata`
-  feature, ZST when off). Trivial now, expensive to retrofit. Full relation-
-  graph build stays deferred until a detection element needs it.
+- **`v4l2src`** (first real capture source - turns g2g from "process streams"
+  into "produce streams"), **`HttpSrc` + `UdpSrc`** (prereq for HLS/DASH/raw-RTP).
+  Both are OS/network-coupled, validated on hardware, not in-sandbox.
+- **Reserve the `FrameMeta` field** on `Frame` (behind a `metadata` feature, ZST
+  when off). Trivial now, expensive to retrofit. Full relation-graph build stays
+  deferred until a detection element needs it (see "High / Per-frame metadata").
+- Leaky-link follow-up: wire leaky `LinkPolicy` for a `no_std` live-camera
+  runner (the design's stated `DropOldest` use case); the leaky setters are
+  `std`-gated today since only `run_graph` configures per-edge policy.
 
 ### Phase 3 - Use-case-driven breadth (pick by product target).
 
@@ -76,55 +39,25 @@ as the number of focused implementation sessions to reach functional
 parity (not full polish), with a priority for "is g2g a credible
 GStreamer replacement for this use case?"
 
-### Critical
+### Critical — complete
 
-These block any non-trivial multimedia application, not just specific
-codecs or transports.
+All former Critical items are done: the DAG runner (`run_graph` over arbitrary
+linear / fan-out / fan-in / diamond topologies, with the historical runners as
+thin builders over it), the pipeline state machine + preroll, seek + SEGMENT,
+and auto-plug / `decodebin` / `playbin`. Architecture: DESIGN.md §4.13.3
+(runner), §4.14 (lifecycle + seek), §4.13.9 (auto-plug). The depth that rounds
+these out is no longer blocking but still open:
 
-`run_graph(Graph)` over an arbitrary DAG was the first Critical item and is
-now **DONE** (M63-M74): a single `Graph` builder + `run_graph` entry point
-covers linear / fan-out / fan-in / diamond topologies, and the four historical
-runners are thin builders over it (DESIGN.md §4.13.3). The three Critical items
-below remain, and are the Phase 1 lifecycle spine in the roadmap above.
-
-- **Pipeline state machine, then Seek, then Auto-plug** — sequenced in the
-  Phase 1 roadmap. Detail for each:
-
-- **Auto-plug / element registry / `decodebin`-equivalent.** M83a-c
-  DONE (`g2g-core::runtime::autoplug`, DESIGN.md §4.13.9). The runtime
-  `Registry` enumerates registered element types over the `PadTemplates`
-  metadata; `find_chain` is the breadth-first search ("compose pad
-  templates from this input down to raw"); `Registry::decodebin` returns
-  the chain spliced into a `Graph<GraphNode>` onto `run_graph`;
-  `SourceFactory` / `register_source` / `build_playbin` assemble
-  `source -> chain -> sink` from a source's declared caps; `FfmpegH264Dec`
-  and `VaapiH264Dec` publish `PadTemplates`. A user no longer hand-picks
-  the decoder, *given a registry*. **Remaining for the full
-  `playbin uri=...` experience:** the URI-scheme front door
-  (`uridecodebin`: map `rtsp://` / `file://` to a registered source);
-  richer source/element construction parameters (geometry / device / file
-  path, beyond the output caps the builder receives, so real parameterized
-  sources can be registered); `PadTemplates` on the remaining decoders
-  (H.265, ...); and a hardware-backed end-to-end decode-through-`decodebin`
-  run (the `ffmpeg` / `vaapi` tests today read templates only and decode
-  nothing).
-
-- **Pipeline state machine (NULL → READY → PAUSED → PLAYING).** 3–4
-  sessions. No formal state transitions, no preroll (sink rendering
-  first frame before unpausing), no async state changes, no formal
-  live-vs-non-live distinction beyond the `LatencyProfile::Live` hint.
-  The "build, then run, then drop" lifetime is too coarse for editors,
-  players, or anything user-interactive that needs to pause / scrub /
-  resume. Load-bearing for correctness across seek and A/V sync at
-  startup.
-
-- **Seek + SEGMENT + rate control.** 4–5 sessions.
-  `PipelinePacket::Flush` is the FLUSH half of seek only. Missing:
-  `seek(rate, start, stop)` API, reverse playback, segment seeks (for
-  CMAF / DASH segment transitions), trick play (rate != 1.0), and
-  GStreamer's `GstSegment` running_time / stream_time / base_time
-  decomposition. Without this we're a "live streaming framework," not a
-  "multimedia framework." Tied to the state machine.
+- **Seek depth.** Non-flushing / accumulating `do_seek` (advance base by elapsed
+  running time), reverse + trick-mode (rate != 1.0) handling at the sink, segment
+  seeks (CMAF / DASH transitions), re-preroll after a flushing seek when paused,
+  and a real repositioning source (`Mp4Src` / `FileSrc`) — in-tree sources aren't
+  yet seek-aware.
+- **Auto-plug depth.** A `uridecodebin` URI front door (see Medium), richer
+  factory construction params (geometry / device / file path, beyond the chosen
+  output caps), `PadTemplates` on the remaining decoders (H.265, ...), and a
+  hardware-backed end-to-end decode-through-`decodebin` run (the `ffmpeg` /
+  `vaapi` autoplug tests read templates only, decode nothing).
 
 ### High
 
@@ -202,14 +135,12 @@ Production-shape needs that block specific real-world use cases.
     A's overlay mutates a label, does branch B see it? Default:
     `AnalyticsMeta` is shared via `Arc`, mutation is COW.
 
-- **Bus message coverage.** DONE (M81/M85/M87). `BusMessage` now carries
-  `Eos`, `Error`, `Warning`, `NegotiationFailed`, `StateChanged`, `AsyncDone`,
-  `Qos` (M85: `SyncSink` late-frame drops), and `Buffering` (M87: link-occupancy
-  fill percent from the sink arm via `run_graph_with_bus`). Remaining GStreamer
-  message types are tied to subsystems we don't have yet: `tag` (tag system),
-  `segment-done` (segment seeks), `stream-status` (thread pool), `clock-lost`
-  (clock re-election). Follow-ups: buffering on interior links; periodic QoS;
-  QoS from the display sinks once they sync to the clock.
+- **Remaining bus message types.** Core bus coverage is done (DESIGN.md §4.15).
+  The GStreamer message types still missing are gated on subsystems we don't
+  have yet: `tag` (tag system), `segment-done` (segment seeks), `stream-status`
+  (thread pool), `clock-lost` (clock re-election). Smaller follow-ups: buffering
+  on interior links; periodic QoS; QoS from the display sinks once they sync to
+  the clock.
 
 - **Compositor / pixel mixer (`videomixer` / `compositor`).** 3–4
   sessions. Our `mux` is a fan-in *multiplexer* (combining encoded

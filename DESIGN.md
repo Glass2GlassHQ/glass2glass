@@ -321,7 +321,7 @@ pub enum LinkPolicy {
 }
 ```
 
-The runner reports drops via a tracing hook; drop events are pipeline-observable, never silent.
+The leaky variants are implemented in the per-edge data-plane sink: under a full channel, `DropNewest` discards the incoming frame and `DropOldest` evicts the oldest queued frame to make room. Only `DataFrame`s are ever dropped, control packets (`CapsChanged` / `Segment` / `Flush` / `Eos`) always block, so a leaky link never corrupts the stream; if a full queue holds only control packets, `DropOldest` falls back to blocking. Drops are pipeline-observable, never silent: `RunStats::frames_dropped` reports the total, and `run_graph` applies each edge's policy set via `graph.link_with`. This per-edge policy replaces GStreamer's explicit `queue` element, every link is already a bounded channel and every node already its own scheduling arm.
 
 ### 4.6 The `G2gError` Type
 Errors are a single closed enum so element authors handle the full set exhaustively. Hardware-specific failures carry a backend-tagged payload rather than collapsing to a `String`.
@@ -715,7 +715,7 @@ serves as a snapshot for the mid-stream re-solve (§4.13.4).
 A `Graph` is built from `GraphNode { Source | Element | Muxer }` payloads and
 edges (each carrying a `LinkPolicy`); `finish()` validates topology (topo
 sort, cycle / orphan / pad-count checks) before the run. `run_graph` owns
-whole-graph `solve_graph` negotiation, per-node configure, the M12 latency /
+whole-graph `solve_graph` negotiation, per-node configure, the latency /
 clock / allocation folds, one data arm per node over the edge channels, the
 β allocation re-cascade and the Caps-α mid-stream re-solve. It covers the
 full topology space: linear, fan-out (tee), fan-in (muxer), and diamonds.
@@ -855,6 +855,65 @@ Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
 known without sniffing the byte stream. A `uridecodebin`-equivalent
 source-selection layer (URI scheme → source element) is the remaining piece.
+
+### 4.14 Pipeline Lifecycle: State Machine, Preroll, and Seek
+
+The lifecycle spine sits on top of the DAG runner: it turns "build, run to EOS,
+drop" into a controllable `NULL → READY → PAUSED → PLAYING` machine that can
+preroll, pause, scrub, and resume.
+
+**State machine + preroll.** `PipelineState` (`NULL`/`READY`/`PAUSED`/`PLAYING`)
+and `StateChangeReturn` are ungated core types. A `StateController` (runtime
+feature) carries the target state and a sink-side **flow gate**: below `PLAYING`
+a sink parks at the gate, stops draining its edge, and backpressure stalls the
+DAG upstream, the state machine reuses the existing channel backpressure rather
+than a separate pause mechanism. Preroll: a non-live `PAUSED` transition admits
+exactly one buffer per sink and then holds; the runner calls
+`expect_prerolls(n)` and each sink's `notify_prerolled` aggregates so the async
+`PAUSED` completes with a single `AsyncDone` once *all* sinks have prerolled.
+Live pipelines (`set_live(true)`) take the `NoPreroll` path (no frame is held).
+The lifecycle is opt-in via `run_simple_pipeline_stateful` and
+`run_graph_stateful`; the plain runners are unchanged.
+
+**Seek + SEGMENT + running time.** `g2g-core::segment` is a pure-core (ungated)
+model: `Seek` / `SeekType` / `SeekFlags` describe the request, and `Segment`
+carries the rate/direction-aware running-time ↔ stream-time ↔ base-time math
+(`GstSegment`-equivalent), with `clip` and `for_flush_seek` (which resets `base`
+so running time restarts after a flush). `PipelinePacket::Segment` is the
+carrier: the runner emits an opening SEGMENT and every element forwards it
+(transforms/decoders forward, sinks consume), the same way `Flush` already
+flows. A `SeekController` (runtime) is a cloneable handle the application holds;
+a seek-aware source's run loop polls `take_pending()` between frames and, on a
+flushing seek, emits `Flush`, repositions, emits the post-flush `Segment`, and
+resumes, so a seek reaches the source GStreamer-style (upstream) without a
+back-reference. Non-flushing/accumulating seeks, reverse/trick-mode sink
+handling, and a real repositioning source (`Mp4Src`/`FileSrc`) are open
+(DESIGN_TODO).
+
+### 4.15 Bus and Observability
+
+The pipeline `Bus` (§4.9.1) is a many-producer / single-consumer channel for
+out-of-band events, so an element notifies the application without a
+back-reference. `BusMessage` covers the lifecycle and quality signals an
+application reacts to:
+
+- `Eos`, `Error`, `Warning` — stream lifecycle and faults.
+- `NegotiationFailed(NegotiationFailure)` — structured caps conflict naming the
+  responsible element pair (§4.13), posted by the coordinator on a startup or
+  mid-stream negotiation failure.
+- `StateChanged { old, new }` and `AsyncDone` — every effective lifecycle
+  transition, and the completion of an async `PAUSED` once preroll aggregates
+  (§4.14).
+- `Qos { running_time_ns, jitter_ns, processed, dropped }` — a synchronizing
+  sink (`SyncSink`) that has fallen behind the clock drops a late frame
+  (`with_max_lateness_ns`) and reports it, the `GST_MESSAGE_QOS` analog.
+- `Buffering { percent }` — a sink's input link fill (0 = underrun, 100 = full),
+  posted by the sink arm on a quartile crossing via `run_graph_with_bus`. Since
+  g2g has no `queue` element, this reports the bounded link channel's own
+  occupancy (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
+
+Posting is non-blocking (`try_post`): a control message never stalls the data
+path; a full bus drops the report rather than applying backpressure.
 
 ---
 
