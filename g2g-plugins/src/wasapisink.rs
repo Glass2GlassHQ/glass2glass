@@ -221,7 +221,7 @@ impl AsyncElement for WasapiSink {
                     pcm_params(&c)?;
                     Ok(())
                 }
-                PipelinePacket::Flush => Ok(()),
+                PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())

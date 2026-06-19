@@ -188,6 +188,8 @@ impl AsyncElement for Mp4AudioSink {
                     self.accept_caps(&c)?;
                 }
                 PipelinePacket::Flush => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

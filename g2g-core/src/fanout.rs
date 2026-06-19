@@ -272,6 +272,10 @@ impl AsyncElement for Gate {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is control: forward regardless of open state.
+                PipelinePacket::Segment(s) => {
+                    out.push(PipelinePacket::Segment(s)).await?;
+                }
                 // Runner forwards Eos after process() returns.
                 PipelinePacket::Eos => {}
             }
@@ -373,6 +377,12 @@ impl MultiOutputElement for Router {
                 PipelinePacket::Flush => {
                     for port in 0..ports {
                         out.push_to(port, PipelinePacket::Flush).await?;
+                    }
+                }
+                // Segment is broadcast to every branch, like CapsChanged.
+                PipelinePacket::Segment(s) => {
+                    for port in 0..ports {
+                        out.push_to(port, PipelinePacket::Segment(s)).await?;
                     }
                 }
                 // Runner broadcasts Eos to all ports after process() returns.
@@ -481,7 +491,7 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs[port].push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes[port] += 1,
-                PipelinePacket::Eos | PipelinePacket::Flush => {}
+                PipelinePacket::Eos | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }
@@ -506,7 +516,7 @@ mod tests {
             match packet {
                 PipelinePacket::DataFrame(f) => self.data_seqs.push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes += 1,
-                PipelinePacket::Eos | PipelinePacket::Flush => {}
+                PipelinePacket::Eos | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
             }
             Box::pin(async { Ok(PushOutcome::Accepted) })
         }

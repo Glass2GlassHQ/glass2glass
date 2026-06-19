@@ -192,6 +192,10 @@ impl AsyncElement for TensorPostprocess {
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is a timing marker: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {}
             }
             Ok(())

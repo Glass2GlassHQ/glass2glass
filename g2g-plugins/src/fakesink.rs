@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket,
+    PadTemplate, PadTemplates, PipelinePacket, Segment,
 };
 
 #[cfg(feature = "std")]
@@ -35,6 +35,10 @@ pub struct FakeSink {
     flushes: u64,
     configured: bool,
     caps_changes: Vec<CapsChange>,
+    /// The most recent `Segment` received, and how many have arrived. A stream
+    /// opens with one (M80); a flushing seek emits another after the `Flush`.
+    last_segment: Option<Segment>,
+    segments: u64,
     /// Glass-to-glass latency distribution recorded as
     /// `monotonic_ns() - arrival_ns` on every received `DataFrame`
     /// whose `FrameTiming::arrival_ns` is non-zero. Frames without a
@@ -69,6 +73,17 @@ impl FakeSink {
 
     pub fn caps_changes(&self) -> &[CapsChange] {
         &self.caps_changes
+    }
+
+    /// The most recent `Segment` the sink received, or `None` if no SEGMENT has
+    /// arrived. Use it to map a frame's timestamp to running time.
+    pub fn last_segment(&self) -> Option<Segment> {
+        self.last_segment
+    }
+
+    /// Number of `Segment` packets seen.
+    pub fn segments(&self) -> u64 {
+        self.segments
     }
 
     /// Snapshot of the glass-to-glass latency histogram. Count of zero
@@ -153,6 +168,10 @@ impl AsyncElement for FakeSink {
                         caps,
                         frames_before: self.received,
                     });
+                }
+                PipelinePacket::Segment(seg) => {
+                    self.segments += 1;
+                    self.last_segment = Some(seg);
                 }
             }
             Ok(())

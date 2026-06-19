@@ -77,6 +77,10 @@ impl AsyncElement for IdentityTransform {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is control: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {}
             }
             Ok(())

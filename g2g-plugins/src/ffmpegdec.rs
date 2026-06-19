@@ -664,6 +664,9 @@ impl AsyncElement for FfmpegH264Dec {
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut decoded)?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
 
             let out_format = self.output_format;

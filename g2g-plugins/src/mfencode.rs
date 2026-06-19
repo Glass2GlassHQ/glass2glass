@@ -636,6 +636,9 @@ impl AsyncElement for MfEncode {
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut encoded)?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
 
             for c in encoded {

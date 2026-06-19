@@ -112,6 +112,8 @@ impl AsyncElement for FileSink {
                 // Caps aren't representable in a raw byte stream; the
                 // recording continues under the new caps.
                 PipelinePacket::CapsChanged(_) => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

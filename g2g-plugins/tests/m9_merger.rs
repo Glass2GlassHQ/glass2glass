@@ -139,7 +139,7 @@ impl AsyncElement for SignalSink {
                 }
             }
             PipelinePacket::Eos => self.eos = true,
-            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => {}
+            PipelinePacket::CapsChanged(_) | PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
         }
         Box::pin(async { Ok(()) })
     }

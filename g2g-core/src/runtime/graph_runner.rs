@@ -1017,6 +1017,7 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
         PipelinePacket::CapsChanged(caps) => PipelinePacket::CapsChanged(caps.clone()),
         PipelinePacket::Eos => PipelinePacket::Eos,
         PipelinePacket::Flush => PipelinePacket::Flush,
+        PipelinePacket::Segment(seg) => PipelinePacket::Segment(*seg),
         PipelinePacket::DataFrame(frame) => {
             let MemoryDomain::System(slice) = &frame.domain else {
                 return Err(G2gError::UnsupportedDomain);

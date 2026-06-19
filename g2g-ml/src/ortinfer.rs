@@ -319,6 +319,10 @@ impl AsyncElement for OrtInference {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is a timing marker: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 // stateless per-frame inference: nothing to drain.
                 PipelinePacket::Eos => {}
             }

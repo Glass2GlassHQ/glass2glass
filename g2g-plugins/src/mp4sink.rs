@@ -220,6 +220,8 @@ impl AsyncElement for Mp4Sink {
                 }
                 // a raw fragment stream has no seek index to reset.
                 PipelinePacket::Flush => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

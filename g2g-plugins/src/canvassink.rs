@@ -126,7 +126,7 @@ impl AsyncElement for CanvasSink {
                 // A non-RGBA caps change is a negotiation error for this sink.
                 PipelinePacket::CapsChanged(_) => return Err(G2gError::CapsMismatch),
                 PipelinePacket::DataFrame(frame) => self.present(&frame)?,
-                PipelinePacket::Flush | PipelinePacket::Eos => {}
+                PipelinePacket::Flush | PipelinePacket::Eos | PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

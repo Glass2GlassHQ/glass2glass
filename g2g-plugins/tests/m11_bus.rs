@@ -61,6 +61,9 @@ impl AsyncElement for BusTap {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {
                     self.bus.try_post(BusMessage::Eos);
                 }

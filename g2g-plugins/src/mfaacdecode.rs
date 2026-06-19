@@ -296,6 +296,9 @@ impl AsyncElement for MfAacDecode {
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut decoded)?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
 
             let pcm_caps = Caps::Audio {

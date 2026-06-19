@@ -5,6 +5,46 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M80: `PipelinePacket::Segment` carrier
+
+- Wires the M79 `Segment` into the data stream: a new `PipelinePacket::Segment`
+  variant, the GStreamer SEGMENT-event analog. Like `CapsChanged` it is
+  **ordered** in the stream (it precedes the `DataFrame`s it governs) so a sink
+  maps each frame's timestamp to running time via the most recent `Segment`.
+- The variant breaks every exhaustive `PipelinePacket` match, so this is a
+  broad, uniform sweep: every forwarding element (parsers, converters,
+  transforms, decoders, encoders, inference, the muxer/batcher) gains a
+  pass-through arm (`Segment(seg) => out.push(Segment(seg))`); every terminal
+  sink ignores it (`Segment(_) => {}`), with care that a sink whose `Flush` arm
+  resets state does **not** reset on `Segment` (it is a benign timing marker).
+  `try_clone_packet` clones it trivially (it is `Copy`), so a tee broadcasts it.
+  ~40 element files plus the core fan-out/router/gate and several test
+  harnesses updated.
+- `FakeSink` records the segment: `last_segment()` and `segments()`.
+- **Deliberately deferred to M81 (seek):** the runner does not yet *emit* an
+  opening SEGMENT. An initial auto-emit was prototyped but reverted: pushing an
+  extra packet ahead of the source can make the source block on a full link, so
+  when a downstream element returns a real error (e.g. a mid-stream
+  `CapsMismatch`) the source's pending push fails with `Shutdown` first and the
+  runner (which checks the source arm before the transform arm) reports the
+  secondary `Shutdown`, masking the substantive error. Emitting the opening
+  (and post-flush) SEGMENT belongs with the seek wiring, alongside the
+  error-priority fix it needs (prefer a non-`Shutdown` arm error). For now a
+  producer must emit `Segment` explicitly; nothing in a default pipeline does.
+- Tests: `m80_segment` (a `SegmentInjector` transform emits one `Segment` ahead
+  of the first frame; it survives `run_source_transform_sink`'s forwarding and
+  `FakeSink` records it, with `to_running_time` checked; a `tee` fan-out
+  broadcasts it to both branches, each a shared-counter sink that confirms
+  receipt). All pre-existing tests pass unchanged (the carrier is additive; no
+  auto-emit perturbs ordering-sensitive harnesses like
+  `m16_workaround3_phase_a`). VERIFIED on the dev host: `cargo test --workspace`
+  green; `cargo clippy -p g2g-core --features "std runtime multi-thread"
+  --all-targets` clean; new test `rustfmt`-clean. NOT verified in-session: the
+  platform-gated elements (Windows `mf*`/`d3d11`/`wasapi`, `cuda`, `vaapi`,
+  `ffmpeg`, `kms`/`wayland`, `webcodecs`, `burn`/`ort`/`wgpu`) — their `Segment`
+  arms were added by the uniform rule and reviewed by diff (decoders/encoders
+  forward, sinks ignore), but not compiled here.
+
 ### M79: seek + segment model (running-time / stream-time math)
 
 - First milestone of the Phase 1 seek track (DESIGN_TODO roadmap item 2). Pure,

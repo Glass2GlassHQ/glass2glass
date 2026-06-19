@@ -124,6 +124,8 @@ where
                     self.last_sequence = None;
                 }
                 PipelinePacket::CapsChanged(_) => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

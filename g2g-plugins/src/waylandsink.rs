@@ -417,7 +417,9 @@ impl AsyncElement for WaylandSink {
                     }
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())

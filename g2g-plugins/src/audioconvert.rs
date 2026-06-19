@@ -184,6 +184,10 @@ impl AsyncElement for AudioConvert {
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is control: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 // the runner forwards Eos; the transform does not re-emit it.
                 PipelinePacket::Eos => {}
             }

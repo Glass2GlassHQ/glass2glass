@@ -318,6 +318,9 @@ impl AsyncElement for MfAacEncode {
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut encoded)?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
 
             let aac_caps = Caps::Audio {

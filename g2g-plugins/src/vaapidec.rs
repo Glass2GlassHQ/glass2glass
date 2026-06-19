@@ -361,6 +361,9 @@ impl AsyncElement for VaapiH264Dec {
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut decoded)?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
 
             for d in decoded {

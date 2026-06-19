@@ -542,7 +542,9 @@ impl AsyncElement for KmsSink {
                     }
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     // Drain any in-flight flip so the final frame is fully
                     // presented before the pipeline tears down.

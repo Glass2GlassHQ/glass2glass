@@ -212,6 +212,10 @@ impl AsyncElement for VideoScale {
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is control: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {}
             }
             Ok(())

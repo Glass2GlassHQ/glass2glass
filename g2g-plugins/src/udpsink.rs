@@ -192,6 +192,8 @@ impl AsyncElement for UdpSink {
                 PipelinePacket::Flush => {}
                 // Geometry refinement lives in the in-band SPS, not in RTP.
                 PipelinePacket::CapsChanged(_) => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

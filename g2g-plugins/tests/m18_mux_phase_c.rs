@@ -144,7 +144,7 @@ impl AsyncElement for ProbeSink {
                 PipelinePacket::DataFrame(_) => g.frames += 1,
                 PipelinePacket::CapsChanged(c) => g.caps_changes.push(c),
                 PipelinePacket::Eos => g.eos = true,
-                PipelinePacket::Flush => {}
+                PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

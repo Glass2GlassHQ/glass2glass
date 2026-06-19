@@ -218,7 +218,7 @@ impl AsyncElement for PickySink {
                 PipelinePacket::Eos => {
                     g.saw_eos = true;
                 }
-                PipelinePacket::Flush => {}
+                PipelinePacket::Flush | PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

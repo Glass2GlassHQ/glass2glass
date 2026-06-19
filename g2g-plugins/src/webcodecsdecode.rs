@@ -317,6 +317,9 @@ impl AsyncElement for WebCodecsDecode {
                     }
                     self.drain_ready(out).await?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
             Ok(())
         })

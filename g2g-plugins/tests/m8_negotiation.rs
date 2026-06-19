@@ -146,6 +146,8 @@ impl AsyncElement for OrderedRecordingSink {
             PipelinePacket::CapsChanged(_) => Event::CapsChanged { width: 0 },
             PipelinePacket::Flush => Event::Flush,
             PipelinePacket::Eos => Event::Eos,
+            // Segment is not part of this test's recorded event stream.
+            PipelinePacket::Segment(_) => return Box::pin(async { Ok(()) }),
         };
         self.push(event);
         Box::pin(async { Ok(()) })

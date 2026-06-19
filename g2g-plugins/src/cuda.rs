@@ -153,6 +153,9 @@ impl AsyncElement for CudaDownload {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {}
             }
             Ok(())

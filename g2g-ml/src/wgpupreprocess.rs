@@ -309,6 +309,10 @@ impl AsyncElement for WgpuPreprocess {
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is a timing marker: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 // stateless per-frame conversion: nothing to drain.
                 PipelinePacket::Eos => {}
             }

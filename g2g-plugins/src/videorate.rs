@@ -270,6 +270,10 @@ impl AsyncElement for VideoRate {
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is control: forward unchanged, never into rate logic.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
                 PipelinePacket::Eos => {
                     // emit the held frame once so the stream's last frame is
                     // not dropped (it is otherwise emitted only when a later

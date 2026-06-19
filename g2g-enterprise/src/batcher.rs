@@ -233,6 +233,10 @@ impl MultiInputElement for TensorBatcher {
                     }
                     out.push(PipelinePacket::Flush).await?;
                 }
+                // Segment is a timing marker: forward unchanged, no flush.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
             Ok(())
         })

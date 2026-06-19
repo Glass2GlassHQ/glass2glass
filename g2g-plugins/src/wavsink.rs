@@ -144,6 +144,8 @@ impl AsyncElement for WavSink {
                     pcm_params(&c)?;
                 }
                 PipelinePacket::Flush => {}
+                // Segment is control: ignored at sink.
+                PipelinePacket::Segment(_) => {}
             }
             Ok(())
         })

@@ -305,7 +305,9 @@ impl AsyncElement for D3D11Sink {
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Flush => Ok(()),
+                PipelinePacket::CapsChanged(_)
+                | PipelinePacket::Flush
+                | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())

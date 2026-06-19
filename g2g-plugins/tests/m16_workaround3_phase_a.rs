@@ -312,6 +312,9 @@ impl AsyncElement for FakeReorderDecoder {
                     *self.last_out_caps.borrow_mut() = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
             }
             Ok(())
         })
