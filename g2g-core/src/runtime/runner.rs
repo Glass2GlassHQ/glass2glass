@@ -24,6 +24,25 @@ use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
 };
 use crate::runtime::state::{Flow, StateController};
+use crate::segment::Segment;
+
+/// Pick the most informative error from a pipeline's arm results. A closed-link
+/// `Shutdown` is usually the *consequence* of another arm erroring first (it
+/// dropped its channel end), so prefer any non-`Shutdown` error over it; fall
+/// back to the first error otherwise (M81). `None` if every arm succeeded.
+fn substantive_error<'a, I>(results: I) -> Option<G2gError>
+where
+    I: IntoIterator<Item = Option<&'a G2gError>>,
+{
+    let mut first: Option<G2gError> = None;
+    for e in results.into_iter().flatten() {
+        if *e != G2gError::Shutdown {
+            return Some(e.clone());
+        }
+        first.get_or_insert_with(|| e.clone());
+    }
+    first
+}
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
@@ -422,6 +441,11 @@ where
 
     let source_fut = async move {
         let mut adapter = SenderSink::new(link_tx);
+        // M81: every stream opens with a SEGMENT, ahead of the source's data,
+        // so a sink maps frame timestamps to running time from the first frame.
+        let _ = adapter
+            .push(PipelinePacket::Segment(Segment::new()))
+            .await?;
         let emitted = source.run(&mut adapter).await?;
         Ok::<u64, G2gError>(emitted)
     };
@@ -525,6 +549,12 @@ where
     };
 
     let (src_res, snk_res) = Join2::new(source_fut, sink_fut).await;
+    // M81: a closed-link `Shutdown` on the source arm can be the consequence of
+    // the sink arm's real error (it dropped the link), so surface the
+    // substantive one rather than whichever arm we check first.
+    if let Some(e) = substantive_error([src_res.as_ref().err(), snk_res.as_ref().err()]) {
+        return Err(e);
+    }
     let emitted = src_res?;
     let consumed = snk_res?;
 
@@ -984,6 +1014,14 @@ where
 
     let source_fut = async move {
         let mut adapter = SenderSink::new(link1_tx);
+        // M81: unlike `run_simple_pipeline` and `run_graph`, this bespoke
+        // 3-element runner does NOT emit an opening SEGMENT. Prepending a packet
+        // here can exactly fill a link feeding a buffering transform and trip a
+        // shutdown race in this hand-rolled data plane (a latent exact-capacity
+        // fragility, tracked separately). The opening SEGMENT lands once this
+        // runner is re-expressed as a thin builder over `run_graph` (as
+        // `run_linear_chain` already is). Use `run_graph` / `run_linear_chain`
+        // for the SEGMENT-emitting path.
         source.run(&mut adapter).await
     };
 
@@ -1170,6 +1208,14 @@ where
         Join2::new(transform_fut, Join2::new(sink_fut, coordinator_fut)),
     )
     .await;
+    // M81: prefer a substantive error over a secondary `Shutdown`. A real error
+    // in the transform or sink closes a link, which can surface as `Shutdown` on
+    // the source arm (checked first); without this, that masks the real cause.
+    if let Some(e) =
+        substantive_error([src_res.as_ref().err(), tx_res.as_ref().err(), snk_res.as_ref().err()])
+    {
+        return Err(e);
+    }
     let emitted = src_res?;
     tx_res?;
     let consumed = snk_res?;

@@ -41,6 +41,7 @@ use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{MemoryDomain, SystemSlice};
+use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
@@ -593,6 +594,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     arms.push(Box::pin(async move { Ok(coordinator.run().await) }));
 
     let results = join_all(arms).await;
+    // M81: surface a substantive arm error over a secondary `Shutdown` (a real
+    // error in one node closes links, which surfaces as `Shutdown` on the
+    // others; reporting the first-in-topo-order error would often mask the
+    // cause).
+    if let Some(e) = results
+        .iter()
+        .filter_map(|r| r.as_ref().err())
+        .find(|e| **e != G2gError::Shutdown)
+        .or_else(|| results.iter().filter_map(|r| r.as_ref().err()).next())
+    {
+        return Err(e.clone());
+    }
     let mut counts = Vec::with_capacity(results.len());
     for r in results {
         counts.push(r?);
@@ -712,6 +725,11 @@ async fn source_arm<'a>(
     out_tx: LinkSender,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    // M81: open the stream with a SEGMENT ahead of the source's data, so every
+    // downstream branch maps timestamps to running time from the first frame.
+    let _ = adapter
+        .push(PipelinePacket::Segment(Segment::new()))
+        .await?;
     src.run(&mut adapter).await
 }
 

@@ -1,10 +1,9 @@
 //! M80 - the SEGMENT carrier: `PipelinePacket::Segment` propagates through a
 //! transform to a sink and broadcasts across a tee, and a sink records it so
-//! frame timestamps map to running time. The runner does not yet *emit* an
-//! opening SEGMENT on its own (that, plus the post-flush re-emit, is the seek
-//! milestone, which also needs the error-priority robustness a blocking
-//! initial push would require); here a small injector element produces one so
-//! the carrier is exercised end-to-end.
+//! frame timestamps map to running time. `run_source_transform_sink` (the
+//! bespoke 3-element runner) does not emit an opening SEGMENT, so the first
+//! test injects one via an element to exercise forwarding; `run_graph` emits
+//! the opening SEGMENT itself (M81), exercised by the tee test.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -130,16 +129,16 @@ impl AsyncElement for SegCountingSink {
     }
 }
 
-/// A tee broadcasts the injected SEGMENT to every branch: both sinks see it.
+/// `run_graph` opens the stream with a SEGMENT (M81) and a tee broadcasts it to
+/// every branch: both sinks see exactly one.
 #[tokio::test]
-async fn segment_broadcasts_through_tee_to_all_sinks() {
+async fn opening_segment_broadcasts_through_tee_to_all_sinks() {
     let target = 3u64;
     let c0 = Arc::new(AtomicU64::new(0));
     let c1 = Arc::new(AtomicU64::new(0));
 
     let mut g: Graph<GraphNode> = Graph::new();
     let s = g.add_source(GraphNode::source(VideoTestSrc::new(16, 16, 30, target)));
-    let inj = g.add_transform(GraphNode::element(SegmentInjector::new(Segment::new())));
     let tee = g.add_tee(2);
     let s0 = g.add_sink(GraphNode::element(SegCountingSink {
         segments: c0.clone(),
@@ -147,8 +146,7 @@ async fn segment_broadcasts_through_tee_to_all_sinks() {
     let s1 = g.add_sink(GraphNode::element(SegCountingSink {
         segments: c1.clone(),
     }));
-    g.link(s, inj).unwrap();
-    g.link(inj, tee.input()).unwrap();
+    g.link(s, tee.input()).unwrap();
     g.link(tee.out(0), s0).unwrap();
     g.link(tee.out(1), s1).unwrap();
 
@@ -157,11 +155,11 @@ async fn segment_broadcasts_through_tee_to_all_sinks() {
     assert_eq!(
         c0.load(Ordering::SeqCst),
         1,
-        "branch 0 received the SEGMENT"
+        "branch 0 got the opening SEGMENT"
     );
     assert_eq!(
         c1.load(Ordering::SeqCst),
         1,
-        "branch 1 received the SEGMENT"
+        "branch 1 got the opening SEGMENT"
     );
 }

@@ -5,6 +5,42 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M81: runner emits the opening SEGMENT + error-priority fix
+
+- `run_simple_pipeline` and `run_graph` (and thus its thin-builder runners:
+  `run_linear_chain`, `run_muxer_sink`, `run_source_fanout`) now open every
+  stream with a `PipelinePacket::Segment(Segment::new())` ahead of the source's
+  data, establishing the "every stream begins with a SEGMENT" invariant so a
+  sink maps frame timestamps to running time from the first frame. A tee
+  broadcasts it to all branches.
+- **Error-priority fix (the prerequisite).** Re-landing the M80-prototyped
+  auto-emit surfaced a latent footgun: an extra packet ahead of the source can
+  make it block on a full link, so when a downstream element returns a real
+  error (closing its link), the source's pending push fails with `Shutdown` and
+  the runner — which checked the source arm first — reported that secondary
+  `Shutdown`, masking the real cause. New `substantive_error` helper: prefer any
+  non-`Shutdown` arm error over `Shutdown` (a closed link is usually the
+  *consequence* of another arm erroring). Applied at the join of
+  `run_simple_pipeline`, `run_source_transform_sink`, and `run_graph`.
+- **One runner deliberately omitted.** `run_source_transform_sink` (the bespoke
+  fixed-arity 3-element runner) does NOT emit the opening SEGMENT: prepending a
+  packet there can exactly fill the link feeding a buffering transform and trip
+  a shutdown race in its hand-rolled data plane (a latent exact-capacity
+  fragility, tracked as a follow-up). It lands the SEGMENT once that runner is
+  re-expressed as a thin builder over `run_graph`, as `run_linear_chain` already
+  is. The error-priority fix still applies there.
+- Tests: `m81_segment_emit` (`run_simple_pipeline` opens with a SEGMENT the sink
+  records, running-time checked; and a `FailingSink` erroring on its first frame
+  under capacity 1 — the source's blocked push then fails `Shutdown`, but the
+  runner reports the sink's real `CapsMismatch`). `m80_segment` updated for the
+  new reality (the tee test now exercises `run_graph`'s opening-SEGMENT
+  broadcast directly; the `run_source_transform_sink` test keeps its element
+  injector since that runner does not emit). `m16_workaround3_phase_a` (the
+  CapsChanged-ordering harness, which uses `run_source_transform_sink`) passes
+  unchanged. VERIFIED on the dev host: `cargo test --workspace` green; `cargo
+  clippy -p g2g-core --features "std runtime multi-thread" --all-targets` clean;
+  new/updated tests `rustfmt`-clean.
+
 ### M80: `PipelinePacket::Segment` carrier
 
 - Wires the M79 `Segment` into the data stream: a new `PipelinePacket::Segment`
