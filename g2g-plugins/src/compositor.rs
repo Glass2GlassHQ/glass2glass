@@ -13,9 +13,19 @@
 //!
 //! **Cadence:** input 0 is the timing driver (the background / main stream).
 //! One composited output frame is emitted per input-0 frame, overlaying the
-//! latest frame cached from every other input; inputs that have not produced
-//! yet are simply absent. This keeps output timing deterministic and matches
-//! the common "background video + overlays" shape.
+//! latest frame cached from every other input. Each overlay updates
+//! independently as new frames land, so a live overlay animates at its own rate.
+//!
+//! **Startup:** inputs start asynchronously and an overlay branch (camera warm-up,
+//! extra transforms) can lag the background, in the extreme starting only after a
+//! short background has fully drained. So at startup the compositor buffers
+//! input-0 frames (bounded by [`PENDING_CAP`]) until every overlay has delivered
+//! its first frame, then flushes them composited with the overlays and runs live.
+//! Two failure modes are avoided: it must not block the background forever on a
+//! slow overlay (so on buffer overflow the oldest input-0 frame is emitted
+//! *overlay-less* rather than held or dropped, keeping output flowing and losing
+//! no frames), and once primed it must not keep reusing a single stale overlay
+//! frame (so live frames composite the latest overlay, not a frozen one).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -74,10 +84,25 @@ pub struct Compositor {
     pads: Vec<CompositorPad>,
     /// Per-input configured geometry `(width, height)`, set at negotiation.
     inputs: Vec<Option<(u32, u32)>>,
-    /// Per-input latest RGBA8 frame, overwritten as frames arrive.
+    /// Per-overlay (input != 0) latest RGBA8 frame, overwritten as frames
+    /// arrive. Index 0 is unused: input 0 composites from the in-flight frame.
     latest: Vec<Option<Box<[u8]>>>,
+    /// True once every overlay input has delivered at least one frame (or there
+    /// are no overlays). Until then the compositor is in startup, buffering
+    /// input-0 frames in [`pending`](Self::pending) so a late-starting overlay
+    /// still appears.
+    primed: bool,
+    /// Startup buffer of input-0 frames awaiting the first overlay, bounded to
+    /// [`PENDING_CAP`]. On overflow the oldest is emitted overlay-less (output
+    /// keeps flowing, no frame is dropped); on prime the rest flush composited
+    /// with the now-available overlays. Empty once primed.
+    pending: alloc::collections::VecDeque<(FrameTiming, Box<[u8]>)>,
     emitted: u64,
 }
+
+/// Max input-0 frames buffered during startup before output begins flowing
+/// overlay-less (bounds startup memory and latency).
+const PENDING_CAP: usize = 8;
 
 impl Compositor {
     /// A compositor producing an `out_w` x `out_h` RGBA8 canvas at 30 fps, with
@@ -93,6 +118,9 @@ impl Compositor {
             pads,
             inputs: vec![None; n],
             latest: vec![None; n],
+            // No overlays (single input) means nothing to wait for: start live.
+            primed: n == 1,
+            pending: alloc::collections::VecDeque::new(),
             emitted: 0,
         }
     }
@@ -118,9 +146,10 @@ impl Compositor {
         }
     }
 
-    /// Composite every cached input onto a fresh opaque-black canvas in z-order
-    /// and return the RGBA8 bytes.
-    fn compose(&self) -> Box<[u8]> {
+    /// Composite onto a fresh opaque-black canvas in z-order and return the
+    /// RGBA8 bytes. Input 0 uses `base0` (the frame currently driving output);
+    /// every other input uses its latest cached frame.
+    fn compose(&self, base0: &[u8]) -> Box<[u8]> {
         let (cw, ch) = (self.out_w as usize, self.out_h as usize);
         let mut canvas = vec![0u8; cw * ch * 4];
         // Opaque black background.
@@ -131,13 +160,32 @@ impl Compositor {
         let mut order: Vec<usize> = (0..self.pads.len()).collect();
         order.sort_by_key(|&i| (self.pads[i].zorder, i));
         for i in order {
-            let (Some((w, h)), Some(src)) = (self.inputs[i], self.latest[i].as_deref()) else {
-                continue;
+            let Some((w, h)) = self.inputs[i] else { continue };
+            let src: &[u8] = if i == 0 {
+                base0
+            } else {
+                match self.latest[i].as_deref() {
+                    Some(s) => s,
+                    None => continue,
+                }
             };
             let pad = self.pads[i];
             blend_over(&mut canvas, cw, ch, src, w as usize, h as usize, pad.xpos, pad.ypos, pad.alpha);
         }
         canvas.into_boxed_slice()
+    }
+
+    /// Wrap composited `canvas` bytes as the next output frame, advancing the
+    /// output sequence counter.
+    fn output_frame(&mut self, canvas: Box<[u8]>, timing: FrameTiming) -> Frame {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(canvas)),
+            timing,
+            sequence: self.emitted,
+            meta: Default::default(),
+        };
+        self.emitted += 1;
+        frame
     }
 }
 
@@ -253,24 +301,44 @@ impl MultiInputElement for Compositor {
                     if src.len() < need {
                         return Err(G2gError::CapsMismatch);
                     }
-                    // Cache this input's latest frame (trimmed to its geometry).
-                    self.latest[input] = Some(src[..need].into());
+                    let bytes: Box<[u8]> = src[..need].into();
 
-                    // Input 0 drives output cadence: composite and emit.
                     if input == 0 {
-                        let canvas = self.compose();
-                        let timing = FrameTiming {
-                            duration_ns: frame.timing.duration_ns,
-                            ..frame.timing
-                        };
-                        let composed = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(canvas)),
-                            timing,
-                            sequence: self.emitted,
-                            meta: Default::default(),
-                        };
-                        self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(composed)).await?;
+                        if self.primed {
+                            // Live: composite this frame with the latest overlays.
+                            let canvas = self.compose(&bytes);
+                            let frame = self.output_frame(canvas, frame.timing);
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                        } else {
+                            // Startup: buffer until an overlay primes. If the
+                            // buffer is full, emit the oldest overlay-less rather
+                            // than drop it, so output keeps flowing and no input-0
+                            // frame is lost while a slow overlay starts up.
+                            if self.pending.len() == PENDING_CAP {
+                                let (timing, base) = self.pending.pop_front().expect("non-empty");
+                                let canvas = self.compose(&base);
+                                let frame = self.output_frame(canvas, timing);
+                                out.push(PipelinePacket::DataFrame(frame)).await?;
+                            }
+                            self.pending.push_back((frame.timing, bytes));
+                        }
+                    } else {
+                        // Overlay: cache the latest frame; it is picked up by the
+                        // next input-0 frame and updates live as more arrive.
+                        self.latest[input] = Some(bytes);
+                    }
+
+                    // Priming completes when every overlay has delivered a frame.
+                    // Flush the buffered input-0 frames composited against the
+                    // now-available overlays, in arrival order, then go live.
+                    if !self.primed && self.latest.iter().skip(1).all(|l| l.is_some()) {
+                        self.primed = true;
+                        let pending = core::mem::take(&mut self.pending);
+                        for (timing, base) in pending {
+                            let canvas = self.compose(&base);
+                            let frame = self.output_frame(canvas, timing);
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                        }
                     }
                 }
                 // A per-input caps refinement updates that input's geometry; the
@@ -286,10 +354,17 @@ impl MultiInputElement for Compositor {
                         self.inputs[input] = Some((w, h));
                     }
                 }
-                // A flush on an input drops its cached frame so a stale overlay
-                // never lingers across a discontinuity.
+                // A flush on an overlay input drops its cached frame so a stale
+                // overlay never lingers across a discontinuity, and re-arms
+                // startup so that overlay is waited for again. A flush on input 0
+                // clears any buffered startup frames (nothing else is cached).
                 PipelinePacket::Flush => {
                     self.latest[input] = None;
+                    if input == 0 {
+                        self.pending.clear();
+                    } else if self.pads.len() > 1 {
+                        self.primed = false;
+                    }
                 }
                 // Per-input Eos is informational; the runner aggregates input
                 // ends and emits the single merged Eos. Segment is per-input
@@ -367,9 +442,10 @@ mod tests {
         );
         comp.inputs[0] = Some((2, 2));
         comp.inputs[1] = Some((2, 2));
-        comp.latest[0] = Some(solid(2, 2, [255, 0, 0, 255]).into());
+        let red = solid(2, 2, [255, 0, 0, 255]);
         comp.latest[1] = Some(solid(2, 2, [0, 0, 255, 255]).into());
-        let out = comp.compose();
+        // input 0 (red) is passed as the base; input 1 (blue) has higher z-order.
+        let out = comp.compose(&red);
         assert_eq!(px(&out, 2, 0, 0), [0, 0, 255, 255], "z=5 (blue) painted over z=1 (red)");
     }
 

@@ -16,12 +16,31 @@ use g2g_core::{
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
 
+/// Synthetic content drawn into each frame. All are animated (they change with
+/// the frame index), but they differ in how obvious the motion is, which matters
+/// when eyeballing a live sink.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pattern {
+    /// Per-byte animated gradient: each byte is `(index + frame) & 0xFF`. Smooth
+    /// and cheap, but its motion is a subtle scroll, easy to miss on a small
+    /// inset. The historical default.
+    #[default]
+    Gradient,
+    /// Full-frame per-pixel pseudo-random noise, reseeded every frame, so the
+    /// whole image churns visibly: an unmistakable "is it live?" check.
+    Snow,
+    /// A bright vertical bar that sweeps left to right (wrapping), over a dark
+    /// field: obvious, smooth motion that's easy to spot in a small overlay.
+    MovingBar,
+}
+
 #[derive(Debug)]
 pub struct VideoTestSrc {
     width: u32,
     height: u32,
     framerate_q16: u32,
     target_frames: u64,
+    pattern: Pattern,
     configured: bool,
     pool: Option<BufferPool<Box<[u8]>>>,
 }
@@ -34,9 +53,18 @@ impl VideoTestSrc {
             height,
             framerate_q16: framerate << 16,
             target_frames,
+            pattern: Pattern::default(),
             configured: false,
             pool: None,
         }
+    }
+
+    /// Select the drawn [`Pattern`] (default [`Pattern::Gradient`]). Use
+    /// [`Pattern::Snow`] or [`Pattern::MovingBar`] when you need motion that is
+    /// obvious to the eye (e.g. confirming a live overlay is actually updating).
+    pub fn with_pattern(mut self, pattern: Pattern) -> Self {
+        self.pattern = pattern;
+        self
     }
 
     /// Pool-backed variant: every emitted frame draws its `width * height * 4`
@@ -55,6 +83,7 @@ impl VideoTestSrc {
             height,
             framerate_q16: framerate << 16,
             target_frames,
+            pattern: Pattern::default(),
             configured: false,
             pool: Some(pool),
         }
@@ -128,16 +157,11 @@ impl SourceLoop for VideoTestSrc {
                     if buf.len() < bytes_per_frame {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let slice = buf.as_mut();
-                    for (i, b) in slice.iter_mut().take(bytes_per_frame).enumerate() {
-                        *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
-                    }
+                    fill_pattern(self.pattern, &mut buf.as_mut()[..bytes_per_frame], self.width, seq);
                     MemoryDomain::System(SystemSlice::from_pool(buf, bytes_per_frame))
                 } else {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
-                    for (i, b) in buf.iter_mut().enumerate() {
-                        *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
-                    }
+                    fill_pattern(self.pattern, &mut buf, self.width, seq);
                     MemoryDomain::System(SystemSlice::from_boxed(buf))
                 };
 
@@ -175,6 +199,52 @@ impl SourceLoop for VideoTestSrc {
     }
 }
 
+/// Draw `pattern` for frame `seq` into a `width`-wide RGBA8 buffer (`buf.len()`
+/// is exactly the frame's `width * height * 4` bytes). Animated by `seq`.
+fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
+    match pattern {
+        // Per-byte scrolling gradient, byte-for-byte the historical output.
+        Pattern::Gradient => {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = ((i as u64).wrapping_add(seq) & 0xFF) as u8;
+            }
+        }
+        // Per-pixel hash of (pixel index, frame): full-frame churn. Alpha stays
+        // opaque so the noise is visible through a compositor's blend.
+        Pattern::Snow => {
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                // Cheap integer hash, reseeded per frame via `seq`.
+                let mut h = (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ seq.wrapping_mul(0x2545_F491_4F6C_DD1D);
+                h ^= h >> 29;
+                h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h ^= h >> 32;
+                let v = (h & 0xFF) as u8;
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+                px[3] = 255;
+            }
+        }
+        // A bright bar sweeping left to right over a dark field. The bar is
+        // ~1/8 of the width and advances a few pixels per frame, wrapping.
+        Pattern::MovingBar => {
+            let w = width.max(1) as usize;
+            let bar_w = (w / 8).max(1);
+            let bar_x = (seq as usize).wrapping_mul(4) % w;
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                let x = p % w;
+                // Distance from the bar's left edge, modulo width (so it wraps).
+                let within = x.wrapping_sub(bar_x) % w < bar_w;
+                let v = if within { 255 } else { 32 };
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+                px[3] = 255;
+            }
+        }
+    }
+}
+
 impl PadTemplates for VideoTestSrc {
     /// Static superset: the type always produces RGBA at any geometry /
     /// framerate. A constructed instance narrows to its configured dims via
@@ -186,5 +256,36 @@ impl PadTemplates for VideoTestSrc {
             height: Dim::Any,
             framerate: Rate::Any,
         }))])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 16x16 RGBA frame (wide enough for the bar to advance between frames).
+    const W: u32 = 16;
+    const BYTES: usize = (W * W * 4) as usize;
+
+    #[test]
+    fn gradient_is_byte_identical_to_the_historical_output() {
+        let mut buf = [0u8; BYTES];
+        fill_pattern(Pattern::Gradient, &mut buf, W, 7);
+        for (i, &b) in buf.iter().enumerate() {
+            assert_eq!(b, ((i as u64).wrapping_add(7) & 0xFF) as u8);
+        }
+    }
+
+    #[test]
+    fn snow_and_bar_change_between_frames_so_motion_is_visible() {
+        for pattern in [Pattern::Snow, Pattern::MovingBar] {
+            let mut a = [0u8; BYTES];
+            let mut b = [0u8; BYTES];
+            fill_pattern(pattern, &mut a, W, 0);
+            fill_pattern(pattern, &mut b, W, 1);
+            assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
+            // Alpha stays opaque so the content survives a compositor blend.
+            assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+        }
     }
 }

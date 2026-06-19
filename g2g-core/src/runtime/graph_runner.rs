@@ -28,6 +28,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::pin::Pin;
 
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
@@ -541,18 +542,26 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             let pads: Vec<usize> =
                 in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
             let input_count = in_rxs.len();
-            // Per-input forwarders tag each packet with its pad and feed one
-            // tagged channel; only they keep it open (the runner drops its end).
-            let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+            // Each input pad gets its OWN bounded channel feeding the muxer arm,
+            // which drains them round-robin. A single shared FIFO would let a
+            // fast input (e.g. a free-running background) monopolize the queue
+            // and starve a slower real-time input (e.g. a 30 fps camera): the
+            // camera's overlay would freeze and, worse, its EOS would never
+            // arrive, hanging the all-inputs-EOS aggregation forever. Forwarders
+            // are still indexed by pad so a muxer's `process(pad, ..)` keeps its
+            // per-input geometry straight even if pads link out of order.
+            let mut pad_rxs: Vec<(usize, Receiver<PipelinePacket>)> =
+                Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
+                let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
                 let fwd: BoxFuture<'a, Result<u64, G2gError>> =
-                    Box::pin(muxer_forwarder(in_rx, pad, tagged_tx.clone()));
+                    Box::pin(muxer_forwarder(in_rx, pad_tx));
                 arms.push(fwd);
                 arm_kinds.push(kind);
+                pad_rxs.push((pad, pad_rx));
             }
-            drop(tagged_tx);
             let arm: BoxFuture<'a, Result<u64, G2gError>> =
-                Box::pin(muxer_arm(mux, tagged_rx, out_tx, input_count, mux_out_caps));
+                Box::pin(muxer_arm(mux, pad_rxs, out_tx, input_count, mux_out_caps));
             arms.push(arm);
             arm_kinds.push(kind);
             continue;
@@ -997,52 +1006,108 @@ async fn broadcast(senders: &mut [SenderSink], packet: PipelinePacket) -> Result
 /// arm can aggregate the single merged `Eos`.
 async fn muxer_forwarder(
     in_rx: LinkReceiver,
-    pad: usize,
-    tagged: Sender<(usize, PipelinePacket)>,
+    tagged: Sender<PipelinePacket>,
 ) -> Result<u64, G2gError> {
     loop {
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) | None => {
-                tagged
-                    .send((pad, PipelinePacket::Eos))
-                    .await
-                    .map_err(|_| G2gError::Shutdown)?;
+                tagged.send(PipelinePacket::Eos).await.map_err(|_| G2gError::Shutdown)?;
                 return Ok(0);
             }
             Some(packet) => {
-                tagged
-                    .send((pad, packet))
-                    .await
-                    .map_err(|_| G2gError::Shutdown)?;
+                tagged.send(packet).await.map_err(|_| G2gError::Shutdown)?;
             }
         }
     }
 }
 
-/// The muxer arm: drain the tagged channel, combine each input's packets via
-/// `process(pad, ..)`, and emit a single `Eos` once every input has ended. The
-/// per-input `Eos` is delivered to the element first (so a stateful muxer can
-/// flush) but the element must not forward it; the runner owns the merged one.
+/// Block until some open input pad delivers a packet (or closes), scanning
+/// round-robin from `start` so the wake-up path stays fair too. Returns the
+/// pad's slot index (into `pad_rxs`) and its packet; `None` means that pad's
+/// channel closed without an `Eos` (an upstream error), treated as an end. All
+/// receivers register the same task waker, so a push on any one wakes us.
+async fn muxer_recv_any(
+    pad_rxs: &[(usize, Receiver<PipelinePacket>)],
+    open: &[bool],
+    start: usize,
+) -> (usize, Option<PipelinePacket>) {
+    let n = pad_rxs.len();
+    core::future::poll_fn(|cx| {
+        for k in 0..n {
+            let slot = (start + k) % n;
+            if !open[slot] {
+                continue;
+            }
+            // `RecvFuture` holds only a `&Receiver`, so it is `Unpin`; polling it
+            // parks our waker on that channel when pending.
+            let mut f = pad_rxs[slot].1.recv();
+            if let core::task::Poll::Ready(v) = core::future::Future::poll(Pin::new(&mut f), cx) {
+                return core::task::Poll::Ready((slot, v));
+            }
+        }
+        core::task::Poll::Pending
+    })
+    .await
+}
+
+/// The muxer arm: drain the per-input channels round-robin, combine each input's
+/// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
+/// ended. Round-robin draining keeps a fast input from starving a slow one (a
+/// frozen overlay and a hung EOS aggregation). The per-input `Eos` is delivered
+/// to the element first (so a stateful muxer can flush) but the element must not
+/// forward it; the runner owns the merged one.
 async fn muxer_arm<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
-    tagged_rx: Receiver<(usize, PipelinePacket)>,
+    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
     out_tx: LinkSender,
     input_count: usize,
     mut current_output: Caps,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    let mut open = alloc::vec![true; input_count];
     let mut ended = 0usize;
+    // Cursor for round-robin fairness across both the try-drain and block paths.
+    let mut next = 0usize;
     loop {
-        match tagged_rx.recv().await {
-            Some((pad, PipelinePacket::Eos)) => {
+        // Take one buffered packet, scanning round-robin from `next`, so no
+        // single input can monopolize the muxer while others have data waiting.
+        let mut picked: Option<(usize, PipelinePacket)> = None;
+        for k in 0..input_count {
+            let slot = (next + k) % input_count;
+            if !open[slot] {
+                continue;
+            }
+            if let Some(pkt) = pad_rxs[slot].1.try_recv() {
+                picked = Some((slot, pkt));
+                next = (slot + 1) % input_count;
+                break;
+            }
+        }
+        let (slot, packet) = match picked {
+            Some(p) => p,
+            None => {
+                if !open.iter().any(|&o| o) {
+                    return Ok(0);
+                }
+                let (slot, maybe) = muxer_recv_any(&pad_rxs, &open, next).await;
+                next = (slot + 1) % input_count;
+                // A closed channel with no `Eos` is an upstream end; fold it into
+                // the same end-of-input path so aggregation still completes.
+                (slot, maybe.unwrap_or(PipelinePacket::Eos))
+            }
+        };
+        let pad = pad_rxs[slot].0;
+        match packet {
+            PipelinePacket::Eos => {
                 mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;
+                open[slot] = false;
                 ended += 1;
                 if ended == input_count {
                     adapter.push(PipelinePacket::Eos).await?;
                     return Ok(0);
                 }
             }
-            Some((pad, PipelinePacket::CapsChanged(new_caps))) => {
+            PipelinePacket::CapsChanged(new_caps) => {
                 // MX-1: re-solve this input against its pad constraint and
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
                 // not forwarded as if it were the merged output. A muxer is a β
@@ -1060,10 +1125,9 @@ async fn muxer_arm<'a>(
                     adapter.push(PipelinePacket::CapsChanged(new_output)).await?;
                 }
             }
-            Some((pad, packet)) => {
+            packet => {
                 mux.process(pad, packet, &mut adapter).await?;
             }
-            None => return Ok(0),
         }
     }
 }

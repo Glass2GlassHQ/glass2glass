@@ -48,9 +48,12 @@ const INPUT_FORMATS: [RawVideoFormat; 5] = [
 #[derive(Debug)]
 pub struct VideoConvert {
     target: RawVideoFormat,
-    /// Geometry and input format of the configured stream, updated by a
-    /// mid-stream `CapsChanged`.
-    input: Option<(RawVideoFormat, u32, u32)>,
+    /// Format, geometry, and framerate of the configured input stream, updated
+    /// by a mid-stream `CapsChanged`. The framerate is carried through to the
+    /// output caps unchanged (a convert does not retime), so downstream sees a
+    /// fixed rate rather than `Rate::Any` (which a fixating peer, e.g. a
+    /// compositor input, would reject).
+    input: Option<(RawVideoFormat, u32, u32, Rate)>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -143,8 +146,8 @@ impl AsyncElement for VideoConvert {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (format, w, h, _) = self.accept_input(absolute_caps)?;
-        self.input = Some((format, w, h));
+        let (format, w, h, framerate) = self.accept_input(absolute_caps)?;
+        self.input = Some((format, w, h, framerate));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -160,7 +163,8 @@ impl AsyncElement for VideoConvert {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
+                    let (format, w, h, framerate) =
+                        self.input.clone().ok_or(G2gError::NotConfigured)?;
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -170,11 +174,14 @@ impl AsyncElement for VideoConvert {
                     }
                     let converted = convert(src, format, self.target, w as usize, h as usize);
 
+                    // A convert changes format/geometry but not rate: carry the
+                    // input framerate so a fixating downstream peer (e.g. a
+                    // compositor input) does not reject a `Rate::Any`.
                     let new_caps = Caps::RawVideo {
                         format: self.target,
                         width: Dim::Fixed(w),
                         height: Dim::Fixed(h),
-                        framerate: Rate::Any,
+                        framerate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
@@ -190,8 +197,8 @@ impl AsyncElement for VideoConvert {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, w, h, _) = self.accept_input(&c)?;
-                    self.input = Some((format, w, h));
+                    let (format, w, h, framerate) = self.accept_input(&c)?;
+                    self.input = Some((format, w, h, framerate));
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

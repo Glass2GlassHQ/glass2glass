@@ -25,6 +25,29 @@ Nothing is published yet; all versions are `0.1.0`.
   -> capturing sink) asserting one output per base frame, canvas geometry, and
   the base layer covering the canvas. Architecture in DESIGN.md §4.13.6.
 
+#### Fixes (live picture-in-picture bring-up)
+
+- **Fan-in lost-wakeup deadlock / starvation (`graph_runner`).** The muxer
+  merged every input into one shared bounded channel, whose mpsc parks a single
+  sender waker (last writer wins). With two forwarders blocked on a full channel
+  one wakeup was lost permanently, and a free-running input starved a real-time
+  one — a frozen overlay and a hung all-inputs-EOS aggregation. Each input pad
+  now gets its own channel, drained round-robin with a fair block path. Regression
+  test `m93_mux_fairness` (hangs/collapses on the old runner, passes now).
+- **Compositor priming froze the overlay and collapsed output.** The startup
+  hold dropped buffered input-0 frames on overflow, so a free-running background
+  evicted the buffer before a slow overlay (camera warm-up) primed; only the held
+  frames ever flushed, latched on one stale overlay frame. Startup now emits the
+  oldest buffered frame *overlay-less* on overflow instead of dropping it (output
+  keeps flowing, no frames lost, a late overlay still appears), then flushes
+  with-overlay and runs live. Regression test
+  `live_overlay_animates_and_background_never_collapses`.
+- `VideoTestSrc::with_pattern` adds `Pattern::{Snow, MovingBar}` (default
+  `Gradient` unchanged) for visibly-animated content when eyeballing a live sink.
+- `v4l2_branch_smoke` (ignored, device-gated): isolates the webcam branch and the
+  compositor inset for headless diagnosis without a Wayland session; `pip_smoke`
+  tees the raw webcam to a second window as a motion reference.
+
 ### M92: `uridecodebin` — URI front door to the autoplug registry
 
 - `Registry::build_uridecodebin(uri, sink, target, max_depth)` (g2g-core

@@ -9,12 +9,15 @@ use core::pin::Pin;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_muxer_sink, DynSourceLoop, SourceLoop};
+use g2g_core::runtime::{run_graph, run_muxer_sink, DynSourceLoop, GraphNode, SourceLoop};
+use g2g_core::Graph;
+use g2g_plugins::videoscale::VideoScale;
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock,
     PipelinePacket, Rate, RawVideoFormat,
 };
 use g2g_plugins::compositor::{Compositor, CompositorPad};
+use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -80,11 +83,13 @@ fn alloc_vec(n: usize) -> Vec<u8> {
     vec![0u8; n]
 }
 
-/// Records every received DataFrame's byte length and the top-left pixel.
+/// Records every received DataFrame's byte length and the top-left pixel, plus
+/// the most recent full frame for pixel sampling.
 #[derive(Default)]
 struct CapturingSink {
     lens: Vec<usize>,
     top_left: Vec<[u8; 4]>,
+    last: Option<Box<[u8]>>,
 }
 
 impl AsyncElement for CapturingSink {
@@ -109,6 +114,7 @@ impl AsyncElement for CapturingSink {
                     let s = slice.as_slice();
                     self.lens.push(s.len());
                     self.top_left.push([s[0], s[1], s[2], s[3]]);
+                    self.last = Some(s.into());
                 }
             }
             Ok(())
@@ -146,4 +152,173 @@ async fn compositor_emits_one_frame_per_base_frame() {
         sink.top_left.iter().all(|&p| p == [255, 0, 0, 255]),
         "base red covers the top-left in every frame"
     );
+}
+
+use std::sync::{Arc, Mutex};
+
+/// Sink that writes each frame into a shared cell so the test can sample pixels
+/// after `run_graph` (which owns the sink).
+struct ShareSink(Arc<Mutex<Vec<Box<[u8]>>>>);
+impl AsyncElement for ShareSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(frame) = packet {
+                if let MemoryDomain::System(slice) = &frame.domain {
+                    self.0.lock().unwrap().push(slice.as_slice().into());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// PiP-scale, deterministic (solid-colour "camera", no real device): a green
+// overlay scaled down and placed at an offset must be visible in the inset
+// region and absent outside it. Mirrors the live PiP graph
+// (source -> VideoScale -> compositor.input(1)) that showed no inset.
+#[tokio::test]
+async fn pip_scale_overlay_is_visible_in_the_inset() {
+    const CW: usize = 320;
+    const CH: usize = 240;
+    const IW: u32 = 80;
+    const IH: u32 = 60;
+    const IX: i32 = 220;
+    const IY: i32 = 170;
+
+    let frames = Arc::new(Mutex::new(Vec::<Box<[u8]>>::new()));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let bg = g.add_source(GraphNode::source(ColorSrc {
+        w: CW as u32, h: CH as u32, color: [255, 0, 0, 255], count: 8, configured: false,
+    }));
+    let cam = g.add_source(GraphNode::source(ColorSrc {
+        w: 160, h: 120, color: [0, 255, 0, 255], count: 8, configured: false,
+    }));
+    let scale = g.add_transform(GraphNode::element(VideoScale::new(IW, IH)));
+    let comp = g.add_muxer(
+        GraphNode::muxer(Compositor::new(
+            CW as u32, CH as u32,
+            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(IX, IY).with_zorder(1)]),
+        )),
+        2,
+    );
+    let snk = g.add_sink(GraphNode::element(ShareSink(frames.clone())));
+    g.link(bg, comp.input(0)).unwrap();
+    g.link(cam, scale).unwrap();
+    g.link(scale, comp.input(1)).unwrap();
+    g.link(comp.output(), snk).unwrap();
+
+    run_graph(g, &ZeroClock, 4).await.expect("PiP-scale DAG runs");
+
+    let frames = frames.lock().unwrap();
+    let pixel = |buf: &[u8], x: usize, y: usize| {
+        let i = (y * CW + x) * 4;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    };
+    // Some output frame must carry the inset (the last one, after the overlay
+    // has been cached). Sample the inset centre and an outside point.
+    let last = frames.last().expect("at least one composited frame");
+    let inset = pixel(last, (IX as usize) + 40, (IY as usize) + 30);
+    let outside = pixel(last, 10, 10);
+    eprintln!("inset={inset:?} outside={outside:?} frames={}", frames.len());
+    assert_eq!(outside, [255, 0, 0, 255], "background red outside the inset");
+    assert_eq!(inset, [0, 255, 0, 255], "green camera visible in the inset");
+}
+
+/// Records the inset-centre pixel of each output frame (and counts frames),
+/// throttling slightly so the background does not race arbitrarily ahead of the
+/// overlay (mirrors an output-paced consumer).
+struct InsetProbe {
+    cw: usize,
+    x: usize,
+    y: usize,
+    pixels: Arc<Mutex<Vec<[u8; 4]>>>,
+}
+impl AsyncElement for InsetProbe {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> where Self: 'a;
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(frame) = packet {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                if let MemoryDomain::System(slice) = &frame.domain {
+                    let s = slice.as_slice();
+                    let i = (self.y * self.cw + self.x) * 4;
+                    self.pixels.lock().unwrap().push([s[i], s[i + 1], s[i + 2], s[i + 3]]);
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// A *changing* overlay (per-frame snow) must animate in the inset across the
+// run, and the background must not collapse: every input-0 frame produces an
+// output. This is the regression guard for the priming freeze, where a
+// free-running background outran a slower overlay and the inset latched on one
+// frame (only PENDING_CAP frames ever emitted).
+#[tokio::test]
+async fn live_overlay_animates_and_background_never_collapses() {
+    const CW: u32 = 160;
+    const CH: u32 = 120;
+    const IW: u32 = 48;
+    const IH: u32 = 36;
+    const IX: i32 = 100;
+    const IY: i32 = 80;
+    const N: u64 = 60;
+
+    let pixels = Arc::new(Mutex::new(Vec::<[u8; 4]>::new()));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let bg = g.add_source(GraphNode::source(
+        VideoTestSrc::new(CW, CH, 30, N).with_pattern(Pattern::MovingBar),
+    ));
+    // Overlay produces distinct per-frame content (snow) at the inset size.
+    let overlay = g.add_source(GraphNode::source(
+        VideoTestSrc::new(IW, IH, 30, N).with_pattern(Pattern::Snow),
+    ));
+    let comp = g.add_muxer(
+        GraphNode::muxer(Compositor::new(
+            CW, CH,
+            Vec::from([CompositorPad::at(0, 0), CompositorPad::at(IX, IY).with_zorder(1)]),
+        )),
+        2,
+    );
+    let snk = g.add_sink(GraphNode::element(InsetProbe {
+        cw: CW as usize,
+        x: (IX as usize) + (IW as usize) / 2,
+        y: (IY as usize) + (IH as usize) / 2,
+        pixels: pixels.clone(),
+    }));
+    g.link(bg, comp.input(0)).unwrap();
+    g.link(overlay, comp.input(1)).unwrap();
+    g.link(comp.output(), snk).unwrap();
+
+    let stats = run_graph(g, &ZeroClock, 4).await.expect("compositor DAG runs");
+
+    let pixels = pixels.lock().unwrap();
+    // No collapse: one output per background frame.
+    assert_eq!(pixels.len() as u64, N, "every background frame produced an output");
+    assert_eq!(stats.frames_consumed, N);
+    // The overlay animated: the inset took many distinct values, not one frozen.
+    let distinct = pixels.iter().collect::<std::collections::HashSet<_>>().len();
+    assert!(distinct > (N as usize) / 2, "inset froze: only {distinct} distinct over {N} frames");
 }
