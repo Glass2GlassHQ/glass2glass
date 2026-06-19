@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M115: Matroska / WebM muxer (`matroskamux`)
+
+- **`g2g-plugins::matroska::MatroskaMuxer` (no_std).** The inverse of
+  `MatroskaDemuxer`: writes a valid EBML stream (EBML header with DocType, an
+  unknown-size Segment, Info + Tracks, then one Cluster per frame). WebM-subset
+  codecs (VP8 / VP9 / AV1 / Opus) get the `webm` DocType, the rest `matroska`.
+- **`g2g-plugins::mkvmux::MkvMux` element (no_std).** `Caps::CompressedVideo{H264 |
+  H265 | VP8 | VP9 | AV1}` or `Caps::Audio{Aac | Opus}` in, `Caps::ByteStream{Matroska}`
+  out. The track (codec + geometry / audio params) is read from the input caps;
+  the muxer is built lazily on the first frame so a geometry-refining `CapsChanged`
+  is reflected in Tracks. Registered as `matroskamux`. v1: one track, one frame
+  per Cluster, every frame flagged a keyframe (no upstream delta-frame signal yet).
+- Tested: a pure mux -> demux round trip (track + frames + PTS recovered) and the
+  `webm` DocType for VP9; the element round trip through `MkvDemux`; and an
+  end-to-end VP9 source -> matroskamux -> matroskademux -> sink run through
+  `run_graph` (`ByteStream{Matroska}` as an interior link).
+
 ### M114: MPEG-TS muxer (`mpegtsmux`)
 
 - **`g2g-plugins::mpegts::TsMuxer` (no_std).** The inverse of `TsDemuxer`: wraps

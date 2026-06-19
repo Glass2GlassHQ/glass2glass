@@ -136,6 +136,7 @@ fn matroska_demuxer_registered() {
     // M110: the MKV / WebM demuxer joins the registry with its stream selector.
     let reg = default_registry();
     assert!(reg.inspect("matroskademux").unwrap().contains("stream"));
+    assert!(reg.inspect("matroskamux").is_some()); // M115: the MKV / WebM muxer
 
     let mut mkv = reg.make_element("matroskademux").unwrap();
     assert_eq!(mkv.get_property("stream"), Some(PropValue::Str("vp9".into())));

@@ -23,16 +23,17 @@
 
 use alloc::vec::Vec;
 
-/// EBML / Matroska element IDs (kept whole, length marker included). The EBML
-/// header (`0x1A45DFA3`) and any other pre-Segment element are skipped by their
-/// size, so only the elements parsed below are named. TrackType is unused: the
-/// CodecID string already pins the media type.
+/// EBML / Matroska element IDs (kept whole, length marker included). The demuxer
+/// skips the EBML header by its size and ignores TrackType (the CodecID pins the
+/// media type), but the muxer writes both, so they are named here too.
+const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_SEGMENT: u32 = 0x1853_8067;
 const ID_INFO: u32 = 0x1549_A966;
 const ID_TIMESTAMP_SCALE: u32 = 0x002A_D7B1;
 const ID_TRACKS: u32 = 0x1654_AE6B;
 const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
+const ID_TRACK_TYPE: u32 = 0x0083;
 const ID_CODEC_ID: u32 = 0x0086;
 const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
@@ -83,6 +84,34 @@ impl MkvCodec {
             MkvCodec::Opus
         } else {
             MkvCodec::Other
+        }
+    }
+
+    /// The canonical Matroska `CodecID` to write for a codec (`None` for the
+    /// unmappable [`MkvCodec::Other`]). AAC writes the LC profile string.
+    pub fn codec_id(self) -> Option<&'static [u8]> {
+        Some(match self {
+            MkvCodec::H264 => b"V_MPEG4/ISO/AVC",
+            MkvCodec::H265 => b"V_MPEGH/ISO/HEVC",
+            MkvCodec::Vp8 => b"V_VP8",
+            MkvCodec::Vp9 => b"V_VP9",
+            MkvCodec::Av1 => b"V_AV1",
+            MkvCodec::Aac => b"A_AAC",
+            MkvCodec::Opus => b"A_OPUS",
+            MkvCodec::Other => return None,
+        })
+    }
+
+    /// True for the WebM codec subset, so the muxer can write the `webm` DocType.
+    pub fn is_webm(self) -> bool {
+        matches!(self, MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus)
+    }
+
+    /// `1` for video, `2` for audio (the Matroska `TrackType`).
+    fn track_type(self) -> u8 {
+        match self {
+            MkvCodec::Aac | MkvCodec::Opus => 2,
+            _ => 1,
         }
     }
 }
@@ -497,6 +526,158 @@ fn read_float(data: &[u8]) -> f64 {
     }
 }
 
+// --- Muxing (M115): the inverse of the demuxer above. ---
+
+/// The single track a [`MatroskaMuxer`] writes.
+const MUX_TRACK_NUMBER: u64 = 1;
+
+/// The track parameters a [`MatroskaMuxer`] writes. Geometry is used for video,
+/// channels / sample_rate for audio (the codec selects which).
+#[derive(Debug, Clone, Copy)]
+pub struct MkvTrackSpec {
+    pub codec: MkvCodec,
+    pub width: u32,
+    pub height: u32,
+    pub channels: u8,
+    pub sample_rate: u32,
+}
+
+/// Matroska / WebM multiplexer for a single track (M115): writes the EBML header,
+/// an unknown-size Segment, Info + Tracks, then one Cluster per frame. The
+/// inverse of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps it.
+///
+/// Scope (v1): one track, one frame per Cluster (correct but unbatched), default
+/// TimestampScale (1 ms). Cues, multi-track, and Cluster batching are follow-ups.
+#[derive(Debug)]
+pub struct MatroskaMuxer {
+    spec: MkvTrackSpec,
+    header_written: bool,
+}
+
+impl MatroskaMuxer {
+    pub fn new(spec: MkvTrackSpec) -> Self {
+        Self { spec, header_written: false }
+    }
+
+    /// Mux one frame, writing the EBML header + Segment + Info + Tracks on the
+    /// first call, then a Cluster (Timestamp + SimpleBlock) for this frame.
+    pub fn push_frame(&mut self, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if !self.header_written {
+            let doctype: &[u8] = if self.spec.codec.is_webm() { b"webm" } else { b"matroska" };
+            out.extend_from_slice(&ebml_header(doctype));
+            // Segment with unknown size: its children run to end of stream.
+            id_bytes(ID_SEGMENT, &mut out);
+            out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+            out.extend_from_slice(&info_element());
+            out.extend_from_slice(&tracks_element(&self.spec));
+            self.header_written = true;
+        }
+        let ts = pts_ns / DEFAULT_TIMESTAMP_SCALE;
+        let block = build_simple_block(MUX_TRACK_NUMBER, 0, keyframe, data);
+        let mut cluster = elem_vec(ID_TIMESTAMP, &uint_bytes(ts));
+        cluster.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
+        out.extend_from_slice(&elem_vec(ID_CLUSTER, &cluster));
+        out
+    }
+}
+
+/// A minimal but valid EBML header naming the DocType (`matroska` / `webm`).
+fn ebml_header(doctype: &[u8]) -> Vec<u8> {
+    let mut h = elem_vec(0x4286, &[1]); // EBMLVersion
+    h.extend_from_slice(&elem_vec(0x42F7, &[1])); // EBMLReadVersion
+    h.extend_from_slice(&elem_vec(0x42F2, &[4])); // EBMLMaxIDLength
+    h.extend_from_slice(&elem_vec(0x42F3, &[8])); // EBMLMaxSizeLength
+    h.extend_from_slice(&elem_vec(0x4282, doctype)); // DocType
+    h.extend_from_slice(&elem_vec(0x4287, &[2])); // DocTypeVersion
+    h.extend_from_slice(&elem_vec(0x4285, &[2])); // DocTypeReadVersion
+    elem_vec(ID_EBML, &h)
+}
+
+fn info_element() -> Vec<u8> {
+    elem_vec(ID_INFO, &elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE)))
+}
+
+fn tracks_element(spec: &MkvTrackSpec) -> Vec<u8> {
+    let codec_id = spec.codec.codec_id().unwrap_or(b"");
+    let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(MUX_TRACK_NUMBER));
+    entry.extend_from_slice(&elem_vec(ID_TRACK_TYPE, &uint_bytes(spec.codec.track_type() as u64)));
+    entry.extend_from_slice(&elem_vec(ID_CODEC_ID, codec_id));
+    if spec.codec.track_type() == 1 {
+        let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
+        v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
+        entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
+    } else {
+        let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
+        a.extend_from_slice(&elem_vec(ID_SAMPLING_FREQ, &(spec.sample_rate as f64).to_be_bytes()));
+        entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+    }
+    let entry = elem_vec(ID_TRACK_ENTRY, &entry);
+    elem_vec(ID_TRACKS, &entry)
+}
+
+/// A SimpleBlock body: track-number VINT, signed relative timestamp, flags, data.
+fn build_simple_block(track: u64, rel: i16, keyframe: bool, data: &[u8]) -> Vec<u8> {
+    let mut b = encode_vint(track);
+    b.extend_from_slice(&rel.to_be_bytes());
+    b.push(if keyframe { 0x80 } else { 0x00 }); // keyframe flag, no lacing
+    b.extend_from_slice(data);
+    b
+}
+
+/// One EBML element: serialized id, a size VINT, then the body.
+fn elem_vec(id: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    id_bytes(id, &mut out);
+    out.extend_from_slice(&encode_vint(body.len() as u64));
+    out.extend_from_slice(body);
+    out
+}
+
+/// Serialize an element ID to its 1..4 bytes (the length marker is part of the
+/// value, so the byte count follows the highest non-zero byte).
+fn id_bytes(id: u32, out: &mut Vec<u8>) {
+    let len = if id > 0x00FF_FFFF {
+        4
+    } else if id > 0x0000_FFFF {
+        3
+    } else if id > 0x0000_00FF {
+        2
+    } else {
+        1
+    };
+    for i in (0..len).rev() {
+        out.push((id >> (8 * i)) as u8);
+    }
+}
+
+/// Encode an EBML size as a minimal VINT, avoiding the all-ones (unknown-size)
+/// pattern by growing to a longer encoding (the inverse of [`read_size`]).
+fn encode_vint(value: u64) -> Vec<u8> {
+    let mut len = 1usize;
+    while len < 8 && value >= (1u64 << (7 * len)) - 1 {
+        len += 1;
+    }
+    let mut out = alloc::vec![0u8; len];
+    let mut v = value;
+    for i in (0..len).rev() {
+        out[i] = (v & 0xFF) as u8;
+        v >>= 8;
+    }
+    out[0] |= 1 << (8 - len);
+    out
+}
+
+/// Minimal big-endian unsigned integer element body (`0` is one zero byte).
+fn uint_bytes(v: u64) -> Vec<u8> {
+    if v == 0 {
+        return alloc::vec![0];
+    }
+    let bytes = v.to_be_bytes();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(7);
+    bytes[start..].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +887,39 @@ mod tests {
         let mut body = vec![1u8]; // two frames
         body.extend_from_slice(&[1, 2, 3, 4, 5]);
         assert!(split_laced(&body, 2).is_none());
+    }
+
+    #[test]
+    fn mux_demux_round_trip() {
+        // Mux a VP9 video track of two frames, then demux the WebM back.
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0 };
+        let mut mux = MatroskaMuxer::new(spec);
+        let mut bytes = mux.push_frame(&[1, 2, 3], 0, true);
+        bytes.extend_from_slice(&mux.push_frame(&[4, 5], 33_000_000, false));
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(
+            d.tracks(),
+            &[MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0 }]
+        );
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2, "both frames survive the round trip");
+        assert_eq!(frames[0].data, vec![1, 2, 3]);
+        assert_eq!(frames[0].pts_ns, 0);
+        assert!(frames[0].keyframe);
+        assert_eq!(frames[1].data, vec![4, 5]);
+        assert_eq!(frames[1].pts_ns, 33_000_000); // 33 ms ticks * 1 ms scale
+        assert!(!frames[1].keyframe);
+    }
+
+    #[test]
+    fn mux_writes_webm_doctype_for_vp9() {
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let bytes = MatroskaMuxer::new(spec).push_frame(&[0], 0, true);
+        // The DocType string appears in the EBML header for a WebM codec.
+        assert!(bytes.windows(4).any(|w| w == b"webm"), "VP9 muxes as WebM");
     }
 }

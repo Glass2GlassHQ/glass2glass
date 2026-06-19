@@ -332,9 +332,12 @@ modern PipeWire path remain.
   params) and Cluster SimpleBlock / Block frames, with per-codec `MkvStream`
   selection (`matroskademux stream=vp9`, default VP9) and `CapsChanged`-refined
   output caps from Tracks. Registered as `matroskademux`. Block lacing (Xiph /
-  EBML / fixed) is split (M113). **Remaining:** unknown-size Clusters (live), Cues
-  / seeking, per-frame timestamp interpolation (DefaultDuration), and the muxers
-  (`matroskamux` / `webmmux`).
+  EBML / fixed) is split (M113). The muxer `matroskamux`
+  (`g2g-plugins::matroska::MatroskaMuxer` + the `MkvMux` element, single track,
+  one Cluster per frame, `webm` / `matroska` DocType by codec) landed in M115.
+  **Remaining:** unknown-size Clusters (live read), Cues / seeking, per-frame
+  timestamp interpolation (DefaultDuration), multi-track muxing, and Cluster
+  batching.
 - **MPEG-TS `tsdemux` — DONE (M108, M109).** Pure-Rust demuxer
   (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->
   elementary streams, fed by the `Caps::ByteStream{MpegTs}` link type

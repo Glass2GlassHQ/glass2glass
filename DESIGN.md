@@ -1113,9 +1113,12 @@ video, AAC / Opus audio, default VP9). Unlike `TsDemux`, Matroska's Tracks eleme
 carries concrete geometry and audio parameters, so the demuxer refines the output
 caps itself via `CapsChanged` once Tracks is parsed, without a downstream bitstream
 parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
-lacing (Xiph / EBML / fixed) is split (M113), so multi-frame audio blocks demux.
-Scope is one Segment with definite-size Clusters; unknown-size Clusters (live
-streaming), Cues (seeking), and the muxers are follow-ups.
+lacing (Xiph / EBML / fixed) is split (M113), so multi-frame audio blocks demux. The
+MKV muxer (`matroskamux`: `MatroskaMuxer` + the `MkvMux` element) is the inverse path
+(M115), writing the EBML header, an unknown-size Segment, Tracks, and one Cluster per
+frame, with the `webm` DocType for the WebM codec subset. Scope is one Segment /
+one track with definite-size Clusters; unknown-size Clusters (live read), Cues
+(seeking), and multi-track muxing are follow-ups.
 
 ---
 

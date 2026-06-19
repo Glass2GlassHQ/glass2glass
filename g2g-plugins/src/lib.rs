@@ -76,6 +76,9 @@ pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one
 // selected elementary stream, wrapping the matroska parser.
 pub mod mkvdemux;
+// Matroska / WebM muxer element (no_std): one elementary stream ->
+// Caps::ByteStream{Matroska}, the inverse of mkvdemux.
+pub mod mkvmux;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;
