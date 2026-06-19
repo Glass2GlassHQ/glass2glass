@@ -25,11 +25,24 @@ use g2g_core::{
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
 
+/// Formats this element can both consume and produce. The convert `target`
+/// is always one of these.
 const FORMATS: [RawVideoFormat; 4] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+];
+
+/// Formats accepted as **input**. Superset of [`FORMATS`]: `Yuyv` (packed
+/// 4:2:2, the usual webcam output) is unpacked to a planar / RGB target but is
+/// never produced, so it is input-only.
+const INPUT_FORMATS: [RawVideoFormat; 5] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+    RawVideoFormat::Yuyv,
 ];
 
 #[derive(Debug)]
@@ -70,10 +83,15 @@ impl VideoConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !FORMATS.contains(format) || *w == 0 || *h == 0 {
+        if !INPUT_FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
         if (is_yuv420(*format) || is_yuv420(self.target)) && (*w % 2 != 0 || *h % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
+        // YUYV pairs two horizontal pixels per macropixel, so the width must be
+        // even regardless of the target.
+        if *format == RawVideoFormat::Yuyv && *w % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *w, *h, framerate.clone()))
@@ -88,7 +106,7 @@ impl AsyncElement for VideoConvert {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // any supported raw format at any geometry; per-format alternatives
         // intersected in declaration order.
-        for format in FORMATS {
+        for format in INPUT_FORMATS {
             let candidate = Caps::RawVideo {
                 format,
                 width: Dim::Any,
@@ -113,7 +131,7 @@ impl AsyncElement for VideoConvert {
                     width,
                     height,
                     framerate,
-                } if FORMATS.contains(format) => CapsSet::one(Caps::RawVideo {
+                } if INPUT_FORMATS.contains(format) => CapsSet::one(Caps::RawVideo {
                     format: target,
                     width: width.clone(),
                     height: height.clone(),
@@ -214,6 +232,8 @@ fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
         RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
+        // Packed 4:2:2: two bytes per pixel (Y0 U Y1 V over each pixel pair).
+        RawVideoFormat::Yuyv => w * h * 2,
     }
 }
 
@@ -234,9 +254,81 @@ fn convert(src: &[u8], from: RawVideoFormat, to: RawVideoFormat, w: usize, h: us
         (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2),
         (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0),
         (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0),
-        // every distinct pair is enumerated; identical pairs hit the guard.
+        // YUYV (packed 4:2:2) is input-only: unpack to the planar / RGB target.
+        (Yuyv, I420) => yuyv_to_yuv420(src, w, h, false),
+        (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
+        (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2),
+        (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0),
+        // every reachable pair is enumerated; identical pairs hit the guard,
+        // and no path converts *to* Yuyv (it is never a `target`).
         _ => unreachable!("unhandled raw-video conversion {from:?} -> {to:?}"),
     }
+}
+
+/// Packed YUYV (4:2:2, byte order Y0 U Y1 V) -> 4:2:0 YUV. The luma plane is a
+/// direct deinterleave; chroma drops to half vertical resolution by averaging
+/// the two source rows that share each output chroma sample. `interleaved`
+/// selects NV12 (true) vs I420 (false) chroma layout. Width is even (checked at
+/// negotiation); height is even whenever the 4:2:0 target is involved.
+fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize, interleaved: bool) -> Box<[u8]> {
+    let luma = w * h;
+    let mut dst = vec![0u8; luma + luma / 2];
+    // Luma: every macropixel (4 src bytes) yields two Y samples.
+    for y in 0..h {
+        for x in 0..w {
+            dst[y * w + x] = src[(y * w + x) * 2];
+        }
+    }
+    let (cw, ch) = (w / 2, h / 2);
+    for cy in 0..ch {
+        for cx in 0..cw {
+            // The macropixel at column `cx` carries one U and one V per row;
+            // average the two rows (cy*2, cy*2+1) for the 4:2:0 sample.
+            let row0 = ((cy * 2) * w + cx * 2) * 2;
+            let row1 = ((cy * 2 + 1) * w + cx * 2) * 2;
+            let u = (src[row0 + 1] as u32 + src[row1 + 1] as u32 + 1) / 2;
+            let v = (src[row0 + 3] as u32 + src[row1 + 3] as u32 + 1) / 2;
+            let ci = cy * cw + cx;
+            if interleaved {
+                dst[luma + 2 * ci] = u as u8;
+                dst[luma + 2 * ci + 1] = v as u8;
+            } else {
+                dst[luma + ci] = u as u8;
+                dst[luma + luma / 4 + ci] = v as u8;
+            }
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+/// Packed YUYV (4:2:2) -> packed 4-byte RGB(A), BT.601 limited range, integer
+/// math (same coefficients as [`yuv420_to_rgb`]). Each macropixel's two Y
+/// samples share its U/V; alpha is opaque. `r_off`/`b_off` pick the channel
+/// order (RGBA: 0/2, BGRA: 2/0).
+fn yuyv_to_rgb(src: &[u8], w: usize, h: usize, r_off: usize, b_off: usize) -> Box<[u8]> {
+    let mut dst = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for mx in 0..(w / 2) {
+            let s = (y * w + mx * 2) * 2;
+            let (y0, u, y1, v) = (
+                src[s] as i32,
+                src[s + 1] as i32,
+                src[s + 2] as i32,
+                src[s + 3] as i32,
+            );
+            let d = u - 128;
+            let e = v - 128;
+            for (yi, luma) in [y0, y1].into_iter().enumerate() {
+                let c = luma - 16;
+                let p = (y * w + mx * 2 + yi) * 4;
+                dst[p + r_off] = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+                dst[p + 1] = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+                dst[p + b_off] = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+                dst[p + 3] = 255;
+            }
+        }
+    }
+    dst.into_boxed_slice()
 }
 
 /// RGBA<->BGRA: swap the R and B channels.
@@ -474,5 +566,33 @@ mod tests {
         let src: Vec<u8> = (0..4).flat_map(|_| [128u8, 128, 128, 255]).collect();
         let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true);
         assert_eq!(&nv12[4..], &[128, 128], "neutral chroma for grey");
+    }
+
+    #[test]
+    fn yuyv_unpacks_luma_and_averages_chroma_to_i420() {
+        // 2x2 YUYV: one macropixel per row, [Y0, U, Y1, V].
+        // row 0: Y=10,20 U=100 V=200 ; row 1: Y=30,40 U=110 V=210
+        let yuyv = [10u8, 100, 20, 200, 30, 110, 40, 210];
+        let i420 = yuyv_to_yuv420(&yuyv, 2, 2, false);
+        // luma is a straight deinterleave; chroma is the vertical average
+        // (4:2:2 -> 4:2:0), U plane then V plane.
+        assert_eq!(&i420[..4], &[10, 20, 30, 40], "luma deinterleave");
+        assert_eq!(i420[4], 105, "U = avg(100,110)");
+        assert_eq!(i420[5], 205, "V = avg(200,210)");
+        assert_eq!(i420.len(), 2 * 2 * 3 / 2);
+    }
+
+    #[test]
+    fn yuyv_to_rgb_is_grey_for_neutral_chroma() {
+        // Y0 == Y1, U = V = 128: both unpacked pixels are the same neutral grey
+        // and alpha is opaque.
+        let yuyv = [128u8, 128, 128, 128];
+        let rgba = yuyv_to_rgb(&yuyv, 2, 1, 0, 2);
+        assert_eq!(rgba.len(), 2 * 1 * 4);
+        let (p0, p1) = (&rgba[0..4], &rgba[4..8]);
+        assert_eq!(p0, p1, "equal luma -> identical pixels");
+        assert_eq!(p0[0], p0[1], "grey: R == G");
+        assert_eq!(p0[1], p0[2], "grey: G == B");
+        assert_eq!(p0[3], 255, "alpha opaque");
     }
 }

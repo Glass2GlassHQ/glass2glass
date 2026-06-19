@@ -353,6 +353,10 @@ pub enum RawVideoFormat {
     I420,
     Rgba8,
     Bgra8,
+    /// Packed YUV 4:2:2, byte order Y0 U Y1 V (the V4L2 `YUYV` / `YUY2`
+    /// fourcc). Two bytes per pixel; the near-universal UVC webcam output.
+    /// Packed (not planar), so it needs unpacking before planar consumers.
+    Yuyv,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

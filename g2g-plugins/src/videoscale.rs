@@ -248,6 +248,7 @@ fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
         RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
+        RawVideoFormat::Yuyv => w * h * 2,
     }
 }
 
@@ -369,6 +370,9 @@ fn scale(
             out.extend_from_slice(&v);
             out.into_boxed_slice()
         }
+        // YUYV is absent from SUPPORTED, so negotiation never admits it here;
+        // convert to a planar format upstream before scaling.
+        RawVideoFormat::Yuyv => unreachable!("videoscale: YUYV is not negotiated"),
     }
 }
 

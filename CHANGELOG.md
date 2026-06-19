@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M89: `RawVideoFormat::Yuyv` (packed 4:2:2) + videoconvert unpacking
+
+- Adds `RawVideoFormat::Yuyv` (packed 4:2:2, byte order Y0 U Y1 V; the V4L2
+  `YUYV` / `YUY2` fourcc), the near-universal UVC webcam output. Prerequisite
+  for the upcoming `v4l2src` capture source.
+- `VideoConvert` now accepts YUYV as an **input-only** format (it unpacks, never
+  produces it): new `INPUT_FORMATS` superset gates negotiation, and the convert
+  table gains `Yuyv -> {I420, Nv12, Rgba8, Bgra8}` via two helpers
+  (`yuyv_to_yuv420` deinterleaves luma + vertically averages 4:2:2 chroma to
+  4:2:0; `yuyv_to_rgb` shares the BT.601 integer coefficients with
+  `yuv420_to_rgb`). YUYV input requires even width (the macropixel pairs two
+  horizontal pixels).
+- `frame_byte_size` learns YUYV (`w*h*2`) in videoconvert / videoscale /
+  videocrop / videoflip. The geometry transforms keep YUYV out of their
+  `SUPPORTED` lists, so negotiation rejects packed 4:2:2 there (convert first);
+  their pixel-op dispatch carries a documented `unreachable!` for it.
+
 ### M88: Reserve the `FrameMeta` extension point on `Frame`
 
 - Adds `pub meta: FrameMetaSet` to `Frame` (the GstMeta / per-buffer side-channel
