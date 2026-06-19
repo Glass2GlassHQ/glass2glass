@@ -481,7 +481,7 @@ follow describe each track's current architecture.
 
 | Track | Section | Summary |
 | :--- | :--- | :--- |
-| Receive | §4.11 | Network sources and hardware decoders (RTSP, file, fMP4, software/VAAPI/MF/NVDEC decoders). |
+| Receive | §4.11, §4.12a/b | Network + capture sources and hardware decoders (RTSP, raw RTP ingest with jitter buffer + RTCP/NACK, V4L2 capture, file, fMP4, software/VAAPI/MF/NVDEC decoders). |
 | Display & egress | §4.11.5, §4.12 | GPU-resident presentation sinks and outbound RTP packetizers. |
 | Negotiation | §4.13 | Distributed CSP caps solver with per-link assignment and structured failure. |
 | ML | §5 | Inline GPU tensor preprocess and inference (Burn / ORT). |
@@ -648,7 +648,10 @@ and a thin sink does the UDP I/O.
   packets to a destination on a tokio `UdpSocket`. The RTP timestamp is the
   90 kHz image of `FrameTiming::pts_ns`; sequence numbers and the per-AU
   marker bit come from the packetizer. `with_rtp(pt, ssrc)` and
-  `with_max_payload(mtu)` configure the flow.
+  `with_max_payload(mtu)` configure the flow. It also keeps a bounded history of
+  recently sent packets and honors receive-side RTCP NACK by retransmitting them
+  (`with_retransmit(enabled, capacity)`); see the receive-side feedback loop in
+  §4.12b.
 
 ### 4.12a Live Capture (V4L2)
 
@@ -695,13 +698,28 @@ the FU header's type); the RTP marker bit closes an access unit. A sequence-
 number gap drops the in-flight reassembly so loss or reorder never welds two
 access units together.
 
+**Receive-side resilience (jitter buffer + RTCP + NACK).** Between the socket and
+the depayloader sits a Sans-IO jitter buffer (`rtpjitter.rs`,
+`RtpJitterBuffer`): it orders packets by an *extended* sequence number (the
+16-bit RTP sequence unrolled to a monotonic counter, so wraparound is handled),
+releases them in order, holds a gap only until its predecessors fill or a
+bounded deadline elapses (then declares loss), and drops duplicates / too-late
+packets. RTCP (`rtcp.rs`, Sans-IO RFC 3550 SR/RR/BYE + RFC 4585 Generic NACK,
+plus `ReceptionStats` for loss fraction / cumulative loss / interarrival jitter)
+runs RTP/RTCP-muxed on the one socket (RFC 5761): `UdpSrc` sends periodic
+receiver reports and emits a NACK for each detected gap, and `UdpSink` honors
+those NACKs by retransmitting from its send history (§4.12). A retransmit
+arriving inside the jitter hold window heals the gap before it is declared lost,
+so the loop recovers packet loss end to end. RFC 4588 RTX (a distinct
+retransmission payload; plain same-stream resend is used today) and FEC are the
+remaining receive-side items.
+
 This is **raw RTP** with no RTSP/SDP, so there is no out-of-band stream
 description: the output geometry is a declared hint (`with_video_size` /
 `with_framerate`), and since H.264 carries its real dimensions in the SPS a
-downstream decoder re-derives and corrects them. A receive-side jitter buffer
-(packet reorder, loss concealment, RTCP) and SDP/SPS-driven caps discovery are
-the larger receive-side follow-ups; `RtspSrc` (via `retina`) already covers the
-RTSP case with its own jitter buffer (§4.11.4).
+downstream decoder re-derives and corrects them. SDP/SPS-driven caps discovery is
+a follow-up; `RtspSrc` (via `retina`) already covers the RTSP case with its own
+jitter buffer (§4.11.4).
 
 The remaining capture/ingress breadth — `HttpSrc` (gated on a byte-stream caps
 + consumer; see DESIGN_TODO) and a `uridecodebin`-equivalent URI → source layer
@@ -888,10 +906,13 @@ straight source-over alpha blending and left/top clipping; a wgpu GPU companion
 is a follow-up. Because a mixer must combine *simultaneous* inputs rather than
 interleave, it caches the latest frame per input and uses **input 0 as the
 timing driver**: one composited output frame is emitted per input-0 frame,
-overlaying whatever the other inputs have most recently delivered. The output
-canvas size and framerate are fixed at construction; per-input geometry is
-whatever each input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed
-canvas).
+overlaying whatever the other inputs have most recently delivered. At startup it
+briefly buffers input-0 frames (bounded) until every overlay has produced once,
+so a late-starting overlay (camera warm-up) still appears; on buffer overflow the
+oldest is emitted overlay-less rather than dropped, so a free-running background
+never stalls or latches the overlay on one stale frame. The output canvas size
+and framerate are fixed at construction; per-input geometry is whatever each
+input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed canvas).
 
 #### 4.13.7 Pad templates
 

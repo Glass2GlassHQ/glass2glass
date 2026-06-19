@@ -27,7 +27,7 @@ See [DESIGN.md](DESIGN.md) for the architecture specification.
 | Crate | Role | Profile |
 | :--- | :--- | :--- |
 | `g2g-core` | Traits, `Frame`/`PipelinePacket`, caps algebra, clock, runner. | `no_std + alloc` |
-| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP, ffmpeg, VAAPI, MF, Wayland, KMS, WASAPI, Embassy, web). | mixed |
+| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, V4L2 capture, ffmpeg, VAAPI, MF, Wayland, KMS, WASAPI, compositor, Embassy, web). | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
 | `g2g-enterprise` | Multi-stream tensor batcher. | `std` |
@@ -56,6 +56,8 @@ OS-coupled elements live behind cargo features:
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `CudaDownload`, `CudaGlSink` | `cuda`, `cuda-gl` | Linux + NVIDIA driver (libcuda) + EGL + GL |
 | `UdpSink` + RTP packetizer | `udp-egress` | — |
+| `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
+| `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
@@ -140,16 +142,49 @@ run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?
 ### Camera → encode → RTP egress over UDP
 
 ```rust
-let src  = VideoTestSrc::new(RawVideoFormat::Nv12, 1920, 1080, 30.0);
+let src  = VideoTestSrc::new(1920, 1080, 30, 0);         // RGBA test pattern, unbounded
 let enc  = MfEncode::new_low_latency();                  // Windows; on Linux use the bridge
-let sink = UdpSink::bind("0.0.0.0:0")?
-    .with_remote("239.0.0.1:5004")
+let sink = UdpSink::new("239.0.0.1:5004".parse()?)
     .with_rtp(96, 0x1234_5678);                          // payload type, SSRC
 
 run_source_transform_sink(src, enc, sink, &clock, LatencyProfile::Live).await?;
 ```
 
-Features: `udp-egress` (plus the platform encoder feature).
+Features: `udp-egress` (plus the platform encoder feature). `UdpSink` honors
+receive-side NACK by retransmitting from a bounded send history
+(`with_retransmit`).
+
+### RTP ingress over UDP → ffmpeg decode → Wayland
+
+The receive-side inverse, with a jitter buffer (reorder / bounded-latency loss
+handling) and RTCP feedback (periodic receiver reports, NACK on gaps) built in.
+
+```rust
+let src  = UdpSrc::new("0.0.0.0:5004".parse()?)
+    .with_jitter(50, 64)                                 // 50 ms hold, 64-packet depth
+    .with_rtcp(1000, true);                              // 1 s reports, NACK enabled
+let dec  = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let sink = WaylandSink::new();
+
+run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
+```
+
+Features: `udp-ingress ffmpeg wayland-sink`.
+
+### Picture-in-picture: webcam over a test pattern (compositor)
+
+```rust
+let bg   = VideoTestSrc::new(1280, 720, 30, 0).with_pattern(Pattern::MovingBar);
+let cam  = V4l2Src::new("/dev/video0").with_size(640, 480);   // -> VideoConvert(RGBA) -> VideoScale
+let comp = Compositor::new(1280, 720, vec![
+    CompositorPad::at(0, 0),                              // background, timing driver
+    CompositorPad::at(940, 460).with_zorder(1),          // webcam inset
+]);
+// bg -> comp.input(0); cam -> rgba -> scale -> comp.input(1); comp -> sink (see tests).
+```
+
+Features: `v4l2 wayland-sink`. Full graph in
+[`g2g-plugins/tests/pip_smoke.rs`](g2g-plugins/tests/pip_smoke.rs).
 
 ## Running smoke tests
 
@@ -247,6 +282,17 @@ cargo test -p g2g-plugins --features udp-egress --test m47_udp_egress -- --nocap
 Binds a UDP receiver on localhost, drives the H.264 RTP packetizer, and
 asserts the datagrams parse back byte-exactly, with sequence numbers,
 marker bit, and FU-A reassembly all correct.
+
+### UDP ingress + resilience (loopback, no network)
+
+```sh
+cargo test -p g2g-plugins --features "udp-ingress udp-egress" --test udp_loopback -- --nocapture
+```
+
+End-to-end over localhost: depayload round-trip, the jitter buffer reordering
+out-of-order packets, and NACK-driven recovery (a lossy relay drops chosen
+sequences; the receiver NACKs, the sender retransmits, every access unit is
+recovered in order).
 
 ## System dependencies
 
