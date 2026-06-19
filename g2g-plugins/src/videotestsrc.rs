@@ -13,7 +13,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Synthetic content drawn into each frame. All are animated (they change with
@@ -196,6 +197,88 @@ impl SourceLoop for VideoTestSrc {
             out.push(PipelinePacket::Eos).await?;
             Ok(self.target_frames)
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEOTESTSRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "pattern" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.pattern = pattern_from_str(s).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                // GStreamer convention: -1 means "no limit".
+                self.target_frames = if n < 0 { u64::MAX } else { n as u64 };
+                Ok(())
+            }
+            "width" => {
+                self.width = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "height" => {
+                self.height = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "framerate" => {
+                let (n, d) = value.as_fraction().ok_or(PropError::Type)?;
+                if n < 0 || d <= 0 {
+                    return Err(PropError::Value);
+                }
+                // Store fps as Q16: (n/d) << 16.
+                self.framerate_q16 = (((n as u64) << 16) / d as u64) as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "pattern" => Some(PropValue::Str(pattern_to_str(self.pattern).into())),
+            "num-buffers" => Some(PropValue::Int(if self.target_frames == u64::MAX {
+                -1
+            } else {
+                self.target_frames as i64
+            })),
+            "width" => Some(PropValue::Uint(self.width as u64)),
+            "height" => Some(PropValue::Uint(self.height as u64)),
+            // Report the integral fps numerator over /1 (Q16 stores fps*65536).
+            "framerate" => Some(PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1)),
+            _ => None,
+        }
+    }
+}
+
+/// `VideoTestSrc`'s settable properties (M104).
+static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("pattern", PropKind::Str, "drawn pattern: gradient | snow | moving-bar"),
+    PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)"),
+    PropertySpec::new("width", PropKind::Uint, "frame width in pixels"),
+    PropertySpec::new("height", PropKind::Uint, "frame height in pixels"),
+    PropertySpec::new("framerate", PropKind::Fraction, "frames per second (e.g. 30/1)"),
+];
+
+/// Parse a `pattern` property string to a [`Pattern`].
+fn pattern_from_str(s: &str) -> Option<Pattern> {
+    match s {
+        "gradient" => Some(Pattern::Gradient),
+        "snow" => Some(Pattern::Snow),
+        "moving-bar" => Some(Pattern::MovingBar),
+        _ => None,
+    }
+}
+
+/// The `pattern` property string for a [`Pattern`].
+fn pattern_to_str(p: Pattern) -> &'static str {
+    match p {
+        Pattern::Gradient => "gradient",
+        Pattern::Snow => "snow",
+        Pattern::MovingBar => "moving-bar",
     }
 }
 

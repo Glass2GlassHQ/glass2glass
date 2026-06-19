@@ -19,7 +19,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 4] = [
@@ -218,6 +219,58 @@ impl AsyncElement for VideoFlip {
             }
             Ok(())
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEOFLIP_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "method" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.method = flip_method_from_str(s).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "method" => Some(PropValue::Str(flip_method_to_str(self.method).into())),
+            _ => None,
+        }
+    }
+}
+
+/// `VideoFlip`'s settable properties (M104).
+static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "method",
+    PropKind::Str,
+    "flip/rotate: horizontal-mirror | vertical-mirror | rotate-90cw | rotate-180 | rotate-90ccw",
+)];
+
+/// Parse a `method` property string to a [`FlipMethod`].
+fn flip_method_from_str(s: &str) -> Option<FlipMethod> {
+    match s {
+        "horizontal-mirror" => Some(FlipMethod::HorizontalMirror),
+        "vertical-mirror" => Some(FlipMethod::VerticalMirror),
+        "rotate-90cw" => Some(FlipMethod::Rotate90Cw),
+        "rotate-180" => Some(FlipMethod::Rotate180),
+        "rotate-90ccw" => Some(FlipMethod::Rotate90Ccw),
+        _ => None,
+    }
+}
+
+/// The `method` property string for a [`FlipMethod`].
+fn flip_method_to_str(m: FlipMethod) -> &'static str {
+    match m {
+        FlipMethod::HorizontalMirror => "horizontal-mirror",
+        FlipMethod::VerticalMirror => "vertical-mirror",
+        FlipMethod::Rotate90Cw => "rotate-90cw",
+        FlipMethod::Rotate180 => "rotate-180",
+        FlipMethod::Rotate90Ccw => "rotate-90ccw",
     }
 }
 

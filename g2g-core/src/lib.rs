@@ -24,6 +24,7 @@ pub mod memory;
 pub mod meta;
 pub mod metrics;
 pub mod pool;
+pub mod property;
 pub mod query;
 pub mod segment;
 pub mod state;
@@ -58,6 +59,7 @@ pub use format_element::{
 };
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use meta::FrameMetaSet;
+pub use property::{PropError, PropKind, PropValue, PropertySpec};
 #[cfg(feature = "metadata")]
 pub use meta::{
     AnalyticsMeta, AnalyticsNode, BBox, Classification, FrameMeta, ObjectDetection, Propagation,

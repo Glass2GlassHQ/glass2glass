@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M104: Runtime property system (foundation for gst-launch / gst-inspect)
+
+- **`g2g-core::property` (no_std + alloc).** A name/value property bag layered over
+  the compile-time `with_*` builders, the GObject-property analog: `PropValue`
+  (Bool / Int / Uint / Double / Fraction / Str), `PropKind`, `PropertySpec`
+  (name + kind + blurb), `PropError`, and `PropValue::parse(kind, "text")` for the
+  `key=value` syntax a `gst-launch` pipeline uses (`30/1` fractions, `-1` ints,
+  etc.). The keystone the M105 introspection dump and M106 text-pipeline parser
+  build on.
+- **Trait methods.** `AsyncElement` and `SourceLoop` (and their dyn mirrors
+  `DynAsyncElement` / `DynSourceLoop`) gained `properties()` / `set_property()` /
+  `get_property()`, all with defaults ("no properties"), the same zero-cost
+  default-impl pattern as `latency()` — so the no_std / RTOS baseline pays nothing
+  and the `with_*` builders stay the type-checked construction path.
+- **First element coverage.** `VideoTestSrc` (`pattern` / `num-buffers` / `width` /
+  `height` / `framerate`), `VideoFlip` (`method`), and `VideoRate` (`framerate`)
+  implement properties, exercising string-enum, int, uint, and fraction kinds.
+- Tested: per-element set/get round-trips, typed errors (unknown name / wrong
+  kind / invalid value), spec-table introspection, and the dyn-erased path a
+  registry takes (`Box<dyn DynSourceLoop>` / `Box<dyn DynAsyncElement>`).
+
 ### M103: `WgpuSink` GPU presentation sink (closes the keep-on-GPU loop)
 
 - **`g2g-plugins::wgpusink::WgpuSink` (`wgpu-sink` feature).** The consuming end

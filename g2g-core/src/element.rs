@@ -8,6 +8,7 @@ use crate::clock::ClockCandidate;
 use crate::error::G2gError;
 use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
 use crate::frame::PipelinePacket;
+use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
 #[cfg(feature = "multi-thread")]
@@ -170,6 +171,30 @@ pub trait AsyncElement: ElementBound {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         legacy_transform_constraint(self)
     }
+
+    /// The runtime properties this element type exposes (M104), the GObject
+    /// property-spec analog. Default: none. An element overrides this (and
+    /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))
+    /// to be settable by name from a `gst-launch` pipeline or inspectable by a
+    /// `gst-inspect` dump. The `with_*` builders remain the zero-cost
+    /// construction path; this is the string-keyed runtime face.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Set a property by name (M104). Default: every name is
+    /// [`PropError::Unknown`] (no properties). An overriding element validates
+    /// the value kind against its [`properties`](Self::properties) spec and
+    /// applies it.
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Read a property back by name (M104). Default: `None`. Overriding elements
+    /// return the current value for a known property.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.
@@ -220,6 +245,25 @@ pub trait DynAsyncElement: ElementBound {
     /// element that paces to hardware joins the runner's clock election.
     /// Defaults to none.
     fn provide_clock(&self) -> Option<ClockCandidate> {
+        None
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
+    /// and the `gst-launch` parser can introspect / set an erased element.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::set_property`]. Defaults to "no
+    /// properties" so a hand-written `DynAsyncElement` need not implement it; the
+    /// blanket `impl<T: AsyncElement>` overrides it to forward to the element.
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::get_property`]. Defaults to `None`; the
+    /// blanket impl forwards to the element.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
 }
@@ -273,6 +317,18 @@ impl<T: AsyncElement> DynAsyncElement for T {
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        AsyncElement::properties(self)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        AsyncElement::set_property(self, name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        AsyncElement::get_property(self, name)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynAsyncElement` can be boxed into a
@@ -323,5 +379,17 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
         (**self).provide_clock()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        (**self).properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        (**self).set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (**self).get_property(name)
     }
 }

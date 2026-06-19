@@ -27,7 +27,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 #[derive(Debug)]
@@ -295,7 +296,44 @@ impl AsyncElement for VideoRate {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        VIDEORATE_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "framerate" => {
+                let (n, d) = value.as_fraction().ok_or(PropError::Type)?;
+                if n <= 0 || d <= 0 {
+                    return Err(PropError::Value);
+                }
+                self.rate_q16 = (((n as u64) << 16) / d as u64) as u32;
+                self.dt_ns = if self.rate_q16 > 0 {
+                    (1_000_000_000u64 << 16) / self.rate_q16 as u64
+                } else {
+                    0
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "framerate" => Some(PropValue::Fraction((self.rate_q16 >> 16) as i32, 1)),
+            _ => None,
+        }
+    }
 }
+
+/// `VideoRate`'s settable properties (M104).
+static VIDEORATE_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "framerate",
+    PropKind::Fraction,
+    "target output frames per second (e.g. 10/1)",
+)];
 
 #[cfg(test)]
 mod tests {

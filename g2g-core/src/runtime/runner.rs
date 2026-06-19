@@ -11,6 +11,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
+use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
@@ -140,6 +141,25 @@ pub trait SourceLoop: ElementBound {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
+    }
+
+    /// The runtime properties this source type exposes (M104), the GObject
+    /// property-spec analog. Default: none. A source overrides this (and
+    /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))
+    /// to be settable by name from a `gst-launch` pipeline (eg `filesrc
+    /// location=...`, `videotestsrc pattern=...`).
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Set a property by name (M104). Default: [`PropError::Unknown`].
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Read a property back by name (M104). Default: `None`.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
     }
 }
 

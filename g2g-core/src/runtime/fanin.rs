@@ -29,6 +29,7 @@ use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
+use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
@@ -67,6 +68,24 @@ pub trait DynSourceLoop: ElementBound {
     /// Dyn-safe mirror of [`SourceLoop::configure_allocation`], the upstream end
     /// of the M12 allocation cascade.
     fn configure_allocation(&mut self, params: &AllocationParams);
+
+    /// Dyn-safe mirror of [`SourceLoop::properties`], for `gst-inspect` /
+    /// `gst-launch` introspection of an erased source.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::set_property`]. Defaults to "no
+    /// properties"; the blanket `impl<T: SourceLoop>` overrides it to forward.
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::get_property`]. Defaults to `None`; the
+    /// blanket impl forwards to the source.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
 }
 
 /// Blanket adapter: every [`SourceLoop`] is usable as a [`DynSourceLoop`]
@@ -109,6 +128,18 @@ impl<T: SourceLoop> DynSourceLoop for T {
     fn configure_allocation(&mut self, params: &AllocationParams) {
         SourceLoop::configure_allocation(self, params)
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        SourceLoop::properties(self)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        SourceLoop::set_property(self, name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        SourceLoop::get_property(self, name)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynSourceLoop` can be boxed into a
@@ -145,6 +176,18 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
         (**self).configure_allocation(params)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        (**self).properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        (**self).set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (**self).get_property(name)
     }
 }
 

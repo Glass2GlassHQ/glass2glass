@@ -1147,16 +1147,19 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
                 return Err(G2gError::UnsupportedDomain);
             };
             let bytes = slice.as_slice().to_vec().into_boxed_slice();
+            // Tee clone: per-frame metadata is shared with the original by Arc
+            // refcount (cheap), so a detector branch and a video branch both carry
+            // the same AnalyticsMeta. A branch that mutates it pays a copy-on-write
+            // deep copy then (FrameMetaSet::get_mut), so the branches never alias.
+            // When `metadata` is off, FrameMetaSet is a Copy ZST and this is a
+            // no-op copy (clippy's clone_on_copy fires only in that config).
+            #[allow(clippy::clone_on_copy)]
+            let meta = frame.meta.clone();
             PipelinePacket::DataFrame(Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
                 timing: frame.timing,
                 sequence: frame.sequence,
-                // Tee clone: per-frame metadata is shared with the original by
-                // Arc refcount (cheap), so a detector branch and a video branch
-                // both carry the same AnalyticsMeta. A branch that mutates it
-                // pays a copy-on-write deep copy then (FrameMetaSet::get_mut),
-                // so the branches never alias. A ZST no-op when `metadata` is off.
-                meta: frame.meta.clone(),
+                meta,
             })
         }
     })
