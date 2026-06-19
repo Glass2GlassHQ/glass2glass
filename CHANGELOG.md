@@ -5,6 +5,50 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M83b: caps-aware factories + `decodebin` splice + real decoder templates
+
+- Builds on M83a. Three things land: the search now reports its per-hop caps
+  decisions, factories consume them, and a `decodebin` convenience splices the
+  result into a graph.
+- `find_chain` now returns `Vec<ChainLink>` (`{ index, output }`) instead of
+  bare indices: each hop carries the source-pad caps the search chose for it.
+  A format-flexible element (a converter, a multi-format decoder) needs that to
+  be constructed at all (the format isn't derivable from its input), and the
+  caps pin the media type / format while leaving geometry + framerate to
+  instance negotiation.
+- `ElementFactory` builders are now `fn(&Caps) -> Box<dyn DynAsyncElement>`,
+  receiving the chosen output caps. A fixed-output element ignores the arg
+  (`|_| Box::new(Decoder::new())`); a converter reads it
+  (`|out| Box::new(VideoConvert::new(format_of(out)))`). `Registry::autoplug`
+  threads each `ChainLink::output` into the matching builder, so the registry no
+  longer bakes a target format into the registration closure.
+- `Registry::decodebin(graph, from, to, input, target, max_depth)` (feature
+  `std`, new `DecodebinError`): the `decodebin`-equivalent. The caller builds
+  only its source and sink and names the input caps + target shape; the method
+  auto-plugs the chain, adds each element as a transform, and links
+  `from → chain → to` (an empty chain links `from → to` directly). Returns the
+  inserted node ids. This is the "returns a sub-graph onto `run_graph`" payoff,
+  now end to end.
+- Real decoder metadata: `FfmpegH264Dec` implements `PadTemplates` (H.264 in;
+  NV12 / I420 out, the formats the type can emit), so a real decoder can be
+  registered and auto-plugged, not just synthetic descriptors.
+- Tests: the five `g2g-core` unit tests now also assert the chosen per-hop
+  output caps (decoder picks NV12; the forced two-element chain ends in RGBA).
+  `m83_autoplug` gains a `decodebin` splice-and-run case (source + sink only,
+  registry fills the middle, frames flow through `run_graph`) and an
+  `ffmpeg`-gated case proving the search routes H.264 → raw through the real
+  `FfmpegH264Dec` (reads templates only, no decode). VERIFIED on the dev host:
+  `cargo test --workspace` green; `cargo test -p g2g-plugins --features "ffmpeg
+  multi-thread" --test m83_autoplug` green (5/5, real decoder found); `cargo
+  clippy -p g2g-core --features "std runtime multi-thread" --all-targets` clean;
+  default `cargo check --workspace` (no_std) builds.
+- Still open (M83c+): factory builders take only output caps, not arbitrary
+  construction parameters (geometry / device selection still needs a richer
+  factory or post-construction config); `VaapiDec` + other decoders still owe
+  `PadTemplates`; a hardware-backed end-to-end decode-through-`decodebin` run
+  (the `ffmpeg` test reads templates but decodes nothing); and a
+  `uridecodebin`-equivalent source-selection layer on top.
+
 ### M83a: auto-plug search + element registry (`decodebin` foundation)
 
 - First slice of the last Phase 1 lifecycle item (auto-plug / `decodebin`).

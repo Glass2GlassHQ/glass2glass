@@ -92,9 +92,24 @@ pub fn is_raw_video(caps: &Caps) -> bool {
     matches!(caps, Caps::RawVideo { .. })
 }
 
+/// One element on an auto-plugged chain: which registered [`ElementDesc`] it is
+/// (`index` into the searched slice) and the output caps the search chose for it
+/// (the source-pad alternative it was matched to produce). The caps pin the
+/// media type and format the element must emit, which a format-flexible element
+/// (a converter, a multi-format decoder) needs to be constructed; geometry and
+/// framerate may still be open and fixate later at instance negotiation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChainLink {
+    /// Index into the `descs` slice passed to [`find_chain`].
+    pub index: usize,
+    /// The caps this element was chosen to produce on its source pad.
+    pub output: Caps,
+}
+
 /// Find the shortest chain of registered element types that converts `input`
-/// caps into caps satisfying `target`, returning the indices into `descs` in
-/// chain order (upstream first).
+/// caps into caps satisfying `target`, returning the chain in order (upstream
+/// first): for each hop, the descriptor index and the output caps the search
+/// picked for it.
 ///
 /// Returns `Some(vec![])` if `input` already satisfies `target` (no elements
 /// needed), or `None` if no chain exists within `max_depth` hops. The search is
@@ -106,25 +121,25 @@ pub fn find_chain(
     input: &Caps,
     target: &dyn Fn(&Caps) -> bool,
     max_depth: usize,
-) -> Option<Vec<usize>> {
+) -> Option<Vec<ChainLink>> {
     if target(input) {
         return Some(Vec::new());
     }
     // BFS frontier: each entry is a reached caps state and the element path
     // that produced it. Depth is bounded by max_depth so an unsatisfiable
     // target terminates even with cycle-free same-shape elements.
-    let mut frontier: Vec<(Caps, Vec<usize>)> = Vec::from([(input.clone(), Vec::new())]);
+    let mut frontier: Vec<(Caps, Vec<ChainLink>)> = Vec::from([(input.clone(), Vec::new())]);
     for _ in 0..max_depth {
-        let mut next: Vec<(Caps, Vec<usize>)> = Vec::new();
+        let mut next: Vec<(Caps, Vec<ChainLink>)> = Vec::new();
         for (caps, path) in &frontier {
             for (i, desc) in descs.iter().enumerate() {
-                if path.contains(&i) {
+                if path.iter().any(|link| link.index == i) {
                     continue;
                 }
                 let Some(out_set) = desc.step(caps) else { continue };
                 for out in out_set.alternatives() {
                     let mut new_path = path.clone();
-                    new_path.push(i);
+                    new_path.push(ChainLink { index: i, output: out.clone() });
                     if target(out) {
                         return Some(new_path);
                     }
@@ -146,15 +161,21 @@ mod factory {
     use alloc::boxed::Box;
 
     use crate::element::DynAsyncElement;
+    use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::PadTemplates;
+    use crate::runtime::{GraphNode, GraphNodeRef};
 
-    /// A registered element type: its autoplug metadata plus a parameterless
-    /// constructor producing a boxed transform/sink for the graph runner. The
-    /// constructor is a plain `fn` pointer, the common case being a closure
-    /// `|| Box::new(MyTransform::new())` coerced at the call site.
+    /// A registered element type: its autoplug metadata plus a constructor
+    /// producing a boxed transform/sink for the graph runner. The constructor
+    /// receives the output caps the search chose for this hop (see
+    /// [`ChainLink::output`]), so a format-flexible element configures itself to
+    /// produce the right format. It is a plain `fn` pointer, the common case
+    /// being a non-capturing closure `|out| Box::new(MyTransform::new(out))`
+    /// coerced at the call site; an element with a fixed output ignores the arg
+    /// (`|_| Box::new(MyDecoder::new())`).
     pub struct ElementFactory {
         desc: ElementDesc,
-        build: fn() -> Box<dyn DynAsyncElement>,
+        build: fn(&Caps) -> Box<dyn DynAsyncElement>,
     }
 
     impl ElementFactory {
@@ -162,7 +183,7 @@ mod factory {
         pub fn new(
             name: &'static str,
             templates: Vec<PadTemplate>,
-            build: fn() -> Box<dyn DynAsyncElement>,
+            build: fn(&Caps) -> Box<dyn DynAsyncElement>,
         ) -> Self {
             Self { desc: ElementDesc::new(name, templates), build }
         }
@@ -171,19 +192,35 @@ mod factory {
         /// trait so the registration site names only the type and constructor.
         pub fn of<E: PadTemplates>(
             name: &'static str,
-            build: fn() -> Box<dyn DynAsyncElement>,
+            build: fn(&Caps) -> Box<dyn DynAsyncElement>,
         ) -> Self {
             Self::new(name, E::pad_templates(), build)
         }
 
-        /// Instantiate a fresh boxed element.
-        pub fn build(&self) -> Box<dyn DynAsyncElement> {
-            (self.build)()
+        /// Instantiate a fresh boxed element configured to produce `output`.
+        pub fn build(&self, output: &Caps) -> Box<dyn DynAsyncElement> {
+            (self.build)(output)
         }
 
         /// This factory's autoplug descriptor.
         pub fn desc(&self) -> &ElementDesc {
             &self.desc
+        }
+    }
+
+    /// Why [`Registry::decodebin`] could not splice a chain.
+    #[derive(Debug)]
+    pub enum DecodebinError {
+        /// No chain of registered elements converts the input caps to the target
+        /// within the depth bound.
+        NoChain,
+        /// A graph link failed (e.g. a pad was out of range or already linked).
+        Graph(GraphError),
+    }
+
+    impl From<GraphError> for DecodebinError {
+        fn from(e: GraphError) -> Self {
+            DecodebinError::Graph(e)
         }
     }
 
@@ -233,12 +270,13 @@ mod factory {
         ) -> Option<Vec<&'static str>> {
             let descs = self.descs();
             let chain = find_chain(&descs, input, target, max_depth)?;
-            Some(chain.into_iter().map(|i| self.factories[i].desc.name).collect())
+            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
         }
 
         /// Find the shortest chain converting `input` into caps satisfying
         /// `target` and instantiate it: an ordered list of boxed elements
-        /// (upstream first) ready to splice onto [`run_graph`] as transforms.
+        /// (upstream first), each configured to produce the caps the search
+        /// chose for it, ready to splice onto [`run_graph`] as transforms.
         /// `Some(vec![])` if no elements are needed; `None` if no chain exists.
         ///
         /// [`run_graph`]: crate::runtime::run_graph
@@ -250,13 +288,51 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain(&descs, input, target, max_depth)?;
-            Some(chain.into_iter().map(|i| self.factories[i].build()).collect())
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[link.index].build(&link.output))
+                    .collect(),
+            )
+        }
+
+        /// `decodebin`-equivalent: auto-plug a decode chain and splice it into
+        /// `graph` as a run of transforms between an existing output pad `from`
+        /// (which produces `input` caps) and an existing input pad `to`. Returns
+        /// the inserted transform node ids in chain order.
+        ///
+        /// This is the "returns a sub-graph onto `run_graph`" payoff: the caller
+        /// builds its source and sink, names the input caps and the target shape
+        /// ([`is_raw_video`] for playback), and the registry fills the middle. An
+        /// empty chain (input already satisfies `target`) links `from` straight
+        /// to `to`.
+        pub fn decodebin(
+            &self,
+            graph: &mut Graph<GraphNode>,
+            from: impl Into<PadId>,
+            to: impl Into<PadId>,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+        ) -> Result<Vec<NodeId>, DecodebinError> {
+            let elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            let mut prev: PadId = from.into();
+            let to: PadId = to.into();
+            let mut inserted = Vec::with_capacity(elements.len());
+            for boxed in elements {
+                let node = graph.add_transform(GraphNodeRef::Element(boxed));
+                graph.link(prev, node)?;
+                inserted.push(node);
+                prev = node.into();
+            }
+            graph.link(prev, to)?;
+            Ok(inserted)
         }
     }
 }
 
 #[cfg(feature = "std")]
-pub use factory::{ElementFactory, Registry};
+pub use factory::{DecodebinError, ElementFactory, Registry};
 
 #[cfg(test)]
 mod tests {
@@ -309,14 +385,20 @@ mod tests {
         )
     }
 
+    /// Just the descriptor indices of a found chain, for terse assertions.
+    fn indices(chain: &[ChainLink]) -> Vec<usize> {
+        chain.iter().map(|l| l.index).collect()
+    }
+
     #[test]
     fn finds_single_decoder_for_h264_to_raw() {
         let descs = [parser(), decoder()];
         let chain = find_chain(&descs, &h264(Dim::Fixed(1280)), &is_raw_video, 4)
             .expect("decoder bridges H.264 to raw");
         // Shortest path is the decoder alone (the parser is same-shape, so it
-        // never shortens the route to raw).
-        assert_eq!(chain, Vec::from([1usize]));
+        // never shortens the route to raw), and it was chosen to emit NV12.
+        assert_eq!(indices(&chain), Vec::from([1usize]));
+        assert_eq!(chain[0].output, raw(RawVideoFormat::Nv12));
     }
 
     #[test]
@@ -334,7 +416,9 @@ mod tests {
         let target = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. });
         let chain = find_chain(&descs, &h264(Dim::Any), &target, 4)
             .expect("decode then convert reaches RGBA");
-        assert_eq!(chain, Vec::from([1usize, 2usize]), "decoder then converter");
+        assert_eq!(indices(&chain), Vec::from([1usize, 2usize]), "decoder then converter");
+        // The converter hop carries the chosen output the builder needs: RGBA.
+        assert_eq!(chain.last().unwrap().output, raw(RawVideoFormat::Rgba8));
     }
 
     #[test]

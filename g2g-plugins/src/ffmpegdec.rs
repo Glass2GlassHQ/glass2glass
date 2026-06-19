@@ -91,8 +91,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
-    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate,
-    VideoCodec, RawVideoFormat,
+    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -433,6 +433,34 @@ impl FfmpegH264Dec {
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         }
         self.drain_frames(decoded)
+    }
+}
+
+impl PadTemplates for FfmpegH264Dec {
+    /// Static superset for auto-plug: H.264 in (any geometry), raw NV12 or I420
+    /// out. A constructed instance narrows the source pad to its configured
+    /// `OutputFormat` via `caps_constraint_as_transform`; the template lists
+    /// both formats the type can ever emit so the registry search can route
+    /// either way.
+    fn pad_templates() -> Vec<PadTemplate> {
+        let any_geometry = |format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
+                any_geometry(RawVideoFormat::Nv12),
+                any_geometry(RawVideoFormat::I420),
+            ]))),
+        ])
     }
 }
 
