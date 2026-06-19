@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M93: `Compositor` — software RGBA8 video mixer (videomixer / compositor)
+
+- First *pixel mixer* (vs `mux`'s track multiplexer): overlays N raw RGBA8 input
+  streams onto one output canvas at configurable position, z-order, and per-pad
+  alpha, with straight source-over alpha blending and left/top clipping. The
+  `videomixer` / `compositor` analog — picture-in-picture, multi-camera grids,
+  sub-window UIs.
+- CPU, `no_std` baseline like the other raw-video transforms (a wgpu GPU
+  companion is a follow-up). A fan-in `MultiInputElement`: `Accepts(RGBA8)` per
+  input pad, `Produces` the fixed output canvas. `CompositorPad { xpos, ypos,
+  zorder, alpha }` with `at` / `with_zorder` / `with_alpha` builders; output
+  size at construction, framerate via `with_framerate`.
+- **Cadence:** input 0 is the timing driver — one composited frame is emitted
+  per input-0 frame, overlaying the latest frame cached from every other input.
+  Deterministic output timing for the common "background + overlays" shape.
+- Tested: blend/alpha/clipping/z-order pixel math + negotiation (unit), and a
+  fan-in integration through `run_muxer_sink` (two colour sources -> compositor
+  -> capturing sink) asserting one output per base frame, canvas geometry, and
+  the base layer covering the canvas. Architecture in DESIGN.md §4.13.6.
+
 ### M92: `uridecodebin` — URI front door to the autoplug registry
 
 - `Registry::build_uridecodebin(uri, sink, target, max_depth)` (g2g-core

@@ -877,6 +877,22 @@ terminate the walk), and a per-edge `graph_downstream_feasibility` snapshot
 steers each transform's Caps-α output on a mid-stream change. β across a
 muxer (per-input-pad re-cascade) is still owed.
 
+Two flavours of fan-in element exist. `InterleaveMux` (`mux.rs`) is a
+*multiplexer*: it forwards every input's frames straight through (each frame
+carries its own caps), combining encoded tracks into one stream. `Compositor`
+(`compositor.rs`) is a *pixel mixer*: it overlays N raw RGBA8 inputs onto one
+output canvas at configurable position, z-order, and per-pad alpha (the
+`videomixer` / `compositor` analog — picture-in-picture, camera grids, sub-window
+UIs). It is CPU and `no_std`-baseline like the other raw-video transforms, with
+straight source-over alpha blending and left/top clipping; a wgpu GPU companion
+is a follow-up. Because a mixer must combine *simultaneous* inputs rather than
+interleave, it caches the latest frame per input and uses **input 0 as the
+timing driver**: one composited output frame is emitted per input-0 frame,
+overlaying whatever the other inputs have most recently delivered. The output
+canvas size and framerate are fixed at construction; per-input geometry is
+whatever each input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed
+canvas).
+
 #### 4.13.7 Pad templates
 
 Static metadata for tools that need to query pad compatibility without

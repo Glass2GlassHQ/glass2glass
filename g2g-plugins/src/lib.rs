@@ -19,6 +19,8 @@ pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
 pub mod mux;
+// Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
+pub mod compositor;
 pub mod videoconvert;
 pub mod videoscale;
 pub mod videorate;

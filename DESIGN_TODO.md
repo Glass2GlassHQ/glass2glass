@@ -149,13 +149,12 @@ Production-shape needs that block specific real-world use cases.
   on interior links; periodic QoS; QoS from the display sinks once they sync to
   the clock.
 
-- **Compositor / pixel mixer (`videomixer` / `compositor`).** 3–4
-  sessions. Our `mux` is a fan-in *multiplexer* (combining encoded
-  tracks into a container). GStreamer's `compositor` overlays multiple
-  raw video streams onto one frame at configurable positions / sizes /
-  z-order — picture-in-picture, multi-camera grids, sub-window UIs.
-  Common production need; we have nothing. Needs a wgpu compute
-  pipeline element + a per-input position config.
+- **Compositor GPU companion + depth.** The CPU `Compositor` (RGBA8 pixel
+  mixer: position / z-order / per-pad alpha, input-0-driven cadence) is done
+  (DESIGN.md §4.13.6). Remaining: a wgpu compute variant for HD/many-input
+  scale; per-input scaling (resize an input as it composites, instead of
+  requiring an upstream `videoscale`); NV12/I420 mixing without a round-trip
+  through RGBA; and configurable output cadence / background colour.
 
 - **Adaptive streaming demuxers (HLS, DASH).** 2–4 sessions each.
   Playlist parsing + ABR rate selection + per-segment fetch +
@@ -858,8 +857,7 @@ wait for later work, even though they appear elsewhere in this doc:
   the native demo uses `RtspSrc`. Live camera capture is a
   general-purpose tier-1 win but not required for the cross-target
   proof.
-- **Compositor, RTP receive jitterbuffer, bus message coverage,
-  metadata system, every codec beyond H.264.** Wait.
+- **RTP receive jitterbuffer, every codec beyond H.264.** Wait.
 - **macOS / Android platforms.** The deployment runs on whatever
   WebGPU + WebCodecs + H.264 supports in those browsers, which covers
   more than the in-tree native macOS / Android story would.
