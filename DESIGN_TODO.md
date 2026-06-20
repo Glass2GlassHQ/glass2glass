@@ -174,8 +174,12 @@ Production-shape needs that block specific real-world use cases.
   **Remaining HLS:** byte-range segments, AES-128/SAMPLE-AES keyed segments,
   throughput-driven ABR (the current pick is static by declared bandwidth),
   live-edge start (skip to the last few segments), and mid-stream variant switching.
-  **DASH** (MPD parsing + the same per-segment fetch over the CMAF handoff) is still
-  open, 2-4 sessions, and reuses the `HttpSrc` fetch layer.
+  **DASH static VOD is DONE (M160):** `g2g-plugins::mpd` (roxmltree MPD parser) +
+  `dashsrc::DashSrc` (`dash` feature) parse the manifest, ABR-select a
+  Representation, and stream its fMP4 init + `SegmentTemplate` `$Number$` segments
+  as `ByteStream{IsoBmff}` into `fmp4demux`. **Remaining DASH:** `SegmentTimeline`
+  and `$Time$` addressing, dynamic (live) MPD reload, `SegmentList`/`SegmentBase`
+  byte-range, multi-period, and throughput-driven ABR.
 
 - **SRT / RTMP transports.** 2–3 sessions each. RTMP for legacy
   ingest (still ubiquitous), SRT for low-latency contribution. Each

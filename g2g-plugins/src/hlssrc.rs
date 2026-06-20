@@ -20,17 +20,14 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::String;
-use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
 use crate::hls::{parse, MediaPlaylist, Playlist};
 
 #[derive(Debug)]
@@ -115,57 +112,6 @@ async fn resolve_media(
                 Playlist::Master(_) => Err(G2gError::CapsMismatch),
             }
         }
-    }
-}
-
-fn net_err(_e: reqwest::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Other)
-}
-
-async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, G2gError> {
-    let resp = client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
-    Ok(resp.bytes().await.map_err(net_err)?.to_vec())
-}
-
-async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, G2gError> {
-    let resp = client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
-    resp.text().await.map_err(net_err)
-}
-
-fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            arrival_ns: g2g_core::metrics::monotonic_ns(),
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
-    }
-}
-
-/// Resolve a possibly-relative playlist/segment URI against the playlist URL.
-/// Handles absolute URLs, absolute paths (`/a/b`), and path-relative names; the
-/// HLS cases in practice. Not a full RFC 3986 resolver (no `..` collapsing).
-fn resolve_url(base: &str, rel: &str) -> String {
-    if rel.starts_with("http://") || rel.starts_with("https://") {
-        return String::from(rel);
-    }
-    let scheme_end = base.find("://").map(|i| i + 3).unwrap_or(0);
-    if let Some(stripped) = rel.strip_prefix('/') {
-        // absolute path: keep scheme://authority, replace the path
-        let authority_end =
-            base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
-        let mut out = String::from(&base[..authority_end]);
-        out.push('/');
-        out.push_str(stripped);
-        out
-    } else {
-        // relative to the playlist's directory (everything up to the last '/')
-        let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
-        let mut out = String::from(&base[..dir_end]);
-        out.push_str(rel);
-        out
     }
 }
 
@@ -311,16 +257,3 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         "live-playlist reload interval in ms; 0 derives it from TARGETDURATION",
     ),
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_url;
-
-    #[test]
-    fn resolves_relative_absolute_and_full_uris() {
-        let base = "http://h/v/media.m3u8";
-        assert_eq!(resolve_url(base, "seg0.ts"), "http://h/v/seg0.ts");
-        assert_eq!(resolve_url(base, "/x/seg0.ts"), "http://h/x/seg0.ts");
-        assert_eq!(resolve_url(base, "http://o/s.ts"), "http://o/s.ts");
-    }
-}

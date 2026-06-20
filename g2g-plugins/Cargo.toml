@@ -169,6 +169,10 @@ http-src = ["std", "dep:reqwest"]
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
 # pure no_std and always compiled; only the fetching element needs this feature.
 hls = ["http-src"]
+# DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
+# Representation (simple ABR), and streams its fMP4 init + media segments as a
+# `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
+dash = ["http-src", "dep:roxmltree"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -188,6 +192,9 @@ jpeg-encoder = { version = "0.7", optional = true }
 # default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
 # used. Runs on the caller's tokio runtime.
 reqwest = { version = "0.12", optional = true }
+# Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
+# xmlparser), no system deps.
+roxmltree = { version = "0.21", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }

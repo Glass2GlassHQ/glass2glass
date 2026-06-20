@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M160: DASH (MPD parser + DashSrc, SegmentTemplate)
+
+- **`mpd` MPD parser** (`dash` feature, via `roxmltree`) reads a static manifest:
+  `mediaPresentationDuration`, `BaseURL`, and each `Representation`
+  (bandwidth/geometry/codecs, inherited from the `AdaptationSet` where set) with
+  its `SegmentTemplate` (`initialization`, `media`, `startNumber`, `duration`,
+  `timescale`). `Mpd::select` is a bandwidth-capped ABR pick; `SegmentTemplate`
+  expands `$RepresentationID$` / `$Number$` (incl. `%0Nd` padding) and computes the
+  VOD segment count.
+- **`DashSrc`** fetches the MPD, selects a Representation, and streams its fMP4
+  init + media segments (`$Number$` addressing) as `Caps::ByteStream{IsoBmff}` into
+  `fmp4demux`, then `Eos`: `dashsrc ! fmp4demux ! h264parse ! ...`, reusing the
+  M158 demuxer and the M155 fetch layer.
+- **Refactor:** the HTTP fetch + URL-resolution helpers (`get_bytes` / `get_text` /
+  `resolve_url` / `byte_frame`) moved from `hlssrc` into a shared `fetch` module
+  used by both `HlsSrc` and `DashSrc` (no behavior change; HLS tests still pass).
+- Scope: static (VOD), `SegmentTemplate` number addressing. `SegmentTimeline`,
+  dynamic/live reload, `SegmentList`/`SegmentBase`, and mid-stream switching are
+  follow-ups.
+- Verified by `mpd.rs` unit tests (inheritance, ABR, templating, ISO-8601 duration)
+  and `m160_dashsrc.rs` end to end: an fMP4 from `Mp4Sink` split into init +
+  segments, served as an MPD, round-trips through `DashSrc -> Fmp4Demux` to the
+  original access units.
+
 ### M159: fMP4 / CMAF over HLS (EXT-X-MAP wiring)
 
 - **`HlsSrc` now delivers fMP4/CMAF variants**, closing the loop with `Fmp4Demux`

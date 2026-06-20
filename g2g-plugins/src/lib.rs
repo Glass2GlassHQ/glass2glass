@@ -187,10 +187,20 @@ pub mod mjpegenc;
 #[cfg(feature = "http-src")]
 pub mod httpsrc;
 
+// Shared HTTP fetch + URL helpers for the adaptive-streaming sources.
+#[cfg(feature = "http-src")]
+mod fetch;
+
 // HLS playlist parser (pure, no_std baseline) and the HlsSrc segment source.
 pub mod hls;
 #[cfg(feature = "hls")]
 pub mod hlssrc;
+
+// DASH MPD parser and the DashSrc segment source.
+#[cfg(feature = "dash")]
+pub mod mpd;
+#[cfg(feature = "dash")]
+pub mod dashsrc;
 
 // Fragmented-MP4 / CMAF parsing (shared) and the byte-stream demuxer. In the
 // std MP4 family (shares mp4box with mp4src/mp4sink).
