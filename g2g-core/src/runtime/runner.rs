@@ -281,7 +281,7 @@ pub struct RunStats {
 /// Longer chains (4+ elements, future runner variants) will iterate
 /// the solver result to reconfigure every changed downstream link, not
 /// just the immediate next element — that's the structural unlock
-/// `DESIGN-M16-workaround3-reconfigure.md` §4 calls out.
+/// DESIGN.md §4.13.4 calls out.
 ///
 /// Forward × reverse race (§7): an `EmptyLink` here means the sink
 /// can't take the boundary's output. The caller drops the forward
@@ -831,7 +831,7 @@ where
 ///
 /// Owed: Caps-β, a forward coordinator re-solve walk for a downstream
 /// `DerivedOutput` element that must re-derive mid-stream (driver-gated,
-/// DESIGN-M18-caps-resolve.md §3). ReFixate at startup fails loud
+/// DESIGN.md §4.13.4). ReFixate at startup fails loud
 /// (`FixationFailed`), as in `run_source_fanout`.
 #[cfg(feature = "std")]
 pub async fn run_linear_chain<Src, Snk, Clk>(
@@ -1029,7 +1029,7 @@ where
     // M18 β: a single coordinator task owns the cross-element re-cascade.
     // The sink arm reports an applied mid-stream `CapsChanged` (with its
     // re-derived allocation proposal) out-of-band
-    // (DESIGN-M16-workaround3-reconfigure.md §9.4 R3); the coordinator
+    // (DESIGN.md §4.13.5); the coordinator
     // forwards the proposal one hop upstream over `transform_ctrl_rx` to the
     // transform's `configure_allocation`. The transform arm selects on that
     // control receiver alongside its data link, so the directive reaches it

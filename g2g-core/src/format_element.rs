@@ -1,4 +1,4 @@
-//! M16 step 2 (DESIGN-M16-caps-nego.md §4): negotiation-time element
+//! M16 step 2 (DESIGN.md §4.13.1): negotiation-time element
 //! surface.
 //!
 //! `FormatElement` is the trait the future solver (M16 step 3) consumes;
@@ -123,7 +123,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
 }
 
 impl CapsConstraint<'_> {
-    /// ACCEPT_CAPS query (DESIGN-M16 §7): would this element accept a
+    /// ACCEPT_CAPS query (DESIGN.md §4.13.1): would this element accept a
     /// link carrying `caps`? A pure check against the declared
     /// constraint, with no runtime negotiation or back-and-forth.
     ///
@@ -144,7 +144,7 @@ impl CapsConstraint<'_> {
 }
 
 /// Optional preference data for tie-breaking. Reserved for the solver's
-/// scoring pass; the concrete algebra is unspecified (DESIGN-M16 §10).
+/// scoring pass; the concrete algebra is unspecified (DESIGN.md §4.13.2).
 /// The empty value is meaningful: "use the constraint's own preference
 /// order."
 #[derive(Clone, Debug, Default, PartialEq)]

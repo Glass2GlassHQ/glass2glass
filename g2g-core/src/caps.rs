@@ -258,7 +258,7 @@ fn intersect_range((amin, amax): (u32, u32), (bmin, bmax): (u32, u32)) -> Option
 /// `Caps` itself remains the *fixed* description used at runtime
 /// (`DataFrame.caps`, `configure_*`). `CapsSet` is the negotiation-time
 /// vocabulary: it carries alternatives and preference, neither of which
-/// fits in a single `Caps`. See DESIGN-M16-caps-nego.md §3.
+/// fits in a single `Caps`. See DESIGN.md §4.13.1.
 ///
 /// The first alternative is highest preference; later ones are
 /// fallbacks the element will accept if no peer agrees on the first.
@@ -334,7 +334,7 @@ impl CapsSet {
     }
 
     /// True if any alternative is compatible with `caps` (a non-empty
-    /// intersection exists). The ACCEPT_CAPS predicate (DESIGN-M16 §7):
+    /// intersection exists). The ACCEPT_CAPS predicate (DESIGN.md §4.13.1):
     /// "would a link carrying `caps` satisfy this set?" — a pure check,
     /// no negotiation.
     pub fn accepts(&self, caps: &Caps) -> bool {

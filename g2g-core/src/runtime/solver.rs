@@ -1,4 +1,4 @@
-//! M16 step 3 (DESIGN-M16-caps-nego.md §5): linear-pipeline caps solver.
+//! M16 step 3 (DESIGN.md §4.13.2): linear-pipeline caps solver.
 //!
 //! Takes the ordered constraint list for a source → transform* → sink
 //! chain and returns one fixated `Caps` per link, or a structured
@@ -25,7 +25,7 @@ use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 /// `None` on input; sinks receive `None` on output).
 pub type LinkSolution = Vec<Caps>;
 
-/// Structured solver failure (DESIGN-M16 §5).
+/// Structured solver failure (DESIGN.md §4.13.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NegotiationFailure {
     /// Adjacent elements have no overlap on the link between them, or a
@@ -401,7 +401,7 @@ fn forward_propagate(
 }
 
 /// Caps-α mid-stream re-fixation outcome for one interior element
-/// (`DESIGN-M18-caps-resolve.md` §3, D3). The runner derives the element's
+/// (DESIGN.md §4.13.4). The runner derives the element's
 /// forwarded output from its declared constraint, steered by the downstream
 /// feasibility snapshot, instead of letting the element fixate greedily.
 #[derive(Debug, Clone, PartialEq)]
@@ -426,7 +426,7 @@ pub(crate) enum ForwardResolve {
 /// sink, or a non-invertible `DerivedOutput` / legacy element below it).
 /// Computed once at startup and snapshotted per interior arm so the
 /// mid-stream re-solve can steer an element's output without reaching the
-/// downstream elements at runtime (`DESIGN-M18-caps-resolve.md` §3).
+/// downstream elements at runtime (DESIGN.md §4.13.4).
 ///
 /// Test-only since `run_linear_chain` became a thin builder over `run_graph`
 /// (which uses the edge-indexed [`graph_downstream_feasibility`]); the test
@@ -483,7 +483,7 @@ fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<C
 }
 
 /// Caps-α: derive the forwarded output for an interior element on a
-/// mid-stream caps change (`DESIGN-M18-caps-resolve.md` §3, D3). `input` is
+/// mid-stream caps change (DESIGN.md §4.13.4). `input` is
 /// the new fixated caps the element receives; `downstream_feasible` is its
 /// output link's snapshot from [`downstream_feasibility`]. Steers only when
 /// a concrete downstream set exists; otherwise defers to the element's own
