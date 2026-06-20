@@ -424,7 +424,12 @@ parsers have follow-ups:
   uncompressed header (marker, profile, `49 83 42` sync, `color_config`, 16-bit
   size fields, MSB-first) on a key frame, emitting
   `CompressedVideo{Vp9, Fixed w/h, Rate::Any}`. Intra-only resizes deferred.
-- **`Av1Parse`.** 1–2 sessions, alongside the AV1 codec.
+- **`Av1Parse` — DONE (M136).** `g2g-plugins::av1parse` walks the OBUs
+  (low-overhead format, LEB128-sized) and parses the sequence header
+  (`reduced_still_picture_header` + operating-points loop) for
+  `max_frame_width/height`, emitting `CompressedVideo{Av1, Fixed w/h, Rate::Any}`.
+  With `OpusParse` (M133), `Vp8Parse` (M134), and `Vp9Parse` (M135) the codec
+  parser gap is closed.
 
 ### Overlay / effects
 

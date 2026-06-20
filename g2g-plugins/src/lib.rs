@@ -13,6 +13,7 @@ pub mod aacparse;
 pub mod opusparse;
 pub mod vp8parse;
 pub mod vp9parse;
+pub mod av1parse;
 pub mod audioconvert;
 pub mod audioresample;
 pub mod audiotestsrc;

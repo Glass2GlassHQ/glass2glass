@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M136: av1parse (AV1 sequence-header parser)
+
+- **`g2g-plugins::av1parse::Av1Parse` (no_std).** The AV1 sibling of `vp9parse`,
+  closing the parser-gap sprint. It walks the OBUs of each frame (low-overhead
+  bitstream format: 1-byte `obu_header`, optional extension byte, LEB128 size) and,
+  when a sequence-header OBU is present, parses `max_frame_width` /
+  `max_frame_height`, emitting `CapsChanged(CompressedVideo{Av1, Fixed w/h,
+  Rate::Any})` before forwarding so an AV1 stream lacking container geometry
+  recovers it from the keyframe temporal unit. The sequence header is the
+  fiddliest of the sprint: past `seq_profile` it branches on
+  `reduced_still_picture_header`, then walks the operating-points loop (with the
+  optional `timing_info` / `decoder_model_info` / `initial_display_delay`
+  sub-structures, including a `uvlc()` field) to reach the `frame_width_bits` /
+  `frame_height_bits` sizing and the variable-width size fields, MSB-first via
+  `annexb::BitReader`. Frames without a sequence-header OBU forward unchanged; the
+  profile is surfaced (not in `Caps`). `Identity(Av1 any)` constraint, registered
+  as `av1parse`.
+- Tested: sequence-header decode after a temporal delimiter (full and reduced
+  paths, power-of-two and odd dimensions, profiles 0 / 1 / 2), a frame-only unit /
+  forbidden bit / empty input rejected, LEB128 multi-byte decode; the element
+  emits `CapsChanged` before the first frame, suppresses re-emission when
+  unchanged, re-emits on a resolution change, and rejects non-AV1 at
+  `intercept_caps`; end-to-end `MkvSource ! matroskademux(av1) ! av1parse !
+  fakesink` passes a keyframe + inter unit through. With this the
+  `Vp8/Vp9/Av1/OpusParse` parser gap is closed (M133-M136).
+
 ### M135: vp9parse (VP9 uncompressed-header parser)
 
 - **`g2g-plugins::vp9parse::Vp9Parse` (no_std).** The VP9 sibling of `vp8parse`:
