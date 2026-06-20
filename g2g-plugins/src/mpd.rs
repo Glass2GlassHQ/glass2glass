@@ -1,10 +1,10 @@
 //! DASH MPD manifest parser (a subset of ISO/IEC 23009-1), driven by
 //! [`DashSrc`](crate::dashsrc). Pure (no I/O), so it is fully unit-testable.
 //!
-//! Scope: static (VOD) manifests using `SegmentTemplate` with `$Number$`
-//! addressing and an explicit `@duration` (the dominant DASH-IF profile).
-//! `SegmentTimeline`, `SegmentList`, `SegmentBase` byte-ranges, and dynamic
-//! (live) manifests are follow-ups. Attribute inheritance (geometry / codecs /
+//! Scope: static (VOD) manifests using `SegmentTemplate`, both the `@duration`
+//! profile and `SegmentTimeline`, with `$Number$` or `$Time$` addressing.
+//! `SegmentList`, `SegmentBase` byte-ranges, and dynamic (live) manifests are
+//! follow-ups. Attribute inheritance (geometry / codecs /
 //! the `SegmentTemplate` itself declared on the `AdaptationSet` and shared by its
 //! `Representation`s) is resolved by walking ancestors.
 
@@ -25,17 +25,38 @@ pub struct Representation {
     pub template: SegmentTemplate,
 }
 
-/// `SegmentTemplate` with `$Number$` addressing.
+/// `SegmentTemplate` with `$Number$` / `$Time$` addressing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentTemplate {
     /// Init-segment template (resolves `$RepresentationID$`).
     pub initialization: Option<String>,
-    /// Media-segment template (resolves `$RepresentationID$` and `$Number$`).
+    /// Media-segment template (resolves `$RepresentationID$`, `$Number$`, `$Time$`).
     pub media: String,
     pub start_number: u64,
-    /// Segment duration in `timescale` units.
+    /// Segment duration in `timescale` units (the `@duration` profile; the
+    /// `SegmentTimeline` carries its own per-entry durations instead).
     pub duration: u64,
     pub timescale: u64,
+    /// `SegmentTimeline` `<S>` entries when present; empty for the `@duration`
+    /// profile.
+    pub timeline: Vec<TimelineEntry>,
+}
+
+/// One `SegmentTimeline` `<S>` entry: a start time `t` (absent = continue from
+/// the previous entry), a duration `d`, and `r` additional repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineEntry {
+    pub t: Option<u64>,
+    pub d: u64,
+    pub r: u64,
+}
+
+/// One resolved media segment: its `$Number$` and its `$Time$` (start time in
+/// `timescale` units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentRef {
+    pub number: u64,
+    pub time: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,12 +88,42 @@ impl SegmentTemplate {
 
     /// The init-segment URL template expanded for `rep_id`.
     pub fn init_url(&self, rep_id: &str) -> Option<String> {
-        self.initialization.as_ref().map(|t| expand(t, rep_id, None))
+        self.initialization.as_ref().map(|t| expand(t, rep_id, None, None))
     }
 
-    /// The media-segment URL template expanded for `rep_id` and `number`.
-    pub fn media_url(&self, rep_id: &str, number: u64) -> String {
-        expand(&self.media, rep_id, Some(number))
+    /// The media-segment URL template expanded for `rep_id` and a segment's
+    /// `$Number$` / `$Time$`.
+    pub fn media_url(&self, rep_id: &str, seg: SegmentRef) -> String {
+        expand(&self.media, rep_id, Some(seg.number), Some(seg.time))
+    }
+
+    /// The ordered media segments for a VOD presentation of `total_secs`. Driven
+    /// by the `SegmentTimeline` when present, else by `@duration`. Each carries
+    /// its `$Number$` (from `startNumber`) and `$Time$` (accumulated start time).
+    pub fn segments(&self, total_secs: f64) -> Vec<SegmentRef> {
+        let mut out = Vec::new();
+        let mut number = self.start_number;
+        if self.timeline.is_empty() {
+            let mut time = 0u64;
+            for _ in 0..self.segment_count(total_secs) {
+                out.push(SegmentRef { number, time });
+                number += 1;
+                time += self.duration;
+            }
+        } else {
+            let mut time = 0u64;
+            for entry in &self.timeline {
+                if let Some(t) = entry.t {
+                    time = t;
+                }
+                for _ in 0..=entry.r {
+                    out.push(SegmentRef { number, time });
+                    number += 1;
+                    time += entry.d;
+                }
+            }
+        }
+        out
     }
 }
 
@@ -130,13 +181,32 @@ fn segment_template(rep: Node) -> Option<SegmentTemplate> {
     let st = rep
         .ancestors()
         .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentTemplate")))?;
+    let timeline = st
+        .children()
+        .find(|c| c.is_element() && c.has_tag_name("SegmentTimeline"))
+        .map(parse_timeline)
+        .unwrap_or_default();
     Some(SegmentTemplate {
         initialization: st.attribute("initialization").map(String::from),
         media: String::from(st.attribute("media")?),
         start_number: st.attribute("startNumber").and_then(|s| s.parse().ok()).unwrap_or(1),
         duration: st.attribute("duration").and_then(|s| s.parse().ok()).unwrap_or(0),
         timescale: st.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
+        timeline,
     })
+}
+
+/// Parse a `SegmentTimeline`'s `<S>` entries. A negative `@r` (live "repeat to
+/// period end") fails to parse as `u64` and falls back to 0; live is a follow-up.
+fn parse_timeline(tl: Node) -> Vec<TimelineEntry> {
+    tl.children()
+        .filter(|c| c.is_element() && c.has_tag_name("S"))
+        .map(|s| TimelineEntry {
+            t: s.attribute("t").and_then(|v| v.parse().ok()),
+            d: s.attribute("d").and_then(|v| v.parse().ok()).unwrap_or(0),
+            r: s.attribute("r").and_then(|v| v.parse().ok()).unwrap_or(0),
+        })
+        .collect()
 }
 
 /// An attribute on `node` or the nearest ancestor that carries it.
@@ -145,8 +215,9 @@ fn inherited<'a>(node: Node<'a, '_>, name: &str) -> Option<&'a str> {
 }
 
 /// Expand a `SegmentTemplate` URL: `$$` -> `$`, `$RepresentationID$` -> id,
-/// `$Number$` / `$Number%0Nd$` -> the segment number (zero-padded).
-fn expand(tmpl: &str, rep_id: &str, number: Option<u64>) -> String {
+/// `$Number$` / `$Number%0Nd$` -> the segment number, `$Time$` / `$Time%0Nd$` ->
+/// the segment start time, both honoring a `%0Nd` zero-pad width.
+fn expand(tmpl: &str, rep_id: &str, number: Option<u64>, time: Option<u64>) -> String {
     let mut out = String::new();
     for (i, part) in tmpl.split('$').enumerate() {
         if i % 2 == 0 {
@@ -157,8 +228,10 @@ fn expand(tmpl: &str, rep_id: &str, number: Option<u64>) -> String {
             out.push_str(rep_id);
         } else if let Some(fmt) = part.strip_prefix("Number") {
             out.push_str(&format_number(fmt, number.unwrap_or(0)));
+        } else if let Some(fmt) = part.strip_prefix("Time") {
+            out.push_str(&format_number(fmt, time.unwrap_or(0)));
         }
-        // unknown identifier (eg $Time$ in a timeline profile): dropped
+        // any other identifier is dropped
     }
     out
 }
@@ -246,8 +319,65 @@ mod tests {
         // 12s / 4s = 3 segments.
         assert_eq!(rep.template.segment_count(mpd.duration_secs), 3);
         assert_eq!(rep.template.init_url(&rep.id).as_deref(), Some("init-high.mp4"));
-        assert_eq!(rep.template.media_url(&rep.id, 1), "seg-high-001.m4s");
-        assert_eq!(rep.template.media_url(&rep.id, 12), "seg-high-012.m4s");
+        assert_eq!(rep.template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }), "seg-high-001.m4s");
+        assert_eq!(rep.template.media_url(&rep.id, SegmentRef { number: 12, time: 0 }), "seg-high-012.m4s");
+        // The @duration profile yields startNumber.. with cumulative $Time$.
+        let segs = rep.template.segments(mpd.duration_secs);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
+        assert_eq!(segs[2], SegmentRef { number: 3, time: 8000 });
+    }
+
+    const TIMELINE_MPD: &str = r#"<?xml version="1.0"?>
+<MPD type="static">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <SegmentTemplate initialization="init.mp4" media="seg-$Time$.m4s"
+                       startNumber="1" timescale="90000">
+        <SegmentTimeline>
+          <S t="0" d="180000" r="2"/>
+          <S d="90000"/>
+        </SegmentTimeline>
+      </SegmentTemplate>
+      <Representation id="v0" bandwidth="1000000" width="640" height="360"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+    #[test]
+    fn segment_timeline_expands_repeats_with_time_addressing() {
+        let mpd = parse(TIMELINE_MPD).unwrap();
+        let rep = mpd.select(None).unwrap();
+        // <S r="2"> = 3 segments of d=180000, then one of d=90000.
+        let segs = rep.template.segments(mpd.duration_secs);
+        assert_eq!(segs.len(), 4);
+        assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
+        assert_eq!(segs[1], SegmentRef { number: 2, time: 180_000 });
+        assert_eq!(segs[2], SegmentRef { number: 3, time: 360_000 });
+        assert_eq!(segs[3], SegmentRef { number: 4, time: 540_000 });
+        // $Time$ addressing uses each segment's start time.
+        assert_eq!(rep.template.media_url(&rep.id, segs[2]), "seg-360000.m4s");
+    }
+
+    #[test]
+    fn segment_timeline_t_attribute_resets_the_running_time() {
+        let xml = r#"<MPD type="static"><Period><AdaptationSet>
+          <SegmentTemplate media="$Time$.m4s" timescale="1000">
+            <SegmentTimeline><S t="0" d="1000"/><S t="5000" d="1000" r="1"/></SegmentTimeline>
+          </SegmentTemplate>
+          <Representation id="r" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let segs = mpd.representations[0].template.segments(0.0);
+        // A gap: the second <S t="5000"> jumps the running time past 1000.
+        assert_eq!(
+            segs,
+            [
+                SegmentRef { number: 1, time: 0 },
+                SegmentRef { number: 2, time: 5000 },
+                SegmentRef { number: 3, time: 6000 },
+            ]
+        );
     }
 
     #[test]

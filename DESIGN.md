@@ -1185,10 +1185,11 @@ encrypted blocks only) using the same shared key handle `HlsSrc` fills. A clear
 track stays a normal demux; an encrypted track with no key fails loud.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
-`roxmltree`), selects a Representation, and streams its `SegmentTemplate`
-`$Number$` fMP4 init + media segments into `fmp4demux`. Throughput-driven ABR,
-byte-range segments, live DASH, and DASH `SegmentTimeline` are follow-ups
-(DESIGN_TODO).
+`roxmltree`), selects a Representation, and streams its fMP4 init + media segments
+into `fmp4demux`. `SegmentTemplate` is supported both as the `@duration` profile
+and as a `SegmentTimeline` (the `<S t d r>` entries expanded into per-segment
+times), addressed by `$Number$` or `$Time$`. Throughput-driven ABR, byte-range
+segments, and live DASH are follow-ups (DESIGN_TODO).
 
 ---
 

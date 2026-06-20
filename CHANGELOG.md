@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M165: DASH SegmentTimeline + $Time$ addressing
+
+- **`mpd` parses `SegmentTimeline`**: the `SegmentTemplate`'s `<SegmentTimeline>`
+  `<S t d r>` entries (start time, duration, additional repeats) into
+  `SegmentTemplate::timeline`. `SegmentTemplate::segments(total_secs)` yields the
+  ordered `SegmentRef { number, time }` list, driven by the timeline when present
+  (expanding `r` repeats and honoring a `t` that resets the running time) or by
+  the `@duration` profile otherwise.
+- **`$Time$` addressing**: the URL templater expands `$Time$` / `$Time%0Nd$` (the
+  segment start time) alongside `$Number$`; `media_url` takes a `SegmentRef`.
+- **`DashSrc`** iterates `segments()` instead of a computed count, so timeline and
+  duration manifests, with `$Number$` or `$Time$`, both stream correctly.
+- Scope: static (VOD). A negative `@r` (live "repeat to period end") falls back to
+  0; live MPD reload stays a follow-up.
+- Verified by `mpd` unit tests (timeline repeat expansion, `t` reset, `$Time$`
+  templating, `@duration` segment list) and `m160_dashsrc.rs` end to end: a
+  `SegmentTimeline` + `$Time$` manifest streams `DashSrc -> Fmp4Demux` back to the
+  original access units.
+
 ### M164: fMP4 cbcs Common Encryption decryption in Fmp4Demux
 
 - **`Fmp4Demux` decrypts `cbcs` (ISO/IEC 23001-7) fMP4/CMAF**, the fMP4 form of

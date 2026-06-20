@@ -3,12 +3,12 @@
 //! media segments downstream as a `Caps::ByteStream{IsoBmff}` for `fmp4demux`,
 //! then `Eos`. The [`mpd`](crate::mpd) parser does the manifest work; this adds
 //! the fetching (via `reqwest`, shared with [`HlsSrc`](crate::hlssrc)) and the
-//! `SegmentTemplate` `$Number$` addressing.
+//! `SegmentTemplate` `$Number$` / `$Time$` addressing.
 //!
-//! Scope (v1): static (VOD) manifests, `SegmentTemplate` number addressing, one
-//! `DataFrame` per segment, a fixed Representation. `SegmentTimeline`, dynamic
-//! (live) reload, `SegmentList`/`SegmentBase`, and mid-stream switching are
-//! follow-ups (DESIGN_TODO).
+//! Scope: static (VOD) manifests, `SegmentTemplate` with the `@duration` profile
+//! or `SegmentTimeline`, one `DataFrame` per segment, a fixed Representation.
+//! Dynamic (live) reload, `SegmentList`/`SegmentBase`, and mid-stream switching
+//! are follow-ups (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -93,7 +93,6 @@ impl SourceLoop for DashSrc {
                 None => self.url.clone(),
             };
             let rep = mpd.select(cap).ok_or(G2gError::CapsMismatch)?;
-            let count = rep.template.segment_count(mpd.duration_secs);
 
             let mut sequence = 0u64;
             if let Some(init) = rep.template.init_url(&rep.id) {
@@ -103,9 +102,10 @@ impl SourceLoop for DashSrc {
                     sequence += 1;
                 }
             }
-            for i in 0..count {
-                let number = rep.template.start_number + i;
-                let media = rep.template.media_url(&rep.id, number);
+            // SegmentTimeline (if present) or the @duration profile drives the
+            // ordered segments, with $Number$ / $Time$ resolved per segment.
+            for seg in rep.template.segments(mpd.duration_secs) {
+                let media = rep.template.media_url(&rep.id, seg);
                 let bytes = get_bytes(&client, &resolve_url(&base, &media)).await?;
                 if !bytes.is_empty() {
                     out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;

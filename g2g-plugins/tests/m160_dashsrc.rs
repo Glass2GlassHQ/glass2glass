@@ -184,6 +184,96 @@ fn serve(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
     format!("http://127.0.0.1:{port}/manifest.mpd")
 }
 
+/// Serve a `SegmentTimeline` + `$Time$` manifest: one `<S>` with `r` repeats so
+/// the 1s segments map to start times 0, 1000, 2000 (`seg<time>.m4s`).
+fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let repeats = segs.len() as u64 - 1;
+    let mpd = format!(
+        "<?xml version=\"1.0\"?>\n\
+         <MPD type=\"static\">\n\
+           <Period>\n\
+             <AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
+               <SegmentTemplate initialization=\"init.mp4\" media=\"seg$Time$.m4s\" \
+                  startNumber=\"1\" timescale=\"1000\">\n\
+                 <SegmentTimeline><S t=\"0\" d=\"1000\" r=\"{repeats}\"/></SegmentTimeline>\n\
+               </SegmentTemplate>\n\
+               <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\"/>\n\
+             </AdaptationSet>\n\
+           </Period>\n\
+         </MPD>"
+    );
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/manifest.mpd" {
+                mpd.clone().into_bytes()
+            } else if path == "/init.mp4" {
+                init.clone()
+            } else if let Some(time) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".m4s"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(time / 1000).cloned().unwrap_or_default()
+            } else {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/manifest.mpd")
+}
+
+#[tokio::test]
+async fn dash_segment_timeline_time_addressing_demuxes() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    let url = serve_timeline(init.clone(), segs.clone());
+
+    let mut src = DashSrc::new(url);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert_eq!(count, 4, "init + 3 timeline segments addressed by $Time$");
+    let mut expected = init.clone();
+    for s in &segs {
+        expected.extend_from_slice(s);
+    }
+    assert_eq!(sink.body, expected, "timeline segments delivered in time order");
+
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "SegmentTimeline DashSrc -> Fmp4Demux recovers the access units");
+}
+
 #[tokio::test]
 async fn dash_streams_init_then_segments_and_demuxes() {
     let aus = access_units();
