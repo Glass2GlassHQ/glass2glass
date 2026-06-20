@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M143: matroskademux unknown-size Clusters (live WebM)
+
+- **`matroskademux` reads unknown-size Clusters**, the live-streaming WebM shape
+  (MSE / WebRTC recordings, anything muxed without seeking back to patch sizes).
+  Previously the demuxer bailed on a Cluster with an all-ones (unknown) size and
+  never emitted its frames. Now an unknown-size Cluster is descended into like the
+  Segment: its children (`Timestamp` / `SimpleBlock` / `BlockGroup`) are parsed at
+  the top level until the next top-level element (another Cluster, Tracks, Tags,
+  ...) implicitly ends it. Each child still carries a definite size, so blocks emit
+  incrementally as they arrive without waiting for a terminator that may never come.
+  Definite-size Clusters keep the existing consume-whole path.
+- Tested: two live unknown-size Clusters demux all their blocks with each Cluster's
+  `Timestamp` applied (the second Cluster ending the first), and a block fed after a
+  live Cluster header with no terminator still emits.
+
 ### M142: flvmux writes onMetaData
 
 - **`flvmux` writes an `onMetaData` script tag**, the second tag writer (the inverse

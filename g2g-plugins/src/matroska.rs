@@ -14,12 +14,12 @@
 //! for "unknown size". Master elements (Segment, Tracks, Cluster, ...) nest
 //! children in their body.
 //!
-//! Scope (v1): a single Segment; definite-size elements (an unknown-size Segment
-//! is fine, the demuxer never needs its size, but unknown-size Clusters, the live
-//! streaming shape, are not handled). SimpleBlock / Block frames, including all
-//! three lacing modes (Xiph / EBML / fixed), are split; laced frames share the
-//! block timestamp. Cues (seeking), BlockGroup reference tracking, and per-frame
-//! timestamp interpolation from DefaultDuration are follow-ups.
+//! Scope (v1): a single Segment. Both definite-size and unknown-size Clusters are
+//! handled, the latter (the live-streaming shape) descended into and its children
+//! parsed until the next top-level element ends it. SimpleBlock / Block frames,
+//! including all three lacing modes (Xiph / EBML / fixed), are split; laced frames
+//! share the block timestamp. Cues (seeking), BlockGroup reference tracking, and
+//! per-frame timestamp interpolation from DefaultDuration are follow-ups.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,6 +158,10 @@ pub struct MatroskaDemuxer {
     timestamp_scale: u64,
     tracks: Vec<MkvTrack>,
     tags: TagList,
+    /// The current Timestamp of an open unknown-size Cluster (the live shape).
+    /// `Some` while its children are being parsed at the top level, `None`
+    /// otherwise. A definite-size Cluster never sets this (it is consumed whole).
+    open_cluster_ts: Option<u64>,
     completed: Vec<MkvFrame>,
 }
 
@@ -175,6 +179,7 @@ impl MatroskaDemuxer {
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             tracks: Vec::new(),
             tags: TagList::new(),
+            open_cluster_ts: None,
             completed: Vec::new(),
         }
     }
@@ -202,9 +207,10 @@ impl MatroskaDemuxer {
         self.drain_elements();
     }
 
-    /// Consume whole top-level elements from the front of `buf`. The Segment is
-    /// descended into (its children are read at this level); every other element
-    /// is consumed once its definite-size body is fully buffered.
+    /// Consume whole top-level elements from the front of `buf`. The Segment and
+    /// an unknown-size Cluster are descended into (their children are read at this
+    /// level); every other element is consumed once its definite-size body is
+    /// fully buffered.
     fn drain_elements(&mut self) {
         loop {
             let Some((id, id_len)) = read_id(&self.buf, 0) else { return };
@@ -219,8 +225,49 @@ impl MatroskaDemuxer {
                 continue;
             }
 
-            // Every other element is consumed whole; v1 needs a definite size to
-            // know where it ends (unknown-size Clusters are the live shape).
+            // An unknown-size Cluster (the live shape) is likewise descended into:
+            // its children are parsed at this level until the next top-level
+            // element ends it.
+            if id == ID_CLUSTER && unknown {
+                self.buf.drain(..header);
+                self.open_cluster_ts = Some(0);
+                continue;
+            }
+
+            // Inside an open unknown-size Cluster, its own children are decoded
+            // here; any other element closes the Cluster and is handled normally.
+            if self.open_cluster_ts.is_some() {
+                match id {
+                    ID_TIMESTAMP | ID_SIMPLE_BLOCK | ID_BLOCK_GROUP => {
+                        if unknown {
+                            return; // a Cluster child must carry a definite size
+                        }
+                        let Some(total) = header.checked_add(size as usize) else { return };
+                        if self.buf.len() < total {
+                            return;
+                        }
+                        if id == ID_TIMESTAMP {
+                            self.open_cluster_ts = Some(read_uint(&self.buf[header..total]));
+                        } else {
+                            let ts = self.open_cluster_ts.unwrap_or(0);
+                            let frames = parse_block_element(
+                                id,
+                                &self.buf[header..total],
+                                ts,
+                                self.timestamp_scale,
+                                &self.tracks,
+                            );
+                            self.completed.extend(frames);
+                        }
+                        self.buf.drain(..total);
+                        continue;
+                    }
+                    _ => self.open_cluster_ts = None, // end the Cluster, handle id below
+                }
+            }
+
+            // Every other element is consumed whole; a definite size tells us where
+            // it ends (an unknown size here is a container we do not descend).
             if unknown {
                 return;
             }
@@ -408,6 +455,31 @@ fn parse_cluster(body: &[u8], tracks: &[MkvTrack], scale: u64) -> Vec<MkvFrame> 
             }
             _ => {}
         }
+    }
+    frames
+}
+
+/// Parse a single Cluster child block element (a `SimpleBlock` or `BlockGroup`)
+/// into frames, for the unknown-size-Cluster path where children are decoded one
+/// at a time. The Cluster `Timestamp` is handled by the caller.
+fn parse_block_element(
+    id: u32,
+    body: &[u8],
+    cluster_ts: u64,
+    scale: u64,
+    tracks: &[MkvTrack],
+) -> Vec<MkvFrame> {
+    let mut frames = Vec::new();
+    match id {
+        ID_SIMPLE_BLOCK => parse_block(body, cluster_ts, scale, tracks, &mut frames),
+        ID_BLOCK_GROUP => {
+            for (bid, bdata) in children(body) {
+                if bid == ID_BLOCK {
+                    parse_block(bdata, cluster_ts, scale, tracks, &mut frames);
+                }
+            }
+        }
+        _ => {}
     }
     frames
 }
@@ -936,6 +1008,75 @@ mod tests {
         }
         assert_eq!(d.tracks().len(), 2);
         assert_eq!(d.take_frames().len(), 3);
+    }
+
+    /// An EBML element with an explicit unknown-size marker of `marker_len` bytes
+    /// (all-ones), used to build a live-shape Cluster whose end is implicit.
+    fn unknown_size_elem(id: &[u8], marker_len: usize, body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        let mut marker = vec![0xFFu8; marker_len];
+        marker[0] = (0xFFu8 >> (marker_len - 1)) | (1 << (8 - marker_len));
+        out.extend_from_slice(&marker);
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn demuxes_unknown_size_cluster() {
+        // Two live Clusters with unknown size, terminated by each other / EOF.
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((64, 48)), None));
+        let cluster0 = unknown_size_elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            1,
+            &[
+                elem(&[0xE7], &uint_body(0)),
+                elem(&[0xA3], &block_body(1, 0, true, &[0xAA])),
+                elem(&[0xA3], &block_body(1, 10, false, &[0xBB])),
+            ]
+            .concat(),
+        );
+        let cluster1 = unknown_size_elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            1,
+            &[elem(&[0xE7], &uint_body(100)), elem(&[0xA3], &block_body(1, 0, true, &[0xCC]))]
+                .concat(),
+        );
+        let segment = unknown_size_elem(
+            &[0x18, 0x53, 0x80, 0x67],
+            8,
+            &[tracks, cluster0, cluster1].concat(),
+        );
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 3, "both live clusters' blocks demux");
+        assert_eq!(frames[0].data, vec![0xAA]);
+        assert_eq!(frames[0].pts_ns, 0);
+        assert_eq!(frames[1].data, vec![0xBB]);
+        assert_eq!(frames[1].pts_ns, 10 * 1_000_000);
+        assert_eq!(frames[2].data, vec![0xCC]);
+        assert_eq!(frames[2].pts_ns, 100 * 1_000_000, "second cluster's Timestamp applies");
+    }
+
+    #[test]
+    fn unknown_size_cluster_emits_blocks_incrementally() {
+        // A block fully buffered before its Cluster is closed still emits (live
+        // playback can't wait for a terminator that may never come).
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
+        let mut file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[])].concat();
+        file.extend_from_slice(&unknown_size_elem(&[0x18, 0x53, 0x80, 0x67], 8, &tracks));
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        // Open a live Cluster header, then feed one Timestamp + one block, no terminator.
+        let mut live = unknown_size_elem(&[0x1F, 0x43, 0xB6, 0x75], 1, &[]);
+        live.extend_from_slice(&elem(&[0xE7], &uint_body(5)));
+        live.extend_from_slice(&elem(&[0xA3], &block_body(1, 0, true, &[0xDD])));
+        d.push_data(&live);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 1, "the block emits without waiting for a Cluster end");
+        assert_eq!(frames[0].pts_ns, 5 * 1_000_000);
     }
 
     #[test]

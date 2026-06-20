@@ -357,10 +357,11 @@ modern PipeWire path remain.
   (`g2g-plugins::matroska::MatroskaMuxer` + the `MkvMux` element, single track,
   one Cluster per frame, `webm` / `matroska` DocType by codec) landed in M115. The
   Segment `Tags` element + `Info` `Title` surface as `BusMessage::Tag` via
-  `MkvDemux::with_bus` (M139, see the tag system above). **Remaining:** unknown-size
-  Clusters (live read), Cues / seeking, per-frame timestamp interpolation
-  (DefaultDuration), multi-track muxing, Cluster batching, and `Targets`-scoped
-  (per-track) tags.
+  `MkvDemux::with_bus` (M139), and the muxer writes a `Tags` element via
+  `MkvMux::with_tags` (M141, see the tag system above). Unknown-size Clusters (the
+  live read shape) demux (M143). **Remaining:** Cues / seeking, per-frame timestamp
+  interpolation (DefaultDuration), multi-track muxing, Cluster batching, and
+  `Targets`-scoped (per-track) tags.
 - **MPEG-TS `tsdemux` — DONE (M108, M109).** Pure-Rust demuxer
   (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->
   elementary streams, fed by the `Caps::ByteStream{MpegTs}` link type
