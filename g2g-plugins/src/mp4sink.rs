@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, TagList, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -50,6 +50,7 @@ pub struct Mp4Sink {
     /// Accumulated decode time in media-timescale units (`tfdt`).
     decode_time: u64,
     prev_pts_ns: Option<u64>,
+    tags: TagList,
     eos_seen: bool,
 }
 
@@ -67,8 +68,16 @@ impl Mp4Sink {
             fragments: 0,
             decode_time: 0,
             prev_pts_ns: None,
+            tags: TagList::new(),
             eos_seen: false,
         }
+    }
+
+    /// Attach stream metadata, written as a `moov/udta/meta/ilst` box in the init
+    /// segment (the inverse of [`crate::mp4src::Mp4Src`]'s tag reading).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Count of `moof`+`mdat` fragments written. Useful in tests.
@@ -171,7 +180,7 @@ impl AsyncElement for Mp4Sink {
                         let param_sets = parameter_sets(self.codec, &nalus)?;
                         let header = [
                             ftyp(),
-                            moov(self.codec, self.width, self.height, &param_sets),
+                            moov(self.codec, self.width, self.height, &param_sets, &self.tags),
                         ]
                         .concat();
                         let w = self.writer.as_mut().expect("checked above");
@@ -323,11 +332,11 @@ fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
 }
 
 // box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
-use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+use crate::mp4box::{ftyp, full_box, mp4_box, udta_with_tags, MATRIX};
 
 // --- box writers ----------------------------------------------------------
 
-fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]]) -> Vec<u8> {
+fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]], tags: &TagList) -> Vec<u8> {
     let mvhd = {
         let mut p = Vec::new();
         p.extend_from_slice(&[0u8; 8]); // creation/modification time
@@ -420,7 +429,9 @@ fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]]) -> Vec
         mp4_box(b"mvex", &trex)
     };
 
-    mp4_box(b"moov", &[mvhd, trak, mvex].concat())
+    // Optional iTunes-style metadata after the track boxes.
+    let udta = udta_with_tags(tags).unwrap_or_default();
+    mp4_box(b"moov", &[mvhd, trak, mvex, udta].concat())
 }
 
 /// The visual sample entry for the track: `avc1`+`avcC` for H.264,

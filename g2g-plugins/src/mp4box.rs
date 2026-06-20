@@ -136,6 +136,57 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
     Tag::from_key_value(name, value)
 }
 
+/// Build a `udta/meta/ilst` box carrying `tags` (the inverse of
+/// [`parse_ilst_tags`]), or `None` when none of them map to an iTunes atom. The
+/// `meta` box names the `mdir` handler; each mappable tag writes its `©`-prefixed
+/// text atom. `Tag::Language` / `Tag::Other` are skipped (no portable atom).
+pub(crate) fn udta_with_tags(tags: &TagList) -> Option<Vec<u8>> {
+    let mut ilst = Vec::new();
+    for t in tags.tags() {
+        if let Some((atom, value)) = itunes_atom(t) {
+            ilst.extend_from_slice(&ilst_text_item(atom, value));
+        }
+    }
+    if ilst.is_empty() {
+        return None;
+    }
+    let meta_body = [meta_hdlr(), mp4_box(b"ilst", &ilst)].concat();
+    Some(mp4_box(b"udta", &full_box(b"meta", 0, 0, &meta_body)))
+}
+
+/// An iTunes item box: a `©`-prefixed atom wrapping a UTF-8 (`type 1`) `data` box.
+fn ilst_text_item(atom: &[u8; 4], value: &str) -> Vec<u8> {
+    let mut data = 1u32.to_be_bytes().to_vec(); // well-known type 1 = UTF-8 text
+    data.extend_from_slice(&0u32.to_be_bytes()); // locale
+    data.extend_from_slice(value.as_bytes());
+    mp4_box(atom, &mp4_box(b"data", &data))
+}
+
+/// The metadata handler box naming the `mdir` (iTunes) handler that an `ilst`
+/// lives under, with the `appl` manufacturer iTunes writes.
+fn meta_hdlr() -> Vec<u8> {
+    let mut p = 0u32.to_be_bytes().to_vec(); // pre_defined
+    p.extend_from_slice(b"mdir"); // handler_type
+    p.extend_from_slice(b"appl"); // reserved[0]: manufacturer
+    p.extend_from_slice(&[0u8; 8]); // reserved[1..3]
+    p.push(0); // empty name (null-terminated)
+    full_box(b"hdlr", 0, 0, &p)
+}
+
+/// The iTunes `©`-prefixed atom and value for a tag, or `None` when the tag has no
+/// portable atom (`Language` is an MP4 track field; `Other` is freeform `----`).
+fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
+    let pair: (&'static [u8; 4], &str) = match tag {
+        Tag::Title(v) => (b"\xA9nam", v),
+        Tag::Artist(v) => (b"\xA9ART", v),
+        Tag::Album(v) => (b"\xA9alb", v),
+        Tag::Encoder(v) => (b"\xA9too", v),
+        Tag::Comment(v) => (b"\xA9cmt", v),
+        Tag::Language(_) | Tag::Other { .. } => return None,
+    };
+    Some(pair)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +242,28 @@ mod tests {
     fn no_udta_is_empty() {
         let moov = mp4_box(b"moov", &mp4_box(b"trak", &[]));
         assert!(parse_ilst_tags(find_box(&moov, b"moov").unwrap()).is_empty());
+    }
+
+    #[test]
+    fn udta_writer_round_trips_through_the_reader() {
+        let tags: TagList = [
+            Tag::Title("My Song".into()),
+            Tag::Encoder("g2g".into()),
+            Tag::Language("eng".into()), // dropped (no atom)
+            Tag::Other { key: "x".into(), value: "y".into() }, // dropped (freeform)
+        ]
+        .into_iter()
+        .collect();
+        let udta = udta_with_tags(&tags).expect("mappable tags present");
+        // The reader recovers only the atom-mapped tags, in order.
+        let moov = mp4_box(b"moov", &udta);
+        let read = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
+        assert_eq!(read.tags(), &[Tag::Title("My Song".into()), Tag::Encoder("g2g".into())]);
+    }
+
+    #[test]
+    fn udta_writer_none_without_mappable_tags() {
+        let tags: TagList = [Tag::Other { key: "x".into(), value: "y".into() }].into_iter().collect();
+        assert!(udta_with_tags(&tags).is_none());
     }
 }

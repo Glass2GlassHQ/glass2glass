@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M147: mp4sink writes udta/ilst tags
+
+- **`Mp4Sink` writes iTunes `moov/udta/meta/ilst` metadata** into its init segment,
+  the third tag writer (the inverse of M140's `mp4src` reader), so a `TagList`
+  round-trips through the MP4 mux + demux. A shared `mp4box::udta_with_tags` builds
+  the `udta` (a `meta` FullBox naming the `mdir` handler, then an `ilst`), mapping
+  the typed tags to their `©`-prefixed text atoms (`©nam`/`©ART`/`©alb`/`©too`/`©cmt`);
+  `Tag::Language` (an MP4 track field) and `Tag::Other` (freeform `----`) have no
+  portable atom and are skipped. `Mp4Sink::with_tags(...)` attaches the list, written
+  in the `moov` after the track boxes. Without mappable tags the `moov` is unchanged.
+- Tested: `udta_with_tags` round-trips the atom-mapped tags through `parse_ilst_tags`
+  and writes nothing when no tag maps; end-to-end, `Mp4Sink::with_tags` recorded then
+  read by `Mp4Src::with_bus` posts a `BusMessage::Tag` with the title + encoder while
+  the AU still demuxes.
+
 ### M146: compositor configurable background
 
 - **`Compositor` takes a configurable background colour** via

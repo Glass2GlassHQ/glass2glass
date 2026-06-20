@@ -190,6 +190,44 @@ fn splice_into_moov(mp4: &[u8], udta: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn sink_written_tags_round_trip_to_the_source_bus() {
+    use g2g_core::{Bus, BusMessage, Tag, TagList};
+
+    let path = temp_path("tag_roundtrip");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr_au: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+
+    // Record with tags attached to the sink's init-segment moov.
+    let tags: TagList =
+        [Tag::Title("Recorded".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+    let mut sink = Mp4Sink::new(&path).with_tags(tags.clone());
+    sink.configure_pipeline(&h264_caps(64, 48)).expect("configure sink");
+    let mut null = Collect::default();
+    sink.process(PipelinePacket::DataFrame(au_frame(idr_au, 0, 0)), &mut null).await.expect("mux");
+    sink.process(PipelinePacket::Eos, &mut null).await.expect("eos");
+
+    // Read it back; the source surfaces the same tags on the bus.
+    let (bus, handle) = Bus::new(8);
+    let mut src = Mp4Src::new(&path).with_bus(handle);
+    let caps = src.intercept_caps().await.expect("probe");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut out = Collect::default();
+    src.run(&mut out).await.expect("demux");
+
+    let mut posted = None;
+    while let Some(m) = bus.try_recv() {
+        if let BusMessage::Tag(t) = m {
+            posted = Some(t);
+        }
+    }
+    assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
+    assert_eq!(out.frames().len(), 1, "the AU still demuxes alongside the tags");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn surfaces_ilst_tags_on_the_bus() {
     use g2g_core::{Bus, BusMessage, Tag};
 

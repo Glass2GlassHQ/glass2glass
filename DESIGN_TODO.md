@@ -226,12 +226,11 @@ Smaller-scope items, mostly orthogonal to the architecture.
   `flvdemux` FLV `onMetaData` AMF0 (M138), `matroskademux` Segment `Tags` + `Info`
   `Title` (M139), `mp4src` iTunes `udta/meta/ilst` atoms (M140). Writer:
   `matroskamux` emits a whole-stream `Tags` element via `with_tags` (M141) and
-  `flvmux` writes an `onMetaData` AMF0 script tag via `with_tags` (M142), so a
-  `TagList` round-trips through both. Remaining: the `mp4mux` `ilst` writer (no MP4
-  muxer with a `moov` writer yet, only the fragmented `Mp4Sink`); Matroska
-  `Targets`-scoped (per-track) tags and nested SimpleTags; MP4 freeform (`----`) and
-  integer atoms (track/disc number); and a per-stream tag merge policy for
-  multi-stream containers.
+  `flvmux` writes an `onMetaData` AMF0 script tag via `with_tags` (M142), and
+  `Mp4Sink` writes a `moov/udta/meta/ilst` via `with_tags` (M147), so a `TagList`
+  round-trips through all three. Remaining: Matroska `Targets`-scoped (per-track)
+  tags and nested SimpleTags; MP4 freeform (`----`) and integer atoms (track/disc
+  number); and a per-stream tag merge policy for multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation
