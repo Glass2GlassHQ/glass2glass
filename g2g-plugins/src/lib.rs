@@ -192,6 +192,13 @@ pub mod hls;
 #[cfg(feature = "hls")]
 pub mod hlssrc;
 
+// Fragmented-MP4 / CMAF parsing (shared) and the byte-stream demuxer. In the
+// std MP4 family (shares mp4box with mp4src/mp4sink).
+#[cfg(feature = "std")]
+mod fmp4;
+#[cfg(feature = "std")]
+pub mod fmp4demux;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

@@ -166,7 +166,12 @@ Production-shape needs that block specific real-world use cases.
   Live playlist reload is **DONE (M157)**: `HlsSrc` reloads a no-ENDLIST media
   playlist on an interval, plays each new segment once (media-sequence tracked),
   and ends on ENDLIST or downstream shutdown.
-  **Remaining HLS:** fMP4/CMAF segments (needs a ByteStream/MP4 handoff), byte-range
+  fMP4/CMAF demux is **DONE (M158)**: `Caps::ByteStream{IsoBmff}` +
+  `fmp4demux::Fmp4Demux` (streaming fragmented-MP4 demux, shares the `fmp4` parser
+  with `mp4src`). Still needs wiring into HLS: `#EXT-X-MAP` (init-segment) parsing
+  in the playlist + `HlsSrc` emitting `ByteStream{IsoBmff}` (init then fragments)
+  when the variant is fMP4.
+  **Remaining HLS:** the `#EXT-X-MAP` / fMP4 HlsSrc wiring above, byte-range
   + AES-128/SAMPLE-AES keyed segments, throughput-driven ABR (the current pick is
   static by declared bandwidth), live-edge start (skip to the last few segments),
   and mid-stream variant switching.

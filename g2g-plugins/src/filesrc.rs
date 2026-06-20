@@ -241,6 +241,7 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
         "ogg" | "opus" => Some(ByteStreamEncoding::Ogg),
         "flv" => Some(ByteStreamEncoding::Flv),
+        "mp4" | "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
         _ => None,
     }
 }
@@ -252,5 +253,6 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Matroska => "matroska",
         ByteStreamEncoding::Ogg => "ogg",
         ByteStreamEncoding::Flv => "flv",
+        ByteStreamEncoding::IsoBmff => "mp4",
     }
 }

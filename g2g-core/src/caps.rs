@@ -377,6 +377,10 @@ pub enum ByteStreamEncoding {
     /// FLV (Flash Video): an "FLV" header then `PreviousTagSize` / tag pairs, each
     /// tag a codec-tagged audio / video / script payload. The RTMP carrier.
     Flv,
+    /// ISO Base Media File Format / fragmented MP4 (CMAF): `ftyp`/`moov` init then
+    /// `moof`+`mdat` fragments. The modern HLS/DASH segment container, demuxed by
+    /// `fmp4demux`.
+    IsoBmff,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
