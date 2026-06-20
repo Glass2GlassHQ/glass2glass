@@ -44,8 +44,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
@@ -220,6 +220,15 @@ impl SourceLoop for RtspSrc {
             self.stashed_session = Some(stashed);
             Ok(caps)
         })
+    }
+
+    /// Produces the caps discovered by the negotiation-time probe (or the
+    /// `with_expected_dims` hint), so the chain takes the native arc-consistency
+    /// path. Mid-stream SDP/SPS refinements still arrive as `CapsChanged` from
+    /// `run`.
+    async fn caps_constraint(&mut self) -> Result<CapsConstraint<'_>, G2gError> {
+        let caps = self.intercept_caps().await?;
+        Ok(CapsConstraint::Produces(CapsSet::one(caps)))
     }
 
     fn configure_pipeline(
@@ -618,6 +627,27 @@ mod tests {
         let a = src.intercept_caps().await.expect("first");
         let b = src.intercept_caps().await.expect("second");
         assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn caps_constraint_is_produces_from_expected_dims() {
+        let mut src = RtspSrc::new("rtsp://example/stream").with_expected_dims(1920, 1080);
+        match src.caps_constraint().await.expect("constraint") {
+            CapsConstraint::Produces(set) => {
+                let alts = set.alternatives();
+                assert_eq!(alts.len(), 1);
+                assert!(matches!(
+                    alts[0],
+                    Caps::CompressedVideo {
+                        codec: VideoCodec::H264,
+                        width: Dim::Fixed(1920),
+                        height: Dim::Fixed(1080),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Produces, got {other:?}"),
+        };
     }
 
     #[test]

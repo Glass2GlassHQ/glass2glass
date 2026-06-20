@@ -5,6 +5,20 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M131: UdpSrc + RtspSrc native caps_constraint
+
+- **`UdpSrc` / `RtspSrc` off the legacy caps bridge.** Both override
+  `SourceLoop::caps_constraint` to return `Produces(CapsSet)` instead of the
+  default `LegacySource` bridge, so a fully-migrated chain built on them solves
+  on the native arc-consistency path (forward + backward narrowing) rather than
+  the degraded mixed cascade. `UdpSrc` produces its declared H.264 hint with no
+  negotiation I/O; `RtspSrc` wraps its async SDP-probe result (or the
+  `with_expected_dims` hint). Runtime SPS/SDP refinement still lands mid-stream
+  as `CapsChanged`. Continues the M16 bridge migration: of the 5 remaining
+  legacy elements these are the two buildable on the Windows dev host.
+- Tested: each source's `caps_constraint` returns `Produces` with the expected
+  declared caps (`udp-ingress` / `rtsp`).
+
 ### M130: audiomixer (summing fan-in muxer)
 
 - **`g2g-plugins::audiomixer::AudioMixer` (no_std).** A summing fan-in

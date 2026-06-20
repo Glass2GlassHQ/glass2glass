@@ -22,8 +22,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -164,6 +164,15 @@ impl SourceLoop for UdpSrc {
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         core::future::ready(Ok(self.caps()))
+    }
+
+    /// Produces the declared H.264 hint caps (no I/O at negotiation; the socket
+    /// binds in `configure_pipeline`). A downstream decoder corrects the real
+    /// geometry from the in-band SPS via a mid-stream `CapsChanged`.
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps()))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -359,6 +368,18 @@ mod tests {
         let port = sock.local_addr().unwrap().port();
         let src = UdpSrc::from_socket(sock).unwrap();
         assert_eq!(src.local_port(), Some(port), "adopts the pre-bound port");
+    }
+
+    #[tokio::test]
+    async fn caps_constraint_is_produces_declared_h264() {
+        let mut src = UdpSrc::new("127.0.0.1:5004".parse().unwrap())
+            .with_video_size(640, 480)
+            .with_framerate(25);
+        let expected = src.caps();
+        match src.caps_constraint().await.unwrap() {
+            CapsConstraint::Produces(set) => assert_eq!(set.alternatives(), &[expected]),
+            other => panic!("expected Produces, got {other:?}"),
+        };
     }
 
     #[tokio::test]
