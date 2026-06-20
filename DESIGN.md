@@ -1014,9 +1014,11 @@ a seek-aware source's run loop polls `take_pending()` between frames and, on a
 flushing seek, emits `Flush`, repositions, emits the post-flush `Segment`, and
 resumes, so a seek reaches the source GStreamer-style (upstream) without a
 back-reference. `Mp4Src` is the first real repositioning source (M148: flushing
-seek, keyframe `SNAP_BEFORE`, re-prepended parameter sets). Non-flushing/
-accumulating seeks, reverse/trick-mode sink handling, accurate (non-keyframe) seek,
-and making the other sources seek-aware are open (DESIGN_TODO).
+seek, keyframe `SNAP_BEFORE`, re-prepended parameter sets), and `SyncSink` maps PTS
+to running time through the `Segment` and clips pre-target frames so accurate seek
+presents the exact requested frame (M149). Non-flushing/accumulating seeks,
+reverse/trick-mode sink handling, and making the other sources seek-aware are open
+(DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

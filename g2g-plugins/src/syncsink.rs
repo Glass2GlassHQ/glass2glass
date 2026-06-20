@@ -7,6 +7,14 @@
 //! can't push faster than the sink consumes, and the sink consumes no faster
 //! than the clock advances toward each frame's PTS.
 //!
+//! Segment (M149): the sink tracks the playback `Segment` and maps each frame's
+//! PTS to running time through it, so presentation follows running time (correct
+//! after a seek resets the base) rather than raw PTS. A frame outside the segment
+//! is clipped, which completes accurate seek: the source snaps upstream to the
+//! keyframe before the target, the decoder decodes from there, and the sink drops
+//! the decoded frames before the exact target so the first presented frame is the
+//! requested one. Without a segment the sink uses PTS directly, as before.
+//!
 //! QoS (M85): when given a max-lateness bound, a frame whose deadline is
 //! already past by more than that bound is dropped rather than presented late,
 //! so the sink catches up instead of compounding the lag. Each drop posts a
@@ -21,7 +29,7 @@ use alloc::boxed::Box;
 
 use g2g_core::{
     AsyncClock, AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
-    ElementBound, G2gError, OutputSink, PipelinePacket,
+    ElementBound, G2gError, OutputSink, PipelinePacket, Segment,
 };
 
 #[derive(Debug)]
@@ -38,6 +46,13 @@ pub struct SyncSink<C: AsyncClock> {
     /// frame however late, preserving the pre-QoS behaviour.
     max_lateness_ns: u64,
     dropped: u64,
+    /// The current playback segment, set from `PipelinePacket::Segment`. Maps a
+    /// frame's PTS to running time and clips frames outside it (the
+    /// decode-to-target frames after an accurate seek). `None` before any segment
+    /// arrives, where PTS is used directly as running time.
+    segment: Option<Segment>,
+    /// Frames dropped because they fell outside the segment (accurate-seek clip).
+    clipped: u64,
     bus: Option<BusHandle>,
 }
 
@@ -53,6 +68,8 @@ impl<C: AsyncClock> SyncSink<C> {
             total_drift_ns: 0,
             max_lateness_ns: u64::MAX,
             dropped: 0,
+            segment: None,
+            clipped: 0,
             bus: None,
         }
     }
@@ -78,6 +95,12 @@ impl<C: AsyncClock> SyncSink<C> {
     /// Frames dropped because they arrived too late under the QoS bound.
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Frames clipped because they fell outside the current segment, eg the
+    /// decoded frames before an accurate-seek target.
+    pub fn clipped(&self) -> u64 {
+        self.clipped
     }
 
     pub fn last_sequence(&self) -> Option<u64> {
@@ -143,19 +166,32 @@ where
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     let pts = f.timing.pts_ns;
+                    // Map PTS to running time through the segment; a frame outside
+                    // it (the decoded frames before an accurate-seek target) is
+                    // clipped. Without a segment, PTS is the running time directly.
+                    let deadline = match &self.segment {
+                        Some(seg) => match seg.to_running_time(pts) {
+                            Some(rt) => rt,
+                            None => {
+                                self.clipped += 1;
+                                return Ok(());
+                            }
+                        },
+                        None => pts,
+                    };
                     // QoS: a frame already past its deadline by more than the
                     // bound is dropped, not presented late, so the sink catches
-                    // up. `now > pts + bound` (saturating, so the u64::MAX
+                    // up. `now > deadline + bound` (saturating, so the u64::MAX
                     // default never fires).
                     let now = self.clock.now_ns();
-                    if now > pts.saturating_add(self.max_lateness_ns) {
+                    if now > deadline.saturating_add(self.max_lateness_ns) {
                         self.dropped += 1;
                         if let Some(bus) = &self.bus {
-                            let jitter = i64::try_from(now - pts).unwrap_or(i64::MAX);
+                            let jitter = i64::try_from(now - deadline).unwrap_or(i64::MAX);
                             // Control message: non-blocking, never stalls the
                             // sink (a full bus drops the report).
                             bus.try_post(BusMessage::Qos {
-                                running_time_ns: pts,
+                                running_time_ns: deadline,
                                 jitter_ns: jitter,
                                 processed: self.received,
                                 dropped: self.dropped,
@@ -163,8 +199,8 @@ where
                         }
                         return Ok(());
                     }
-                    self.clock.sleep_until_ns(pts).await;
-                    let drift = self.clock.now_ns().saturating_sub(pts);
+                    self.clock.sleep_until_ns(deadline).await;
+                    let drift = self.clock.now_ns().saturating_sub(deadline);
                     self.max_drift_ns = self.max_drift_ns.max(drift);
                     self.total_drift_ns =
                         self.total_drift_ns.saturating_add(u128::from(drift));
@@ -176,14 +212,86 @@ where
                 }
                 PipelinePacket::Flush => {
                     // Seek flush: drop position so presentation resumes
-                    // cleanly at the post-seek timeline.
+                    // cleanly at the post-seek timeline. The post-flush Segment
+                    // that follows installs the new running-time mapping.
                     self.last_sequence = None;
                 }
                 PipelinePacket::CapsChanged(_) => {}
-                // Segment is control: ignored at sink.
-                PipelinePacket::Segment(_) => {}
+                PipelinePacket::Segment(seg) => {
+                    self.segment = Some(seg);
+                }
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::future::Ready;
+    use g2g_core::frame::Frame;
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome, Seek};
+
+    /// A clock fixed at 0 whose sleep resolves immediately (the deadline is in the
+    /// future of `now == 0`, so no QoS drop fires and no real wait happens).
+    struct InstantClock;
+    impl g2g_core::PipelineClock for InstantClock {
+        fn now_ns(&self) -> u64 {
+            0
+        }
+    }
+    impl AsyncClock for InstantClock {
+        type SleepFuture<'a> = Ready<()>;
+        fn sleep_until_ns(&self, _deadline_ns: u64) -> Ready<()> {
+            core::future::ready(())
+        }
+    }
+
+    struct NullSink;
+    impl OutputSink for NullSink {
+        fn push<'a>(
+            &'a mut self,
+            _packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(PushOutcome::Accepted) })
+        }
+    }
+
+    fn frame(pts_ns: u64, sequence: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]))),
+            FrameTiming { pts_ns, ..FrameTiming::default() },
+            sequence,
+        ))
+    }
+
+    #[tokio::test]
+    async fn clips_frames_before_the_segment_start() {
+        let mut sink = SyncSink::new(InstantClock);
+        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Ogg }).unwrap();
+        let mut out = NullSink;
+        // Accurate seek to 70 ms: the source already snapped to the keyframe at
+        // 66 ms, the decoder decoded from there, and this segment starts at 70 ms.
+        let seg = Segment::for_flush_seek(&Seek::flush_to(70_000_000), None);
+        sink.process(PipelinePacket::Segment(seg), &mut out).await.unwrap();
+        sink.process(frame(66_000_000, 0), &mut out).await.unwrap(); // pre-target: clipped
+        sink.process(frame(100_000_000, 1), &mut out).await.unwrap(); // presented
+
+        assert_eq!(sink.clipped(), 1, "the pre-target keyframe is clipped");
+        assert_eq!(sink.received(), 1, "only the at/after-target frame is presented");
+        assert_eq!(sink.last_sequence(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn without_segment_presents_every_frame() {
+        let mut sink = SyncSink::new(InstantClock);
+        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::Ogg }).unwrap();
+        let mut out = NullSink;
+        sink.process(frame(0, 0), &mut out).await.unwrap();
+        sink.process(frame(50_000_000, 1), &mut out).await.unwrap();
+        assert_eq!(sink.clipped(), 0);
+        assert_eq!(sink.received(), 2, "no segment: PTS is the running time, nothing clipped");
     }
 }

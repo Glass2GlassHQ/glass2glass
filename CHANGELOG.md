@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M149: accurate seek (segment clipping at the sink)
+
+- **`SyncSink` is segment-aware, completing accurate seek.** It tracks the playback
+  `Segment` (from `PipelinePacket::Segment`) and maps each frame's PTS to running
+  time through it, so presentation follows running time, correct after a flushing
+  seek resets the base, instead of raw PTS. A frame outside the segment is clipped
+  (`clipped()` counts them): with M148's upstream keyframe snap, the decoder decodes
+  from the keyframe before the target and the sink drops those pre-target frames, so
+  the first presented frame is exactly the requested one. The QoS deadline and drift
+  now use running time too. Without a segment the sink uses PTS directly (the runner
+  emits an opening `Segment::new()` that maps PTS to itself, so existing behavior is
+  unchanged).
+- Tested: a segment starting at 70 ms clips a 66 ms pre-target frame and presents the
+  100 ms one (`clipped == 1`, `received == 1`); without a segment every frame is
+  presented. The existing QoS and sync-pacing integration tests still pass against
+  the runner's opening segment.
+
 ### M148: Mp4Src seek-aware (scrub / edit repositioning)
 
 - **`Mp4Src` is the first real repositioning source**, closing the gap that left
