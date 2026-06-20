@@ -5,6 +5,19 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M144: matroskademux DefaultDuration frame timing
+
+- **`matroskademux` reads `DefaultDuration` and spaces laced frames by it.** A laced
+  block (Xiph / EBML / fixed) carries several frames that previously all shared the
+  block timestamp; per the spec they are spaced by the track's `DefaultDuration`
+  (nanoseconds per frame, unscaled). `MkvTrack` now carries `default_duration_ns`,
+  parsed from the `TrackEntry`, and `parse_block` advances frame `i` by
+  `i * default_duration_ns` from the block timestamp. A single (unlaced) frame is
+  unchanged (`i == 0`), as is a track that omits `DefaultDuration` (0 spacing keeps
+  the prior shared-timestamp behavior).
+- Tested: a fixed-laced two-frame block on a track with a 20 ms `DefaultDuration`
+  gives the second frame a PTS one duration past the first.
+
 ### M143: matroskademux unknown-size Clusters (live WebM)
 
 - **`matroskademux` reads unknown-size Clusters**, the live-streaming WebM shape

@@ -359,8 +359,8 @@ modern PipeWire path remain.
   Segment `Tags` element + `Info` `Title` surface as `BusMessage::Tag` via
   `MkvDemux::with_bus` (M139), and the muxer writes a `Tags` element via
   `MkvMux::with_tags` (M141, see the tag system above). Unknown-size Clusters (the
-  live read shape) demux (M143). **Remaining:** Cues / seeking, per-frame timestamp
-  interpolation (DefaultDuration), multi-track muxing, Cluster batching, and
+  live read shape) demux (M143), and laced frames are spaced by `DefaultDuration`
+  (M144). **Remaining:** Cues / seeking, multi-track muxing, Cluster batching, and
   `Targets`-scoped (per-track) tags.
 - **MPEG-TS `tsdemux` — DONE (M108, M109).** Pure-Rust demuxer
   (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->

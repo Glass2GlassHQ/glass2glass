@@ -45,6 +45,7 @@ const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
 const ID_TRACK_TYPE: u32 = 0x0083;
 const ID_CODEC_ID: u32 = 0x0086;
+const ID_DEFAULT_DURATION: u32 = 0x0023_E383;
 const ID_VIDEO: u32 = 0x00E0;
 const ID_PIXEL_WIDTH: u32 = 0x00B0;
 const ID_PIXEL_HEIGHT: u32 = 0x00BA;
@@ -137,6 +138,10 @@ pub struct MkvTrack {
     pub height: u32,
     pub channels: u8,
     pub sample_rate: u32,
+    /// Nanoseconds per frame from `DefaultDuration` (0 when the track omits it).
+    /// Spaces the frames of a laced block; an unscaled value, unlike block
+    /// timestamps.
+    pub default_duration_ns: u64,
 }
 
 /// One demuxed frame (a SimpleBlock / Block payload) of an elementary stream.
@@ -399,10 +404,12 @@ fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
     let mut height = 0u32;
     let mut channels = 0u8;
     let mut sample_rate = 0u32;
+    let mut default_duration_ns = 0u64;
     for (id, data) in children(body) {
         match id {
             ID_TRACK_NUMBER => number = read_uint(data),
             ID_CODEC_ID => codec_id = data,
+            ID_DEFAULT_DURATION => default_duration_ns = read_uint(data),
             ID_VIDEO => {
                 for (vid, vdata) in children(data) {
                     match vid {
@@ -434,6 +441,7 @@ fn parse_track_entry(body: &[u8]) -> Option<MkvTrack> {
         height,
         channels,
         sample_rate,
+        default_duration_ns,
     })
 }
 
@@ -486,9 +494,9 @@ fn parse_block_element(
 
 /// Parse a (Simple)Block, appending its frame(s): a track-number VINT, a 2-byte
 /// signed relative timestamp, a flags byte, then the frame data. A laced block
-/// carries several frames (Xiph / EBML / fixed lacing) that share the block
-/// timestamp (per-frame interpolation from DefaultDuration is a follow-up). A
-/// malformed block is dropped.
+/// carries several frames (Xiph / EBML / fixed lacing); they are spaced by the
+/// track's `DefaultDuration` from the block timestamp when it is known, else they
+/// share the block timestamp. A malformed block is dropped.
 fn parse_block(
     block: &[u8],
     cluster_ts: u64,
@@ -505,9 +513,11 @@ fn parse_block(
     pos += 2;
     let flags = block[pos];
     pos += 1;
-    let Some(codec) = tracks.iter().find(|t| t.number == track).map(|t| t.codec) else {
+    let Some(t) = tracks.iter().find(|t| t.number == track) else {
         return;
     };
+    let codec = t.codec;
+    let default_duration_ns = t.default_duration_ns;
     let abs = cluster_ts as i64 + rel as i64;
     let pts_ns = if abs < 0 { 0 } else { (abs as u64).saturating_mul(scale) };
     let keyframe = flags & 0x80 != 0;
@@ -522,8 +532,11 @@ fn parse_block(
             None => return, // malformed lacing: drop the block
         }
     };
-    for data in frames {
-        out.push(MkvFrame { track, codec, pts_ns, keyframe, data: data.to_vec() });
+    // A single (unlaced) frame keeps the block timestamp; laced frames advance by
+    // DefaultDuration when known (i == 0 leaves the first at the block timestamp).
+    for (i, data) in frames.into_iter().enumerate() {
+        let frame_pts = pts_ns.saturating_add(i as u64 * default_duration_ns);
+        out.push(MkvFrame { track, codec, pts_ns: frame_pts, keyframe, data: data.to_vec() });
     }
 }
 
@@ -982,8 +995,8 @@ mod tests {
         assert_eq!(
             d.tracks(),
             &[
-                MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 640, height: 480, channels: 0, sample_rate: 0 },
-                MkvTrack { number: 2, codec: MkvCodec::Opus, width: 0, height: 0, channels: 2, sample_rate: 48_000 },
+                MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 640, height: 480, channels: 0, sample_rate: 0, default_duration_ns: 0 },
+                MkvTrack { number: 2, codec: MkvCodec::Opus, width: 0, height: 0, channels: 2, sample_rate: 48_000, default_duration_ns: 0 },
             ]
         );
 
@@ -1106,6 +1119,41 @@ mod tests {
     }
 
     #[test]
+    fn laced_frames_spaced_by_default_duration() {
+        // A VP8 track with DefaultDuration 20 ms and a fixed-laced block of two
+        // frames: the second advances by one DefaultDuration from the block ts.
+        let dur_ns = 20_000_000u64;
+        let track_body = [
+            elem(&[0xD7], &uint_body(1)),                  // TrackNumber
+            elem(&[0x86], b"V_VP8"),                       // CodecID
+            elem(&[0x23, 0xE3, 0x83], &uint_body(dur_ns)), // DefaultDuration
+            elem(&[0xE0], &[elem(&[0xB0], &uint_body(16)), elem(&[0xBA], &uint_body(16))].concat()),
+        ]
+        .concat();
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &elem(&[0xAE], &track_body));
+
+        let mut laced = vint(1); // track 1
+        laced.extend_from_slice(&0i16.to_be_bytes());
+        laced.push(0x04); // fixed lacing
+        laced.push(0x01); // frame count - 1 = 1 (two frames)
+        laced.extend_from_slice(&[0xAA, 0xBB]);
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &laced)].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        assert_eq!(d.tracks()[0].default_duration_ns, dur_ns);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].pts_ns, 0, "first laced frame at the block timestamp");
+        assert_eq!(frames[1].pts_ns, dur_ns, "second frame advanced by DefaultDuration");
+    }
+
+    #[test]
     fn xiph_lacing_splits_with_255_continuation() {
         // Two frames: a 255-byte frame (Xiph size 0xFF 0x00) then a 2-byte one.
         let mut body = vec![1u8]; // frame count - 1 = 1
@@ -1153,7 +1201,7 @@ mod tests {
         d.push_data(&bytes);
         assert_eq!(
             d.tracks(),
-            &[MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0 }]
+            &[MkvTrack { number: 1, codec: MkvCodec::Vp9, width: 320, height: 240, channels: 0, sample_rate: 0, default_duration_ns: 0 }]
         );
         let frames = d.take_frames();
         assert_eq!(frames.len(), 2, "both frames survive the round trip");
