@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M164: fMP4 cbcs Common Encryption decryption in Fmp4Demux
+
+- **`Fmp4Demux` decrypts `cbcs` (ISO/IEC 23001-7) fMP4/CMAF**, the fMP4 form of
+  HLS SAMPLE-AES (and the DASH/CMAF encryption path). The shared `fmp4` parser now
+  reads the init segment's `encv`/`sinf`/`frma`/`schm`/`tenc` (original codec,
+  crypt:skip pattern, constant IV) and each fragment's `senc` (per-sample
+  clear/protected subsample maps), and invokes a decrypt callback per sample
+  before Annex-B framing. The parser stays pure/crypto-free; the cbcs AES lives in
+  `fmp4demux` behind the `hls` feature.
+- **cbcs decryption:** for each protected subsample range, AES-128-CBC decrypt the
+  encrypted 16-byte blocks of the crypt:skip pattern (1:9 for video; full blocks
+  when either is zero), IV reset to the `tenc` constant IV at each subsample,
+  chaining over the encrypted blocks only, trailing partial block left clear.
+- **Key wiring:** `Fmp4Demux::with_cbcs_key_handle` reads the key from the same
+  shared handle `HlsSrc` fills for SAMPLE-AES (M163); the IV comes from `tenc`, not
+  the playlist. So `HlsSrc ! fmp4demux ! h264parse` decrypts an encrypted
+  fMP4/CMAF stream with no hand-set key. A clear track is unaffected; an encrypted
+  track with no key (or without the `hls` feature) fails loud (`CapsMismatch`).
+- Algorithm verified against ISO/IEC 23001-7, Bento4, and mp4ff.
+- Scope: H.264/H.265 video, cbcs constant-IV, `senc`+`tenc` defaults. AAC, the
+  cenc/cbc1 per-sample-IV variants, `saiz`/`saio` and `seig` sample groups, and
+  encrypted init segments are follow-ups.
+- Verified by `m164_fmp4_cbcs.rs`: a hand-built `encv`/`tenc`/`senc` stream with
+  cbcs-encrypted samples (encrypt side mirrors the decryptor) round-trips through
+  `Fmp4Demux` + key handle to the original access units, and a keyless run fails
+  loud.
+
 ### M163: HLS SAMPLE-AES key auto-wiring (HlsSrc -> SampleAesDecrypt)
 
 - **Shared key handle.** `sampleaesdecrypt::SampleAesKeyHandle`

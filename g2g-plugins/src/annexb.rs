@@ -137,6 +137,7 @@ pub(crate) fn strip_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
 /// any byte `<= 0x03` that follows two zero bytes, the inverse of
 /// [`strip_emulation_prevention`]. Used by the SAMPLE-AES decryptor to re-escape
 /// a NAL after decrypting its de-escaped payload.
+#[cfg(any(feature = "hls", test))]
 pub(crate) fn add_emulation_prevention(rbsp: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rbsp.len());
     let mut zeros = 0usize;

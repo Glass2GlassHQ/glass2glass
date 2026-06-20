@@ -1176,6 +1176,13 @@ emulation-prevention aware, IV reset per NAL) and AAC ADTS frames (ADTS header +
 directly or, in the HLS chain, auto-wired: `HlsSrc` fetches the `#EXT-X-KEY`
 material and publishes it into a shared key handle the decryptor reads, forwarding
 the sample-encrypted segments undecrypted (the demuxer needs the clear framing).
+For fMP4/CMAF, SAMPLE-AES maps to the `cbcs` Common Encryption scheme
+(ISO/IEC 23001-7), handled inside `fmp4demux`: the init segment's `encv`/`sinf`/
+`tenc` give the crypt:skip pattern (1:9 for video) and constant IV, each fragment's
+`senc` gives the per-sample clear/protected subsample ranges, and the protected
+ranges are AES-128-CBC decrypted (IV reset per subsample, chaining over the
+encrypted blocks only) using the same shared key handle `HlsSrc` fills. A clear
+track stays a normal demux; an encrypted track with no key fails loud.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its `SegmentTemplate`

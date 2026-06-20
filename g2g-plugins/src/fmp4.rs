@@ -23,7 +23,35 @@ pub(crate) struct Header {
     /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
     /// for H.265), prepended to the first sample if it carries none in-band.
     pub(crate) param_sets: Vec<Vec<u8>>,
+    /// Common-encryption defaults from a `cbcs` `tenc`, `None` for a clear track.
+    pub(crate) cenc: Option<CencDefaults>,
 }
+
+/// MPEG-CENC `cbcs` track defaults from the init segment's `tenc` box. The IV is
+/// the constant IV (cbcs uses `Per_Sample_IV_Size == 0`).
+// The pattern / constant-IV fields are consumed by the `hls`-gated decryptor.
+#[cfg_attr(not(feature = "hls"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct CencDefaults {
+    pub(crate) crypt_byte_block: u8,
+    pub(crate) skip_byte_block: u8,
+    pub(crate) per_sample_iv_size: u8,
+    pub(crate) constant_iv: Vec<u8>,
+}
+
+/// One `senc` subsample range: `clear` bytes pass through, the next `protected`
+/// bytes are sample-encrypted (byte counts over the AVCC sample as stored).
+// Fields are consumed by the `hls`-gated decryptor.
+#[cfg_attr(not(feature = "hls"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Subsample {
+    pub(crate) clear: u32,
+    pub(crate) protected: u32,
+}
+
+/// In-place sample decryptor: given a sample's bytes and its `senc` subsample
+/// map, rewrites the protected ranges. `fmp4demux` supplies the cbcs one.
+pub(crate) type SampleDecrypt<'a> = &'a mut dyn FnMut(&mut [u8], &[Subsample]);
 
 #[derive(Debug)]
 pub(crate) struct Sample {
@@ -66,21 +94,102 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
     // full box: version/flags + entry count, then the first sample entry.
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
-    // visual sample entry: 78 bytes of fixed fields before the nested boxes.
-    let (codec, param_sets) = if let Some(avc1) = find_box(entries, b"avc1") {
+    // visual sample entry: 78 bytes of fixed fields before the nested boxes. An
+    // encrypted track uses `encv`, carrying the original codec config plus a
+    // `sinf` (frma original format + cbcs scheme + tenc defaults).
+    let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
-        let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
-        let (sps, pps) = parse_avcc(avcc)?;
-        (VideoCodec::H264, Vec::from([sps, pps]))
+        let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
+        (VideoCodec::H264, Vec::from([sps, pps]), None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H265, parse_hvcc(hvcc)?)
+        (VideoCodec::H265, parse_hvcc(hvcc)?, None)
+    } else if let Some(encv) = find_box(entries, b"encv") {
+        let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+        let cenc = parse_cenc(sinf)?;
+        let frma = find_box(sinf, b"frma").ok_or(G2gError::CapsMismatch)?;
+        let (codec, param_sets) = match frma.get(0..4) {
+            Some(b"avc1") => {
+                let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+                let (sps, pps) = parse_avcc(avcc)?;
+                (VideoCodec::H264, Vec::from([sps, pps]))
+            }
+            Some(b"hvc1") | Some(b"hev1") => {
+                let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+                (VideoCodec::H265, parse_hvcc(hvcc)?)
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        (codec, param_sets, Some(cenc))
     } else {
         return Err(G2gError::CapsMismatch);
     };
 
-    Ok(Header { codec, width, height, timescale, param_sets })
+    Ok(Header { codec, width, height, timescale, param_sets, cenc })
+}
+
+/// Read the `cbcs` defaults out of a `sinf`: the `schm` scheme must be `cbcs`,
+/// and `schi/tenc` (v1) carries the crypt/skip pattern, per-sample IV size, and
+/// constant IV. Rejects other schemes and per-sample-IV (cenc/cbc1) variants.
+fn parse_cenc(sinf: &[u8]) -> Result<CencDefaults, G2gError> {
+    let schm = find_box(sinf, b"schm").ok_or(G2gError::CapsMismatch)?;
+    if schm.get(4..8) != Some(b"cbcs") {
+        return Err(G2gError::CapsMismatch);
+    }
+    let schi = find_box(sinf, b"schi").ok_or(G2gError::CapsMismatch)?;
+    let tenc = find_box(schi, b"tenc").ok_or(G2gError::CapsMismatch)?;
+    let version = *tenc.first().ok_or(G2gError::CapsMismatch)?;
+    let (crypt_byte_block, skip_byte_block) = if version >= 1 {
+        let packed = *tenc.get(5).ok_or(G2gError::CapsMismatch)?;
+        (packed >> 4, packed & 0x0F)
+    } else {
+        (0, 0)
+    };
+    let is_protected = tenc.get(6) == Some(&1);
+    let per_sample_iv_size = *tenc.get(7).ok_or(G2gError::CapsMismatch)?;
+    // cbcs uses a constant IV (per-sample IV size 0); cenc/cbc1 are out of scope.
+    if per_sample_iv_size != 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let constant_iv = if is_protected {
+        let size = *tenc.get(24).ok_or(G2gError::CapsMismatch)? as usize;
+        tenc.get(25..25 + size).ok_or(G2gError::CapsMismatch)?.to_vec()
+    } else {
+        Vec::new()
+    };
+    Ok(CencDefaults { crypt_byte_block, skip_byte_block, per_sample_iv_size, constant_iv })
+}
+
+/// Parse a `senc` box into per-sample subsample maps (cbcs: no per-sample IV).
+/// An empty map for a sample means the whole sample is one protected range.
+pub(crate) fn parse_senc(senc: &[u8], per_sample_iv_size: u8) -> Result<Vec<Vec<Subsample>>, G2gError> {
+    let flags = be32(senc, 0)? & 0x00FF_FFFF;
+    let has_subsamples = flags & 0x2 != 0;
+    let count = be32(senc, 4)? as usize;
+    let mut at = 8usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        at += per_sample_iv_size as usize;
+        let mut subs = Vec::new();
+        if has_subsamples {
+            let sub_count = u16::from_be_bytes(
+                senc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+            ) as usize;
+            at += 2;
+            for _ in 0..sub_count {
+                let clear = u16::from_be_bytes(
+                    senc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+                ) as u32;
+                let protected = be32(senc, at + 2)?;
+                at += 6;
+                subs.push(Subsample { clear, protected });
+            }
+        }
+        out.push(subs);
+    }
+    Ok(out)
 }
 
 /// Parameter-set NALUs out of an `hvcC` payload, in array order (VPS, SPS,
@@ -145,10 +254,13 @@ pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
     codec: VideoCodec,
+    cenc: Option<&CencDefaults>,
+    mut decrypt: Option<SampleDecrypt<'_>>,
 ) -> Result<Vec<Sample>, G2gError> {
     let mut samples = Vec::new();
     let mut pending: Option<Vec<(u32, u64)>> = None; // (size, pts_ns) per sample
     let mut durations: Vec<u64> = Vec::new();
+    let mut pending_subs: Vec<Vec<Subsample>> = Vec::new();
 
     for (kind, payload) in boxes(data) {
         match kind {
@@ -171,6 +283,13 @@ pub(crate) fn parse_fragments(
                     t += *dur as u64;
                 }
                 pending = Some(tagged);
+                pending_subs = match cenc {
+                    Some(c) => match find_box(traf, b"senc") {
+                        Some(senc) => parse_senc(senc, c.per_sample_iv_size)?,
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
             }
             b"mdat" => {
                 let Some(tagged) = pending.take() else {
@@ -179,7 +298,16 @@ pub(crate) fn parse_fragments(
                 let mut at = 0usize;
                 for (i, (size, pts_ns)) in tagged.iter().enumerate() {
                     let raw = payload.get(at..at + *size as usize).ok_or(G2gError::CapsMismatch)?;
-                    let annexb = avcc_to_annexb(raw)?;
+                    let annexb = if cenc.is_some() {
+                        // Encrypted: decrypt the sample in place, then de-frame.
+                        let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
+                        let mut buf = raw.to_vec();
+                        let subs = pending_subs.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                        decrypt(&mut buf, subs);
+                        avcc_to_annexb(&buf)?
+                    } else {
+                        avcc_to_annexb(raw)?
+                    };
                     let keyframe = contains_keyframe(&annexb, codec);
                     samples.push(Sample {
                         annexb,

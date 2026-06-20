@@ -26,7 +26,9 @@ use g2g_core::{
     Rate, VideoCodec,
 };
 
-use crate::fmp4::{parse_fragments, parse_header, starts_with_param_set, Header};
+use crate::fmp4::{parse_fragments, parse_header, starts_with_param_set, CencDefaults, Header, Sample};
+#[cfg(feature = "hls")]
+use crate::fmp4::Subsample;
 
 #[derive(Debug)]
 pub struct Fmp4Demux {
@@ -38,6 +40,10 @@ pub struct Fmp4Demux {
     out_codec: VideoCodec,
     /// Prepend the config-record parameter sets to the first access unit.
     need_param_sets: bool,
+    /// cbcs decryption key (shared with `HlsSrc`); the constant IV comes from the
+    /// init segment's `tenc`. Without it an encrypted track fails loud.
+    #[cfg(feature = "hls")]
+    cbcs_key: Option<crate::sampleaesdecrypt::SampleAesKeyHandle>,
     caps_sent: bool,
     sequence: u64,
     configured: bool,
@@ -57,10 +63,64 @@ impl Fmp4Demux {
             pending_moof: None,
             out_codec: VideoCodec::H264,
             need_param_sets: true,
+            #[cfg(feature = "hls")]
+            cbcs_key: None,
             caps_sent: false,
             sequence: 0,
             configured: false,
         }
+    }
+
+    /// Share the cbcs key handle a `HlsSrc` publishes into (the auto-wired HLS
+    /// SAMPLE-AES path for fMP4/CMAF). The decryptor pairs it with the constant
+    /// IV from the segment's `tenc`.
+    #[cfg(feature = "hls")]
+    pub fn with_cbcs_key_handle(
+        mut self,
+        handle: crate::sampleaesdecrypt::SampleAesKeyHandle,
+    ) -> Self {
+        self.cbcs_key = Some(handle);
+        self
+    }
+
+    /// Parse a fragment's samples, decrypting in place when the track is cbcs
+    /// (the key from the shared handle, the constant IV + pattern from `tenc`).
+    #[cfg(feature = "hls")]
+    fn parse_fragment_samples(
+        &self,
+        frag: &[u8],
+        timescale: u32,
+        codec: VideoCodec,
+        cenc: Option<&CencDefaults>,
+    ) -> Result<Vec<Sample>, G2gError> {
+        let Some(c) = cenc else {
+            return parse_fragments(frag, timescale, codec, None, None);
+        };
+        let key = self
+            .cbcs_key
+            .as_ref()
+            .and_then(|h| *h.lock().expect("key handle poisoned"))
+            .map(|k| k.key)
+            .ok_or(G2gError::CapsMismatch)?;
+        let iv: [u8; 16] =
+            c.constant_iv.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
+        let (crypt, skip) = (c.crypt_byte_block, c.skip_byte_block);
+        let mut decrypt = move |buf: &mut [u8], subs: &[Subsample]| {
+            cbcs_decrypt_sample(buf, subs, &key, &iv, crypt, skip);
+        };
+        parse_fragments(frag, timescale, codec, Some(c), Some(&mut decrypt))
+    }
+
+    /// Without the `hls` feature there is no AES: an encrypted track fails loud.
+    #[cfg(not(feature = "hls"))]
+    fn parse_fragment_samples(
+        &self,
+        frag: &[u8],
+        timescale: u32,
+        codec: VideoCodec,
+        cenc: Option<&CencDefaults>,
+    ) -> Result<Vec<Sample>, G2gError> {
+        parse_fragments(frag, timescale, codec, cenc, None)
     }
 
     fn input_caps() -> Caps {
@@ -103,9 +163,10 @@ impl Fmp4Demux {
                     };
                     let (timescale, codec) = (header.timescale, header.codec);
                     let param_sets = header.param_sets.clone();
+                    let cenc = header.cenc.clone();
 
                     frag.extend_from_slice(&box_bytes);
-                    let samples = parse_fragments(&frag, timescale, codec)?;
+                    let samples = self.parse_fragment_samples(&frag, timescale, codec, cenc.as_ref())?;
                     for s in samples {
                         let mut annexb = s.annexb;
                         if self.need_param_sets && !starts_with_param_set(&annexb, codec) {
@@ -162,6 +223,61 @@ fn next_box_len(buf: &[u8]) -> Option<usize> {
         size as usize
     };
     (total >= 8).then_some(total)
+}
+
+/// Decrypt one cbcs sample in place: walk its `senc` subsamples, decrypting each
+/// protected range (an empty map means the whole sample is one protected range).
+#[cfg(feature = "hls")]
+fn cbcs_decrypt_sample(
+    buf: &mut [u8],
+    subsamples: &[Subsample],
+    key: &[u8; 16],
+    iv: &[u8; 16],
+    crypt: u8,
+    skip: u8,
+) {
+    if subsamples.is_empty() {
+        decrypt_protected_range(buf, key, iv, crypt, skip);
+        return;
+    }
+    let mut pos = 0usize;
+    for s in subsamples {
+        pos = (pos + s.clear as usize).min(buf.len());
+        let end = (pos + s.protected as usize).min(buf.len());
+        if pos < end {
+            decrypt_protected_range(&mut buf[pos..end], key, iv, crypt, skip);
+        }
+        pos = end;
+    }
+}
+
+/// cbcs pattern decrypt over one protected range: AES-128-CBC the encrypted
+/// 16-byte blocks (a `crypt`:`skip` block pattern, or every block when either is
+/// zero), the IV reset to the constant IV at the range start, CBC chaining across
+/// the encrypted blocks only. A trailing partial block is left clear.
+#[cfg(feature = "hls")]
+fn decrypt_protected_range(range: &mut [u8], key: &[u8; 16], iv: &[u8; 16], crypt: u8, skip: u8) {
+    use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+    type Dec = cbc::Decryptor<aes::Aes128>;
+
+    let block_count = range.len() / 16;
+    let offsets: Vec<usize> = if crypt == 0 || skip == 0 {
+        (0..block_count).map(|b| b * 16).collect()
+    } else {
+        let span = (crypt + skip) as usize;
+        (0..block_count).filter(|b| b % span < crypt as usize).map(|b| b * 16).collect()
+    };
+    if offsets.is_empty() {
+        return;
+    }
+    let mut gathered: Vec<u8> =
+        offsets.iter().flat_map(|&o| range[o..o + 16].iter().copied()).collect();
+    Dec::new(&(*key).into(), &(*iv).into())
+        .decrypt_padded_mut::<NoPadding>(&mut gathered)
+        .expect("cbcs region is block-aligned");
+    for (i, &o) in offsets.iter().enumerate() {
+        range[o..o + 16].copy_from_slice(&gathered[i * 16..i * 16 + 16]);
+    }
 }
 
 impl AsyncElement for Fmp4Demux {

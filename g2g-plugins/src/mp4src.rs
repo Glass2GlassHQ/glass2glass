@@ -137,7 +137,10 @@ impl SourceLoop for Mp4Src {
                 }
             }
             let header = self.header.as_ref().expect("parsed above");
-            let samples = parse_fragments(&data, header.timescale, header.codec)?;
+            // No decryptor here: an encrypted (cbcs) file fails loud rather than
+            // emitting garbage. Decryption lives in `fmp4demux` (the HLS path).
+            let samples =
+                parse_fragments(&data, header.timescale, header.codec, header.cenc.as_ref(), None)?;
 
             let mut sequence = 0u64;
             // The next emitted frame is a (re)start: prepend the out-of-band
