@@ -183,6 +183,10 @@ pub mod mjpegdec;
 #[cfg(feature = "mjpeg-encode")]
 pub mod mjpegenc;
 
+// HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
+#[cfg(feature = "http-src")]
+pub mod httpsrc;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

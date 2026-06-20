@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M155: HttpSrc (HTTP(S) byte-stream source)
+
+- **`HttpSrc` GETs a URL and streams the response body** downstream as
+  `Caps::ByteStream` `DataFrame` chunks then `Eos` (`http-src` feature, via the
+  async `reqwest` client). The souphttpsrc analog and the network sibling of
+  `FileSrc`: it feeds the byte-stream demuxers (`tsdemux` / `matroskademux` / ...)
+  the same way, and is the per-segment fetch layer the HLS/DASH work sits on. Caps
+  are declared at construction or via the `location` / `bytestream-format`
+  properties (the container is not knowable from the URL alone). Runs on the
+  caller's tokio runtime; uses reqwest `default-tls` (SChannel on Windows, no build
+  tools; Linux needs system OpenSSL).
+- Header-sniff (`bytestream-format=auto`) and a `uridecodebin` `http(s)://` handler
+  are deferred: both need a negotiation-time ranged fetch to detect the container.
+- Verified by `m155_httpsrc.rs`: against a local one-shot TCP HTTP server, a
+  200 KB payload round-trips byte-exact across multiple chunks ending in EOS, and a
+  404 status fails the run loud.
+
 ### M154: I420 in/out for the MJPEG codecs
 
 - **`MjpegDec` gains `with_output_format(RawVideoFormat::I420)`** (default still

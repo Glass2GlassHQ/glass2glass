@@ -327,11 +327,12 @@ modern PipeWire path remain.
   buffer (packet reorder, loss concealment, RTCP RR/NACK) is the remaining
   receive-side robustness work. Also SDP/SPS-driven caps discovery so `UdpSrc`
   reports real geometry instead of a declared hint.
-- **`souphttpsrc` / `HttpSrc`.** 2 sessions. HTTP / HTTPS source. Blocked on a
-  byte-stream type + consumer (see the `HttpSrc` note in Phase 2 above): `Caps`
-  has no byte-stream variant and nothing consumes one today, so build it as the
-  fetch layer of an HLS/DASH element rather than standalone. `reqwest` or
-  `hyper` as the backing crate.
+- **`souphttpsrc` / `HttpSrc` — DONE (M155).** `g2g-plugins::httpsrc::HttpSrc`
+  (`http-src` feature) GETs a URL via `reqwest` and streams the body as
+  `Caps::ByteStream` chunks then `Eos`, feeding the byte-stream demuxers like
+  `FileSrc` does. **Remaining:** header-sniff (`bytestream-format=auto`) and a
+  `uridecodebin` `http(s)://` handler (both need a negotiation-time ranged fetch),
+  HTTP range requests / seeking, and retry/reconnect for live edges.
 - **`rtmpsrc`** (RTMP ingest). Tied to the RTMP transport in parity gaps.
 - **`srtsrc`** (SRT ingest). Tied to the SRT transport in parity gaps.
 
