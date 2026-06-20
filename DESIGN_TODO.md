@@ -403,9 +403,15 @@ via the generalized `FfmpegVideoDec` (libavcodec; Linux / `ffmpeg` feature),
 which the M108-M110 demuxers feed. The notable remaining gaps are the encoders
 and the pure-Rust / browser decode paths:
 
-- **VP8 / VP9 encode.** 3 sessions each. WebRTC default video; decode is done
-  (M111, ffmpeg). ffmpeg has the encoders too; wrappers parallel the encode
-  elements. A pure-Rust / wasm decode path (vs the libavcodec FFI) is separate.
+- **VP8 / VP9 encode — DONE (M151), gated + unverified-on-host.**
+  `g2g-plugins::vpxenc::VpxEnc` (`vpx` feature) wraps libvpx via the `vpx-encode`
+  crate: `RawVideo{I420}` -> `CompressedVideo{Vp8|Vp9}`, the GStreamer
+  `vp8enc`/`vp9enc` analog. Not pure Rust (links system libvpx + bindgen), so it is
+  feature-gated and out of pure-Rust / no_std builds. Authored against the
+  `vpx-encode` 0.6 API but compile-unverified on the dev host (no libvpx here); owes
+  a real build/run on a libvpx machine, with a gated `Vp9Parse` round-trip test
+  ready. **Remaining:** validate on a libvpx host, then a pure-Rust / wasm VP8/VP9
+  decode path (vs the libavcodec FFI) is separate.
 - **AV1 encode — DONE (M150).** `g2g-plugins::av1enc::Av1Enc` (`av1-encode`
   feature) wraps the pure-Rust `rav1e` encoder: `RawVideo{I420}` ->
   `CompressedVideo{Av1}`, the first portable / CI-verifiable video encoder (the MF

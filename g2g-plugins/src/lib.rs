@@ -170,6 +170,11 @@ pub mod mfaacdecode;
 #[cfg(feature = "av1-encode")]
 pub mod av1enc;
 
+// VP8/VP9 software encode via libvpx (FFI through vpx-encode). Not pure Rust;
+// links system libvpx, gated behind the `vpx` feature.
+#[cfg(feature = "vpx")]
+pub mod vpxenc;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

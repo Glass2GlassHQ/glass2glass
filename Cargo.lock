@@ -2304,6 +2304,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "env-libvpx-sys"
+version = "5.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26ecdc636a02003406cc821aa9d703c888a966a3fd9bbdae9f7cf27d71720147"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2731,6 +2740,7 @@ dependencies = [
  "url",
  "v4l",
  "vello",
+ "vpx-encode",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wayland-egl",
@@ -6565,6 +6575,16 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
+
+[[package]]
+name = "vpx-encode"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1f41af42de7667cbdba44e8c38c36e9ede970f1291c32ea57c0ded8eb6f4b6"
+dependencies = [
+ "env-libvpx-sys",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "walkdir"

@@ -142,6 +142,13 @@ wgpu-sink = ["std", "dep:wgpu"]
 # encoder. Cross-platform, implies std. Verified by round-tripping the output
 # through `av1parse` (M136).
 av1-encode = ["std", "dep:rav1e"]
+# VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
+# vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
+# bindgen (needs clang/LLVM) at build, so it is gated here and excluded from
+# pure-Rust / no_std builds. Cross-platform but requires libvpx installed
+# (Windows: vcpkg `libvpx`; Debian/Ubuntu: `libvpx-dev`; Fedora: `libvpx-devel`).
+# Implies std.
+vpx = ["std", "dep:vpx-encode"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -149,6 +156,9 @@ g2g-core = { path = "../g2g-core", features = ["runtime"] }
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
 # encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
 rav1e = { version = "0.8", optional = true, default-features = false }
+# libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
+# codec alongside VP8. Links system libvpx + runs bindgen at build (env-libvpx-sys).
+vpx-encode = { version = "0.6", optional = true, features = ["vp9"] }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }

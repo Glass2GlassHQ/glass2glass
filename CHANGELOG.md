@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M151: VpxEnc (VP8 / VP9 encode via libvpx FFI)
+
+- **`VpxEnc` encodes `RawVideo{I420}` to `CompressedVideo{Vp8|Vp9}`** via libvpx
+  through the `vpx-encode` crate (`vpx` feature), the GStreamer `vp8enc`/`vp9enc`
+  analog. Unlike the pure-Rust `Av1Enc`, this links the system `libvpx` and runs
+  bindgen (clang) at build, so it is gated behind `vpx` and excluded from
+  pure-Rust / no_std builds. Codec (`with_codec`, VP8/VP9, default VP9) and bitrate
+  (`with_bitrate_kbps`) are builder-configurable; the element builds a libvpx
+  `Encoder` at configure, encodes each I420 frame (timebase 1/1000), flushes on EOS
+  (consuming the context), and carries `unsafe impl Send` under the same
+  move-not-share contract as `MfDecode`.
+- **Compile-unverified on the dev host:** this Windows machine has no libvpx
+  (`pkg-config` can't find `vpx`), so `env-libvpx-sys`'s build script fails before
+  the element compiles. It is authored against the `vpx-encode` 0.6 API and owes a
+  real build/run on a libvpx host (Windows: `vcpkg install libvpx` + `PKG_CONFIG_PATH`;
+  Debian/Ubuntu: `libvpx-dev`; Fedora: `libvpx-devel`), like the `ffmpeg`/`vaapi`
+  features. The default (`vpx`-off) build and the rest of the suite are unaffected.
+- Test (gated, runs on a libvpx host): encoding five 64x64 I420 frames yields
+  non-empty VP9 packets, and feeding the output through `Vp9Parse` (M135) recovers
+  the 64x64 geometry, mirroring the `Av1Enc` round-trip.
+
 ### M150: Av1Enc (pure-Rust AV1 software encode)
 
 - **`Av1Enc` encodes `RawVideo{I420}` to `CompressedVideo{Av1}`** via the pure-Rust
