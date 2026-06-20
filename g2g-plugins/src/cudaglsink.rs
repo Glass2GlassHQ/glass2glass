@@ -87,9 +87,9 @@ use wayland_egl::WlEglSurface;
 use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, ClockCandidate, ClockPriority, ConfigureOutcome, Dim,
-    Frame, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
-    RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
+    ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 use crate::cuda::{
@@ -227,6 +227,20 @@ impl AsyncElement for CudaGlSink {
         // Pass-through at negotiation; NV12 is enforced in configure_pipeline.
         // The native decoder lands NV12 on this link via its DerivedOutput.
         Ok(upstream_caps.clone())
+    }
+
+    /// Native NV12-only sink constraint (mirrors `KmsSink` / `WaylandSink`): the
+    /// solver intersects this against the upstream decoder's NV12 `DerivedOutput`
+    /// and lands fixed NV12 on the link, so an undecoded (non-NV12) chain fails
+    /// loud in negotiation. Geometry stays open; the decoder fixates it. The
+    /// CUDA-vs-system memory-domain check stays per-frame in `process`.
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }))
     }
 
     /// M12 / C3 step 3: ask the producer to keep buffers in CUDA device memory

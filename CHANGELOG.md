@@ -5,6 +5,20 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M132: V4l2Src + CudaGlSink native caps_constraint
+
+- **`V4l2Src` / `CudaGlSink` off the legacy caps bridge**, the last two in-tree
+  production elements on it. `V4l2Src` overrides `SourceLoop::caps_constraint` to
+  `Produces` the YUYV caps its ioctl probe settles on (mirrors `UdpSrc`);
+  `CudaGlSink` overrides `caps_constraint_as_sink` to `Accepts` NV12 at open
+  geometry (mirrors `KmsSink` / `WaylandSink`). A camera or CUDA-GL chain now
+  solves on the native arc-consistency path, not the mixed cascade. The `Legacy*`
+  bridge stays only as the default fallback for hand-written / future elements;
+  full deletion is deferred.
+- Linux-gated, so not compiled on the Windows dev host (no CI): both edits are
+  verbatim mirrors of compiling siblings using only core types, owed a confirming
+  `v4l2` / `cuda-gl` build, as the `CudaGlSink` header already notes.
+
 ### M131: UdpSrc + RtspSrc native caps_constraint
 
 - **`UdpSrc` / `RtspSrc` off the legacy caps bridge.** Both override

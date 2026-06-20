@@ -23,8 +23,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
+    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 
 use v4l::buffer::Type;
@@ -142,6 +143,17 @@ impl SourceLoop for V4l2Src {
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         // The probe ioctls are quick and synchronous; no need for an async body.
         core::future::ready(self.negotiate())
+    }
+
+    /// Produces the YUYV caps the driver settles on during the ioctl probe, so a
+    /// chain built on the camera takes the native arc-consistency path. Mirrors
+    /// `UdpSrc`; the probe is synchronous, so no async body is needed.
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(
+            self.negotiate().map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+        )
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
