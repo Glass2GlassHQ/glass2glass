@@ -10,16 +10,23 @@
 //! segment once (tracked by HLS media-sequence), and ends when ENDLIST finally
 //! appears or downstream shuts down.
 //!
+//! `#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place: the 16-byte key
+//! is fetched from the key URI (cached per run) and each segment is AES-128-CBC
+//! decrypted with the explicit `IV` or, absent one, the segment media-sequence
+//! number as a 128-bit big-endian IV. `SAMPLE-AES` is rejected (per-sample, not
+//! whole-segment). The init segment (`#EXT-X-MAP`) is assumed unencrypted.
+//!
 //! Scope: in-order segment fetch, one `DataFrame` per segment, a fixed variant
 //! (no mid-stream ABR switch). fMP4/CMAF segments, byte-range segments,
-//! key/decryption, throughput-driven ABR, and live-edge start (skip to the last
-//! few segments) are follow-ups (DESIGN_TODO).
+//! throughput-driven ABR, and live-edge start (skip to the last few segments)
+//! are follow-ups (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -28,7 +35,7 @@ use g2g_core::{
 };
 
 use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
-use crate::hls::{parse, MediaPlaylist, Playlist};
+use crate::hls::{parse, KeyMethod, MediaPlaylist, Playlist};
 
 #[derive(Debug)]
 pub struct HlsSrc {
@@ -115,6 +122,44 @@ async fn resolve_media(
     }
 }
 
+/// Fetch a 16-byte AES-128 key, memoized by URI (keys rarely rotate, so a small
+/// linear cache suffices).
+async fn fetch_key(
+    client: &reqwest::Client,
+    cache: &mut Vec<(String, [u8; 16])>,
+    url: &str,
+) -> Result<[u8; 16], G2gError> {
+    if let Some((_, key)) = cache.iter().find(|(u, _)| u == url) {
+        return Ok(*key);
+    }
+    let bytes = get_bytes(client, url).await?;
+    let key: [u8; 16] = bytes.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
+    cache.push((String::from(url), key));
+    Ok(key)
+}
+
+/// The default HLS IV when `#EXT-X-KEY` carries none: the segment media-sequence
+/// number as a 128-bit big-endian integer.
+fn iv_from_sequence(seq: u64) -> [u8; 16] {
+    let mut iv = [0u8; 16];
+    iv[8..].copy_from_slice(&seq.to_be_bytes());
+    iv
+}
+
+/// AES-128-CBC decrypt with PKCS7 padding, in place; returns the plaintext.
+fn decrypt_aes128_cbc(key: &[u8; 16], iv: &[u8; 16], mut data: Vec<u8>) -> Result<Vec<u8>, G2gError> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+    let plaintext_len = {
+        let plaintext = Aes128CbcDec::new(&(*key).into(), &(*iv).into())
+            .decrypt_padded_mut::<Pkcs7>(&mut data)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        plaintext.len()
+    };
+    data.truncate(plaintext_len);
+    Ok(data)
+}
+
 impl SourceLoop for HlsSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -154,6 +199,8 @@ impl SourceLoop for HlsSrc {
             let (mut media, media_url) = resolve_media(&client, &self.url, self.cap()).await?;
 
             let mut sequence = 0u64;
+            // AES-128 keys fetched once per URI and reused across segments.
+            let mut keys: Vec<(String, [u8; 16])> = Vec::new();
             // Next HLS media-sequence number to play; segments below it on a live
             // reload were already delivered.
             let mut next_seq = media.media_sequence;
@@ -176,6 +223,17 @@ impl SourceLoop for HlsSrc {
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
                         let bytes = get_bytes(&client, &seg_url).await?;
+                        let bytes = match &segment.key {
+                            None => bytes,
+                            Some(key) if key.method == KeyMethod::Aes128 => {
+                                let key_url = resolve_url(&media_url, &key.uri);
+                                let key_bytes = fetch_key(&client, &mut keys, &key_url).await?;
+                                let iv = key.iv.unwrap_or_else(|| iv_from_sequence(seg_seq));
+                                decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
+                            }
+                            // SAMPLE-AES is per-sample, not whole-segment.
+                            Some(_) => return Err(G2gError::CapsMismatch),
+                        };
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;

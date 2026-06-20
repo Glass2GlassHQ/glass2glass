@@ -20,12 +20,34 @@ pub struct Variant {
     pub uri: String,
 }
 
+/// `#EXT-X-KEY` encryption method. `SampleAes` is recognized but unsupported by
+/// [`HlsSrc`](crate::hlssrc) (per-sample, not whole-segment encryption); a
+/// `METHOD=NONE` tag clears the key rather than producing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyMethod {
+    Aes128,
+    SampleAes,
+}
+
+/// The decryption context a preceding `#EXT-X-KEY` puts in effect for a segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentKey {
+    pub method: KeyMethod,
+    /// Key resource URI (the caller resolves it against the playlist URL).
+    pub uri: String,
+    /// Explicit `IV` (16 bytes) from the tag, or `None` to derive it from the
+    /// segment's media-sequence number.
+    pub iv: Option<[u8; 16]>,
+}
+
 /// One media segment in a media playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub uri: String,
     /// Segment duration in milliseconds (from `#EXTINF`, seconds * 1000).
     pub duration_ms: u32,
+    /// Decryption context from the `#EXT-X-KEY` in effect, `None` if unencrypted.
+    pub key: Option<SegmentKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +110,9 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     let mut media_sequence = 0u64;
     let mut map_uri = None;
     let mut end_list = false;
+    // The `#EXT-X-KEY` carries forward to every following segment until the next
+    // one changes or clears it.
+    let mut current_key: Option<SegmentKey> = None;
     // A tag carries over to the next URI line: Some(duration_ms) for a segment,
     // or the variant being built for a stream-inf.
     let mut pending_segment: Option<u32> = None;
@@ -107,6 +132,8 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 .into_iter()
                 .find(|(k, _)| *k == "URI")
                 .map(|(_, v)| String::from(v.trim_matches('"')));
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
+            current_key = parse_key(attrs);
         } else if line == "#EXT-X-ENDLIST" {
             end_list = true;
         } else if line.starts_with('#') {
@@ -115,7 +142,11 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             variant.uri = String::from(line);
             variants.push(variant);
         } else if let Some(duration_ms) = pending_segment.take() {
-            segments.push(Segment { uri: String::from(line), duration_ms });
+            segments.push(Segment {
+                uri: String::from(line),
+                duration_ms,
+                key: current_key.clone(),
+            });
         }
         // a bare URI with no pending tag is ignored
     }
@@ -152,6 +183,34 @@ fn parse_stream_inf(attrs: &str) -> Variant {
         }
     }
     Variant { bandwidth, resolution, codecs, uri: String::new() }
+}
+
+/// Parse an `#EXT-X-KEY` attribute list. `METHOD=NONE` (or a missing/unknown
+/// method or a keyed method with no `URI`) yields `None`, clearing encryption.
+fn parse_key(attrs: &str) -> Option<SegmentKey> {
+    let pairs = attr_pairs(attrs);
+    let find = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let method = match find("METHOD")? {
+        "AES-128" => KeyMethod::Aes128,
+        "SAMPLE-AES" => KeyMethod::SampleAes,
+        _ => return None,
+    };
+    let uri = String::from(find("URI")?.trim_matches('"'));
+    let iv = find("IV").and_then(parse_iv);
+    Some(SegmentKey { method, uri, iv })
+}
+
+/// `IV=0x<32 hex digits>` -> 16 bytes. Anything else is rejected.
+fn parse_iv(value: &str) -> Option<[u8; 16]> {
+    let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut iv = [0u8; 16];
+    for (i, byte) in iv.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(iv)
 }
 
 /// Split a comma-separated `KEY=VALUE` attribute list, respecting double-quoted
@@ -215,7 +274,7 @@ mod tests {
         assert_eq!(m.media_sequence, 7);
         assert!(m.end_list);
         assert_eq!(m.segments.len(), 3);
-        assert_eq!(m.segments[0], Segment { uri: "seg0.ts".into(), duration_ms: 9009 });
+        assert_eq!(m.segments[0], Segment { uri: "seg0.ts".into(), duration_ms: 9009, key: None });
         assert_eq!(m.segments[2].duration_ms, 3003);
     }
 
@@ -263,6 +322,41 @@ mod tests {
         assert_eq!(master.select(Some(1_000_000)).unwrap().uri, "low.m3u8");
         // Cap below everything: falls back to the lowest.
         assert_eq!(master.select(Some(1)).unwrap().uri, "low.m3u8");
+    }
+
+    #[test]
+    fn ext_x_key_applies_to_following_segments_until_changed() {
+        let text = "#EXTM3U\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"k1.key\",IV=0x00000000000000000000000000000001\n\
+            #EXTINF:4.0,\n\
+            seg0.ts\n\
+            #EXTINF:4.0,\n\
+            seg1.ts\n\
+            #EXT-X-KEY:METHOD=NONE\n\
+            #EXTINF:4.0,\n\
+            seg2.ts\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"k2.key\"\n\
+            #EXTINF:4.0,\n\
+            seg3.ts\n\
+            #EXT-X-ENDLIST\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        let mut iv1 = [0u8; 16];
+        iv1[15] = 1;
+        assert_eq!(
+            m.segments[0].key,
+            Some(SegmentKey { method: KeyMethod::Aes128, uri: "k1.key".into(), iv: Some(iv1) }),
+        );
+        // The key carries forward to the next segment unchanged.
+        assert_eq!(m.segments[1].key, m.segments[0].key);
+        // METHOD=NONE clears it.
+        assert_eq!(m.segments[2].key, None);
+        // A new key with no IV defaults to a sequence-derived IV (resolved later).
+        assert_eq!(
+            m.segments[3].key,
+            Some(SegmentKey { method: KeyMethod::Aes128, uri: "k2.key".into(), iv: None }),
+        );
     }
 
     #[test]

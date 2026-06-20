@@ -159,27 +159,16 @@ Production-shape needs that block specific real-world use cases.
   variant for HD/many-input scale; NV12/I420 mixing without a round-trip through
   RGBA; and configurable output cadence.
 
-- **Adaptive streaming demuxers (HLS, DASH).** HLS VOD is **DONE (M156)**:
-  `g2g-plugins::hls` (pure-Rust RFC 8216 playlist parser, master + media) +
-  `hlssrc::HlsSrc` (`hls` feature) fetch the playlist, ABR-select a variant, and
-  stream its MPEG-TS segments as a `Caps::ByteStream{MpegTs}` into `tsdemux`.
-  Live playlist reload is **DONE (M157)**: `HlsSrc` reloads a no-ENDLIST media
-  playlist on an interval, plays each new segment once (media-sequence tracked),
-  and ends on ENDLIST or downstream shutdown.
-  fMP4/CMAF demux is **DONE (M158)**: `Caps::ByteStream{IsoBmff}` +
-  `fmp4demux::Fmp4Demux` (streaming fragmented-MP4 demux, shares the `fmp4` parser
-  with `mp4src`), and **wired into HLS (M159)**: the parser reads `#EXT-X-MAP`,
-  `HlsSrc` probes the container at negotiation and emits the init segment then the
-  fragments as `ByteStream{IsoBmff}` (`HlsSrc ! fmp4demux`), verified end to end.
-  **Remaining HLS:** byte-range segments, AES-128/SAMPLE-AES keyed segments,
+- **Adaptive streaming (HLS, DASH).** Built and documented in DESIGN.md §4.17:
+  the `HttpSrc` fetch layer, `HlsSrc` (TS + fMP4/CMAF via `#EXT-X-MAP`, live
+  reload, AES-128 `#EXT-X-KEY` decryption), and `DashSrc` (static MPD,
+  `SegmentTemplate` `$Number$`).
+  **Remaining HLS:** SAMPLE-AES + encrypted init segments, byte-range segments,
   throughput-driven ABR (the current pick is static by declared bandwidth),
   live-edge start (skip to the last few segments), and mid-stream variant switching.
-  **DASH static VOD is DONE (M160):** `g2g-plugins::mpd` (roxmltree MPD parser) +
-  `dashsrc::DashSrc` (`dash` feature) parse the manifest, ABR-select a
-  Representation, and stream its fMP4 init + `SegmentTemplate` `$Number$` segments
-  as `ByteStream{IsoBmff}` into `fmp4demux`. **Remaining DASH:** `SegmentTimeline`
-  and `$Time$` addressing, dynamic (live) MPD reload, `SegmentList`/`SegmentBase`
-  byte-range, multi-period, and throughput-driven ABR.
+  **Remaining DASH:** `SegmentTimeline` and `$Time$` addressing, dynamic (live) MPD
+  reload, `SegmentList`/`SegmentBase` byte-range, multi-period, and
+  throughput-driven ABR.
 
 - **SRT / RTMP transports.** 2–3 sessions each. RTMP for legacy
   ingest (still ubiquitous), SRT for low-latency contribution. Each

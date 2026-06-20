@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M161: HLS AES-128 segment decryption (EXT-X-KEY)
+
+- **`hls` parser reads `#EXT-X-KEY`** into a per-segment `SegmentKey` (`method` /
+  key `uri` / optional explicit `IV`), carried forward to following segments until
+  another `#EXT-X-KEY` changes it; `METHOD=NONE` clears it.
+- **`HlsSrc` decrypts `METHOD=AES-128` segments** in place: the 16-byte key is
+  fetched from the key URI (cached per run) and each segment is AES-128-CBC
+  decrypted (PKCS7) with the explicit `IV` or, absent one, the segment
+  media-sequence number as a 128-bit big-endian IV. `SAMPLE-AES` is rejected
+  (per-sample, not whole-segment); the `#EXT-X-MAP` init segment is assumed
+  unencrypted.
+- **Deps:** `aes` 0.8 / `cbc` 0.1 (pure Rust, cipher-0.4 line) under the `hls`
+  feature. Pinned below `aes` 0.9 / `cbc` 0.2, which need rustc 1.85 (> workspace
+  MSRV 1.75).
+- Scope: AES-128 (full-segment) only. SAMPLE-AES and encrypted init segments are
+  follow-ups.
+- Verified by an `hls.rs` parser unit test (key carry-forward, NONE clear,
+  explicit vs sequence IV) and `m161_hls_aes128.rs` end to end: segments encrypted
+  here with the `aes`/`cbc` encryptor side, served with a keyed playlist + key
+  resource, decrypt back to the original plaintext for both IV modes.
+
 ### M160: DASH (MPD parser + DashSrc, SegmentTemplate)
 
 - **`mpd` MPD parser** (`dash` feature, via `roxmltree`) reads a static manifest:

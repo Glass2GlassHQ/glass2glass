@@ -1154,6 +1154,25 @@ only; the sequence header / extradata and the `onMetaData` script tag are
 follow-ups). With MP4 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV,
 the demux/mux coverage spans the major containers.
 
+Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
+a playlist/manifest-driven source that fetches media segments and hands them to
+the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`
+feature, `reqwest`) GETs a URL and streams the body as `Caps::ByteStream` chunks,
+the fetch layer the others share. `hlssrc::HlsSrc` (`hls`) parses an RFC 8216
+`.m3u8` (the pure `no_std` `hls` parser: master variants for bandwidth-capped ABR,
+media segments), selects a variant, and streams its segments, MPEG-TS into
+`tsdemux` or fMP4/CMAF (signalled by `#EXT-X-MAP`, probed at negotiation) as
+`ByteStream{IsoBmff}` into `fmp4demux`. It reloads a no-ENDLIST live playlist on an
+interval, playing each new segment once by media sequence.
+`#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place (AES-128-CBC via
+`aes`/`cbc`, key fetched from the key URI and cached, IV explicit or derived from
+the media-sequence number); `SAMPLE-AES` is rejected. `dashsrc::DashSrc` (`dash`)
+is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
+`roxmltree`), selects a Representation, and streams its `SegmentTemplate`
+`$Number$` fMP4 init + media segments into `fmp4demux`. Throughput-driven ABR,
+byte-range segments, live DASH, and DASH `SegmentTimeline` are follow-ups
+(DESIGN_TODO).
+
 ---
 
 ## 5. First-Class Machine Learning Integration

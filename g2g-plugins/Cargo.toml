@@ -168,7 +168,8 @@ http-src = ["std", "dep:reqwest"]
 # and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
 # `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
 # pure no_std and always compiled; only the fetching element needs this feature.
-hls = ["http-src"]
+# aes/cbc decrypt AES-128 `#EXT-X-KEY` segments.
+hls = ["http-src", "dep:aes", "dep:cbc"]
 # DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
 # `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
@@ -195,6 +196,11 @@ reqwest = { version = "0.12", optional = true }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }
+# Pure-Rust AES + CBC for HLS AES-128 segment decryption (`#EXT-X-KEY`, hls
+# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56): cbc 0.2
+# / aes 0.9 need rustc 1.85, above the workspace MSRV 1.75.
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
@@ -290,6 +296,10 @@ tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 # integration test only. Feature unification keeps the lib build at `runtime`.
 g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
 embassy-futures = "0.1.2"
+# AES-128-CBC encryptor as the ciphertext fixture for the m161 HLS decryption
+# test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
