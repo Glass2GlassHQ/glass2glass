@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M156: HLS playlist parser + HlsSrc (adaptive streaming, VOD)
+
+- **`hls` playlist parser (pure `no_std + alloc`, always compiled)** parses both
+  `.m3u8` forms per RFC 8216: a master playlist (`#EXT-X-STREAM-INF` variants with
+  BANDWIDTH / RESOLUTION / CODECS, quoted-comma-safe attribute parsing) and a
+  media playlist (`#EXTINF` segments to ms, TARGETDURATION, MEDIA-SEQUENCE,
+  ENDLIST). `MasterPlaylist::select` is a simple bandwidth-capped ABR pick.
+- **`HlsSrc` (`hls` feature)** fetches the playlist via `reqwest`, resolves a
+  master down to a media playlist (relative / absolute-path / full-URL resolution),
+  and streams that variant's MPEG-TS segments in order as `Caps::ByteStream{MpegTs}`
+  `DataFrame`s then `Eos`, feeding `tsdemux`. `with_max_bandwidth` caps the ABR
+  pick. Builds on the M155 HTTP fetch layer.
+- Scope is VOD; live playlist reload, fMP4/CMAF segments, byte-range / keyed
+  segments, and throughput-driven ABR are follow-ups.
+- Verified by `hls.rs` unit tests (master/media parse, ABR selection, malformed
+  rejection), `hlssrc` URL-resolution tests, and `m156_hlssrc.rs` end to end:
+  against a local routing HTTP server, the master resolves to the high variant and
+  both segments arrive byte-exact in order ending in EOS.
+
 ### M155: HttpSrc (HTTP(S) byte-stream source)
 
 - **`HttpSrc` GETs a URL and streams the response body** downstream as

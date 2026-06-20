@@ -164,6 +164,11 @@ mjpeg-encode = ["std", "dep:jpeg-encoder"]
 # Uses reqwest default-tls (SChannel on Windows, SecureTransport on macOS; Linux
 # needs system OpenSSL dev headers, like the other native-backed features).
 http-src = ["std", "dep:reqwest"]
+# HLS source (HlsSrc): fetches an .m3u8 playlist, selects a variant (simple ABR),
+# and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
+# `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
+# pure no_std and always compiled; only the fetching element needs this feature.
+hls = ["http-src"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }

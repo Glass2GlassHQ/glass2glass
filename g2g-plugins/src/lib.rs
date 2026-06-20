@@ -187,6 +187,11 @@ pub mod mjpegenc;
 #[cfg(feature = "http-src")]
 pub mod httpsrc;
 
+// HLS playlist parser (pure, no_std baseline) and the HlsSrc segment source.
+pub mod hls;
+#[cfg(feature = "hls")]
+pub mod hlssrc;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

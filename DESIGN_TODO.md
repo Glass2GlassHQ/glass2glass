@@ -159,11 +159,15 @@ Production-shape needs that block specific real-world use cases.
   variant for HD/many-input scale; NV12/I420 mixing without a round-trip through
   RGBA; and configurable output cadence.
 
-- **Adaptive streaming demuxers (HLS, DASH).** 2–4 sessions each.
-  Playlist parsing + ABR rate selection + per-segment fetch +
-  CMAF/fMP4 handoff. The OBS / Twitch / YouTube Live / DASH player
-  ecosystem isn't reachable without these. Each is its own
-  non-trivial implementation; pick by use case.
+- **Adaptive streaming demuxers (HLS, DASH).** HLS VOD is **DONE (M156)**:
+  `g2g-plugins::hls` (pure-Rust RFC 8216 playlist parser, master + media) +
+  `hlssrc::HlsSrc` (`hls` feature) fetch the playlist, ABR-select a variant, and
+  stream its MPEG-TS segments as a `Caps::ByteStream{MpegTs}` into `tsdemux`.
+  **Remaining HLS:** live playlist reload (no ENDLIST), fMP4/CMAF segments (needs a
+  ByteStream/MP4 handoff), byte-range + AES-128/SAMPLE-AES keyed segments, and
+  throughput-driven ABR (the current pick is static by declared bandwidth).
+  **DASH** (MPD parsing + the same per-segment fetch over the CMAF handoff) is still
+  open, 2-4 sessions, and reuses the `HttpSrc` fetch layer.
 
 - **SRT / RTMP transports.** 2–3 sessions each. RTMP for legacy
   ingest (still ubiquitous), SRT for low-latency contribution. Each
