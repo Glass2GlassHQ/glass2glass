@@ -195,6 +195,9 @@ mod fetch;
 pub mod hls;
 #[cfg(feature = "hls")]
 pub mod hlssrc;
+// HLS SAMPLE-AES per-sample decryptor (runs after the demuxer).
+#[cfg(feature = "hls")]
+pub mod sampleaesdecrypt;
 
 // DASH MPD parser and the DashSrc segment source.
 #[cfg(feature = "dash")]

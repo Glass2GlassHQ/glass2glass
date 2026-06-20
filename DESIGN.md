@@ -1166,7 +1166,14 @@ media segments), selects a variant, and streams its segments, MPEG-TS into
 interval, playing each new segment once by media sequence.
 `#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place (AES-128-CBC via
 `aes`/`cbc`, key fetched from the key URI and cached, IV explicit or derived from
-the media-sequence number); `SAMPLE-AES` is rejected. `dashsrc::DashSrc` (`dash`)
+the media-sequence number). `METHOD=SAMPLE-AES` encrypts only the media samples
+inside the container, so it is handled after demux by the
+`sampleaesdecrypt::SampleAesDecrypt` transform (`tsdemux ! sampleaesdecrypt !
+h264parse`): per the Apple TS sample-encryption format it AES-128-CBC decrypts
+H.264 slice NALs (32-byte clear leader, 16-encrypted / 144-clear pattern,
+emulation-prevention aware, IV reset per NAL) and AAC ADTS frames (ADTS header +
+16 clear bytes, then whole-block CBC), with the key/IV configured on the element.
+`dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its `SegmentTemplate`
 `$Number$` fMP4 init + media segments into `fmp4demux`. Throughput-driven ABR,

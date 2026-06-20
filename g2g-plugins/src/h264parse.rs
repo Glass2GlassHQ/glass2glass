@@ -435,26 +435,10 @@ mod tests {
         // emulation-prevented like an encoder's output.
         let mut payload = vec![66u8, 0, 30];
         payload.extend_from_slice(&rbsp);
-        let payload = add_emulation_prevention(&payload);
+        let payload = crate::annexb::add_emulation_prevention(&payload);
 
         let mut out = vec![0u8, 0, 0, 1, 0x67];
         out.extend_from_slice(&payload);
-        out
-    }
-
-    /// Insert `0x03` after each `00 00` run preceding a byte <= 0x03, the
-    /// inverse of `strip_emulation_prevention`.
-    fn add_emulation_prevention(rbsp: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(rbsp.len());
-        let mut zeros = 0usize;
-        for &b in rbsp {
-            if zeros >= 2 && b <= 0x03 {
-                out.push(0x03);
-                zeros = 0;
-            }
-            out.push(b);
-            zeros = if b == 0 { zeros + 1 } else { 0 };
-        }
         out
     }
 

@@ -133,6 +133,24 @@ pub(crate) fn strip_emulation_prevention(ebsp: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Convert RBSP to EBSP by inserting a `0x03` emulation-prevention byte before
+/// any byte `<= 0x03` that follows two zero bytes, the inverse of
+/// [`strip_emulation_prevention`]. Used by the SAMPLE-AES decryptor to re-escape
+/// a NAL after decrypting its de-escaped payload.
+pub(crate) fn add_emulation_prevention(rbsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rbsp.len());
+    let mut zeros = 0usize;
+    for &b in rbsp {
+        if zeros >= 2 && b <= 0x03 {
+            out.push(0x03);
+            zeros = 0;
+        }
+        out.push(b);
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+    }
+    out
+}
+
 /// MSB-first bit reader over a byte slice, the shared bitstream cursor for the
 /// H.264 / H.265 SPS parsers. All readers return `None` on EOF rather than
 /// panicking, so a partial / malformed header propagates as "field unknown"

@@ -5,6 +5,33 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M162: HLS SAMPLE-AES sample decryptor (TS H.264 + AAC)
+
+- **`sampleaesdecrypt::SampleAesDecrypt`** (`hls` feature), the post-demux half of
+  HLS encryption. SAMPLE-AES encrypts only the media samples inside the container,
+  so unlike whole-segment AES-128 (decrypted by `HlsSrc`) it runs after the
+  demuxer, per access unit: `tsdemux ! sampleaesdecrypt ! h264parse`. Key + IV are
+  configured on the element.
+- **H.264:** per Annex-B slice NAL (type 1 / 5) over 48 bytes, strip
+  emulation-prevention, keep a 32-byte clear leader, AES-128-CBC decrypt a
+  16-encrypted / 144-clear block pattern (CBC chaining over the encrypted blocks
+  only, IV reset per NAL), re-escape. Other / short NALs pass through.
+- **AAC:** per ADTS frame (a PES payload may carry several), keep the ADTS header
+  + 16 leader bytes clear, CBC-decrypt the whole 16-byte blocks after them, IV
+  reset per frame.
+- Algorithm verified against the Apple "MPEG-2 Stream Encryption Format for HLS"
+  spec, cross-checked with hls.js and FFmpeg.
+- **Refactor:** `add_emulation_prevention` (the inverse of
+  `strip_emulation_prevention`) moved into the shared `annexb` module; the
+  `h264parse` test now uses it instead of a private copy.
+- Scope: TS SAMPLE-AES H.264 + AAC, key set on the element. Auto-wiring the
+  playlist `#EXT-X-KEY` key from `HlsSrc` through the demuxer, fMP4 `cbcs`, and
+  AC-3 are follow-ups.
+- Verified by inline round-trip tests (encrypt side mirrors decrypt, so the real
+  decrypt path runs against independent ciphertext): AVC IDR/non-IDR slices, AAC
+  multi-frame ADTS, short/non-slice pass-through, and the element driven through
+  `process`.
+
 ### M161: HLS AES-128 segment decryption (EXT-X-KEY)
 
 - **`hls` parser reads `#EXT-X-KEY`** into a per-segment `SegmentKey` (`method` /
