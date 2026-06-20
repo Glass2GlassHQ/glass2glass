@@ -696,22 +696,42 @@ pub struct MkvTrackSpec {
     pub sample_rate: u32,
 }
 
+/// Default cap on a Cluster's time span (ms): a new Cluster opens once a frame is
+/// this far past the current Cluster's base timestamp.
+const DEFAULT_MAX_CLUSTER_SPAN_MS: u64 = 1_000;
+
 /// Matroska / WebM multiplexer for a single track (M115): writes the EBML header,
-/// an unknown-size Segment, Info + Tracks, then one Cluster per frame. The
-/// inverse of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps it.
+/// an unknown-size Segment, Info + Tracks, then time-windowed Clusters of frames.
+/// The inverse of [`MatroskaDemuxer`]; the [`crate::mkvmux::MkvMux`] element wraps
+/// it.
 ///
-/// Scope (v1): one track, one frame per Cluster (correct but unbatched), default
-/// TimestampScale (1 ms). Cues, multi-track, and Cluster batching are follow-ups.
+/// Clusters are written with an unknown size (the live shape, M143): a new Cluster
+/// header opens the window and the next one ends it, so frames stream out
+/// incrementally without buffering a whole Cluster to learn its size. Frames batch
+/// into one Cluster until one is more than the span cap past its base timestamp
+/// (or time runs backward), amortizing the per-Cluster overhead.
+///
+/// Scope (v1): one track, default TimestampScale (1 ms). Cues and multi-track are
+/// follow-ups.
 #[derive(Debug)]
 pub struct MatroskaMuxer {
     spec: MkvTrackSpec,
     tags: TagList,
+    max_cluster_span_ms: u64,
     header_written: bool,
+    /// The open Cluster's base Timestamp (ms), or `None` before the first frame.
+    cluster_base_ms: Option<u64>,
 }
 
 impl MatroskaMuxer {
     pub fn new(spec: MkvTrackSpec) -> Self {
-        Self { spec, tags: TagList::new(), header_written: false }
+        Self {
+            spec,
+            tags: TagList::new(),
+            max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
+            header_written: false,
+            cluster_base_ms: None,
+        }
     }
 
     /// Attach stream metadata, written as a `Tags` element after Tracks on the
@@ -721,9 +741,16 @@ impl MatroskaMuxer {
         self
     }
 
+    /// Cap the time span of one Cluster (ms); a frame this far past the Cluster
+    /// base opens a new one. Keep it within the i16 block-timestamp range (±32 s).
+    pub fn with_max_cluster_span_ms(mut self, span_ms: u64) -> Self {
+        self.max_cluster_span_ms = span_ms;
+        self
+    }
+
     /// Mux one frame, writing the EBML header + Segment + Info + Tracks (+ Tags
-    /// when present) on the first call, then a Cluster (Timestamp + SimpleBlock)
-    /// for this frame.
+    /// when present) on the first call, then a SimpleBlock, opening a new
+    /// (unknown-size) Cluster first when the time window is exceeded.
     pub fn push_frame(&mut self, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
@@ -740,10 +767,22 @@ impl MatroskaMuxer {
             self.header_written = true;
         }
         let ts = pts_ns / DEFAULT_TIMESTAMP_SCALE;
-        let block = build_simple_block(MUX_TRACK_NUMBER, 0, keyframe, data);
-        let mut cluster = elem_vec(ID_TIMESTAMP, &uint_bytes(ts));
-        cluster.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
-        out.extend_from_slice(&elem_vec(ID_CLUSTER, &cluster));
+        let need_new_cluster = match self.cluster_base_ms {
+            None => true,
+            Some(base) => ts < base || ts - base > self.max_cluster_span_ms,
+        };
+        if need_new_cluster {
+            // Open an unknown-size Cluster: its id + a one-byte unknown-size marker,
+            // then the base Timestamp. The next Cluster header (or EOF) ends it.
+            id_bytes(ID_CLUSTER, &mut out);
+            out.push(0xFF);
+            out.extend_from_slice(&elem_vec(ID_TIMESTAMP, &uint_bytes(ts)));
+            self.cluster_base_ms = Some(ts);
+        }
+        let base = self.cluster_base_ms.expect("set above");
+        let rel = (ts as i64 - base as i64) as i16;
+        let block = build_simple_block(MUX_TRACK_NUMBER, rel, keyframe, data);
+        out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
         out
     }
 }
@@ -1273,6 +1312,45 @@ mod tests {
         let mut d = MatroskaDemuxer::new();
         d.push_data(&bytes);
         assert!(d.tags().is_empty());
+    }
+
+    fn count_clusters(bytes: &[u8]) -> usize {
+        bytes.windows(4).filter(|w| *w == [0x1F, 0x43, 0xB6, 0x75]).count()
+    }
+
+    #[test]
+    fn batches_frames_within_span_into_one_cluster() {
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let mut mux = MatroskaMuxer::new(spec); // default 1000 ms span
+        let mut out = mux.push_frame(&[1], 0, true);
+        out.extend_from_slice(&mux.push_frame(&[2], 100_000_000, false)); // 100 ms
+        out.extend_from_slice(&mux.push_frame(&[3], 200_000_000, false)); // 200 ms
+
+        assert_eq!(count_clusters(&out), 1, "frames within the span share one Cluster");
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&out);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].pts_ns, 0);
+        assert_eq!(frames[1].pts_ns, 100_000_000);
+        assert_eq!(frames[2].pts_ns, 200_000_000, "rel timestamps within the batched Cluster");
+    }
+
+    #[test]
+    fn opens_a_new_cluster_past_the_span() {
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let mut mux = MatroskaMuxer::new(spec).with_max_cluster_span_ms(500);
+        let mut out = mux.push_frame(&[1], 0, true);
+        out.extend_from_slice(&mux.push_frame(&[2], 600_000_000, true)); // 600 ms > 500 ms
+
+        assert_eq!(count_clusters(&out), 2, "a frame past the span opens a new Cluster");
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&out);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1].pts_ns, 600_000_000, "second Cluster carries its own base");
     }
 
     #[test]

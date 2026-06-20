@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M145: matroskamux Cluster batching
+
+- **`matroskamux` batches frames into Clusters** instead of writing one Cluster per
+  frame (~13 bytes of Cluster + Timestamp overhead each). Clusters are written with
+  an unknown size (the live shape, read since M143): a new Cluster header opens a
+  time window and the next one ends it, so frames still stream out incrementally with
+  no whole-Cluster buffering. Frames batch into one Cluster until one is more than
+  `max_cluster_span_ms` (default 1 s, `MatroskaMuxer::with_max_cluster_span_ms`) past
+  the Cluster base, or time runs backward; each block's timestamp is relative to the
+  Cluster base. Round-trips through the demuxer (M143's unknown-size Cluster path).
+- Tested: three frames within the span share one Cluster and recover their PTS; a
+  frame past the span opens a second Cluster carrying its own base. The existing
+  mux + demux round-trips (unit, element, and runner integration) still pass against
+  the new unknown-size batched output.
+
 ### M144: matroskademux DefaultDuration frame timing
 
 - **`matroskademux` reads `DefaultDuration` and spaces laced frames by it.** A laced
