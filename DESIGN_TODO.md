@@ -422,8 +422,12 @@ and the pure-Rust / browser decode paths:
   `rav1d`) to pair with it ffmpeg-free.
 - **Opus encode + decode.** 2 sessions. WebRTC audio default; we have AAC
   only. `opus` crate or libopus FFI.
-- **MJPEG decode.** 1 session. Low-end IP cameras (a huge installed base)
-  only emit MJPEG over RTSP. `mozjpeg` / `image` crates.
+- **MJPEG decode — DONE (M152).** `g2g-plugins::mjpegdec::MjpegDec` (`mjpeg`
+  feature) decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}` via the pure-Rust
+  `zune-jpeg` crate (no system dep, CI-verified on any host). Geometry recovered
+  from the JPEG headers per frame, emitted as `CapsChanged`. **Remaining:** I420
+  output (avoid the YCbCr->RGBA convert for planar consumers) and a `mozjpeg`-backed
+  fast path under a feature flag if decode CPU cost matters.
 - **JPEG decode + encode.** 1 session. Thumbnailing, snapshot capture.
 
 ### Parsers
@@ -604,12 +608,11 @@ decision). Open via `/dev/videoN` (configurable), `VIDIOC_QUERYCAP` +
   cameras with separate ISP control); not needed for the consumer
   webcam baseline.
 
-**B2 — MJPEG decode (1 session).** Unblocks the half of webcams that
-only emit MJPEG. Wrap `image` crate or `mozjpeg` for SW JPEG decode in a
-new `MjpegDec` element; `Caps::CompressedVideo { codec: Mjpeg }` →
-`Caps::RawVideo { format: I420 | Rgba8 }`. Lands here because `V4l2Src`'s
-default on every consumer webcam is MJPEG, and without `MjpegDec` the
-Phase B demo doesn't compose.
+**B2 — MJPEG decode — DONE (M152).** `MjpegDec` (`mjpeg` feature) wraps the
+pure-Rust `zune-jpeg` decoder: `Caps::CompressedVideo { codec: Mjpeg }` →
+`Caps::RawVideo { format: Rgba8 }`. Chose `zune-jpeg` over `image` / `mozjpeg`
+(pure Rust, no system dep, fast). Unblocks the half of consumer webcams that only
+emit MJPEG; pairs with `V4l2Src` / `MfVideoSrc` once they negotiate MJPEG.
 
 **B3 — `MfVideoSrc` (2 sessions).** Windows-only, `mf-video-src` feature.
 Media Foundation Source Reader pattern, paralleling `WasapiSrc` /

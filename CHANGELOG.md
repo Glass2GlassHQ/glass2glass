@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M152: MjpegDec (Motion-JPEG decode, pure Rust)
+
+- **`MjpegDec` decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}`** via the
+  pure-Rust `zune-jpeg` crate (`mjpeg` feature), the GStreamer `jpegdec` analog
+  for the MJPEG output of cheap UVC webcams (pairs with the future `v4l2src` /
+  `mfvideosrc` MJPEG path). No system dependency; unlike `VpxEnc` it builds and is
+  CI-verified on every host. Decode is stateless (each access unit an independent
+  baseline JPEG); geometry is recovered from the JPEG headers per frame and emitted
+  as a `CapsChanged` before the first frame and on any mid-stream size change, so a
+  source that advertises `Mjpeg` with `Any` dims still negotiates.
+- **New `VideoCodec::Mjpeg` variant** carries MJPEG through negotiation; the
+  `image/jpeg` caps string maps to it in the `gst-launch` grammar. `ffmpegdec`
+  gained the matching `Id::MJPEG` / `mjpeg_cuvid` arms (it does not advertise MJPEG
+  on its sink template; `MjpegDec` is the dedicated decoder). `matroskamux`'s
+  `video_to_mkv` now returns `Option` (MJPEG is unmappable to a Matroska track).
+- Verified by `m152_mjpegdec.rs`: a 16x16 baseline JPEG fixture decodes to a
+  16x16x4 RGBA buffer with the recovered geometry surfaced as one `CapsChanged`.
+
 ### M151: VpxEnc (VP8 / VP9 encode via libvpx FFI)
 
 - **`VpxEnc` encodes `RawVideo{I420}` to `CompressedVideo{Vp8|Vp9}`** via libvpx

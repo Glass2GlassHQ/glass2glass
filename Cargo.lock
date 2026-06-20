@@ -2747,6 +2747,7 @@ dependencies = [
  "web-sys",
  "wgpu",
  "windows",
+ "zune-jpeg",
 ]
 
 [[package]]

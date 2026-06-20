@@ -785,6 +785,7 @@ fn codec_id(codec: VideoCodec) -> Id {
         VideoCodec::Vp8 => Id::VP8,
         VideoCodec::Vp9 => Id::VP9,
         VideoCodec::Av1 => Id::AV1,
+        VideoCodec::Mjpeg => Id::MJPEG,
     }
 }
 
@@ -796,6 +797,7 @@ fn cuvid_name(codec: VideoCodec) -> &'static str {
         VideoCodec::Vp8 => "vp8_cuvid",
         VideoCodec::Vp9 => "vp9_cuvid",
         VideoCodec::Av1 => "av1_cuvid",
+        VideoCodec::Mjpeg => "mjpeg_cuvid",
     }
 }
 

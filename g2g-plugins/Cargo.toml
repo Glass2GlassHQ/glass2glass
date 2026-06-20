@@ -149,6 +149,11 @@ av1-encode = ["std", "dep:rav1e"]
 # (Windows: vcpkg `libvpx`; Debian/Ubuntu: `libvpx-dev`; Fedora: `libvpx-devel`).
 # Implies std.
 vpx = ["std", "dep:vpx-encode"]
+# Motion-JPEG decode via the pure-Rust `zune-jpeg` decoder (MjpegDec,
+# CompressedVideo{Mjpeg} -> RawVideo{Rgba8}). No system deps; the MJPEG output
+# of cheap UVC webcams (pairs with v4l2src / mfvideosrc). Implies std (zune's
+# SIMD paths use runtime feature detection); the decoder is otherwise no_std.
+mjpeg = ["std", "dep:zune-jpeg"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -159,6 +164,9 @@ rav1e = { version = "0.8", optional = true, default-features = false }
 # libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
 # codec alongside VP8. Links system libvpx + runs bindgen at build (env-libvpx-sys).
 vpx-encode = { version = "0.6", optional = true, features = ["vp9"] }
+# Pure-Rust JPEG decoder (mjpeg feature). Default features keep the x86/neon SIMD
+# paths and std; no system dependency.
+zune-jpeg = { version = "0.5", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }

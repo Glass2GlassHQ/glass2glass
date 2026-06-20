@@ -353,6 +353,9 @@ pub enum VideoCodec {
     Av1,
     Vp8,
     Vp9,
+    /// Motion JPEG: each frame an independent baseline JPEG. The near-universal
+    /// fallback output of cheap UVC webcams, decoded by `MjpegDec`.
+    Mjpeg,
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the

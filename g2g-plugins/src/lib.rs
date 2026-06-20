@@ -175,6 +175,10 @@ pub mod av1enc;
 #[cfg(feature = "vpx")]
 pub mod vpxenc;
 
+// Motion-JPEG decode via the pure-Rust zune-jpeg crate (no system deps).
+#[cfg(feature = "mjpeg")]
+pub mod mjpegdec;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

@@ -191,6 +191,7 @@ pub fn parse_caps(desc: &str) -> Option<Caps> {
         "video/x-vp8" => Some(compressed(VideoCodec::Vp8, dim("width"), dim("height"), framerate)),
         "video/x-vp9" => Some(compressed(VideoCodec::Vp9, dim("width"), dim("height"), framerate)),
         "video/x-av1" => Some(compressed(VideoCodec::Av1, dim("width"), dim("height"), framerate)),
+        "image/jpeg" => Some(compressed(VideoCodec::Mjpeg, dim("width"), dim("height"), framerate)),
         "audio/x-opus" => Some(audio(AudioFormat::Opus, &fields)),
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
         "audio/mpeg" => Some(audio(AudioFormat::Aac, &fields)),

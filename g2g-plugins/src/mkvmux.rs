@@ -75,7 +75,7 @@ impl MkvMux {
     fn track_spec(caps: &Caps) -> Option<MkvTrackSpec> {
         match caps {
             Caps::CompressedVideo { codec, width, height, .. } => Some(MkvTrackSpec {
-                codec: video_to_mkv(*codec),
+                codec: video_to_mkv(*codec)?,
                 width: dim_u32(width),
                 height: dim_u32(height),
                 channels: 0,
@@ -200,13 +200,14 @@ impl PadTemplates for MkvMux {
     }
 }
 
-fn video_to_mkv(codec: VideoCodec) -> MkvCodec {
+fn video_to_mkv(codec: VideoCodec) -> Option<MkvCodec> {
     match codec {
-        VideoCodec::H264 => MkvCodec::H264,
-        VideoCodec::H265 => MkvCodec::H265,
-        VideoCodec::Vp8 => MkvCodec::Vp8,
-        VideoCodec::Vp9 => MkvCodec::Vp9,
-        VideoCodec::Av1 => MkvCodec::Av1,
+        VideoCodec::H264 => Some(MkvCodec::H264),
+        VideoCodec::H265 => Some(MkvCodec::H265),
+        VideoCodec::Vp8 => Some(MkvCodec::Vp8),
+        VideoCodec::Vp9 => Some(MkvCodec::Vp9),
+        VideoCodec::Av1 => Some(MkvCodec::Av1),
+        VideoCodec::Mjpeg => None,
     }
 }
 
