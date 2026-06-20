@@ -422,18 +422,21 @@ and the pure-Rust / browser decode paths:
   `rav1d`) to pair with it ffmpeg-free.
 - **Opus encode + decode.** 2 sessions. WebRTC audio default; we have AAC
   only. `opus` crate or libopus FFI.
-- **MJPEG decode — DONE (M152).** `g2g-plugins::mjpegdec::MjpegDec` (`mjpeg`
-  feature) decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}` via the pure-Rust
-  `zune-jpeg` crate (no system dep, CI-verified on any host). Geometry recovered
-  from the JPEG headers per frame, emitted as `CapsChanged`. **Remaining:** I420
-  output (avoid the YCbCr->RGBA convert for planar consumers) and a `mozjpeg`-backed
-  fast path under a feature flag if decode CPU cost matters.
-- **JPEG decode + encode — DONE (M152 / M153).** Decode is `MjpegDec`
+- **MJPEG decode — DONE (M152, I420 in M154).** `g2g-plugins::mjpegdec::MjpegDec`
+  (`mjpeg` feature) decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}` (default)
+  or `RawVideo{I420}` (`with_output_format`) via the pure-Rust `zune-jpeg` crate (no
+  system dep, CI-verified on any host). Geometry recovered from the JPEG headers per
+  frame, emitted as `CapsChanged`. **Remaining:** a `mozjpeg`-backed fast path under
+  a feature flag if decode CPU cost matters, and a direct YCbCr->I420 path (skip the
+  RGBA intermediate).
+- **JPEG decode + encode — DONE (M152 / M153 / M154).** Decode is `MjpegDec`
   (`zune-jpeg`, M152 above); encode is `g2g-plugins::mjpegenc::MjpegEnc`
   (`mjpeg-encode` feature) via the pure-Rust `jpeg-encoder` crate:
-  `RawVideo{Rgba8|Bgra8}` -> `CompressedVideo{Mjpeg}`, intra-only per frame for
-  thumbnail / snapshot / low-latency capture. **Remaining:** planar (I420) input
-  without a `VideoConvert` round-trip, and a single-still image sink.
+  `RawVideo{Rgba8|Bgra8|I420}` -> `CompressedVideo{Mjpeg}`, intra-only per frame
+  for thumbnail / snapshot / low-latency capture. M154 added I420 in/out on both
+  (planar 4:2:0, BT.601 limited range, even dims) so they pair with a video
+  encoder / decoder without a `VideoConvert`. **Remaining:** a single-still image
+  sink, and a direct YCbCr path to skip the RGBA intermediate.
 
 ### Parsers
 

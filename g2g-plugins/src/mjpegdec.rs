@@ -8,7 +8,10 @@
 //! `CapsChanged` carries the decoded geometry before the first frame and on any
 //! mid-stream size change.
 //!
-//! Scope (v1): RGBA8 output (the JPEG YCbCr is converted by zune). System memory.
+//! Output is RGBA8 by default; `with_output_format(RawVideoFormat::I420)` instead
+//! emits planar 4:2:0 (BT.601 limited range, matching `VideoConvert` / the other
+//! decoders) so a downstream video encoder needs no intervening `VideoConvert`.
+//! I420 requires even dimensions. System memory.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -28,9 +31,10 @@ use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
-/// Decodes a Motion-JPEG stream into RGBA8 raw video.
+/// Decodes a Motion-JPEG stream into raw video (RGBA8 or I420).
 #[derive(Debug)]
 pub struct MjpegDec {
+    out_format: RawVideoFormat,
     framerate: Rate,
     /// Last emitted geometry, so `CapsChanged` is sent only on change.
     out_dims: Option<(u32, u32)>,
@@ -46,7 +50,20 @@ impl Default for MjpegDec {
 
 impl MjpegDec {
     pub fn new() -> Self {
-        Self { framerate: Rate::Any, out_dims: None, sequence: 0, configured: false }
+        Self {
+            out_format: RawVideoFormat::Rgba8,
+            framerate: Rate::Any,
+            out_dims: None,
+            sequence: 0,
+            configured: false,
+        }
+    }
+
+    /// Choose the decoded pixel format: `Rgba8` (default) or `I420`. Other
+    /// formats are rejected at configure.
+    pub fn with_output_format(mut self, format: RawVideoFormat) -> Self {
+        self.out_format = format;
+        self
     }
 
     fn input_template() -> Caps {
@@ -60,20 +77,40 @@ impl MjpegDec {
 
     fn output_caps(&self, w: u32, h: u32) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
+            format: self.out_format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
         }
     }
 
-    /// Decode one JPEG access unit to RGBA8, returning `(pixels, width, height)`.
-    fn decode(jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
+    /// Decode one JPEG access unit, returning `(pixels, width, height)` in the
+    /// configured output format. I420 decodes via RGBA then the shared BT.601
+    /// conversion (so its range matches `VideoConvert`); it requires even dims.
+    fn decode(&self, jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
         let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
         let mut dec = JpegDecoder::new_with_options(ZCursor::new(jpeg), opts);
-        let pixels = dec.decode().map_err(|_| G2gError::CapsMismatch)?;
+        let rgba = dec.decode().map_err(|_| G2gError::CapsMismatch)?;
         let info = dec.info().ok_or(G2gError::CapsMismatch)?;
-        Ok((pixels, info.width as u32, info.height as u32))
+        let (w, h) = (info.width as u32, info.height as u32);
+        let pixels = match self.out_format {
+            RawVideoFormat::Rgba8 => rgba,
+            RawVideoFormat::I420 => {
+                if w % 2 != 0 || h % 2 != 0 {
+                    return Err(G2gError::CapsMismatch);
+                }
+                crate::videoconvert::convert(
+                    &rgba,
+                    RawVideoFormat::Rgba8,
+                    RawVideoFormat::I420,
+                    w as usize,
+                    h as usize,
+                )
+                .into_vec()
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        Ok((pixels, w, h))
     }
 }
 
@@ -88,10 +125,11 @@ impl AsyncElement for MjpegDec {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+        let out_format = self.out_format;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::CompressedVideo { codec: VideoCodec::Mjpeg, width, height, framerate } => {
                 CapsSet::one(Caps::RawVideo {
-                    format: RawVideoFormat::Rgba8,
+                    format: out_format,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
@@ -105,6 +143,9 @@ impl AsyncElement for MjpegDec {
         let Caps::CompressedVideo { codec: VideoCodec::Mjpeg, framerate, .. } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
+        if !matches!(self.out_format, RawVideoFormat::Rgba8 | RawVideoFormat::I420) {
+            return Err(G2gError::CapsMismatch);
+        }
         self.framerate = framerate.clone();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -124,7 +165,7 @@ impl AsyncElement for MjpegDec {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let (pixels, w, h) = Self::decode(slice.as_slice())?;
+                    let (pixels, w, h) = self.decode(slice.as_slice())?;
                     if self.out_dims != Some((w, h)) {
                         out.push(PipelinePacket::CapsChanged(self.output_caps(w, h))).await?;
                         self.out_dims = Some((w, h));
@@ -149,15 +190,18 @@ impl AsyncElement for MjpegDec {
 
 impl PadTemplates for MjpegDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
+        let out = |format| Caps::RawVideo {
+            format,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),
-            PadTemplate::source(CapsSet::one(out)),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
+                out(RawVideoFormat::Rgba8),
+                out(RawVideoFormat::I420),
+            ]))),
         ])
     }
 }

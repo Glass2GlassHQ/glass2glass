@@ -1,12 +1,13 @@
-//! Motion-JPEG encode element (MjpegEnc, `mjpeg-encode` feature): packed
-//! `RawVideo{Rgba8|Bgra8}` in, `CompressedVideo{Mjpeg}` out, via the pure-Rust
-//! `jpeg-encoder` crate. The GStreamer `jpegenc` analog.
+//! Motion-JPEG encode element (MjpegEnc, `mjpeg-encode` feature):
+//! `RawVideo{Rgba8|Bgra8|I420}` in, `CompressedVideo{Mjpeg}` out, via the
+//! pure-Rust `jpeg-encoder` crate. The GStreamer `jpegenc` analog.
 //!
 //! Each frame encodes to an independent baseline JPEG (intra-only), so this is
 //! the snapshot / thumbnail / low-latency-capture encoder and the inverse of
 //! [`crate::mjpegdec::MjpegDec`]. Quality is builder-configurable; geometry is
-//! fixed at configure. Input is packed 4-byte RGBA/BGRA (run a `VideoConvert`
-//! ahead of it for planar sources).
+//! fixed at configure. Packed RGBA/BGRA encodes directly; planar I420 (even dims,
+//! BT.601 limited range) converts to RGBA first via the shared `VideoConvert`
+//! path, so a decoder can feed it without an intervening `VideoConvert`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -72,7 +73,11 @@ impl MjpegEnc {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([raw(RawVideoFormat::Rgba8), raw(RawVideoFormat::Bgra8)])
+        Vec::from([
+            raw(RawVideoFormat::Rgba8),
+            raw(RawVideoFormat::Bgra8),
+            raw(RawVideoFormat::I420),
+        ])
     }
 
     fn output_caps(&self) -> Caps {
@@ -84,21 +89,41 @@ impl MjpegEnc {
         }
     }
 
-    fn color_type(&self) -> ColorType {
-        match self.format {
-            RawVideoFormat::Bgra8 => ColorType::Bgra,
-            _ => ColorType::Rgba,
-        }
-    }
-
     fn encode(&self, pixels: &[u8]) -> Result<Vec<u8>, G2gError> {
-        if pixels.len() < self.width as usize * self.height as usize * 4 {
-            return Err(G2gError::CapsMismatch);
-        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        // I420 converts to packed RGBA first (shared BT.601 path); packed inputs
+        // map straight to a jpeg-encoder ColorType.
+        let (data, color): (alloc::borrow::Cow<[u8]>, ColorType) = match self.format {
+            RawVideoFormat::I420 => {
+                if pixels.len() < w * h * 3 / 2 {
+                    return Err(G2gError::CapsMismatch);
+                }
+                let rgba = crate::videoconvert::convert(
+                    pixels,
+                    RawVideoFormat::I420,
+                    RawVideoFormat::Rgba8,
+                    w,
+                    h,
+                );
+                (alloc::borrow::Cow::Owned(rgba.into_vec()), ColorType::Rgba)
+            }
+            RawVideoFormat::Bgra8 => {
+                if pixels.len() < w * h * 4 {
+                    return Err(G2gError::CapsMismatch);
+                }
+                (alloc::borrow::Cow::Borrowed(pixels), ColorType::Bgra)
+            }
+            _ => {
+                if pixels.len() < w * h * 4 {
+                    return Err(G2gError::CapsMismatch);
+                }
+                (alloc::borrow::Cow::Borrowed(pixels), ColorType::Rgba)
+            }
+        };
         let mut out = Vec::new();
         let encoder = Encoder::new(&mut out, self.quality);
         encoder
-            .encode(pixels, self.width as u16, self.height as u16, self.color_type())
+            .encode(&data, self.width as u16, self.height as u16, color)
             .map_err(|_| G2gError::CapsMismatch)?;
         Ok(out)
     }
@@ -122,7 +147,7 @@ impl AsyncElement for MjpegEnc {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::RawVideo {
-                format: RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8,
+                format: RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::I420,
                 width,
                 height,
                 framerate,
@@ -140,12 +165,19 @@ impl AsyncElement for MjpegEnc {
         let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
-        if !matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8) {
+        if !matches!(
+            format,
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::I420
+        ) {
             return Err(G2gError::CapsMismatch);
         }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
             return Err(G2gError::CapsMismatch);
         };
+        // I420 chroma is 2x2 subsampled; the shared conversion needs even dims.
+        if *format == RawVideoFormat::I420 && (w % 2 != 0 || h % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
         self.format = *format;
         self.width = *w;
         self.height = *h;

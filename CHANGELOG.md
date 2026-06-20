@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M154: I420 in/out for the MJPEG codecs
+
+- **`MjpegDec` gains `with_output_format(RawVideoFormat::I420)`** (default still
+  `Rgba8`), and **`MjpegEnc` now accepts `RawVideo{I420}` input** alongside
+  Rgba8/Bgra8. So a webcam MJPEG stream decodes straight to the planar 4:2:0 a
+  video encoder wants, and a planar source encodes to MJPEG, both without an
+  intervening `VideoConvert`. I420 requires even dimensions.
+- The I420 path reuses `videoconvert::convert` (now `pub(crate)`), so its BT.601
+  limited-range YCbCr matches `VideoConvert` and the other decoders: JPEG decodes
+  via RGBA then converts to I420, and I420 converts to RGBA before encode. The
+  decoder advertises both Rgba8 and I420 on its source template.
+- Verified by added cases in `m152_mjpegdec.rs` (decode to I420: planar byte size
+  + red-pushed V plane) and `m153_mjpegenc.rs` (I420 -> MJPEG -> RGBA round-trip
+  preserves blue).
+
 ### M153: MjpegEnc (Motion-JPEG encode, pure Rust)
 
 - **`MjpegEnc` encodes packed `RawVideo{Rgba8|Bgra8}` to `CompressedVideo{Mjpeg}`**

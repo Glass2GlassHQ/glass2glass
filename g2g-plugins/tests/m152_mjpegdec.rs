@@ -93,3 +93,29 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
     assert!(px[1] < 100 && px[2] < 100, "green/blue low (got {},{})", px[1], px[2]);
     assert_eq!(px[3], 255, "opaque alpha");
 }
+
+#[tokio::test]
+async fn decodes_mjpeg_to_i420() {
+    let mut dec = MjpegDec::new().with_output_format(RawVideoFormat::I420);
+    dec.configure_pipeline(&mjpeg_caps()).unwrap();
+    let mut sink = CaptureSink::default();
+
+    dec.process(PipelinePacket::DataFrame(frame(0)), &mut sink).await.unwrap();
+
+    assert_eq!(
+        sink.caps,
+        vec![Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+        }],
+        "CapsChanged announces the I420 output format"
+    );
+    assert_eq!(sink.frames.len(), 1);
+    // I420 is 4:2:0 planar: w*h luma + 2 * (w/2 * h/2) chroma.
+    assert_eq!(sink.frames[0].len(), 16 * 16 * 3 / 2, "planar 4:2:0 byte size");
+    // Solid red -> low luma, and the V (red-difference) plane sits well above 128.
+    let v_plane_start = 16 * 16 + (8 * 8);
+    assert!(sink.frames[0][v_plane_start] > 150, "red pushes the V chroma plane high");
+}

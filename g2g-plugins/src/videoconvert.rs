@@ -300,7 +300,13 @@ fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
 /// input frame; dims are even whenever a 4:2:0 format is involved.
-fn convert(src: &[u8], from: RawVideoFormat, to: RawVideoFormat, w: usize, h: usize) -> Box<[u8]> {
+pub(crate) fn convert(
+    src: &[u8],
+    from: RawVideoFormat,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+) -> Box<[u8]> {
     use RawVideoFormat::*;
     match (from, to) {
         (a, b) if a == b => src[..frame_byte_size(a, w as u32, h as u32)].into(),
