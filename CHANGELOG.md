@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M129: videobox (borders / letterbox)
+
+- **`g2g-plugins::videobox::VideoBox` (no_std).** Surrounds a packed RGBA / BGRA
+  frame with a solid-colour border on any side, growing the geometry (letterbox /
+  pillarbox): `border-top` / `-bottom` / `-left` / `-right` widths plus a named
+  `fill` colour (black | white | red | green | blue | transparent). Output dims
+  are the input plus the borders; the fill respects channel order via the shared
+  `pixel` helper. Registered as `videobox`, so
+  `videobox border-left=8 border-right=8 fill=black` works as text. Borders only,
+  cropping is `videocrop`; a packed-ARGB `fill` is a follow-up.
+- Tested: a 1px border grows a 1x1 frame to 3x3 with the pixel centred,
+  asymmetric borders grow each axis, the fill respects RGBA vs BGRA order, and the
+  `DerivedOutput` grows fixed dims; the element runs in a
+  `videotestsrc ! videobox ! fakesink` text pipeline.
+
 ### M128: audiopanorama (stereo pan)
 
 - **`g2g-plugins::audiopanorama::AudioPanorama` (no_std).** Balances an

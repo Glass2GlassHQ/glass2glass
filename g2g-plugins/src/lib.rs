@@ -45,6 +45,7 @@ pub mod videorate;
 pub mod videocrop;
 pub mod videoflip;
 pub mod videobalance;
+pub mod videobox;
 pub mod alpha;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;

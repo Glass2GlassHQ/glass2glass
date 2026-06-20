@@ -41,6 +41,7 @@ use crate::mux::InterleaveMux;
 use crate::mkvmux::MkvMux;
 use crate::oggdemux::OggDemux;
 use crate::videobalance::VideoBalance;
+use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
 use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
@@ -104,6 +105,7 @@ pub fn default_registry() -> Registry {
         Box::new(VideoBalance::new())
     }));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
+    reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || Box::new(VideoBox::new())));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))
