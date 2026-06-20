@@ -1,10 +1,11 @@
 //! Synthetic audio source (M25), the audio analog of `VideoTestSrc`. Emits
 //! interleaved signed 16-bit PCM (`AudioFormat::PcmS16Le`) buffers of a
-//! deterministic test tone at a fixed sample rate. CPU-only, `no_std`.
+//! deterministic test waveform at a fixed sample rate. CPU-only, `no_std`.
 //!
-//! The sine uses Bhaskara I's approximation (pure f32 arithmetic, no libm),
-//! accurate to ~0.2% of full scale: more than clean enough for a test tone
-//! and keeps the element in the crate baseline.
+//! Waveforms: `sine`, `square`, `saw`, `triangle`, `white-noise`, `silence`. The
+//! sine uses Bhaskara I's approximation (pure f32 arithmetic, no libm), accurate
+//! to ~0.2% of full scale; the rest are exact ramps / a deterministic hash, so
+//! every waveform keeps the element in the crate baseline (no libm).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -30,6 +31,13 @@ pub enum Wave {
     Sine,
     /// `tone_hz` square at half full scale.
     Square,
+    /// `tone_hz` rising sawtooth ramp (-half to +half full scale per period).
+    Saw,
+    /// `tone_hz` triangle, phased like the sine (0 at the start, peak at 1/4).
+    Triangle,
+    /// Deterministic per-sample pseudo-random noise at half full scale,
+    /// independent of `tone_hz`.
+    WhiteNoise,
     Silence,
 }
 
@@ -71,6 +79,11 @@ impl AudioTestSrc {
 
     /// Sample value at absolute sample index `n`, half full scale.
     fn sample(&self, n: u64) -> i16 {
+        const HALF: f32 = (i16::MAX / 2) as f32;
+        // Noise is tone-independent: a deterministic hash of the sample index.
+        if self.wave == Wave::WhiteNoise {
+            return (noise_unit(n) * HALF) as i16;
+        }
         let period = self.sample_rate as u64 / self.tone_hz.max(1) as u64;
         if period == 0 {
             return 0;
@@ -85,7 +98,11 @@ impl AudioTestSrc {
                     -(i16::MAX / 2)
                 }
             }
-            Wave::Sine => (sin_turns(phase) * (i16::MAX / 2) as f32) as i16,
+            Wave::Sine => (sin_turns(phase) * HALF) as i16,
+            Wave::Saw => ((2.0 * phase - 1.0) * HALF) as i16,
+            Wave::Triangle => (tri_turns(phase) * HALF) as i16,
+            // Handled above before the period calculation.
+            Wave::WhiteNoise => unreachable!(),
         }
     }
 }
@@ -102,6 +119,28 @@ fn sin_turns(t: f32) -> f32 {
     const PI: f32 = core::f32::consts::PI;
     let xr = x * PI;
     sign * (16.0 * xr * (PI - xr)) / (5.0 * PI * PI - 4.0 * xr * (PI - xr))
+}
+
+/// Triangle for t in [0, 1): 0 -> +1 -> -1 -> 0, sharing the sine's phase
+/// (zero at the start, peak a quarter in). Exact, no libm.
+fn tri_turns(t: f32) -> f32 {
+    if t < 0.25 {
+        4.0 * t
+    } else if t < 0.75 {
+        2.0 - 4.0 * t
+    } else {
+        4.0 * t - 4.0
+    }
+}
+
+/// Deterministic pseudo-random value in [-1, 1) from a sample index, via a
+/// SplitMix64-style integer hash. Stable per index so output is reproducible.
+fn noise_unit(n: u64) -> f32 {
+    let mut h = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 32;
+    ((h & 0xFFFF) as f32 / 32_768.0) - 1.0
 }
 
 impl SourceLoop for AudioTestSrc {
@@ -218,7 +257,11 @@ static AUDIOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("channels", PropKind::Uint, "channel count"),
     PropertySpec::new("freq", PropKind::Uint, "test tone frequency in Hz"),
     PropertySpec::new("num-buffers", PropKind::Int, "buffers to emit then EOS (-1 = forever)"),
-    PropertySpec::new("wave", PropKind::Str, "waveform: sine | square | silence"),
+    PropertySpec::new(
+        "wave",
+        PropKind::Str,
+        "waveform: sine | square | saw | triangle | white-noise | silence",
+    ),
 ];
 
 /// Parse a `wave` property string to a [`Wave`].
@@ -226,6 +269,9 @@ fn wave_from_str(s: &str) -> Option<Wave> {
     match s {
         "sine" => Some(Wave::Sine),
         "square" => Some(Wave::Square),
+        "saw" => Some(Wave::Saw),
+        "triangle" => Some(Wave::Triangle),
+        "white-noise" => Some(Wave::WhiteNoise),
         "silence" => Some(Wave::Silence),
         _ => None,
     }
@@ -236,6 +282,9 @@ fn wave_to_str(w: Wave) -> &'static str {
     match w {
         Wave::Sine => "sine",
         Wave::Square => "square",
+        Wave::Saw => "saw",
+        Wave::Triangle => "triangle",
+        Wave::WhiteNoise => "white-noise",
         Wave::Silence => "silence",
     }
 }
@@ -285,6 +334,39 @@ mod tests {
         assert_eq!(sq.sample(24), -(i16::MAX / 2)); // second half of period 48
         let silence = AudioTestSrc::new(48_000, 1, 1_000, 1).with_wave(Wave::Silence);
         assert_eq!(silence.sample(7), 0);
+    }
+
+    #[test]
+    fn saw_ramps_from_trough_to_peak() {
+        // period 48: phase 0 -> -half, phase 0.5 (sample 24) -> 0, rising overall.
+        let src = AudioTestSrc::new(48_000, 1, 1_000, 1).with_wave(Wave::Saw);
+        assert_eq!(src.sample(0), -(i16::MAX / 2));
+        assert_eq!(src.sample(24), 0);
+        assert!(src.sample(36) > src.sample(12), "sawtooth rises across the period");
+    }
+
+    #[test]
+    fn triangle_is_zero_then_peaks_a_quarter_in() {
+        let src = AudioTestSrc::new(48_000, 1, 1_000, 1).with_wave(Wave::Triangle);
+        assert_eq!(src.sample(0), 0);
+        assert_eq!(src.sample(12), i16::MAX / 2); // phase 0.25 -> +peak
+        assert_eq!(src.sample(36), -(i16::MAX / 2)); // phase 0.75 -> -peak
+    }
+
+    #[test]
+    fn white_noise_is_deterministic_bounded_and_varies() {
+        let src = AudioTestSrc::new(48_000, 1, 1_000, 1).with_wave(Wave::WhiteNoise);
+        let half = i16::MAX / 2;
+        // Deterministic: the same index hashes identically.
+        assert_eq!(src.sample(42), src.sample(42));
+        let first = src.sample(0);
+        let mut varied = false;
+        for n in 0..100u64 {
+            let v = src.sample(n);
+            assert!(v.abs() <= half, "noise sample {v} within +/- half scale");
+            varied |= v != first;
+        }
+        assert!(varied, "noise must vary across samples");
     }
 
     #[test]

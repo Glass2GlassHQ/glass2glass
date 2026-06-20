@@ -5,6 +5,17 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M125: AudioTestSrc waveform coverage
+
+- **Three new `audiotestsrc` waveforms (g2g-plugins).** `saw` (rising ramp),
+  `triangle` (phased like the sine), and `white-noise` (a deterministic per-sample
+  hash), alongside the existing `sine` / `square` / `silence`. All exact ramps or
+  integer-hash, so they stay libm-free on the `no_std` baseline. Reachable from
+  text as `audiotestsrc wave=saw` etc.
+- Tested: the saw rises trough-to-peak (0 at mid-period), the triangle is zero at
+  the start and peaks a quarter in, and the noise is deterministic, bounded to
+  +/- half scale, and varies across samples.
+
 ### M124: videobalance (brightness / contrast / saturation)
 
 - **`g2g-plugins::videobalance::VideoBalance` (no_std).** A per-pixel RGBA / BGRA
