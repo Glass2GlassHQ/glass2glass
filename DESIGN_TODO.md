@@ -168,13 +168,12 @@ Production-shape needs that block specific real-world use cases.
   and ends on ENDLIST or downstream shutdown.
   fMP4/CMAF demux is **DONE (M158)**: `Caps::ByteStream{IsoBmff}` +
   `fmp4demux::Fmp4Demux` (streaming fragmented-MP4 demux, shares the `fmp4` parser
-  with `mp4src`). Still needs wiring into HLS: `#EXT-X-MAP` (init-segment) parsing
-  in the playlist + `HlsSrc` emitting `ByteStream{IsoBmff}` (init then fragments)
-  when the variant is fMP4.
-  **Remaining HLS:** the `#EXT-X-MAP` / fMP4 HlsSrc wiring above, byte-range
-  + AES-128/SAMPLE-AES keyed segments, throughput-driven ABR (the current pick is
-  static by declared bandwidth), live-edge start (skip to the last few segments),
-  and mid-stream variant switching.
+  with `mp4src`), and **wired into HLS (M159)**: the parser reads `#EXT-X-MAP`,
+  `HlsSrc` probes the container at negotiation and emits the init segment then the
+  fragments as `ByteStream{IsoBmff}` (`HlsSrc ! fmp4demux`), verified end to end.
+  **Remaining HLS:** byte-range segments, AES-128/SAMPLE-AES keyed segments,
+  throughput-driven ABR (the current pick is static by declared bandwidth),
+  live-edge start (skip to the last few segments), and mid-stream variant switching.
   **DASH** (MPD parsing + the same per-segment fetch over the CMAF handoff) is still
   open, 2-4 sessions, and reuses the `HttpSrc` fetch layer.
 

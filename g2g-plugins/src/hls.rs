@@ -38,6 +38,9 @@ pub struct MediaPlaylist {
     pub target_duration_secs: u32,
     pub media_sequence: u64,
     pub segments: Vec<Segment>,
+    /// `#EXT-X-MAP:URI` initialization segment (fMP4/CMAF): the `ftyp`+`moov`
+    /// prepended before the media fragments. `None` for an MPEG-TS playlist.
+    pub map_uri: Option<String>,
     /// `#EXT-X-ENDLIST` present: a complete VOD playlist (no live reload).
     pub end_list: bool,
 }
@@ -83,6 +86,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     let mut segments = Vec::new();
     let mut target_duration_secs = 0u32;
     let mut media_sequence = 0u64;
+    let mut map_uri = None;
     let mut end_list = false;
     // A tag carries over to the next URI line: Some(duration_ms) for a segment,
     // or the variant being built for a stream-inf.
@@ -98,6 +102,11 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             target_duration_secs = rest.trim().parse().unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = rest.trim().parse().unwrap_or(0);
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
+            map_uri = attr_pairs(attrs)
+                .into_iter()
+                .find(|(k, _)| *k == "URI")
+                .map(|(_, v)| String::from(v.trim_matches('"')));
         } else if line == "#EXT-X-ENDLIST" {
             end_list = true;
         } else if line.starts_with('#') {
@@ -122,6 +131,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             target_duration_secs,
             media_sequence,
             segments,
+            map_uri,
             end_list,
         }))
     }
@@ -207,6 +217,30 @@ mod tests {
         assert_eq!(m.segments.len(), 3);
         assert_eq!(m.segments[0], Segment { uri: "seg0.ts".into(), duration_ms: 9009 });
         assert_eq!(m.segments[2].duration_ms, 3003);
+    }
+
+    #[test]
+    fn parses_fmp4_media_playlist_with_init_map() {
+        let text = "#EXTM3U\n\
+            #EXT-X-TARGETDURATION:4\n\
+            #EXT-X-MAP:URI=\"init.mp4\"\n\
+            #EXTINF:4.0,\n\
+            seg0.m4s\n\
+            #EXT-X-ENDLIST\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(m.map_uri.as_deref(), Some("init.mp4"), "EXT-X-MAP init segment recovered");
+        assert_eq!(m.segments[0].uri, "seg0.m4s");
+    }
+
+    #[test]
+    fn ts_media_playlist_has_no_init_map() {
+        let text = "#EXTM3U\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(m.map_uri, None);
     }
 
     #[test]

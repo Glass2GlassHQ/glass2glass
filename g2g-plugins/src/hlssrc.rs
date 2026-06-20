@@ -31,7 +31,7 @@ use g2g_core::{
     PropertySpec,
 };
 
-use crate::hls::{parse, Playlist};
+use crate::hls::{parse, MediaPlaylist, Playlist};
 
 #[derive(Debug)]
 pub struct HlsSrc {
@@ -41,12 +41,22 @@ pub struct HlsSrc {
     max_bandwidth: u64,
     /// Live-playlist reload interval in ms (0 = derive from `TARGETDURATION`).
     reload_interval_ms: u64,
+    /// Container discovered by the negotiation-time probe: `IsoBmff` when the
+    /// media playlist has an `#EXT-X-MAP` init segment (fMP4/CMAF), else `MpegTs`.
+    /// Memoized so a re-fixate retry skips the probe.
+    container: Option<ByteStreamEncoding>,
     configured: bool,
 }
 
 impl HlsSrc {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), max_bandwidth: 0, reload_interval_ms: 0, configured: false }
+        Self {
+            url: url.into(),
+            max_bandwidth: 0,
+            reload_interval_ms: 0,
+            container: None,
+            configured: false,
+        }
     }
 
     /// Cap variant selection to this bitrate (bits/sec); 0 picks the highest.
@@ -62,8 +72,49 @@ impl HlsSrc {
         self
     }
 
-    fn output_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
+    fn cap(&self) -> Option<u64> {
+        (self.max_bandwidth != 0).then_some(self.max_bandwidth)
+    }
+
+    /// Fetch the playlist (resolving master -> media) and decide the segment
+    /// container: `IsoBmff` if the media playlist carries an `#EXT-X-MAP` init
+    /// segment, else `MpegTs`. Memoized in `self.container`.
+    async fn probe(&mut self) -> Result<ByteStreamEncoding, G2gError> {
+        if let Some(enc) = self.container {
+            return Ok(enc);
+        }
+        let client = reqwest::Client::new();
+        let (media, _) = resolve_media(&client, &self.url, self.cap()).await?;
+        let enc = if media.map_uri.is_some() {
+            ByteStreamEncoding::IsoBmff
+        } else {
+            ByteStreamEncoding::MpegTs
+        };
+        self.container = Some(enc);
+        Ok(enc)
+    }
+}
+
+/// Fetch `url` and resolve a master playlist down to a media playlist, returning
+/// it with the URL it came from (for segment-URI resolution and live reload).
+async fn resolve_media(
+    client: &reqwest::Client,
+    url: &str,
+    cap: Option<u64>,
+) -> Result<(MediaPlaylist, String), G2gError> {
+    let text = get_text(client, url).await?;
+    match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+        Playlist::Media(m) => Ok((m, String::from(url))),
+        Playlist::Master(master) => {
+            let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
+            let media_url = resolve_url(url, &variant.uri);
+            let media_text = get_text(client, &media_url).await?;
+            match parse(&media_text).map_err(|_| G2gError::CapsMismatch)? {
+                Playlist::Media(m) => Ok((m, media_url)),
+                // A master pointing at another master is malformed.
+                Playlist::Master(_) => Err(G2gError::CapsMismatch),
+            }
+        }
     }
 }
 
@@ -79,6 +130,18 @@ async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, G2gEr
 async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, G2gError> {
     let resp = client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
     resp.text().await.map_err(net_err)
+}
+
+fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
+    Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        timing: FrameTiming {
+            arrival_ns: g2g_core::metrics::monotonic_ns(),
+            ..FrameTiming::default()
+        },
+        sequence,
+        meta: Default::default(),
+    }
 }
 
 /// Resolve a possibly-relative playlist/segment URI against the playlist URL.
@@ -113,18 +176,22 @@ impl SourceLoop for HlsSrc {
         Self: 'a;
 
     type CapsFuture<'a>
-        = core::future::Ready<Result<Caps, G2gError>>
+        = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where
         Self: 'a;
 
+    /// Probe the playlist at negotiation to discover the segment container
+    /// (TS vs fMP4), the way `RtspSrc` does its DESCRIBE. The probe is memoized.
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(Self::output_caps()))
+        Box::pin(async move {
+            let encoding = self.probe().await?;
+            Ok(Caps::ByteStream { encoding })
+        })
     }
 
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(Self::output_caps()))))
+    async fn caps_constraint(&mut self) -> Result<CapsConstraint<'_>, G2gError> {
+        let caps = self.intercept_caps().await?;
+        Ok(CapsConstraint::Produces(CapsSet::one(caps)))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -138,48 +205,34 @@ impl SourceLoop for HlsSrc {
                 return Err(G2gError::NotConfigured);
             }
             let client = reqwest::Client::new();
-            let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
-
-            // Resolve a master playlist down to a media playlist + the URL it came
-            // from (used both to resolve segment URIs and to reload, for live).
-            let text = get_text(&client, &self.url).await?;
-            let (mut media, media_url) = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
-                Playlist::Media(m) => (m, self.url.clone()),
-                Playlist::Master(master) => {
-                    let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
-                    let media_url = resolve_url(&self.url, &variant.uri);
-                    let media_text = get_text(&client, &media_url).await?;
-                    match parse(&media_text).map_err(|_| G2gError::CapsMismatch)? {
-                        Playlist::Media(m) => (m, media_url),
-                        // A master pointing at another master is malformed.
-                        Playlist::Master(_) => return Err(G2gError::CapsMismatch),
-                    }
-                }
-            };
+            let (mut media, media_url) = resolve_media(&client, &self.url, self.cap()).await?;
 
             let mut sequence = 0u64;
             // Next HLS media-sequence number to play; segments below it on a live
             // reload were already delivered.
             let mut next_seq = media.media_sequence;
+            // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
+            // any media fragment, so a downstream fmp4demux sees the moov first.
+            let mut init_emitted = false;
             loop {
+                if let Some(map) = &media.map_uri {
+                    if !init_emitted {
+                        let init_url = resolve_url(&media_url, map);
+                        let bytes = get_bytes(&client, &init_url).await?;
+                        if !bytes.is_empty() {
+                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
+                            sequence += 1;
+                        }
+                        init_emitted = true;
+                    }
+                }
                 for (seg_seq, segment) in (media.media_sequence..).zip(media.segments.iter()) {
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
                         let bytes = get_bytes(&client, &seg_url).await?;
                         if !bytes.is_empty() {
-                            let frame = Frame {
-                                domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                    bytes.into_boxed_slice(),
-                                )),
-                                timing: FrameTiming {
-                                    arrival_ns: g2g_core::metrics::monotonic_ns(),
-                                    ..FrameTiming::default()
-                                },
-                                sequence,
-                                meta: Default::default(),
-                            };
+                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;
-                            out.push(PipelinePacket::DataFrame(frame)).await?;
                         }
                         next_seq = seg_seq + 1;
                     }

@@ -13,11 +13,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+use g2g_core::element::AsyncElement;
+use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
+    ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, OutputSink,
+    PipelinePacket, PushOutcome, Rate, VideoCodec,
 };
+use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
+use g2g_plugins::mp4sink::Mp4Sink;
+
+use std::path::PathBuf;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -203,4 +211,202 @@ async fn live_reloads_playlist_and_plays_each_new_segment_once() {
     assert_eq!(count, 4, "each of the 4 segments played exactly once across reloads");
     let expected: Vec<u8> = segs.concat();
     assert_eq!(sink.body, expected, "seg0..seg3 delivered once, in order, no duplicates");
+}
+
+// --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------
+
+fn temp_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("g2g_m156_{}_{}.mp4", std::process::id(), name))
+}
+
+struct NullOut;
+impl OutputSink for NullOut {
+    fn push<'a>(
+        &'a mut self,
+        _packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        Box::pin(async { Ok(PushOutcome::Accepted) })
+    }
+}
+
+fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
+    Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        timing: FrameTiming { pts_ns, dts_ns: pts_ns, duration_ns: 33_333_333, ..FrameTiming::default() },
+        sequence: seq,
+        meta: Default::default(),
+    }
+}
+
+fn access_units() -> Vec<Vec<u8>> {
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11, 0x22];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA, 0xBB]].concat();
+    let p = |f: u8| [&[0, 0, 0, 1][..], &[0x41, f, f]].concat();
+    vec![idr, p(1), p(2)]
+}
+
+/// Mux the access units to an fMP4 buffer via `Mp4Sink`.
+async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
+    let path = temp_path("fmp4");
+    let mut sink = Mp4Sink::new(&path);
+    sink.configure_pipeline(&Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(64),
+        height: Dim::Fixed(48),
+        framerate: Rate::Fixed(30 << 16),
+    })
+    .unwrap();
+    let mut out = NullOut;
+    for (i, au) in aus.iter().enumerate() {
+        sink.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
+            .await
+            .unwrap();
+    }
+    sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    bytes
+}
+
+/// Split an fMP4 buffer into the init segment (ftyp+moov, everything before the
+/// first `moof`) and one media segment per `moof`+`mdat` fragment, as a CMAF HLS
+/// origin would serve them.
+fn split_fmp4(data: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut spans = Vec::new(); // (kind, start, end)
+    let mut i = 0;
+    while i + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = data[i + 4..i + 8].try_into().unwrap();
+        spans.push((kind, i, i + size));
+        i += size;
+    }
+    let first_moof = spans.iter().find(|(k, _, _)| k == b"moof").unwrap().1;
+    let init = data[..first_moof].to_vec();
+    let mut segments = Vec::new();
+    let mut j = 0;
+    while j < spans.len() {
+        if &spans[j].0 == b"moof" {
+            let (_, start, _) = spans[j];
+            let (_, _, end) = spans[j + 1]; // the following mdat
+            segments.push(data[start..end].to_vec());
+            j += 2;
+        } else {
+            j += 1;
+        }
+    }
+    (init, segments)
+}
+
+fn serve_fmp4(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n");
+    for n in 0..segs.len() {
+        playlist.push_str(&format!("#EXTINF:1.0,\nseg{n}.m4s\n"));
+    }
+    playlist.push_str("#EXT-X-ENDLIST\n");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/fmp4.m3u8" {
+                playlist.clone().into_bytes()
+            } else if path == "/init.mp4" {
+                init.clone()
+            } else if let Some(idx) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".m4s"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(idx).cloned().unwrap_or_default()
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/fmp4.m3u8")
+}
+
+#[tokio::test]
+async fn fmp4_hls_emits_init_then_fragments_and_demuxes() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    let url = serve_fmp4(init.clone(), segs.clone());
+
+    let mut src = HlsSrc::new(url);
+
+    // The negotiation probe sees EXT-X-MAP and declares the fMP4 container.
+    {
+        match src.caps_constraint().await.unwrap() {
+            CapsConstraint::Produces(set) => assert_eq!(
+                set,
+                g2g_core::CapsSet::one(Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff })
+            ),
+            _ => panic!("fMP4 HLS should produce IsoBmff caps"),
+        }
+    }
+
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    // The byte stream is the init segment followed by every media fragment.
+    let mut expected = init.clone();
+    for s in &segs {
+        expected.extend_from_slice(s);
+    }
+    assert_eq!(sink.body, expected, "init segment emitted first, then fragments in order");
+
+    // End to end: the delivered fMP4 byte stream demuxes back to the access units.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = DemuxSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "HlsSrc -> Fmp4Demux recovers the original access units");
+}
+
+#[derive(Default)]
+struct DemuxSink {
+    aus: Vec<Vec<u8>>,
+}
+impl OutputSink for DemuxSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(f) = packet {
+                if let MemoryDomain::System(s) = &f.domain {
+                    self.aus.push(s.as_slice().to_vec());
+                }
+            }
+            Ok(PushOutcome::Accepted)
+        })
+    }
 }
