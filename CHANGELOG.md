@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M134: vp8parse (VP8 keyframe parser)
+
+- **`g2g-plugins::vp8parse::Vp8Parse` (no_std).** The VP8 counterpart of
+  `h264parse`: it reads each frame's 3-byte tag (RFC 6386 §9.1) and, on a key
+  frame, the `9d 01 2a` start code plus the two 14-bit size words, emitting
+  `CapsChanged(CompressedVideo{Vp8, Fixed w/h, Rate::Any})` before forwarding so a
+  VP8 elementary stream lacking container geometry (RTP, raw) recovers it from the
+  bitstream. No Annex-B / exp-Golomb machinery: the container frames packets, so
+  the packet *is* the frame and the keyframe header is plain byte fields.
+  Dimensions live only in key frames, so interframes forward without a caps
+  change; VP8 carries no framerate in the bitstream, so refined caps report
+  `Rate::Any` (matching mkvdemux). The decoder also surfaces the bitstream version
+  and show flag (not in `Caps`). `Identity(Vp8 any)` constraint, registered as
+  `vp8parse`. Second of the parser-gap sprint (`Vp9Parse` / `Av1Parse` next).
+- Tested: keyframe decode (geometry, version, show flag), an interframe / bad
+  start code / short / zero-dimension input rejected; the element emits
+  `CapsChanged` before the first frame, an interframe between keyframes adds no
+  second change, it re-emits on a resolution change, and rejects non-VP8 at
+  `intercept_caps`; end-to-end `MkvSource ! matroskademux(vp8) ! vp8parse !
+  fakesink` passes a keyframe + interframe through.
+
 ### M133: opusparse (Opus TOC parser)
 
 - **`g2g-plugins::opusparse::OpusParse` (no_std).** The audio sibling of

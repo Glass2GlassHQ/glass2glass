@@ -416,8 +416,12 @@ parsers have follow-ups:
   TOC byte (RFC 6716 §3.1) to recover mono/stereo channels (+ coder / bandwidth /
   frame duration), emitting `Audio{Opus, channels, 48 kHz}` caps. Multichannel
   (family 1, count in `OpusHead`) deferred.
-- **`Vp8Parse` / `Vp9Parse` / `Av1Parse`.** 1–2 sessions each, alongside the
-  corresponding codec.
+- **`Vp8Parse` — DONE (M134).** `g2g-plugins::vp8parse` reads the VP8 frame tag
+  (RFC 6386 §9.1) and, on a key frame, the start code + 14-bit width/height,
+  emitting `CompressedVideo{Vp8, Fixed w/h, Rate::Any}`. Geometry only (no
+  in-bitstream framerate).
+- **`Vp9Parse` / `Av1Parse`.** 1–2 sessions each, alongside the corresponding
+  codec.
 
 ### Overlay / effects
 
