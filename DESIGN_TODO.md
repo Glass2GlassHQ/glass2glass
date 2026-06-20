@@ -428,7 +428,12 @@ and the pure-Rust / browser decode paths:
   from the JPEG headers per frame, emitted as `CapsChanged`. **Remaining:** I420
   output (avoid the YCbCr->RGBA convert for planar consumers) and a `mozjpeg`-backed
   fast path under a feature flag if decode CPU cost matters.
-- **JPEG decode + encode.** 1 session. Thumbnailing, snapshot capture.
+- **JPEG decode + encode — DONE (M152 / M153).** Decode is `MjpegDec`
+  (`zune-jpeg`, M152 above); encode is `g2g-plugins::mjpegenc::MjpegEnc`
+  (`mjpeg-encode` feature) via the pure-Rust `jpeg-encoder` crate:
+  `RawVideo{Rgba8|Bgra8}` -> `CompressedVideo{Mjpeg}`, intra-only per frame for
+  thumbnail / snapshot / low-latency capture. **Remaining:** planar (I420) input
+  without a `VideoConvert` round-trip, and a single-still image sink.
 
 ### Parsers
 

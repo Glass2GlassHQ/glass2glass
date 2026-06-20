@@ -5,6 +5,20 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M153: MjpegEnc (Motion-JPEG encode, pure Rust)
+
+- **`MjpegEnc` encodes packed `RawVideo{Rgba8|Bgra8}` to `CompressedVideo{Mjpeg}`**
+  via the pure-Rust `jpeg-encoder` crate (`mjpeg-encode` feature), the GStreamer
+  `jpegenc` analog and the inverse of `MjpegDec` (M152). Each frame is an
+  independent baseline JPEG (intra-only), so this is the snapshot / thumbnail /
+  low-latency capture encoder. Quality is builder-configurable (`with_quality`,
+  default 85); geometry fixed at configure. No system dependency. Planar sources
+  run a `VideoConvert` to packed RGBA/BGRA first (`jpeg-encoder`'s `ColorType` has
+  no planar input).
+- Verified by `m153_mjpegenc.rs`: a 32x16 solid-blue RGBA frame encodes to a JPEG
+  (SOI marker asserted) that round-trips back through `MjpegDec` to the source
+  geometry with the blue channel still dominant.
+
 ### M152: MjpegDec (Motion-JPEG decode, pure Rust)
 
 - **`MjpegDec` decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}`** via the

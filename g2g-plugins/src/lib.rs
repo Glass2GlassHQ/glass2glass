@@ -179,6 +179,10 @@ pub mod vpxenc;
 #[cfg(feature = "mjpeg")]
 pub mod mjpegdec;
 
+// Motion-JPEG encode via the pure-Rust jpeg-encoder crate (no system deps).
+#[cfg(feature = "mjpeg-encode")]
+pub mod mjpegenc;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
