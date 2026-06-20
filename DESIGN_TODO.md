@@ -412,8 +412,12 @@ parsers have follow-ups:
 - **`AacParse` follow-ups.** LATM / LOAS framing (MPEG-TS / broadcast),
   AudioSpecificConfig synthesis for a downstream decoder (needs the metadata
   side channel), and validation against a real ADTS stream.
-- **`Vp8Parse` / `Vp9Parse` / `Av1Parse` / `OpusParse`.** 1–2 sessions each,
-  alongside the corresponding codec.
+- **`OpusParse` — DONE (M133).** `g2g-plugins::opusparse` reads each packet's
+  TOC byte (RFC 6716 §3.1) to recover mono/stereo channels (+ coder / bandwidth /
+  frame duration), emitting `Audio{Opus, channels, 48 kHz}` caps. Multichannel
+  (family 1, count in `OpusHead`) deferred.
+- **`Vp8Parse` / `Vp9Parse` / `Av1Parse`.** 1–2 sessions each, alongside the
+  corresponding codec.
 
 ### Overlay / effects
 

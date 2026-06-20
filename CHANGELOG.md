@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M133: opusparse (Opus TOC parser)
+
+- **`g2g-plugins::opusparse::OpusParse` (no_std).** The audio sibling of
+  `aacparse`: it reads each packet's leading TOC byte (RFC 6716 §3.1) and
+  recovers the mono/stereo channel count, emitting
+  `CapsChanged(Audio{Opus, channels, 48 kHz})` before forwarding the frame, so a
+  raw Opus elementary stream (RTP, or a container that left channels unset) gets
+  a concrete channel count for restream / mux. Unlike H.264 / AAC there is no
+  in-band syncword: the container frames packets, so byte 0 *is* the TOC, never a
+  scan. The decoder also surfaces the coder (SILK / Hybrid / CELT), bandwidth,
+  and frame duration from the 5-bit `config`. Sample rate is the constant 48 kHz
+  (Opus always decodes there regardless of coded bandwidth). `IdentityAny`
+  constraint like `aacparse`, registered as `opusparse`. Multichannel
+  (channel-mapping family 1) carries its count in `OpusHead`, not the TOC, so
+  that case needs the container header and is deferred; the TOC covers the common
+  mono/stereo family 0. First of the parser-gap sprint (`Vp8/Vp9/Av1Parse` next).
+- Tested: TOC decode across SILK / Hybrid / CELT configs (mode, bandwidth, frame
+  duration), every 5-bit config decodes to a real duration, mono/stereo from the
+  stereo bit, an empty packet rejected; the element emits `CapsChanged` before
+  the first frame, suppresses re-emission when the channel count is unchanged,
+  re-emits on a mono->stereo change, and rejects non-Opus at `intercept_caps`;
+  end-to-end `filesrc ! oggdemux ! opusparse ! fakesink` passes three demuxed
+  Opus packets through.
+
 ### M132: V4l2Src + CudaGlSink native caps_constraint
 
 - **`V4l2Src` / `CudaGlSink` off the legacy caps bridge**, the last two in-tree

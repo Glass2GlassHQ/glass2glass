@@ -41,6 +41,7 @@ use crate::mkvdemux::MkvDemux;
 use crate::mux::InterleaveMux;
 use crate::mkvmux::MkvMux;
 use crate::oggdemux::OggDemux;
+use crate::opusparse::OpusParse;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
@@ -135,6 +136,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
     reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
+    reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || Box::new(OpusParse::new())));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
