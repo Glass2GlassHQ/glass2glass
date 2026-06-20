@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M142: flvmux writes onMetaData
+
+- **`flvmux` writes an `onMetaData` script tag**, the second tag writer (the inverse
+  of M138's reader), so a `TagList` round-trips through the FLV mux + demux. The pure
+  `FlvMuxer::with_tags(...)` serializes the list as AMF0 (the event-name string then
+  an ECMA array of `key`/string-value properties) and emits it as a type-18 script
+  tag ahead of the first media tag, with its `PreviousTagSize` chained correctly;
+  typed keys write their conventional lowercase FLV names (`title` / `encoder` / ...)
+  so they decode back to the same `Tag` variant, and `Tag::Other` keeps its key.
+  `FlvMux::with_tags(...)` threads the list to the muxer. Without tags the stream is
+  byte-identical to before (no script tag). The tag-builder is factored into a shared
+  `flv_tag` helper used by both media and script tags.
+- Tested: `FlvMuxer::with_tags` writes an `onMetaData` body the demuxer retains while
+  the media AU still demuxes, and an empty list writes no script tag; end-to-end,
+  `FlvMux::with_tags ! flvdemux(with_bus)` posts a `BusMessage::Tag` with the title +
+  encoder while the AU reaches the sink.
+
 ### M141: matroskamux writes Tags
 
 - **`matroskamux` writes a `Tags` element**, the first tag *writer* (the inverse of

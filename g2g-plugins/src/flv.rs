@@ -17,6 +17,8 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::{Tag, TagList};
+
 /// FLV tag type: an audio tag (codec-tagged audio data).
 const TAG_AUDIO: u8 = 8;
 /// FLV tag type: a video tag (codec-tagged video data).
@@ -38,6 +40,12 @@ const FLV_HEADER_MIN: usize = 9;
 const TAG_HEADER_LEN: usize = 11;
 /// The `PreviousTagSize` (UI32) that prefixes every tag after the header.
 const PREV_TAG_SIZE_LEN: usize = 4;
+
+// AMF0 markers the `onMetaData` writer emits (the inverse of the reader subset in
+// `flvdemux::amf0`).
+const AMF0_STRING: u8 = 0x02;
+const AMF0_ECMA_ARRAY: u8 = 0x08;
+const AMF0_OBJECT_END: u8 = 0x09;
 
 /// Which elementary stream an [`FlvUnit`] belongs to. An FLV stream interleaves
 /// at most one video and one audio track.
@@ -170,17 +178,26 @@ fn write_u24(out: &mut Vec<u8>, v: u32) {
 #[derive(Debug)]
 pub struct FlvMuxer {
     track: FlvTrack,
+    tags: TagList,
     header_written: bool,
     prev_tag_size: u32,
 }
 
 impl FlvMuxer {
     pub fn new(track: FlvTrack) -> Self {
-        Self { track, header_written: false, prev_tag_size: 0 }
+        Self { track, tags: TagList::new(), header_written: false, prev_tag_size: 0 }
+    }
+
+    /// Attach stream metadata, written as an `onMetaData` script tag ahead of the
+    /// first media tag (the inverse of [`FlvDemuxer::metadata`]).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Wrap one access unit (an AVCC unit for video, a raw AAC frame for audio)
-    /// into the FLV bytes to emit, prepending the file header on the first call.
+    /// into the FLV bytes to emit, prepending the file header (+ an `onMetaData`
+    /// script tag when tags are set) on the first call.
     pub fn push_au(&mut self, data: &[u8], pts_ms: u32) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
@@ -192,9 +209,17 @@ impl FlvMuxer {
                 FlvTrack::Audio => 0x04,
             });
             out.extend_from_slice(&(FLV_HEADER_MIN as u32).to_be_bytes()); // data offset
+            if !self.tags.is_empty() {
+                // The script tag is the first tag, so its PreviousTagSize is 0.
+                out.extend_from_slice(&0u32.to_be_bytes());
+                let script = flv_tag(TAG_SCRIPT, 0, &on_metadata_body(&self.tags));
+                self.prev_tag_size = script.len() as u32;
+                out.extend_from_slice(&script);
+            }
             self.header_written = true;
         }
-        // PreviousTagSize: 0 before the first tag, then the prior tag's length.
+        // PreviousTagSize: 0 (or the script tag's length) before the first media
+        // tag, then the prior tag's length.
         out.extend_from_slice(&self.prev_tag_size.to_be_bytes());
         let tag = self.build_tag(data, pts_ms);
         self.prev_tag_size = tag.len() as u32;
@@ -202,7 +227,7 @@ impl FlvMuxer {
         out
     }
 
-    /// Build one tag (11-byte header + codec-tagged body) for an access unit.
+    /// Build one media tag (11-byte header + codec-tagged body) for an access unit.
     fn build_tag(&self, data: &[u8], pts_ms: u32) -> Vec<u8> {
         let (tag_type, mut body) = match self.track {
             // keyframe | AVC, NALU packet, composition time 0.
@@ -211,14 +236,62 @@ impl FlvMuxer {
             FlvTrack::Audio => (TAG_AUDIO, alloc::vec![0xAFu8, 0x01]),
         };
         body.extend_from_slice(data);
+        flv_tag(tag_type, pts_ms, &body)
+    }
+}
 
-        let mut tag = alloc::vec![tag_type];
-        write_u24(&mut tag, body.len() as u32);
-        write_u24(&mut tag, pts_ms & 0x00FF_FFFF);
-        tag.push((pts_ms >> 24) as u8); // timestamp extension
-        write_u24(&mut tag, 0); // stream id
-        tag.extend_from_slice(&body);
-        tag
+/// Build one FLV tag: 11-byte header (type, 24-bit size, 24+8-bit timestamp,
+/// stream id) then the body.
+fn flv_tag(tag_type: u8, pts_ms: u32, body: &[u8]) -> Vec<u8> {
+    let mut tag = alloc::vec![tag_type];
+    write_u24(&mut tag, body.len() as u32);
+    write_u24(&mut tag, pts_ms & 0x00FF_FFFF);
+    tag.push((pts_ms >> 24) as u8); // timestamp extension
+    write_u24(&mut tag, 0); // stream id
+    tag.extend_from_slice(body);
+    tag
+}
+
+/// Serialize a [`TagList`] as an `onMetaData` script body (AMF0): the event-name
+/// string then an ECMA array of `key`/string-value properties. The typed keys
+/// write their conventional FLV names so they decode back to the same [`Tag`]
+/// variant; [`Tag::Other`] keeps its stored key.
+fn on_metadata_body(tags: &TagList) -> Vec<u8> {
+    let mut b = Vec::new();
+    write_amf0_string(&mut b, "onMetaData");
+    b.push(AMF0_ECMA_ARRAY);
+    b.extend_from_slice(&(tags.tags().len() as u32).to_be_bytes());
+    for t in tags.tags() {
+        let (key, value) = tag_key_value(t);
+        // an object/array key is a raw (unmarked) length-prefixed string.
+        b.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        b.extend_from_slice(key.as_bytes());
+        write_amf0_string(&mut b, value);
+    }
+    b.extend_from_slice(&0u16.to_be_bytes()); // empty key precedes the end marker
+    b.push(AMF0_OBJECT_END);
+    b
+}
+
+/// Write a marker-prefixed AMF0 string value.
+fn write_amf0_string(out: &mut Vec<u8>, s: &str) {
+    out.push(AMF0_STRING);
+    out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// A tag's FLV `onMetaData` key / value. Typed keys use the conventional
+/// lowercase names so they round-trip through `Tag::from_key_value`;
+/// [`Tag::Other`] keeps its stored key.
+fn tag_key_value(tag: &Tag) -> (&str, &str) {
+    match tag {
+        Tag::Title(v) => ("title", v),
+        Tag::Artist(v) => ("artist", v),
+        Tag::Album(v) => ("album", v),
+        Tag::Encoder(v) => ("encoder", v),
+        Tag::Language(v) => ("language", v),
+        Tag::Comment(v) => ("comment", v),
+        Tag::Other { key, value } => (key, value),
     }
 }
 
@@ -361,6 +434,34 @@ mod tests {
         d.push_data(&stream);
         assert_eq!(d.metadata(), Some(&b"onMetaData-amf0-blob"[..]), "script body retained");
         assert_eq!(d.take_units().len(), 1, "the media frame still demuxes");
+    }
+
+    #[test]
+    fn mux_writes_on_metadata_script_tag() {
+        let tags: TagList =
+            [Tag::Title("Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let mut mux = FlvMuxer::new(FlvTrack::Video).with_tags(tags);
+        let bytes = mux.push_au(&[0x65, 0xAA], 0);
+
+        // The demuxer retains the first script tag's body; it round-trips to the
+        // same tags, and the media AU still demuxes.
+        let mut d = FlvDemuxer::new();
+        d.push_data(&bytes);
+        let meta = d.metadata().expect("script tag body retained");
+        assert!(meta.starts_with(&[AMF0_STRING, 0, 10]), "begins with the onMetaData string");
+        assert!(meta.windows(10).any(|w| w == b"onMetaData"));
+        assert!(meta.windows(3).any(|w| w == b"g2g"));
+        assert_eq!(d.take_units().len(), 1, "the media AU still demuxes after the script tag");
+    }
+
+    #[test]
+    fn mux_without_tags_writes_no_script_tag() {
+        let mut mux = FlvMuxer::new(FlvTrack::Video);
+        let bytes = mux.push_au(&[0x65, 0xAA], 0);
+        let mut d = FlvDemuxer::new();
+        d.push_data(&bytes);
+        assert!(d.metadata().is_none(), "no script tag without attached tags");
+        assert_eq!(d.take_units().len(), 1);
     }
 
     #[test]

@@ -13,8 +13,9 @@
 //!
 //! Scope (v1): one track (a single input pad), mirroring the single-stream
 //! `FlvDemux`; media frames only (no sequence header), so a real player needs the
-//! codec config that the extradata side channel will carry. Multi-track muxing and
-//! the `onMetaData` script tag are follow-ups (DESIGN.md §4.17).
+//! codec config that the extradata side channel will carry. An `onMetaData` script
+//! tag is written when metadata is attached via [`FlvMux::with_tags`]; multi-track
+//! muxing is a follow-up (DESIGN.md §4.17).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -27,7 +28,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    Rate, TagList, VideoCodec,
 };
 
 use crate::flv::{FlvMuxer, FlvTrack};
@@ -37,6 +38,7 @@ use crate::flv::{FlvMuxer, FlvTrack};
 pub struct FlvMux {
     /// Built at configure, once the input track is known.
     mux: Option<FlvMuxer>,
+    tags: TagList,
     configured: bool,
     emitted: u64,
 }
@@ -49,7 +51,13 @@ impl Default for FlvMux {
 
 impl FlvMux {
     pub fn new() -> Self {
-        Self { mux: None, configured: false, emitted: 0 }
+        Self { mux: None, tags: TagList::new(), configured: false, emitted: 0 }
+    }
+
+    /// Attach stream metadata, written as an `onMetaData` script tag in the header.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Count of FLV byte frames forwarded.
@@ -111,7 +119,7 @@ impl AsyncElement for FlvMux {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let track = Self::track_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.mux = Some(FlvMuxer::new(track));
+        self.mux = Some(FlvMuxer::new(track).with_tags(self.tags.clone()));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -225,6 +233,42 @@ mod tests {
             f(&h264_caps()).alternatives(),
             [Caps::ByteStream { encoding: ByteStreamEncoding::Flv }]
         ));
+    }
+
+    #[tokio::test]
+    async fn element_round_trips_tags_through_flvdemux() {
+        use g2g_core::{Bus, BusMessage, Tag};
+
+        let tags: TagList =
+            [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let mut mux = FlvMux::new().with_tags(tags.clone());
+        mux.configure_pipeline(&h264_caps()).unwrap();
+        let mut flv_sink = CaptureSink::default();
+        mux.process(h264_frame(alloc::vec![0x65, 0xAA], 0), &mut flv_sink).await.unwrap();
+
+        let mut flv = Vec::new();
+        for f in &flv_sink.frames {
+            flv.extend_from_slice(f);
+        }
+        let (bus, handle) = Bus::new(8);
+        let mut demux = FlvDemux::new().with_stream(FlvStream::H264).with_bus(handle);
+        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Flv }).unwrap();
+        let mut au_sink = CaptureSink::default();
+        let flv_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(flv.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        demux.process(PipelinePacket::DataFrame(flv_frame), &mut au_sink).await.unwrap();
+
+        let mut posted = None;
+        while let Some(m) = bus.try_recv() {
+            if let BusMessage::Tag(t) = m {
+                posted = Some(t);
+            }
+        }
+        assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
+        assert_eq!(au_sink.frames, alloc::vec![alloc::vec![0x65, 0xAA]], "the AU still demuxes");
     }
 
     #[tokio::test]

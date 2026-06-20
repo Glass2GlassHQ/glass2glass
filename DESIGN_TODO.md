@@ -224,11 +224,13 @@ Smaller-scope items, mostly orthogonal to the architecture.
   via `BusMessage::Tag`. Readers: `oggdemux` `OpusTags` VorbisComment (M137),
   `flvdemux` FLV `onMetaData` AMF0 (M138), `matroskademux` Segment `Tags` + `Info`
   `Title` (M139), `mp4src` iTunes `udta/meta/ilst` atoms (M140). Writer:
-  `matroskamux` emits a whole-stream `Tags` element via `with_tags` (M141), so a
-  `TagList` round-trips. Remaining: more writers (`mp4mux` `ilst`, `flvmux`
-  `onMetaData`); Matroska `Targets`-scoped (per-track) tags and nested SimpleTags;
-  MP4 freeform (`----`) and integer atoms (track/disc number); and a per-stream tag
-  merge policy for multi-stream containers.
+  `matroskamux` emits a whole-stream `Tags` element via `with_tags` (M141) and
+  `flvmux` writes an `onMetaData` AMF0 script tag via `with_tags` (M142), so a
+  `TagList` round-trips through both. Remaining: the `mp4mux` `ilst` writer (no MP4
+  muxer with a `moov` writer yet, only the fragmented `Mp4Sink`); Matroska
+  `Targets`-scoped (per-track) tags and nested SimpleTags; MP4 freeform (`----`) and
+  integer atoms (track/disc number); and a per-stream tag merge policy for
+  multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation
@@ -375,9 +377,9 @@ modern PipeWire path remain.
   `FlvMux` elements) on the new `Caps::ByteStream{Flv}`: the "FLV" header then
   `PreviousTagSize` / tag pairs, the demuxer forwarding and the muxer wrapping the
   H.264 (AVC) video and AAC audio access units per `FlvStream` selection (h264 |
-  aac), sniffed by `typefind`. The `onMetaData` script-tag metadata is surfaced
-  as tags (M138, see the tag system above). **Remaining:** codec-config /
-  extradata plumbing, and multi-track muxing.
+  aac), sniffed by `typefind`. The `onMetaData` script-tag metadata is read as tags
+  (M138) and written by `flvmux` via `with_tags` (M142, see the tag system above).
+  **Remaining:** codec-config / extradata plumbing, and multi-track muxing.
 - **OGG demux — DONE (M116).** Pure RFC 3533 parser
   (`g2g-plugins::ogg::OggDemuxer` + the `OggDemux` element), fed by the new
   `Caps::ByteStream{Ogg}` link type: "OggS" pages, segment-table lacing with
