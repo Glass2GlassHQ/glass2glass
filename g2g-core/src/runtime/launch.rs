@@ -20,10 +20,20 @@
 //! to two sinks. The caps shorthand (`! video/x-raw,format=nv12,... !`, M117) is
 //! a bare media-type node rewritten to a `capsfilter`.
 //!
+//! Fan-in (M122): an element with several inbound links is a muxer, built from
+//! the registry's [`MuxerFactory`](crate::runtime::MuxerFactory) with that input
+//! count (so its `input_count` matches the node's pads). Each feeding chain ends
+//! with a `m.` tail ref, so
+//! `src1 ! m.   src2 ! m.   funnel name=m ! fakesink` joins two streams. Feeding
+//! chains come first (a new chain can only begin after a `!` / ref / caps
+//! boundary, so a chain starting with a bare element name would be read as the
+//! previous element's property); the muxer chain is last. A muxer has one output
+//! pad, so it must feed a downstream consumer.
+//!
 //! Scope: `key=value` with no spaces in the value (double quotes around a value
-//! are stripped). Fan-in (several links into one muxer element) from text is a
-//! follow-up; a pad-name suffix on a reference (`t.src_0`) is accepted but
-//! ignored (pads are positional).
+//! are stripped). Muxer `key=value` properties are not applied (the in-tree
+//! muxers have none; `name=` is still the handle). A pad-name suffix on a
+//! reference (`t.src_0`) is accepted but ignored (pads are positional).
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -62,9 +72,12 @@ pub enum ParseError {
     /// A non-`tee` element's output links more than once: a pad peers with one
     /// other pad, so an explicit `tee` must express the fan-out.
     FanOutWithoutTee(String),
-    /// More than one link feeds one element's input; muxer fan-in from text is a
-    /// follow-up.
-    UnsupportedFanIn(String),
+    /// More than one link feeds an element's input, but it names no registered
+    /// muxer: fan-in needs a [`MuxerFactory`](crate::runtime::MuxerFactory).
+    NotAMuxer(String),
+    /// A muxer (an element with several inputs) has no outgoing link; its single
+    /// output pad must feed a downstream consumer.
+    MuxerWithoutOutput(String),
     /// Linking two nodes into the graph failed.
     Graph(GraphError),
 }
@@ -97,8 +110,11 @@ impl core::fmt::Display for ParseError {
             ParseError::FanOutWithoutTee(n) => {
                 write!(f, "{n}: output fans out to more than one consumer; insert a 'tee' to branch")
             }
-            ParseError::UnsupportedFanIn(n) => {
-                write!(f, "{n}: fan-in (multiple inputs) needs a muxer, not yet supported in text")
+            ParseError::NotAMuxer(n) => {
+                write!(f, "{n}: more than one input links here, but it is not a registered muxer")
+            }
+            ParseError::MuxerWithoutOutput(n) => {
+                write!(f, "{n}: muxer has no outgoing link; its output must feed a consumer")
             }
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
         }
@@ -378,12 +394,15 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     }
 
     let is_tee = |ei: usize| specs[ei].name == "tee";
+    // A non-tee node with several inbound links is a muxer (built from the
+    // registry with that input count); a tee has a single input pad.
+    let is_muxer = |ei: usize| !is_tee(ei) && in_deg[ei] > 1;
     for ei in 0..specs.len() {
         if !is_tee(ei) && out_deg[ei] > 1 {
             return Err(ParseError::FanOutWithoutTee(specs[ei].name.clone()));
         }
-        if in_deg[ei] > 1 {
-            return Err(ParseError::UnsupportedFanIn(specs[ei].name.clone()));
+        if is_muxer(ei) && out_deg[ei] == 0 {
+            return Err(ParseError::MuxerWithoutOutput(specs[ei].name.clone()));
         }
         if is_tee(ei) && !specs[ei].props.is_empty() {
             // The structural tee carries no element, so it has no properties.
@@ -407,6 +426,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 .ok_or_else(|| ParseError::UnknownSource(spec.name.clone()))?;
             apply_source_props(&mut src, &spec.name, &spec.props)?;
             graph.add_source(GraphNodeRef::Source(src))
+        } else if is_muxer(ei) {
+            let mux = registry
+                .make_muxer(&spec.name, in_deg[ei])
+                .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
+            graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
         } else if out_deg[ei] == 0 {
             let mut el = registry
                 .make_element(&spec.name)
@@ -423,9 +447,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         node_of.push(node);
     }
 
-    // Wire edges. Each tee branch takes a distinct output pad (0..n); every other
-    // output and every input is pad 0.
+    // Wire edges. Each tee branch takes a distinct output pad (0..n) and each
+    // muxer input a distinct input pad (0..n); every other output and input is
+    // pad 0.
     let mut tee_next = alloc::vec![0u8; specs.len()];
+    let mut mux_next = alloc::vec![0u8; specs.len()];
     for &(s, d) in &links {
         let src = if is_tee(s) {
             let index = tee_next[s];
@@ -434,7 +460,14 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         } else {
             PadId::from(node_of[s])
         };
-        graph.link(src, PadId::from(node_of[d]))?;
+        let dst = if is_muxer(d) {
+            let index = mux_next[d];
+            mux_next[d] += 1;
+            PadId { node: node_of[d], index }
+        } else {
+            PadId::from(node_of[d])
+        };
+        graph.link(src, dst)?;
     }
 
     Ok(graph)

@@ -207,7 +207,13 @@ Production-shape needs that block specific real-world use cases.
   **Done (M118):** `gst-launch` branching, a chain parser where `name=t` names an
   element and a `t.` reference opens a branch; `tee` is the structural fan-out
   node, its output width derived from the branch count, broadcasting each frame to
-  every branch. Text muxer fan-in remains.
+  every branch.
+  **Done (M122):** text muxer fan-in. An element with several inbound links is a
+  muxer, built from the registry's `MuxerFactory` with the input count derived
+  from link degree; feeding chains end in a `m.` tail ref, the muxer chain last.
+  `funnel` (the `InterleaveMux` N-to-1 forwarder) is registered in
+  `default_registry`. Muxer `key=value` properties and a muxer-first chain
+  ordering remain unsupported.
 
 ### Medium / niche
 

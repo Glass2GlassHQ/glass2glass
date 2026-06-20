@@ -18,7 +18,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::runtime::{LaunchFactory, Registry, SourceFactory};
+use g2g_core::runtime::{LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
@@ -35,6 +35,7 @@ use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
 use crate::mkvdemux::MkvDemux;
+use crate::mux::InterleaveMux;
 use crate::mkvmux::MkvMux;
 use crate::oggdemux::OggDemux;
 use crate::videoconvert::VideoConvert;
@@ -126,6 +127,22 @@ pub fn default_registry() -> Registry {
     // by name with a `caps` property; see runtime::parse_launch.
     reg.register_launch(LaunchFactory::new("capsfilter", Vec::new(), || {
         Box::new(CapsFilter::default())
+    }));
+
+    // Fan-in muxer (M122). `funnel` is the structural N-to-1 forwarder for text
+    // fan-in (`funnel name=m ! sink   a ! m.   b ! m.`); the parser derives the
+    // input count from link degree. The output caps are a nominal default (frames
+    // carry their own caps downstream), matching `videotestsrc`'s default.
+    reg.register_muxer(MuxerFactory::new("funnel", |inputs| {
+        Box::new(InterleaveMux::new(
+            inputs,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(320),
+                height: Dim::Fixed(240),
+                framerate: Rate::Fixed(30 << 16),
+            },
+        ))
     }));
 
     // Sinks.

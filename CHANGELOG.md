@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M122: gst-launch muxer fan-in
+
+- **`g2g-core::runtime::MuxerFactory` + `Registry::register_muxer` / `make_muxer`.**
+  The registry gains a fan-in path: a named `MultiInputElement` constructor that
+  takes the input count, so a built muxer's `input_count` matches its node's pad
+  count. `element_names` / `inspect` list registered muxers.
+- **`parse_launch` builds muxer nodes (`launch.rs`).** An element with several
+  inbound links is a muxer, built via `make_muxer` with the input count derived
+  from link degree and wired to distinct input pads (mirroring the M118 tee
+  output-pad assignment). Feeding chains come first, each ending in a `m.` tail
+  ref; the muxer chain is last (a chain cannot begin with a bare element name, as
+  it would be read as the prior element's property). New `ParseError::NotAMuxer`
+  (several inputs into a non-muxer) and `MuxerWithoutOutput` (a muxer's single
+  output pad is unlinked) replace the old `UnsupportedFanIn`.
+- **`funnel` registered in `default_registry` (g2g-plugins).** The structural
+  N-to-1 forwarder (`InterleaveMux`) for text fan-in, e.g.
+  `src1 ! m.   src2 ! m.   funnel name=m ! sink`.
+- Tested: a two-source `funnel` fan-in parses, builds a `Muxer(2)` node, and runs
+  end to end through `run_graph` (7 = 4 + 3 frames reach the sink); the error
+  cases (`NotAMuxer`, `MuxerWithoutOutput`) report.
+
 ### M121: fix double-EOS forward in demux/mux/overlay transforms
 
 - **Bug.** Six transforms (`tsdemux`, `oggdemux`, `mkvdemux`, `tsmux`, `mkvmux`,

@@ -166,7 +166,7 @@ mod factory {
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::format_specs;
-    use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
+    use crate::runtime::{DynMultiInputElement, DynSourceLoop, GraphNode, GraphNodeRef};
 
     /// A registered element type: its autoplug metadata plus a constructor
     /// producing a boxed transform/sink for the graph runner. The constructor
@@ -252,6 +252,36 @@ mod factory {
     impl core::fmt::Debug for LaunchFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("LaunchFactory").field("name", &self.name).finish_non_exhaustive()
+        }
+    }
+
+    /// A named fan-in muxer factory for the `gst-launch` parser (M122): an
+    /// N-to-1 element built per use with the input count the parser derives from
+    /// link degree. Unlike [`LaunchFactory`] (a single-in / single-out transform
+    /// or sink), the constructor takes the input count, because a
+    /// [`MultiInputElement`](crate::MultiInputElement)'s `input_count` must match
+    /// the muxer node's input-pad count.
+    pub struct MuxerFactory {
+        name: &'static str,
+        build: fn(usize) -> Box<dyn DynMultiInputElement>,
+    }
+
+    impl MuxerFactory {
+        /// Register a fan-in muxer by name and an input-count constructor
+        /// (`|n| Box::new(MyMux::new(n, ...))`).
+        pub fn new(name: &'static str, build: fn(usize) -> Box<dyn DynMultiInputElement>) -> Self {
+            Self { name, build }
+        }
+
+        /// This factory's element name.
+        pub fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    impl core::fmt::Debug for MuxerFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("MuxerFactory").field("name", &self.name).finish_non_exhaustive()
         }
     }
 
@@ -440,6 +470,7 @@ mod factory {
         sources: Vec<SourceFactory>,
         uris: Vec<UriSourceFactory>,
         launch: Vec<LaunchFactory>,
+        muxers: Vec<MuxerFactory>,
     }
 
     impl Registry {
@@ -477,6 +508,13 @@ mod factory {
             self
         }
 
+        /// Register a named fan-in muxer for the `gst-launch` parser (M122),
+        /// returning `&mut self` to chain calls.
+        pub fn register_muxer(&mut self, factory: MuxerFactory) -> &mut Self {
+            self.muxers.push(factory);
+            self
+        }
+
         /// Construct a registered source by name (the parser's first element).
         /// `None` if no source is registered under `name`.
         pub fn make_source(&self, name: &str) -> Option<Box<dyn DynSourceLoop>> {
@@ -490,6 +528,14 @@ mod factory {
             self.launch.iter().find(|f| f.name == name).map(|f| (f.build)())
         }
 
+        /// Construct a registered fan-in muxer by name with `inputs` input pads
+        /// (the parser derives the count from link degree, so it matches the
+        /// muxer node's input-pad count). `None` if `name` is not registered via
+        /// [`register_muxer`](Self::register_muxer).
+        pub fn make_muxer(&self, name: &str, inputs: usize) -> Option<Box<dyn DynMultiInputElement>> {
+            self.muxers.iter().find(|m| m.name == name).map(|m| (m.build)(inputs))
+        }
+
         /// The names of every element registerable by the parser: sources first,
         /// then transforms / sinks, each in registration order. The `gst-inspect`
         /// element list.
@@ -498,6 +544,7 @@ mod factory {
                 .iter()
                 .map(|s| s.name)
                 .chain(self.launch.iter().map(|f| f.name))
+                .chain(self.muxers.iter().map(|m| m.name))
                 .collect()
         }
 
@@ -521,6 +568,10 @@ mod factory {
                 let _ = writeln!(out, "{name} (element)");
                 let _ = write!(out, "Pad templates:\n{}", format_templates(&f.templates));
                 let _ = write!(out, "Properties:\n{}", format_specs(el.properties()));
+                Some(out)
+            } else if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
+                let _ = writeln!(out, "{} (muxer)", m.name);
+                let _ = writeln!(out, "Inputs: derived from link degree");
                 Some(out)
             } else {
                 None
@@ -666,8 +717,8 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, PlaybinError, Registry,
-    SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, MuxerFactory,
+    PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]
