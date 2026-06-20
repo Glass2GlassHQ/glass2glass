@@ -420,8 +420,11 @@ parsers have follow-ups:
   (RFC 6386 §9.1) and, on a key frame, the start code + 14-bit width/height,
   emitting `CompressedVideo{Vp8, Fixed w/h, Rate::Any}`. Geometry only (no
   in-bitstream framerate).
-- **`Vp9Parse` / `Av1Parse`.** 1–2 sessions each, alongside the corresponding
-  codec.
+- **`Vp9Parse` — DONE (M135).** `g2g-plugins::vp9parse` reads the VP9
+  uncompressed header (marker, profile, `49 83 42` sync, `color_config`, 16-bit
+  size fields, MSB-first) on a key frame, emitting
+  `CompressedVideo{Vp9, Fixed w/h, Rate::Any}`. Intra-only resizes deferred.
+- **`Av1Parse`.** 1–2 sessions, alongside the AV1 codec.
 
 ### Overlay / effects
 

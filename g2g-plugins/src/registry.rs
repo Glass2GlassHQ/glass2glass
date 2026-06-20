@@ -43,6 +43,7 @@ use crate::mkvmux::MkvMux;
 use crate::oggdemux::OggDemux;
 use crate::opusparse::OpusParse;
 use crate::vp8parse::Vp8Parse;
+use crate::vp9parse::Vp9Parse;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
@@ -139,6 +140,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || Box::new(OpusParse::new())));
     reg.register_launch(LaunchFactory::of::<Vp8Parse>("vp8parse", || Box::new(Vp8Parse::new())));
+    reg.register_launch(LaunchFactory::of::<Vp9Parse>("vp9parse", || Box::new(Vp9Parse::new())));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));

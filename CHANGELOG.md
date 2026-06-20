@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M135: vp9parse (VP9 uncompressed-header parser)
+
+- **`g2g-plugins::vp9parse::Vp9Parse` (no_std).** The VP9 sibling of `vp8parse`:
+  it reads each frame's uncompressed header (`uncompressed_header()`) and, on a
+  key frame, the coded dimensions, emitting
+  `CapsChanged(CompressedVideo{Vp9, Fixed w/h, Rate::Any})` before forwarding so a
+  VP9 stream lacking container geometry recovers it from the bitstream. Unlike VP8
+  the header is bit-packed: `frame_marker`, profile, the `49 83 42` sync code, a
+  variable-length `color_config` (its size depends on profile + colour space),
+  then the 16-bit size fields, all MSB-first via the shared `annexb::BitReader`.
+  Dimensions are read only from key frames; inter and `show_existing_frame` frames
+  carry none and forward unchanged. No in-bitstream framerate, so `Rate::Any`
+  (matching mkvdemux); the bitstream profile is surfaced (not in `Caps`).
+  Intra-only resizes are a follow-up. `Identity(Vp9 any)` constraint, registered
+  as `vp9parse`. Third of the parser-gap sprint (`Av1Parse` next).
+- Tested: keyframe decode across profiles 0 / 1 / 2 (exercising the bit-depth and
+  subsampling `color_config` branches), an inter / `show_existing` frame, bad
+  marker / sync code, and empty input rejected; the element emits `CapsChanged`
+  before the first frame, suppresses re-emission when unchanged, re-emits on a
+  resolution change, and rejects non-VP9 at `intercept_caps`; end-to-end
+  `MkvSource ! matroskademux ! vp9parse ! fakesink` passes a keyframe + interframe
+  through.
+
 ### M134: vp8parse (VP8 keyframe parser)
 
 - **`g2g-plugins::vp8parse::Vp8Parse` (no_std).** The VP8 counterpart of
