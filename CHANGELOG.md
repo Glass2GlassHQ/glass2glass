@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M163: HLS SAMPLE-AES key auto-wiring (HlsSrc -> SampleAesDecrypt)
+
+- **Shared key handle.** `sampleaesdecrypt::SampleAesKeyHandle`
+  (`Arc<Mutex<Option<SampleAesKey>>>`) + `new_key_handle()`. `HlsSrc::with_sample_aes_key_handle`
+  and `SampleAesDecrypt::from_key_handle` wire the two ends: on a
+  `METHOD=SAMPLE-AES` segment `HlsSrc` fetches the `#EXT-X-KEY` key, resolves the
+  IV (explicit or media-sequence), publishes `SampleAesKey { key, iv }` into the
+  handle, and forwards the segment bytes undecrypted (sample encryption is handled
+  after the demuxer); `SampleAesDecrypt` reads the handle per frame. So
+  `HlsSrc ! tsdemux ! sampleaesdecrypt ! h264parse` needs no hand-set key.
+- Without a handle, a SAMPLE-AES playlist is still rejected (`CapsMismatch`), as
+  before. The key/IV are also redacted from the `SampleAesKey` / `SampleAesDecrypt`
+  `Debug` output.
+- Scope: a single per-stream key (the common case). Mid-stream key rotation has a
+  benign race (the handle holds one key) and stays a follow-up, as does fMP4 `cbcs`.
+- Verified by `sampleaesdecrypt` unit tests (decrypt from a populated handle, and
+  pass-through when the handle is empty) and `m163_hls_sampleaes_wiring.rs` end to
+  end: a SAMPLE-AES playlist drives `HlsSrc` to publish the fetched key + IV and
+  forward the bytes undecrypted, and a handle-less run is rejected.
+
 ### M162: HLS SAMPLE-AES sample decryptor (TS H.264 + AAC)
 
 - **`sampleaesdecrypt::SampleAesDecrypt`** (`hls` feature), the post-demux half of

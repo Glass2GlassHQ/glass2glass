@@ -162,13 +162,13 @@ Production-shape needs that block specific real-world use cases.
 - **Adaptive streaming (HLS, DASH).** Built and documented in DESIGN.md §4.17:
   the `HttpSrc` fetch layer, `HlsSrc` (TS + fMP4/CMAF via `#EXT-X-MAP`, live
   reload, AES-128 `#EXT-X-KEY` decryption), the `SampleAesDecrypt` transform (TS
-  SAMPLE-AES H.264 + AAC, key configured on the element), and `DashSrc` (static
-  MPD, `SegmentTemplate` `$Number$`).
-  **Remaining HLS:** auto-wire the playlist `#EXT-X-KEY` SAMPLE-AES key from
-  `HlsSrc` through the demuxer into `SampleAesDecrypt` (it takes the key directly
-  today); fMP4 `cbcs` SAMPLE-AES and encrypted init segments; byte-range segments;
-  throughput-driven ABR (the current pick is static by declared bandwidth);
-  live-edge start (skip to the last few segments); and mid-stream variant switching.
+  SAMPLE-AES H.264 + AAC, key auto-wired from `HlsSrc` via a shared handle), and
+  `DashSrc` (static MPD, `SegmentTemplate` `$Number$`).
+  **Remaining HLS:** SAMPLE-AES key rotation mid-stream (the shared handle holds a
+  single key, fine for a constant per-stream key); fMP4 `cbcs` SAMPLE-AES and
+  encrypted init segments; byte-range segments; throughput-driven ABR (the current
+  pick is static by declared bandwidth); live-edge start (skip to the last few
+  segments); and mid-stream variant switching.
   **Remaining DASH:** `SegmentTimeline` and `$Time$` addressing, dynamic (live) MPD
   reload, `SegmentList`/`SegmentBase` byte-range, multi-period, and
   throughput-driven ABR.

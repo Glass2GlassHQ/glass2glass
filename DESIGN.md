@@ -1172,7 +1172,10 @@ inside the container, so it is handled after demux by the
 h264parse`): per the Apple TS sample-encryption format it AES-128-CBC decrypts
 H.264 slice NALs (32-byte clear leader, 16-encrypted / 144-clear pattern,
 emulation-prevention aware, IV reset per NAL) and AAC ADTS frames (ADTS header +
-16 clear bytes, then whole-block CBC), with the key/IV configured on the element.
+16 clear bytes, then whole-block CBC). The key/IV reach it either configured
+directly or, in the HLS chain, auto-wired: `HlsSrc` fetches the `#EXT-X-KEY`
+material and publishes it into a shared key handle the decryptor reads, forwarding
+the sample-encrypted segments undecrypted (the demuxer needs the clear framing).
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its `SegmentTemplate`

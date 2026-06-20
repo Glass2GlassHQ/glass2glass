@@ -22,6 +22,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use std::sync::{Arc, Mutex};
 
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use g2g_core::{
@@ -50,9 +51,38 @@ enum Codec {
     Aac,
 }
 
+/// SAMPLE-AES key material: the 16-byte AES key (the one `#EXT-X-KEY` names) and
+/// the constant segment IV, reset at each NAL unit / audio frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SampleAesKey {
+    pub key: [u8; 16],
+    pub iv: [u8; 16],
+}
+
+// Redact the key/IV from Debug so secrets don't leak into logs.
+impl core::fmt::Debug for SampleAesKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SampleAesKey").finish_non_exhaustive()
+    }
+}
+
+/// Shared slot a key publisher ([`HlsSrc`](crate::hlssrc)) writes once it has
+/// fetched the playlist `#EXT-X-KEY` material, and the decryptor reads. `None`
+/// until the publisher fills it; this is the auto-wiring path that spares the
+/// caller from configuring the key by hand.
+pub type SampleAesKeyHandle = Arc<Mutex<Option<SampleAesKey>>>;
+
+/// A fresh, empty key handle to wire a publisher and a decryptor together.
+pub fn new_key_handle() -> SampleAesKeyHandle {
+    Arc::new(Mutex::new(None))
+}
+
 pub struct SampleAesDecrypt {
-    key: [u8; 16],
-    iv: [u8; 16],
+    /// Directly configured key (the [`new`](Self::new) path).
+    key: Option<SampleAesKey>,
+    /// Shared key source (the [`from_key_handle`](Self::from_key_handle) path);
+    /// takes precedence when set.
+    key_handle: Option<SampleAesKeyHandle>,
     codec: Option<Codec>,
     configured: bool,
 }
@@ -68,10 +98,29 @@ impl core::fmt::Debug for SampleAesDecrypt {
 }
 
 impl SampleAesDecrypt {
-    /// `key` is the 16-byte AES key (the same one `#EXT-X-KEY` names); `iv` is the
-    /// constant segment IV, reset at each NAL unit / audio frame.
+    /// Decrypt with a key known up front.
     pub fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
-        Self { key, iv, codec: None, configured: false }
+        Self {
+            key: Some(SampleAesKey { key, iv }),
+            key_handle: None,
+            codec: None,
+            configured: false,
+        }
+    }
+
+    /// Decrypt with the key a publisher writes into the shared `handle` at
+    /// runtime. A frame that arrives before the handle is filled passes through
+    /// unchanged (in the HLS chain `HlsSrc` fills it before pushing any bytes).
+    pub fn from_key_handle(handle: SampleAesKeyHandle) -> Self {
+        Self { key: None, key_handle: Some(handle), codec: None, configured: false }
+    }
+
+    /// The key in effect: the shared handle if wired, else the direct key.
+    fn current_key(&self) -> Option<SampleAesKey> {
+        match &self.key_handle {
+            Some(handle) => *handle.lock().expect("sample-aes key handle poisoned"),
+            None => self.key,
+        }
     }
 }
 
@@ -110,12 +159,15 @@ impl AsyncElement for SampleAesDecrypt {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let decrypted = match &frame.domain {
-                        MemoryDomain::System(slice) => match self.codec {
-                            Some(Codec::H264) => Some(decrypt_avc(slice.as_slice(), &self.key, &self.iv)),
-                            Some(Codec::Aac) => Some(decrypt_aac(slice.as_slice(), &self.key, &self.iv)),
-                            None => None,
-                        },
+                    let key = self.current_key();
+                    let decrypted = match (&frame.domain, self.codec, key) {
+                        (MemoryDomain::System(s), Some(Codec::H264), Some(k)) => {
+                            Some(decrypt_avc(s.as_slice(), &k.key, &k.iv))
+                        }
+                        (MemoryDomain::System(s), Some(Codec::Aac), Some(k)) => {
+                            Some(decrypt_aac(s.as_slice(), &k.key, &k.iv))
+                        }
+                        // No key yet (or non-system domain): forward unchanged.
                         _ => None,
                     };
                     let frame = match decrypted {
@@ -441,6 +493,57 @@ mod tests {
         let mut sink = RecordingSink::default();
         elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
         assert_eq!(sink.frames, vec![cleartext], "element emits the decrypted access unit");
+    }
+
+    #[tokio::test]
+    async fn element_reads_key_from_shared_handle() {
+        let cleartext = annexb(&[make_nal(5, 256)]);
+        let ciphertext = encrypt_avc(&cleartext, &KEY, &IV);
+
+        // Publisher fills the handle (as HlsSrc would) before the frame flows.
+        let handle = new_key_handle();
+        *handle.lock().unwrap() = Some(SampleAesKey { key: KEY, iv: IV });
+
+        let mut elem = SampleAesDecrypt::from_key_handle(handle);
+        elem.configure_pipeline(&Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .unwrap();
+
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(ciphertext.into_boxed_slice())),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        let mut sink = RecordingSink::default();
+        elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        assert_eq!(sink.frames, vec![cleartext], "key from the shared handle decrypts the AU");
+    }
+
+    #[tokio::test]
+    async fn empty_handle_forwards_unchanged() {
+        let bytes = annexb(&[make_nal(5, 256)]);
+        let mut elem = SampleAesDecrypt::from_key_handle(new_key_handle());
+        elem.configure_pipeline(&Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        })
+        .unwrap();
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        let mut sink = RecordingSink::default();
+        elem.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        assert_eq!(sink.frames, vec![bytes], "no key in the handle: pass through untouched");
     }
 
     #[test]

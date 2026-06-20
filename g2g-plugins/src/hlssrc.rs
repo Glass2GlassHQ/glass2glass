@@ -13,8 +13,12 @@
 //! `#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place: the 16-byte key
 //! is fetched from the key URI (cached per run) and each segment is AES-128-CBC
 //! decrypted with the explicit `IV` or, absent one, the segment media-sequence
-//! number as a 128-bit big-endian IV. `SAMPLE-AES` is rejected (per-sample, not
-//! whole-segment). The init segment (`#EXT-X-MAP`) is assumed unencrypted.
+//! number as a 128-bit big-endian IV. For `METHOD=SAMPLE-AES` (per-sample, not
+//! whole-segment) the fetched key/IV is published to a shared handle
+//! ([`with_sample_aes_key_handle`](HlsSrc::with_sample_aes_key_handle)) for a
+//! downstream [`SampleAesDecrypt`](crate::sampleaesdecrypt) and the bytes are
+//! forwarded undecrypted; without a handle a SAMPLE-AES playlist is rejected. The
+//! init segment (`#EXT-X-MAP`) is assumed unencrypted.
 //!
 //! Scope: in-order segment fetch, one `DataFrame` per segment, a fixed variant
 //! (no mid-stream ABR switch). fMP4/CMAF segments, byte-range segments,
@@ -36,6 +40,7 @@ use g2g_core::{
 
 use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
 use crate::hls::{parse, KeyMethod, MediaPlaylist, Playlist};
+use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
 #[derive(Debug)]
 pub struct HlsSrc {
@@ -49,6 +54,10 @@ pub struct HlsSrc {
     /// media playlist has an `#EXT-X-MAP` init segment (fMP4/CMAF), else `MpegTs`.
     /// Memoized so a re-fixate retry skips the probe.
     container: Option<ByteStreamEncoding>,
+    /// SAMPLE-AES key sink: when set, a `METHOD=SAMPLE-AES` segment publishes its
+    /// fetched key/IV here (for a downstream `SampleAesDecrypt`) and the bytes are
+    /// forwarded undecrypted. Without it a SAMPLE-AES playlist is rejected.
+    sample_aes_key: Option<SampleAesKeyHandle>,
     configured: bool,
 }
 
@@ -59,8 +68,17 @@ impl HlsSrc {
             max_bandwidth: 0,
             reload_interval_ms: 0,
             container: None,
+            sample_aes_key: None,
             configured: false,
         }
+    }
+
+    /// Share a SAMPLE-AES key handle with a downstream `SampleAesDecrypt`: HlsSrc
+    /// fetches the `#EXT-X-KEY` key/IV and publishes it here, the decryptor reads
+    /// it. The auto-wiring path for sample-encrypted streams.
+    pub fn with_sample_aes_key_handle(mut self, handle: SampleAesKeyHandle) -> Self {
+        self.sample_aes_key = Some(handle);
+        self
     }
 
     /// Cap variant selection to this bitrate (bits/sec); 0 picks the highest.
@@ -225,14 +243,26 @@ impl SourceLoop for HlsSrc {
                         let bytes = get_bytes(&client, &seg_url).await?;
                         let bytes = match &segment.key {
                             None => bytes,
-                            Some(key) if key.method == KeyMethod::Aes128 => {
+                            Some(key) => {
                                 let key_url = resolve_url(&media_url, &key.uri);
                                 let key_bytes = fetch_key(&client, &mut keys, &key_url).await?;
                                 let iv = key.iv.unwrap_or_else(|| iv_from_sequence(seg_seq));
-                                decrypt_aes128_cbc(&key_bytes, &iv, bytes)?
+                                match key.method {
+                                    // Whole-segment: decrypt before the demuxer.
+                                    KeyMethod::Aes128 => decrypt_aes128_cbc(&key_bytes, &iv, bytes)?,
+                                    // Per-sample: publish the key for a downstream
+                                    // SampleAesDecrypt and forward the bytes as-is.
+                                    KeyMethod::SampleAes => {
+                                        let handle = self
+                                            .sample_aes_key
+                                            .as_ref()
+                                            .ok_or(G2gError::CapsMismatch)?;
+                                        *handle.lock().expect("key handle poisoned") =
+                                            Some(SampleAesKey { key: key_bytes, iv });
+                                        bytes
+                                    }
+                                }
                             }
-                            // SAMPLE-AES is per-sample, not whole-segment.
-                            Some(_) => return Err(G2gError::CapsMismatch),
                         };
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
