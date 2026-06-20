@@ -9,6 +9,8 @@ use core::future::Future;
 use core::pin::Pin;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use g2g_core::runtime::SourceLoop;
@@ -122,4 +124,83 @@ async fn streams_selected_variant_segments_in_order() {
     let mut expected = seg0.clone();
     expected.extend_from_slice(&seg1);
     assert_eq!(sink.body, expected, "segments delivered in playlist order, byte-exact");
+}
+
+/// The live media playlist returned on the Nth reload: a 2-segment sliding
+/// window that advances each time and adds ENDLIST on the third fetch.
+fn live_playlist(reload: usize) -> String {
+    match reload {
+        0 => "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+              #EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n"
+            .into(),
+        1 => "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n\
+              #EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n"
+            .into(),
+        _ => "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:2\n\
+              #EXTINF:1.0,\nseg2.ts\n#EXTINF:1.0,\nseg3.ts\n#EXT-X-ENDLIST\n"
+            .into(),
+    }
+}
+
+fn serve_live(segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reloads = Arc::new(AtomicUsize::new(0));
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/live.m3u8" {
+                let n = reloads.fetch_add(1, Ordering::SeqCst);
+                live_playlist(n).into_bytes()
+            } else if let Some(idx) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".ts"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(idx).cloned().unwrap_or_default()
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/live.m3u8")
+}
+
+#[tokio::test]
+async fn live_reloads_playlist_and_plays_each_new_segment_once() {
+    let segs: Vec<Vec<u8>> =
+        (0..4u8).map(|s| (0..1000u32).map(|i| (i as u8) ^ (s * 37)).collect()).collect();
+    let url = serve_live(segs.clone());
+
+    let mut src = HlsSrc::new(url).with_reload_interval_ms(20);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos, "ENDLIST on the final reload terminates the live stream");
+    assert_eq!(count, 4, "each of the 4 segments played exactly once across reloads");
+    let expected: Vec<u8> = segs.concat();
+    assert_eq!(sink.body, expected, "seg0..seg3 delivered once, in order, no duplicates");
 }

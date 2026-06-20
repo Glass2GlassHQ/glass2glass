@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M157: Live HLS (playlist reload)
+
+- **`HlsSrc` now plays live playlists** (no `#EXT-X-ENDLIST`): after delivering the
+  current segments it sleeps a reload interval, refetches the media playlist, and
+  plays each newly appeared segment once, tracked by HLS media-sequence so a
+  sliding window never re-delivers a segment. It ends when `ENDLIST` finally
+  appears (live-to-VOD transition) or downstream shuts down. VOD is unchanged.
+- The reload interval derives from `TARGETDURATION` by default; `with_reload_interval_ms`
+  / the `reload-interval-ms` property override it (tests run fast, live tuning).
+  The variant stays fixed for the session (no mid-stream ABR switch yet).
+- Verified by `m156_hlssrc.rs::live_reloads_playlist_and_plays_each_new_segment_once`:
+  a server returns a 2-segment sliding window that advances over three reloads and
+  adds ENDLIST last; `HlsSrc` delivers all four segments once, in order, no
+  duplicates, ending in EOS.
+
 ### M156: HLS playlist parser + HlsSrc (adaptive streaming, VOD)
 
 - **`hls` playlist parser (pure `no_std + alloc`, always compiled)** parses both

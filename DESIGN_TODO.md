@@ -163,9 +163,13 @@ Production-shape needs that block specific real-world use cases.
   `g2g-plugins::hls` (pure-Rust RFC 8216 playlist parser, master + media) +
   `hlssrc::HlsSrc` (`hls` feature) fetch the playlist, ABR-select a variant, and
   stream its MPEG-TS segments as a `Caps::ByteStream{MpegTs}` into `tsdemux`.
-  **Remaining HLS:** live playlist reload (no ENDLIST), fMP4/CMAF segments (needs a
-  ByteStream/MP4 handoff), byte-range + AES-128/SAMPLE-AES keyed segments, and
-  throughput-driven ABR (the current pick is static by declared bandwidth).
+  Live playlist reload is **DONE (M157)**: `HlsSrc` reloads a no-ENDLIST media
+  playlist on an interval, plays each new segment once (media-sequence tracked),
+  and ends on ENDLIST or downstream shutdown.
+  **Remaining HLS:** fMP4/CMAF segments (needs a ByteStream/MP4 handoff), byte-range
+  + AES-128/SAMPLE-AES keyed segments, throughput-driven ABR (the current pick is
+  static by declared bandwidth), live-edge start (skip to the last few segments),
+  and mid-stream variant switching.
   **DASH** (MPD parsing + the same per-segment fetch over the CMAF handoff) is still
   open, 2-4 sessions, and reuses the `HttpSrc` fetch layer.
 

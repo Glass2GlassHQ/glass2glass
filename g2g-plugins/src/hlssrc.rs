@@ -5,9 +5,15 @@
 //! adds the fetching (via `reqwest`, like [`HttpSrc`](crate::httpsrc)) and URL
 //! resolution.
 //!
-//! Scope (v1): VOD, in-order segment fetch, one `DataFrame` per segment. Live
-//! playlist reload, fMP4/CMAF segments, byte-range segments, key/decryption, and
-//! throughput-driven ABR are follow-ups (DESIGN_TODO).
+//! VOD (a playlist with `#EXT-X-ENDLIST`) plays its segments once then `Eos`.
+//! Live (no ENDLIST) reloads the media playlist on an interval, plays each new
+//! segment once (tracked by HLS media-sequence), and ends when ENDLIST finally
+//! appears or downstream shuts down.
+//!
+//! Scope: in-order segment fetch, one `DataFrame` per segment, a fixed variant
+//! (no mid-stream ABR switch). fMP4/CMAF segments, byte-range segments,
+//! key/decryption, throughput-driven ABR, and live-edge start (skip to the last
+//! few segments) are follow-ups (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,17 +39,26 @@ pub struct HlsSrc {
     /// ABR cap: select the highest-bandwidth variant at or below this (0 = no
     /// cap, pick the highest available).
     max_bandwidth: u64,
+    /// Live-playlist reload interval in ms (0 = derive from `TARGETDURATION`).
+    reload_interval_ms: u64,
     configured: bool,
 }
 
 impl HlsSrc {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), max_bandwidth: 0, configured: false }
+        Self { url: url.into(), max_bandwidth: 0, reload_interval_ms: 0, configured: false }
     }
 
     /// Cap variant selection to this bitrate (bits/sec); 0 picks the highest.
     pub fn with_max_bandwidth(mut self, bits_per_sec: u64) -> Self {
         self.max_bandwidth = bits_per_sec;
+        self
+    }
+
+    /// Override the live-playlist reload interval (ms); 0 derives it from the
+    /// playlist `TARGETDURATION`.
+    pub fn with_reload_interval_ms(mut self, ms: u64) -> Self {
+        self.reload_interval_ms = ms;
         self
     }
 
@@ -125,9 +140,10 @@ impl SourceLoop for HlsSrc {
             let client = reqwest::Client::new();
             let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
 
-            // Resolve a master playlist down to a media playlist + its base URL.
+            // Resolve a master playlist down to a media playlist + the URL it came
+            // from (used both to resolve segment URIs and to reload, for live).
             let text = get_text(&client, &self.url).await?;
-            let (media, base) = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+            let (mut media, media_url) = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
                 Playlist::Media(m) => (m, self.url.clone()),
                 Playlist::Master(master) => {
                     let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
@@ -142,23 +158,48 @@ impl SourceLoop for HlsSrc {
             };
 
             let mut sequence = 0u64;
-            for segment in &media.segments {
-                let seg_url = resolve_url(&base, &segment.uri);
-                let bytes = get_bytes(&client, &seg_url).await?;
-                if bytes.is_empty() {
-                    continue;
+            // Next HLS media-sequence number to play; segments below it on a live
+            // reload were already delivered.
+            let mut next_seq = media.media_sequence;
+            loop {
+                for (seg_seq, segment) in (media.media_sequence..).zip(media.segments.iter()) {
+                    if seg_seq >= next_seq {
+                        let seg_url = resolve_url(&media_url, &segment.uri);
+                        let bytes = get_bytes(&client, &seg_url).await?;
+                        if !bytes.is_empty() {
+                            let frame = Frame {
+                                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                                    bytes.into_boxed_slice(),
+                                )),
+                                timing: FrameTiming {
+                                    arrival_ns: g2g_core::metrics::monotonic_ns(),
+                                    ..FrameTiming::default()
+                                },
+                                sequence,
+                                meta: Default::default(),
+                            };
+                            sequence += 1;
+                            out.push(PipelinePacket::DataFrame(frame)).await?;
+                        }
+                        next_seq = seg_seq + 1;
+                    }
                 }
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    timing: FrameTiming {
-                        arrival_ns: g2g_core::metrics::monotonic_ns(),
-                        ..FrameTiming::default()
-                    },
-                    sequence,
-                    meta: Default::default(),
+
+                if media.end_list {
+                    break;
+                }
+                // Live: wait a reload interval, then refetch the media playlist.
+                let interval_ms = if self.reload_interval_ms != 0 {
+                    self.reload_interval_ms
+                } else {
+                    u64::from(media.target_duration_secs.max(1)) * 1000
                 };
-                sequence += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                tokio::time::sleep(core::time::Duration::from_millis(interval_ms)).await;
+                let text = get_text(&client, &media_url).await?;
+                media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+                    Playlist::Media(m) => m,
+                    Playlist::Master(_) => return Err(G2gError::CapsMismatch),
+                };
             }
 
             out.push(PipelinePacket::Eos).await?;
@@ -183,6 +224,13 @@ impl SourceLoop for HlsSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "reload-interval-ms" => match value {
+                PropValue::Uint(v) => {
+                    self.reload_interval_ms = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             _ => Err(PropError::Unknown),
         }
     }
@@ -191,6 +239,7 @@ impl SourceLoop for HlsSrc {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
             "max-bandwidth" => Some(PropValue::Uint(self.max_bandwidth)),
+            "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
             _ => None,
         }
     }
@@ -202,6 +251,11 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         "max-bandwidth",
         PropKind::Uint,
         "ABR cap in bits/sec; 0 selects the highest-bandwidth variant",
+    ),
+    PropertySpec::new(
+        "reload-interval-ms",
+        PropKind::Uint,
+        "live-playlist reload interval in ms; 0 derives it from TARGETDURATION",
     ),
 ];
 
