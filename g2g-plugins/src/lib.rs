@@ -166,6 +166,10 @@ pub mod mfaacencode;
 #[cfg(all(target_os = "windows", feature = "mf-aac"))]
 pub mod mfaacdecode;
 
+// AV1 software encode via the pure-Rust rav1e crate (cross-platform).
+#[cfg(feature = "av1-encode")]
+pub mod av1enc;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

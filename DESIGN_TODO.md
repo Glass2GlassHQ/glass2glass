@@ -406,9 +406,14 @@ and the pure-Rust / browser decode paths:
 - **VP8 / VP9 encode.** 3 sessions each. WebRTC default video; decode is done
   (M111, ffmpeg). ffmpeg has the encoders too; wrappers parallel the encode
   elements. A pure-Rust / wasm decode path (vs the libavcodec FFI) is separate.
-- **AV1 encode.** 3 sessions. Decode is done (M111, ffmpeg); `libaom` /
-  `SVT-AV1` for encode. `dav1d` / `rav1d` remain the pure-Rust decode option if
-  an ffmpeg-free path is wanted.
+- **AV1 encode — DONE (M150).** `g2g-plugins::av1enc::Av1Enc` (`av1-encode`
+  feature) wraps the pure-Rust `rav1e` encoder: `RawVideo{I420}` ->
+  `CompressedVideo{Av1}`, the first portable / CI-verifiable video encoder (the MF
+  encoders are Windows-only). `default-features = false` drops rav1e's NASM / CLI /
+  threading, so it builds with no system deps (MSRV 1.74 within the workspace 1.75).
+  Round-trips through `av1parse` (M136). **Remaining:** bitrate / quantizer rate
+  control surface, 10-bit / 4:4:4, and an `Av1Dec` pure-Rust decode (`dav1d` /
+  `rav1d`) to pair with it ffmpeg-free.
 - **Opus encode + decode.** 2 sessions. WebRTC audio default; we have AAC
   only. `opus` crate or libopus FFI.
 - **MJPEG decode.** 1 session. Low-end IP cameras (a huge installed base)

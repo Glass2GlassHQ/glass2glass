@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M150: Av1Enc (pure-Rust AV1 software encode)
+
+- **`Av1Enc` encodes `RawVideo{I420}` to `CompressedVideo{Av1}`** via the pure-Rust
+  `rav1e` encoder (`av1-encode` feature), the first portable, CI-verifiable video
+  encoder (the existing `mfencode`/`mfaacencode` are Windows-MF only). rav1e is added
+  with `default-features = false`, dropping its NASM assembly, CLI `binaries`, and
+  `threading` features, so it builds as a software encoder with no system deps; its
+  MSRV (1.74) is within the workspace 1.75. The element feeds each I420 frame into
+  the rav1e `Context` (3 planes via `copy_from_raw_u8`), drains ready packets after
+  each `send_frame` (rav1e has frame lookahead, so output lags input), flushes on EOS
+  (a `None` frame), and maps each packet's PTS back through `Packet::input_frameno`
+  (AV1 may reorder). The speed preset is `with_speed(0..=10)`. Output is the
+  low-overhead OBU stream `av1parse` (M136) reads, closing an AV1 encode->parse loop.
+- Tested: encoding five 64x64 I420 frames yields non-empty AV1 packets and a single
+  `CapsChanged{Av1, 64x64}`; feeding the output back through `Av1Parse` recovers the
+  64x64 geometry from the encoded sequence header.
+
 ### M149: accurate seek (segment clipping at the sink)
 
 - **`SyncSink` is segment-aware, completing accurate seek.** It tracks the playback

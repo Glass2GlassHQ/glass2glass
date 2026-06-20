@@ -136,9 +136,19 @@ vello-overlay = ["std", "analytics", "dep:vello", "dep:wgpu"]
 # texture (render-to-texture / screenshot, testable headless) or a caller-built
 # wgpu::Surface (on-screen). Pulls wgpu 29; implies std.
 wgpu-sink = ["std", "dep:wgpu"]
+# AV1 encode via the pure-Rust `rav1e` encoder (Av1Enc, I420 -> CompressedVideo{Av1}).
+# default-features = false drops rav1e's NASM asm, CLI `binaries`, and `threading`
+# features, so it builds with no system deps (no NASM) as a portable software
+# encoder. Cross-platform, implies std. Verified by round-tripping the output
+# through `av1parse` (M136).
+av1-encode = ["std", "dep:rav1e"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
+# Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
+# NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
+rav1e = { version = "0.8", optional = true, default-features = false }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
