@@ -1,12 +1,11 @@
-//! Software colour balance (`videobalance`). Adjusts brightness, contrast, and
-//! saturation of a packed RGBA / BGRA frame per pixel, preserving format and
-//! geometry. CPU-only `no_std` baseline.
+//! Alpha control / chroma key (`alpha`). Rewrites the alpha channel of a packed
+//! RGBA / BGRA frame, leaving the colour channels untouched. CPU-only `no_std`.
 //!
-//! `brightness` (-1..1) adds an offset, `contrast` (0..2) scales around mid-grey
-//! (128), and `saturation` (0..2) lerps each channel toward the pixel's Rec.601
-//! luma (0 = greyscale, 1 = unchanged, >1 = boosted). Hue rotation is omitted: a
-//! faithful hue control rotates the chroma vector, which needs `sin`/`cos` (a
-//! `libm` dependency the baseline avoids).
+//! `set` replaces alpha with a constant (`alpha` 0..1); `green` / `blue` are a
+//! simple chroma key that makes a pixel transparent when the key channel
+//! dominates the other two by [`KEY_MARGIN`], opaque otherwise. The key is a
+//! dominance test, not the full YUV-distance keyer GStreamer's `alpha` ships, so
+//! it stays integer-only and libm-free.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -23,33 +22,48 @@ use g2g_core::{
     PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::pixel::rgba_rb_offsets;
+
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
+/// How far (0..255) the key channel must exceed the other two colour channels
+/// for a chroma-key pixel to be treated as background and made transparent.
+const KEY_MARGIN: i16 = 40;
+
+/// What the element does to the alpha channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaMethod {
+    /// Replace alpha with the constant `alpha` value for every pixel.
+    Set,
+    /// Chroma key: green pixels become transparent, the rest opaque.
+    Green,
+    /// Chroma key: blue pixels become transparent, the rest opaque.
+    Blue,
+}
+
 #[derive(Debug)]
-pub struct VideoBalance {
-    brightness: f64,
-    contrast: f64,
-    saturation: f64,
+pub struct Alpha {
+    method: AlphaMethod,
+    alpha: f64,
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
 }
 
-impl Default for VideoBalance {
+impl Default for Alpha {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl VideoBalance {
-    /// An identity balance (brightness 0, contrast 1, saturation 1); use the
-    /// `with_*` builders or the properties to adjust.
+impl Alpha {
+    /// A `set` element at full opacity (alpha 1.0); use the builders or the
+    /// properties to pick a method or constant.
     pub fn new() -> Self {
         Self {
-            brightness: 0.0,
-            contrast: 1.0,
-            saturation: 1.0,
+            method: AlphaMethod::Set,
+            alpha: 1.0,
             input: None,
             configured: false,
             last_caps: None,
@@ -57,18 +71,13 @@ impl VideoBalance {
         }
     }
 
-    pub fn with_brightness(mut self, brightness: f64) -> Self {
-        self.brightness = brightness;
+    pub fn with_method(mut self, method: AlphaMethod) -> Self {
+        self.method = method;
         self
     }
 
-    pub fn with_contrast(mut self, contrast: f64) -> Self {
-        self.contrast = contrast;
-        self
-    }
-
-    pub fn with_saturation(mut self, saturation: f64) -> Self {
-        self.saturation = saturation;
+    pub fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = alpha;
         self
     }
 
@@ -84,7 +93,7 @@ impl VideoBalance {
     }
 }
 
-impl AsyncElement for VideoBalance {
+impl AsyncElement for Alpha {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -105,14 +114,11 @@ impl AsyncElement for VideoBalance {
         Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: a colour adjustment preserves format, geometry,
-    /// and framerate, so the output caps equal the input for any supported raw
-    /// format.
+    /// Native `DerivedOutput`: rewriting alpha preserves format, geometry, and
+    /// framerate, so the output caps equal the input for any supported format.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
-            }
+            Caps::RawVideo { format, .. } if FORMATS.contains(format) => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -147,14 +153,7 @@ impl AsyncElement for VideoBalance {
                         return Err(G2gError::CapsMismatch);
                     }
                     let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    apply_balance(
-                        format,
-                        &src[..bytes],
-                        &mut dst,
-                        self.brightness,
-                        self.contrast,
-                        self.saturation,
-                    );
+                    apply_alpha(format, &src[..bytes], &mut dst, self.method, alpha_u8(self.alpha));
 
                     let new_caps = Caps::RawVideo {
                         format,
@@ -192,15 +191,16 @@ impl AsyncElement for VideoBalance {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        VIDEOBALANCE_PROPS
+        ALPHA_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        let v = value.as_double().ok_or(PropError::Type)?;
         match name {
-            "brightness" => self.brightness = v,
-            "contrast" => self.contrast = v,
-            "saturation" => self.saturation = v,
+            "method" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.method = method_from_str(s).ok_or(PropError::Value)?;
+            }
+            "alpha" => self.alpha = value.as_double().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -208,22 +208,41 @@ impl AsyncElement for VideoBalance {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "brightness" => Some(PropValue::Double(self.brightness)),
-            "contrast" => Some(PropValue::Double(self.contrast)),
-            "saturation" => Some(PropValue::Double(self.saturation)),
+            "method" => Some(PropValue::Str(method_to_str(self.method).into())),
+            "alpha" => Some(PropValue::Double(self.alpha)),
             _ => None,
         }
     }
 }
 
-/// `VideoBalance`'s settable properties (M104).
-static VIDEOBALANCE_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("brightness", PropKind::Double, "additive brightness, -1..1 (0 = none)"),
-    PropertySpec::new("contrast", PropKind::Double, "contrast about mid-grey, 0..2 (1 = none)"),
-    PropertySpec::new("saturation", PropKind::Double, "saturation, 0..2 (0 = grey, 1 = none)"),
+/// `Alpha`'s settable properties (M104).
+static ALPHA_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("method", PropKind::Str, "alpha op: set | green | blue"),
+    PropertySpec::new("alpha", PropKind::Double, "constant alpha for 'set', 0..1"),
 ];
 
-impl PadTemplates for VideoBalance {
+fn method_from_str(s: &str) -> Option<AlphaMethod> {
+    match s {
+        "set" => Some(AlphaMethod::Set),
+        "green" => Some(AlphaMethod::Green),
+        "blue" => Some(AlphaMethod::Blue),
+        _ => None,
+    }
+}
+
+fn method_to_str(m: AlphaMethod) -> &'static str {
+    match m {
+        AlphaMethod::Set => "set",
+        AlphaMethod::Green => "green",
+        AlphaMethod::Blue => "blue",
+    }
+}
+
+fn alpha_u8(alpha: f64) -> u8 {
+    (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+impl PadTemplates for Alpha {
     fn pad_templates() -> Vec<PadTemplate> {
         let any_geometry = |format| Caps::RawVideo {
             format,
@@ -236,39 +255,44 @@ impl PadTemplates for VideoBalance {
     }
 }
 
-fn clamp_u8(v: f64) -> u8 {
-    v.clamp(0.0, 255.0) as u8
+/// The new alpha byte for one pixel under `method`. `set` returns the constant;
+/// the chroma keys return 0 (transparent) when the key channel dominates, else
+/// 255 (opaque).
+fn pixel_alpha(format: RawVideoFormat, px: &[u8], method: AlphaMethod, set_alpha: u8) -> u8 {
+    match method {
+        AlphaMethod::Set => set_alpha,
+        AlphaMethod::Green | AlphaMethod::Blue => {
+            let (r_idx, b_idx) = rgba_rb_offsets(format);
+            let r = px[r_idx] as i16;
+            let g = px[1] as i16;
+            let b = px[b_idx] as i16;
+            let keyed = match method {
+                AlphaMethod::Green => g - r > KEY_MARGIN && g - b > KEY_MARGIN,
+                AlphaMethod::Blue => b - r > KEY_MARGIN && b - g > KEY_MARGIN,
+                AlphaMethod::Set => unreachable!(),
+            };
+            if keyed {
+                0
+            } else {
+                255
+            }
+        }
+    }
 }
 
-/// Apply brightness / contrast / saturation to one RGBA / BGRA pixel. Contrast
-/// scales about 128 and brightness adds `b*255`; saturation then lerps each
-/// channel toward the Rec.601 luma of the adjusted pixel.
-fn balance_pixel(format: RawVideoFormat, px: &[u8], bright: f64, contrast: f64, sat: f64) -> [u8; 4] {
-    let (r_idx, b_idx) = crate::pixel::rgba_rb_offsets(format);
-    let adj = |c: u8| (c as f64 - 128.0) * contrast + 128.0 + bright * 255.0;
-    let r = adj(px[r_idx]);
-    let g = adj(px[1]);
-    let b = adj(px[b_idx]);
-    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    let mut out = [0u8; 4];
-    out[r_idx] = clamp_u8(luma + sat * (r - luma));
-    out[1] = clamp_u8(luma + sat * (g - luma));
-    out[b_idx] = clamp_u8(luma + sat * (b - luma));
-    out[3] = px[3];
-    out
-}
-
-/// Apply the balance to every pixel of a packed 4-channel frame.
-fn apply_balance(
+/// Rewrite the alpha channel of every pixel, copying the colour channels through.
+fn apply_alpha(
     format: RawVideoFormat,
     src: &[u8],
     dst: &mut [u8],
-    brightness: f64,
-    contrast: f64,
-    saturation: f64,
+    method: AlphaMethod,
+    set_alpha: u8,
 ) {
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
-        d.copy_from_slice(&balance_pixel(format, s, brightness, contrast, saturation));
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+        d[3] = pixel_alpha(format, s, method, set_alpha);
     }
 }
 
@@ -277,46 +301,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_is_exact() {
-        // brightness 0, contrast 1, saturation 1 reproduces the input byte for
-        // byte (integer values round-trip through f64 exactly).
-        let src: Vec<u8> = (0..(4 * 4 * 4) as u8).collect();
-        let mut dst = vec![0u8; src.len()];
-        apply_balance(RawVideoFormat::Rgba8, &src, &mut dst, 0.0, 1.0, 1.0);
-        assert_eq!(dst, src);
+    fn set_replaces_alpha_and_keeps_colour() {
+        // alpha 0.5 -> round(127.5) = 128; RGB untouched.
+        let mut dst = [0u8; 4];
+        apply_alpha(RawVideoFormat::Rgba8, &[10, 20, 30, 255], &mut dst, AlphaMethod::Set, alpha_u8(0.5));
+        assert_eq!(dst, [10, 20, 30, 128]);
+        assert_eq!(alpha_u8(1.0), 255);
+        assert_eq!(alpha_u8(0.0), 0);
     }
 
     #[test]
-    fn brightness_adds_a_scaled_offset() {
-        // +0.2 brightness adds 0.2*255 = 51 to each channel; alpha is untouched.
-        let px = balance_pixel(RawVideoFormat::Rgba8, &[100, 100, 100, 200], 0.2, 1.0, 1.0);
-        assert_eq!(px, [151, 151, 151, 200]);
+    fn green_key_makes_green_transparent_only() {
+        let key = |px: &[u8; 4]| pixel_alpha(RawVideoFormat::Rgba8, px, AlphaMethod::Green, 255);
+        assert_eq!(key(&[0, 255, 0, 255]), 0, "green keyed out");
+        assert_eq!(key(&[255, 0, 0, 255]), 255, "red opaque");
+        assert_eq!(key(&[128, 128, 128, 255]), 255, "grey opaque (no dominance)");
     }
 
     #[test]
-    fn contrast_pivots_around_mid_grey() {
-        // contrast 2 doubles the distance from 128: 100 -> 72, 128 stays put.
-        assert_eq!(balance_pixel(RawVideoFormat::Rgba8, &[100, 100, 100, 255], 0.0, 2.0, 1.0)[0], 72);
-        assert_eq!(balance_pixel(RawVideoFormat::Rgba8, &[128, 128, 128, 255], 0.0, 2.0, 1.0)[0], 128);
-    }
-
-    #[test]
-    fn saturation_zero_is_greyscale() {
-        // saturation 0 collapses every channel to the pixel's luma, so R=G=B.
-        let px = balance_pixel(RawVideoFormat::Rgba8, &[200, 100, 50, 255], 0.0, 1.0, 0.0);
-        assert_eq!(px[0], px[1]);
-        assert_eq!(px[1], px[2]);
-        // Rec.601 luma of (200,100,50) = 59.8 + 58.7 + 5.7 = 124.2 -> 124.
-        assert_eq!(px[0], 124);
-    }
-
-    #[test]
-    fn bgra_weights_luma_by_true_colour() {
-        // Same colour as above but stored BGRA: bytes [50,100,200,255]. Luma must
-        // match the RGBA case (channel roles respected), not be computed on the
-        // raw byte order.
-        let px = balance_pixel(RawVideoFormat::Bgra8, &[50, 100, 200, 255], 0.0, 1.0, 0.0);
-        assert_eq!(px[0], px[2]);
-        assert_eq!(px[0], 124, "luma uses true R/G/B, not byte order");
+    fn blue_key_respects_bgra_channel_order() {
+        // BGRA blue pixel is [255, 0, 0, A]; the key must read blue at index 0,
+        // not the byte that would be red in RGBA.
+        let bgra_blue = [255u8, 0, 0, 255];
+        assert_eq!(pixel_alpha(RawVideoFormat::Bgra8, &bgra_blue, AlphaMethod::Blue, 255), 0);
+        // The same bytes read as RGBA are a red pixel, untouched by a blue key.
+        assert_eq!(pixel_alpha(RawVideoFormat::Rgba8, &bgra_blue, AlphaMethod::Blue, 255), 255);
     }
 }

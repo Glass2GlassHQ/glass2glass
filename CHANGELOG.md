@@ -5,6 +5,22 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M127: alpha (alpha control / chroma key)
+
+- **`g2g-plugins::alpha::Alpha` (no_std).** Rewrites the alpha channel of a packed
+  RGBA / BGRA frame, colour channels untouched: `set` writes a constant `alpha`
+  (0..1), `green` / `blue` are a dominance-based chroma key (a pixel goes
+  transparent when the key channel leads the other two by a fixed margin).
+  Registered as `alpha` with `Str` / `Double` properties, so `alpha method=green`
+  and `alpha method=set alpha=0.5` work as text. A full YUV-distance keyer is a
+  follow-up.
+- **Shared `pixel` helper.** The packed-RGBA red/blue byte-offset lookup moved to
+  a crate-internal `pixel` module, shared by `videobalance` and `alpha` so the
+  channel-order fact has one source.
+- Tested: `set` replaces alpha and keeps colour, the green key transparents only
+  green (red / grey stay opaque), the blue key respects BGRA channel order, and
+  the element runs in a `videotestsrc ! alpha ! fakesink` text pipeline.
+
 ### M126: volume (audio gain)
 
 - **`g2g-plugins::volume::Volume` (no_std).** A per-sample audio-gain transform,

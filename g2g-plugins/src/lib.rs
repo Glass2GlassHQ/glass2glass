@@ -44,6 +44,9 @@ pub mod videorate;
 pub mod videocrop;
 pub mod videoflip;
 pub mod videobalance;
+pub mod alpha;
+// Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
+mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.
 pub mod rtppay;
 // Sans-IO H.264 RTP depayloader, the receive-side inverse of rtppay.

@@ -22,6 +22,7 @@ use g2g_core::runtime::{LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
+use crate::alpha::Alpha;
 use crate::audioconvert::AudioConvert;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
@@ -101,6 +102,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<VideoBalance>("videobalance", || {
         Box::new(VideoBalance::new())
     }));
+    reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))
