@@ -5,6 +5,18 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M128: audiopanorama (stereo pan)
+
+- **`g2g-plugins::audiopanorama::AudioPanorama` (no_std).** Balances an
+  interleaved S16LE stereo stream: `panorama` -1 (left) to +1 (right) attenuates
+  the opposite channel (no cross-mix), centre is byte-exact. Format / channels /
+  rate preserved. Registered as `audiopanorama` with a `Double` property, so
+  `audiopanorama panorama=0.5` works as text. Psychoacoustic mode and mono upmix
+  are follow-ups; stereo only.
+- Tested: centre is identity, full left/right silence the opposite channel,
+  half-pan attenuates one side, configure requires S16LE stereo, and the element
+  runs in an `audiotestsrc ! audiopanorama ! fakesink` text pipeline.
+
 ### M127: alpha (alpha control / chroma key)
 
 - **`g2g-plugins::alpha::Alpha` (no_std).** Rewrites the alpha channel of a packed

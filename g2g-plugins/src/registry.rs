@@ -24,6 +24,7 @@ use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat}
 use crate::aacparse::AacParse;
 use crate::alpha::Alpha;
 use crate::audioconvert::AudioConvert;
+use crate::audiopanorama::AudioPanorama;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::capsfilter::CapsFilter;
@@ -116,6 +117,9 @@ pub fn default_registry() -> Registry {
         Box::new(AudioResample::new(48_000))
     }));
     reg.register_launch(LaunchFactory::of::<Volume>("volume", || Box::new(Volume::new())));
+    reg.register_launch(LaunchFactory::of::<AudioPanorama>("audiopanorama", || {
+        Box::new(AudioPanorama::new())
+    }));
 
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
