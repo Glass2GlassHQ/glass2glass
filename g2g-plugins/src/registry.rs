@@ -24,6 +24,7 @@ use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat}
 use crate::aacparse::AacParse;
 use crate::alpha::Alpha;
 use crate::audioconvert::AudioConvert;
+use crate::audiomixer::AudioMixer;
 use crate::audiopanorama::AudioPanorama;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
@@ -156,6 +157,14 @@ pub fn default_registry() -> Registry {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
             },
+        ))
+    }));
+    // Summing audio fan-in (M130): adds aligned S16LE buffers from N inputs. The
+    // output caps are a nominal default matching `audiotestsrc`.
+    reg.register_muxer(MuxerFactory::new("audiomixer", |inputs| {
+        Box::new(AudioMixer::new(
+            inputs,
+            Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
         ))
     }));
 

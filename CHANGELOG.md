@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M130: audiomixer (summing fan-in muxer)
+
+- **`g2g-plugins::audiomixer::AudioMixer` (no_std).** A summing fan-in
+  `MultiInputElement`, the counterpart to the passthrough `InterleaveMux`: it adds
+  aligned interleaved S16LE buffers from N inputs and clamps to the i16 range.
+  Per-input queues align by arrival (one mixed buffer once every open input has
+  delivered), so it suits roughly synchronised equal-rate sources; an input that
+  ends early drops out and the rest continue. Registered as a `MuxerFactory`
+  (`audiomixer`), so the M122 text fan-in builds it:
+  `a ! m.   b ! m.   audiomixer name=m ! sink`. Sample-rate / channel
+  reconciliation and PTS-based alignment are follow-ups.
+- Tested: the mix sums and saturates, unequal-length inputs span the longer, a
+  lone buffer passes through, and two unequal `audiotestsrc` sources mix into one
+  4-buffer stream end to end through `run_graph`.
+
 ### M129: videobox (borders / letterbox)
 
 - **`g2g-plugins::videobox::VideoBox` (no_std).** Surrounds a packed RGBA / BGRA

@@ -222,8 +222,10 @@ Smaller-scope items, mostly orthogonal to the architecture.
 - **Tag system.** 1 session. `GstTagList`-equivalent for stream
   metadata (title, encoder, language, artist). Container demuxers
   surface tags; applications consume them via the bus.
-- **Audio mixer.** 2 sessions. Fan-in for audio with sample-rate
-  conversion + channel layout reconciliation. Pairs with `AudioConvert`.
+- **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
+  aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
+  the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation
+  (pairs with `AudioConvert` / `AudioResample`) and PTS-based alignment.
 - **Subtitle support.** 2 sessions. `Caps::Subtitle` variant,
   text/srt/webvtt demuxers, a text-overlay element (tied to
   compositor for the rendering half).
@@ -277,8 +279,8 @@ expects them. Grouped by category.
 - **`audioresample`.** Sample-rate conversion (48 kHz → 16 kHz for ASR, etc.).
   1–2 sessions. Mandatory for cross-rate paths; without it, every audio
   source has to negotiate the consumer's exact rate.
-- **`audiomixer`.** Fan-in with sample-rate + channel-layout reconciliation.
-  Already in the parity-gaps list above.
+- **`audiomixer` — v1 DONE (M130).** Summing S16LE fan-in (see the parity-gaps
+  list above); sample-rate + channel-layout reconciliation remain.
 
 ### Capture sources
 
