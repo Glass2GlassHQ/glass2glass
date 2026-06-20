@@ -21,7 +21,10 @@
 //! block timestamp. Cues (seeking), BlockGroup reference tracking, and per-frame
 //! timestamp interpolation from DefaultDuration are follow-ups.
 
+use alloc::string::String;
 use alloc::vec::Vec;
+
+use g2g_core::{Tag, TagList};
 
 /// EBML / Matroska element IDs (kept whole, length marker included). The demuxer
 /// skips the EBML header by its size and ignores TrackType (the CodecID pins the
@@ -30,6 +33,12 @@ const ID_EBML: u32 = 0x1A45_DFA3;
 const ID_SEGMENT: u32 = 0x1853_8067;
 const ID_INFO: u32 = 0x1549_A966;
 const ID_TIMESTAMP_SCALE: u32 = 0x002A_D7B1;
+const ID_TITLE: u32 = 0x7BA9;
+const ID_TAGS: u32 = 0x1254_C367;
+const ID_TAG: u32 = 0x7373;
+const ID_SIMPLE_TAG: u32 = 0x67C8;
+const ID_TAG_NAME: u32 = 0x45A3;
+const ID_TAG_STRING: u32 = 0x4487;
 const ID_TRACKS: u32 = 0x1654_AE6B;
 const ID_TRACK_ENTRY: u32 = 0x00AE;
 const ID_TRACK_NUMBER: u32 = 0x00D7;
@@ -147,6 +156,7 @@ pub struct MatroskaDemuxer {
     in_segment: bool,
     timestamp_scale: u64,
     tracks: Vec<MkvTrack>,
+    tags: TagList,
     completed: Vec<MkvFrame>,
 }
 
@@ -163,6 +173,7 @@ impl MatroskaDemuxer {
             in_segment: false,
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
             tracks: Vec::new(),
+            tags: TagList::new(),
             completed: Vec::new(),
         }
     }
@@ -170,6 +181,12 @@ impl MatroskaDemuxer {
     /// The elementary streams announced by `Tracks` (empty until it is seen).
     pub fn tracks(&self) -> &[MkvTrack] {
         &self.tracks
+    }
+
+    /// The stream metadata from the Segment's `Tags` element and the `Info`
+    /// `Title` (empty until either is seen). Accumulates across pushes.
+    pub fn tags(&self) -> &TagList {
+        &self.tags
     }
 
     /// Drain the frames demuxed so far.
@@ -217,14 +234,22 @@ impl MatroskaDemuxer {
                         if let Some(scale) = parse_timestamp_scale(&self.buf[header..total]) {
                             self.timestamp_scale = scale;
                         }
+                        if let Some(title) = parse_info_title(&self.buf[header..total]) {
+                            self.tags.push(Tag::Title(title));
+                        }
                     }
                     ID_TRACKS => self.tracks = parse_tracks(&self.buf[header..total]),
+                    ID_TAGS => {
+                        for tag in parse_tags(&self.buf[header..total]) {
+                            self.tags.push(tag);
+                        }
+                    }
                     ID_CLUSTER => {
                         let frames =
                             parse_cluster(&self.buf[header..total], &self.tracks, self.timestamp_scale);
                         self.completed.extend(frames);
                     }
-                    _ => {} // SeekHead / Cues / Tags / Chapters / Void, etc.
+                    _ => {} // SeekHead / Cues / Chapters / Void, etc.
                 }
             }
             // (elements before the Segment, e.g. the EBML header, are skipped.)
@@ -262,6 +287,49 @@ fn children(body: &[u8]) -> EbmlChildren<'_> {
 
 fn parse_timestamp_scale(info: &[u8]) -> Option<u64> {
     children(info).find(|(id, _)| *id == ID_TIMESTAMP_SCALE).map(|(_, d)| read_uint(d))
+}
+
+/// The Segment `Info` `Title` (the whole-file title), if present and valid UTF-8.
+fn parse_info_title(info: &[u8]) -> Option<String> {
+    let (_, data) = children(info).find(|(id, _)| *id == ID_TITLE)?;
+    core::str::from_utf8(data).ok().map(String::from)
+}
+
+/// Parse the Segment `Tags` element into a flat list of [`Tag`]s. Each `Tag`'s
+/// `SimpleTag` children carry a `TagName` / `TagString` pair; the conventional
+/// uppercase Matroska names (`TITLE`, `ARTIST`, ...) map through
+/// [`Tag::from_key_value`]. Targets and nested SimpleTags are ignored (v1: the
+/// whole-stream tags, no per-track scoping).
+fn parse_tags(body: &[u8]) -> Vec<Tag> {
+    let mut out = Vec::new();
+    for (tag_id, tag) in children(body) {
+        if tag_id != ID_TAG {
+            continue;
+        }
+        for (sid, simple) in children(tag) {
+            if sid == ID_SIMPLE_TAG {
+                if let Some(t) = parse_simple_tag(simple) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One `SimpleTag`: a `TagName` keyed `TagString` value (both UTF-8). A
+/// `TagBinary` value or a missing name/string yields nothing.
+fn parse_simple_tag(body: &[u8]) -> Option<Tag> {
+    let mut name: Option<&str> = None;
+    let mut value: Option<&str> = None;
+    for (id, data) in children(body) {
+        match id {
+            ID_TAG_NAME => name = core::str::from_utf8(data).ok(),
+            ID_TAG_STRING => value = core::str::from_utf8(data).ok(),
+            _ => {}
+        }
+    }
+    Some(Tag::from_key_value(name?, value?))
 }
 
 fn parse_tracks(body: &[u8]) -> Vec<MkvTrack> {
@@ -912,6 +980,38 @@ mod tests {
         assert_eq!(frames[1].data, vec![4, 5]);
         assert_eq!(frames[1].pts_ns, 33_000_000); // 33 ms ticks * 1 ms scale
         assert!(!frames[1].keyframe);
+    }
+
+    /// A `Tags` element carrying one `Tag` with the given `SimpleTag` pairs and
+    /// an empty `Targets` (whole-stream scope).
+    fn tags_element(simple: &[(&str, &str)]) -> Vec<u8> {
+        let mut tag = elem(&[0x63, 0xC0], &[]); // Targets (empty)
+        for (name, value) in simple {
+            let body = [elem(&[0x45, 0xA3], name.as_bytes()), elem(&[0x44, 0x87], value.as_bytes())]
+                .concat();
+            tag.extend_from_slice(&elem(&[0x67, 0xC8], &body));
+        }
+        elem(&[0x12, 0x54, 0xC3, 0x67], &elem(&[0x73, 0x73], &tag))
+    }
+
+    #[test]
+    fn parses_segment_title_and_tags() {
+        let info = elem(&[0x15, 0x49, 0xA9, 0x66], &elem(&[0x7B, 0xA9], b"My Movie")); // Info/Title
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((16, 16)), None));
+        let tags = tags_element(&[("ARTIST", "Band"), ("ENCODER", "libvpx")]);
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, tags].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        assert_eq!(
+            d.tags().tags(),
+            &[
+                Tag::Title("My Movie".into()),
+                Tag::Artist("Band".into()),
+                Tag::Encoder("libvpx".into()),
+            ]
+        );
     }
 
     #[test]

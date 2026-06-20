@@ -32,9 +32,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList,
+    VideoCodec,
 };
 
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
@@ -63,6 +64,10 @@ pub struct MkvDemux {
     configured: bool,
     emitted: u64,
     last_caps: Option<Caps>,
+    bus: Option<BusHandle>,
+    /// Count of tags already posted, so newly parsed tags (the `Tags` element
+    /// can trail the `Info` `Title`) post once each.
+    tags_posted: usize,
 }
 
 impl Default for MkvDemux {
@@ -79,12 +84,21 @@ impl MkvDemux {
             configured: false,
             emitted: 0,
             last_caps: None,
+            bus: None,
+            tags_posted: 0,
         }
     }
 
     /// Select which elementary stream to forward (default [`MkvStream::Vp9`]).
     pub fn with_stream(mut self, stream: MkvStream) -> Self {
         self.stream = stream;
+        self
+    }
+
+    /// Attach the pipeline bus so the Segment's `Tags` / `Info` `Title` metadata
+    /// posts as a [`BusMessage::Tag`] once parsed.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
         self
     }
 
@@ -164,9 +178,26 @@ impl MkvDemux {
         }
     }
 
+    /// Post any tags parsed since the last call as a [`BusMessage::Tag`]. A
+    /// no-op without a bus attached or when nothing new has been parsed.
+    fn post_tags(&mut self) {
+        let total = self.demux.tags().len();
+        if total <= self.tags_posted {
+            return;
+        }
+        let fresh: TagList = self.demux.tags().tags()[self.tags_posted..].iter().cloned().collect();
+        self.tags_posted = total;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::Tag(fresh));
+        }
+    }
+
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.bus.is_some() {
+            self.post_tags();
+        }
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -499,6 +530,49 @@ mod tests {
             MkvDemux::output_caps(MkvStream::Opus),
             Caps::Audio { format: AudioFormat::Opus, .. }
         ));
+    }
+
+    /// A WebM with a Segment `Title`, a VP9 track, a `Tags` element, then one
+    /// Cluster frame.
+    fn webm_with_tags() -> Vec<u8> {
+        let info = elem(&[0x15, 0x49, 0xA9, 0x66], &elem(&[0x7B, 0xA9], b"My Clip")); // Info/Title
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &video_track(1, b"V_VP9", 320, 240));
+        let simple = [elem(&[0x45, 0xA3], b"ARTIST"), elem(&[0x44, 0x87], b"Band")].concat();
+        let tag = [elem(&[0x63, 0xC0], &[]), elem(&[0x67, 0xC8], &simple)].concat();
+        let tags = elem(&[0x12, 0x54, 0xC3, 0x67], &elem(&[0x73, 0x73], &tag));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &block(1, 0, &[0x11, 0x22]))].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, tags, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn posts_tags_on_the_bus() {
+        use g2g_core::{Bus, BusMessage, Tag};
+        let (bus, handle) = Bus::new(8);
+        let mut d = MkvDemux::new().with_stream(MkvStream::Vp9).with_bus(handle);
+        d.configure_pipeline(&MkvDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(webm_with_tags().into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+
+        let mut posted = TagList::new();
+        while let Some(m) = bus.try_recv() {
+            if let BusMessage::Tag(t) = m {
+                for tag in t.tags() {
+                    posted.push(tag.clone());
+                }
+            }
+        }
+        assert_eq!(posted.tags(), &[Tag::Title("My Clip".into()), Tag::Artist("Band".into())]);
+        // The selected video frame still flows while the tags go out of band.
+        assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22]]);
     }
 
     #[test]

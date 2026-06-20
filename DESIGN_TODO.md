@@ -219,12 +219,13 @@ Production-shape needs that block specific real-world use cases.
 
 Smaller-scope items, mostly orthogonal to the architecture.
 
-- **Tag system — core + two producers DONE (M137, M138).** `g2g_core::tag::{Tag,
+- **Tag system — core + three producers DONE (M137-M139).** `g2g_core::tag::{Tag,
   TagList}` (typed common keys + `Other` fallback) delivered via
-  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment (M137) and
-  `flvdemux` parses FLV `onMetaData` AMF0 (M138). Remaining: more producers
-  (Matroska Tags / Segment title, MP4 `udta`/`ilst`) on the same primitive, and a
-  per-stream tag merge policy for multi-stream containers.
+  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment (M137), `flvdemux`
+  parses FLV `onMetaData` AMF0 (M138), and `matroskademux` parses the Segment
+  `Tags` element + `Info` `Title` (M139). Remaining: the MP4 `udta`/`ilst`
+  producer on the same primitive; Matroska `Targets`-scoped (per-track) tags and
+  nested SimpleTags; and a per-stream tag merge policy for multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation
@@ -349,10 +350,12 @@ modern PipeWire path remain.
   output caps from Tracks. Registered as `matroskademux`. Block lacing (Xiph /
   EBML / fixed) is split (M113). The muxer `matroskamux`
   (`g2g-plugins::matroska::MatroskaMuxer` + the `MkvMux` element, single track,
-  one Cluster per frame, `webm` / `matroska` DocType by codec) landed in M115.
-  **Remaining:** unknown-size Clusters (live read), Cues / seeking, per-frame
-  timestamp interpolation (DefaultDuration), multi-track muxing, and Cluster
-  batching.
+  one Cluster per frame, `webm` / `matroska` DocType by codec) landed in M115. The
+  Segment `Tags` element + `Info` `Title` surface as `BusMessage::Tag` via
+  `MkvDemux::with_bus` (M139, see the tag system above). **Remaining:** unknown-size
+  Clusters (live read), Cues / seeking, per-frame timestamp interpolation
+  (DefaultDuration), multi-track muxing, Cluster batching, and `Targets`-scoped
+  (per-track) tags.
 - **MPEG-TS `tsdemux` — DONE (M108, M109).** Pure-Rust demuxer
   (`g2g-plugins::mpegts::TsDemuxer` + the `TsDemux` element): PAT/PMT/PES ->
   elementary streams, fed by the `Caps::ByteStream{MpegTs}` link type

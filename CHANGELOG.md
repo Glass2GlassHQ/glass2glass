@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M139: matroskademux Tags + Segment Title
+
+- **`matroskademux` surfaces the Segment `Tags` element and `Info` `Title`**, the
+  third producer on the M137 tag primitive (alongside `oggdemux` VorbisComment and
+  `flvdemux` `onMetaData`), proving it spans EBML metadata too. The parser
+  (`MatroskaDemuxer`) now reads the `Tags` element (`Tag` -> `SimpleTag` ->
+  `TagName` / `TagString` pairs, mapped through `Tag::from_key_value` so the
+  conventional uppercase Matroska names typed-resolve) and the `Info` `Title`,
+  accumulating both into a `TagList` exposed via `tags()`. `MkvDemux::with_bus(...)`
+  posts newly parsed tags as a `BusMessage::Tag`, tracking a posted count so a
+  `Tags` element trailing the `Info` `Title` posts once each (Matroska commonly
+  places `Tags` after the Clusters). `Targets` scoping and nested SimpleTags are
+  ignored (v1: whole-stream tags). Without a bus attached the demuxer is unchanged.
+- Tested: the parser extracts the segment title + SimpleTag pairs in order; the
+  element posts a `BusMessage::Tag` with the title and artist while the selected
+  VP9 frame still flows to the sink.
+
 ### M138: flvdemux onMetaData tags (AMF0)
 
 - **`flvdemux` surfaces FLV `onMetaData` as tags**, the second producer on the
