@@ -45,6 +45,7 @@ use crate::videoflip::{FlipMethod, VideoFlip};
 use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
 use crate::videotestsrc::VideoTestSrc;
+use crate::volume::Volume;
 use crate::tsdemux::TsDemux;
 use crate::tsmux::TsMux;
 
@@ -112,6 +113,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AudioResample>("audioresample", || {
         Box::new(AudioResample::new(48_000))
     }));
+    reg.register_launch(LaunchFactory::of::<Volume>("volume", || Box::new(Volume::new())));
 
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));

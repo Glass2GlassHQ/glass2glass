@@ -5,6 +5,19 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M126: volume (audio gain)
+
+- **`g2g-plugins::volume::Volume` (no_std).** A per-sample audio-gain transform,
+  the audio analog of `videobalance`: `volume` is a linear multiplier (1.0 =
+  unchanged), `mute` zeroes the output. S16LE PCM in/out, format / channels /
+  rate preserved; samples are rounded and clamped to the i16 range (unity gain is
+  byte-exact). Registered as `volume` with `Double` / `Bool` properties, so
+  `volume volume=0.5` and `volume mute=true` work as text. An f32 path is a
+  follow-up.
+- Tested: gain scales and saturates, unity is identity, mute silences, configure
+  rejects non-S16LE, and the element runs in an
+  `audiotestsrc ! volume ! fakesink` text pipeline.
+
 ### M125: AudioTestSrc waveform coverage
 
 - **Three new `audiotestsrc` waveforms (g2g-plugins).** `saw` (rising ramp),

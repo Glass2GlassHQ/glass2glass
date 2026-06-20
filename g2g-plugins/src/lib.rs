@@ -13,6 +13,7 @@ pub mod aacparse;
 pub mod audioconvert;
 pub mod audioresample;
 pub mod audiotestsrc;
+pub mod volume;
 pub mod capsfilter;
 pub mod fakesink;
 pub mod h264parse;
