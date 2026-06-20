@@ -24,8 +24,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Tag, TagList,
 };
 
 use crate::ogg::{OggCodec, OggDemuxer};
@@ -37,6 +38,8 @@ pub struct OggDemux {
     configured: bool,
     emitted: u64,
     last_caps: Option<Caps>,
+    bus: Option<BusHandle>,
+    tags_posted: bool,
 }
 
 impl Default for OggDemux {
@@ -47,7 +50,21 @@ impl Default for OggDemux {
 
 impl OggDemux {
     pub fn new() -> Self {
-        Self { demux: OggDemuxer::new(), configured: false, emitted: 0, last_caps: None }
+        Self {
+            demux: OggDemuxer::new(),
+            configured: false,
+            emitted: 0,
+            last_caps: None,
+            bus: None,
+            tags_posted: false,
+        }
+    }
+
+    /// Attach the pipeline bus so the stream's VorbisComment metadata posts as a
+    /// [`BusMessage::Tag`] once the comment header is parsed.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// Count of audio packets forwarded.
@@ -83,6 +100,18 @@ impl OggDemux {
     /// Emit a `CapsChanged` once the Opus parameters are known, then forward each
     /// audio packet. A non-Opus stream is drained and dropped (Opus-typed pad).
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        // Surface the stream's metadata once, as soon as the comment header lands.
+        if !self.tags_posted && self.bus.is_some() {
+            if let Some(comment) = self.demux.comment_header() {
+                let tags = parse_vorbis_comment(comment);
+                self.tags_posted = true;
+                if !tags.is_empty() {
+                    if let Some(bus) = &self.bus {
+                        bus.try_post(BusMessage::Tag(tags));
+                    }
+                }
+            }
+        }
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -173,6 +202,47 @@ impl PadTemplates for OggDemux {
     }
 }
 
+/// Parse a VorbisComment metadata block into a [`TagList`]. Accepts the comment
+/// header with its codec prefix (`OpusTags`, or the Vorbis `\x03vorbis`): vendor
+/// string, then a count-prefixed list of `KEY=VALUE` UTF-8 fields (RFC 7845 §5.2
+/// for Opus). Unparseable / truncated input yields whatever was read so far.
+fn parse_vorbis_comment(packet: &[u8]) -> TagList {
+    let body = if let Some(rest) = packet.strip_prefix(b"OpusTags".as_slice()) {
+        rest
+    } else if let Some(rest) = packet.strip_prefix(b"\x03vorbis".as_slice()) {
+        rest
+    } else {
+        return TagList::new();
+    };
+
+    fn read_u32_le(b: &[u8], pos: &mut usize) -> Option<u32> {
+        let s = b.get(*pos..*pos + 4)?;
+        *pos += 4;
+        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+
+    let mut list = TagList::new();
+    let mut pos = 0usize;
+    let Some(vendor_len) = read_u32_le(body, &mut pos) else { return list };
+    pos = match pos.checked_add(vendor_len as usize) {
+        Some(p) if p <= body.len() => p, // skip the vendor string
+        _ => return list,
+    };
+    let Some(count) = read_u32_le(body, &mut pos) else { return list };
+    for _ in 0..count {
+        let Some(len) = read_u32_le(body, &mut pos) else { break };
+        let Some(end) = pos.checked_add(len as usize) else { break };
+        let Some(field) = body.get(pos..end) else { break };
+        pos = end;
+        if let Ok(s) = core::str::from_utf8(field) {
+            if let Some((key, value)) = s.split_once('=') {
+                list.push(Tag::from_key_value(key, value));
+            }
+        }
+    }
+    list
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +286,21 @@ mod tests {
         h.extend_from_slice(&48_000u32.to_le_bytes());
         h.extend_from_slice(&[0, 0, 0]);
         h
+    }
+
+    /// An `OpusTags` comment header carrying `comments` (a "g2g" vendor string).
+    fn opus_tags(comments: &[(&str, &str)]) -> Vec<u8> {
+        let mut p = b"OpusTags".to_vec();
+        let vendor: &[u8] = b"g2g";
+        p.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+        p.extend_from_slice(vendor);
+        p.extend_from_slice(&(comments.len() as u32).to_le_bytes());
+        for (k, v) in comments {
+            let field = [k.as_bytes(), b"=", v.as_bytes()].concat();
+            p.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            p.extend_from_slice(&field);
+        }
+        p
     }
 
     #[derive(Default)]
@@ -287,5 +372,51 @@ mod tests {
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x11, 0x22], alloc::vec![0x33]]);
         assert!(!sink.eos, "EOS is forwarded by the runner's arm, not the element");
         assert_eq!(d.emitted(), 2);
+    }
+
+    #[test]
+    fn parse_vorbis_comment_reads_fields_and_rejects_non_comment() {
+        let tags = parse_vorbis_comment(&opus_tags(&[("TITLE", "Song"), ("ENCODER", "libopus")]));
+        assert_eq!(
+            tags.tags(),
+            &[Tag::Title("Song".into()), Tag::Encoder("libopus".into())]
+        );
+        // The identification header (OpusHead) is not a comment block.
+        assert!(parse_vorbis_comment(&opus_head(2)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn posts_vorbis_comment_tags_on_the_bus() {
+        use g2g_core::Bus;
+        let (bus, handle) = Bus::new(8);
+        let serial = 9;
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&page(0x02, serial, 0, &[&opus_head(2)]));
+        stream.extend_from_slice(&page(
+            0x00,
+            serial,
+            1,
+            &[&opus_tags(&[("TITLE", "Song"), ("ARTIST", "Band")])],
+        ));
+        stream.extend_from_slice(&page(0x00, serial, 2, &[&[0x10, 0x11]]));
+
+        let mut d = OggDemux::new().with_bus(handle);
+        d.configure_pipeline(&OggDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        d.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+
+        let mut posted = None;
+        while let Some(m) = bus.try_recv() {
+            if let BusMessage::Tag(t) = m {
+                posted = Some(t);
+            }
+        }
+        let tags = posted.expect("a Tag message was posted");
+        assert_eq!(tags.tags(), &[Tag::Title("Song".into()), Tag::Artist("Band".into())]);
     }
 }

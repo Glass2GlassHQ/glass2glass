@@ -29,6 +29,7 @@ pub mod query;
 pub mod segment;
 pub mod state;
 pub mod staticpool;
+pub mod tag;
 
 #[cfg(feature = "runtime")]
 pub mod bus;
@@ -80,6 +81,7 @@ pub use query::{AllocationParams, LatencyReport};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
 pub use state::{PipelineState, StateChangeReturn};
 pub use staticpool::{StaticAcquire, StaticBufferPool, StaticPooled};
+pub use tag::{Tag, TagList};
 
 #[cfg(feature = "runtime")]
 pub use pool::{BufferPool, PooledBuffer};

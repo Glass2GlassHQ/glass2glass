@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M137: tag system (stream metadata on the bus)
+
+- **`g2g-core::tag::{Tag, TagList}` (no_std baseline).** The GStreamer
+  `GstTagList` analog: typed common keys (`Title` / `Artist` / `Album` /
+  `Encoder` / `Language` / `Comment`) plus an `Other { key, value }` fallback so a
+  tag a container defines but the enum doesn't still round-trips.
+  `Tag::from_key_value` (ASCII case-insensitive) is the shared mapping the
+  container metadata formats feed. Delivered out of band via the new
+  `BusMessage::Tag(TagList)` (the `GST_MESSAGE_TAG` analog), so an application
+  reads title / artist / encoder without intercepting the data path.
+- **First producer: `oggdemux` surfaces VorbisComment.** The ogg parser now
+  retains the comment header (`OpusTags`, packet index 1) instead of only
+  skipping it; `OggDemux::with_bus(...)` parses its VorbisComment (RFC 7845 §5.2:
+  vendor string + count-prefixed `KEY=VALUE` fields) into a `TagList` and posts it
+  once. Other demuxers (FLV `onMetaData`, Matroska Tags) can follow using the same
+  primitive. Without a bus attached the demuxer behaves exactly as before.
+- Tested: `Tag::from_key_value` maps known keys case-insensitively and falls back
+  to `Other`, `TagList` collects / reports; the VorbisComment parser reads fields
+  and rejects a non-comment header; `oggdemux` posts a `BusMessage::Tag` with the
+  parsed title / artist; end-to-end `OggSource ! oggdemux(with_bus) ! fakesink`
+  through `run_graph` delivers the tags on the bus while the audio packets reach
+  the sink.
+
 ### M136: av1parse (AV1 sequence-header parser)
 
 - **`g2g-plugins::av1parse::Av1Parse` (no_std).** The AV1 sibling of `vp9parse`,

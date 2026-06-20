@@ -143,11 +143,11 @@ Production-shape needs that block specific real-world use cases.
     on-screen demo (validated on a real display, like `wayland_smoke`).
 
 - **Remaining bus message types.** Core bus coverage is done (DESIGN.md §4.15).
-  The GStreamer message types still missing are gated on subsystems we don't
-  have yet: `tag` (tag system), `segment-done` (segment seeks), `stream-status`
-  (thread pool), `clock-lost` (clock re-election). Smaller follow-ups: buffering
-  on interior links; periodic QoS; QoS from the display sinks once they sync to
-  the clock.
+  The `tag` message landed (M137: `BusMessage::Tag(TagList)` + `oggdemux`
+  VorbisComment). Still missing, each gated on a subsystem we don't have yet:
+  `segment-done` (segment seeks), `stream-status` (thread pool), `clock-lost`
+  (clock re-election). Smaller follow-ups: buffering on interior links; periodic
+  QoS; QoS from the display sinks once they sync to the clock.
 
 - **Compositor GPU companion + depth.** The CPU `Compositor` (RGBA8 pixel
   mixer: position / z-order / per-pad alpha, input-0-driven cadence, plus per-pad
@@ -219,9 +219,12 @@ Production-shape needs that block specific real-world use cases.
 
 Smaller-scope items, mostly orthogonal to the architecture.
 
-- **Tag system.** 1 session. `GstTagList`-equivalent for stream
-  metadata (title, encoder, language, artist). Container demuxers
-  surface tags; applications consume them via the bus.
+- **Tag system — core + first producer DONE (M137).** `g2g_core::tag::{Tag,
+  TagList}` (typed common keys + `Other` fallback) delivered via
+  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment and posts it.
+  Remaining: more producers (FLV `onMetaData` AMF0, Matroska Tags / Segment
+  title, MP4 `udta`/`ilst`) on the same primitive, and a per-stream tag merge
+  policy for multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation

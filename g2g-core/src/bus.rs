@@ -14,6 +14,7 @@ use crate::error::G2gError;
 use crate::runtime::solver::NegotiationFailure;
 use crate::runtime::{bounded, Receiver, Sender};
 use crate::state::PipelineState;
+use crate::tag::TagList;
 
 /// An out-of-band message from an element to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +73,12 @@ pub enum BusMessage {
         /// Fill of the sink's input link, 0 (empty / underrun) to 100 (full).
         percent: u8,
     },
+    /// Stream metadata a demuxer recovered from the container (the GStreamer
+    /// `GST_MESSAGE_TAG` analog). Posted out of band so the application can read
+    /// title / artist / encoder / etc. without intercepting the data path. A
+    /// demuxer with a tag source (e.g. `oggdemux` parsing VorbisComment) posts
+    /// it once the metadata header is parsed.
+    Tag(TagList),
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

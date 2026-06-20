@@ -44,6 +44,9 @@ pub struct OggDemuxer {
     info: Option<OggStreamInfo>,
     /// Count of packets finalized so far, to skip the codec setup headers.
     packets_seen: u32,
+    /// The comment header (packet index 1: `OpusTags` / Vorbis comment), kept so
+    /// the element can surface its VorbisComment tags. `None` until parsed.
+    comment_header: Option<Vec<u8>>,
     completed: Vec<Vec<u8>>,
 }
 
@@ -60,6 +63,12 @@ impl OggDemuxer {
     /// Drain the elementary-stream packets demuxed so far.
     pub fn take_packets(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.completed)
+    }
+
+    /// The codec comment header (`OpusTags` for Opus), once parsed. Carries the
+    /// stream's VorbisComment metadata.
+    pub fn comment_header(&self) -> Option<&[u8]> {
+        self.comment_header.as_deref()
     }
 
     /// Feed Ogg bytes. Complete pages are parsed as they arrive; a partial
@@ -156,6 +165,10 @@ impl OggDemuxer {
             _ => 0,
         };
         if self.packets_seen < header_count {
+            // Packet index 1 is the comment header (OpusTags / Vorbis comment).
+            if self.packets_seen == 1 {
+                self.comment_header = Some(packet);
+            }
             self.packets_seen += 1;
             return;
         }
