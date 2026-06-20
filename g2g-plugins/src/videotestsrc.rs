@@ -17,9 +17,10 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-/// Synthetic content drawn into each frame. All are animated (they change with
-/// the frame index), but they differ in how obvious the motion is, which matters
-/// when eyeballing a live sink.
+/// Synthetic content drawn into each frame. Some animate with the frame index
+/// (gradient, snow, moving-bar, ball, zone-plate); the calibration patterns
+/// (smpte, checker) are static. Integer-only math, so every pattern works on the
+/// `no_std` baseline (no `libm` / float transcendentals).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Pattern {
     /// Per-byte animated gradient: each byte is `(index + frame) & 0xFF`. Smooth
@@ -33,6 +34,19 @@ pub enum Pattern {
     /// A bright vertical bar that sweeps left to right (wrapping), over a dark
     /// field: obvious, smooth motion that's easy to spot in a small overlay.
     MovingBar,
+    /// The seven 75% SMPTE colour bars (white, yellow, cyan, green, magenta, red,
+    /// blue) across the width. Static; the canonical calibration pattern.
+    SmpteBars,
+    /// A black/white checkerboard (square side ~1/8 of the width). Static; makes
+    /// scaling and block-compression artefacts obvious.
+    Checkerboard,
+    /// A filled white ball bouncing over a dark field (reflecting off the edges).
+    /// Smooth two-axis motion for a frame-rate / judder check.
+    Ball,
+    /// Concentric rings whose spacing tightens with radius (`(x^2 + y^2)` square
+    /// wave, phase-animated): an integer zone plate, for resampling / aliasing
+    /// tests. A square-wave approximation of the sinusoidal chirp (no `libm`).
+    ZonePlate,
 }
 
 #[derive(Debug)]
@@ -256,7 +270,11 @@ impl SourceLoop for VideoTestSrc {
 
 /// `VideoTestSrc`'s settable properties (M104).
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("pattern", PropKind::Str, "drawn pattern: gradient | snow | moving-bar"),
+    PropertySpec::new(
+        "pattern",
+        PropKind::Str,
+        "drawn pattern: gradient | snow | moving-bar | smpte | checker | ball | zone-plate",
+    ),
     PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)"),
     PropertySpec::new("width", PropKind::Uint, "frame width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "frame height in pixels"),
@@ -269,6 +287,10 @@ fn pattern_from_str(s: &str) -> Option<Pattern> {
         "gradient" => Some(Pattern::Gradient),
         "snow" => Some(Pattern::Snow),
         "moving-bar" => Some(Pattern::MovingBar),
+        "smpte" => Some(Pattern::SmpteBars),
+        "checker" => Some(Pattern::Checkerboard),
+        "ball" => Some(Pattern::Ball),
+        "zone-plate" => Some(Pattern::ZonePlate),
         _ => None,
     }
 }
@@ -279,6 +301,10 @@ fn pattern_to_str(p: Pattern) -> &'static str {
         Pattern::Gradient => "gradient",
         Pattern::Snow => "snow",
         Pattern::MovingBar => "moving-bar",
+        Pattern::SmpteBars => "smpte",
+        Pattern::Checkerboard => "checker",
+        Pattern::Ball => "ball",
+        Pattern::ZonePlate => "zone-plate",
     }
 }
 
@@ -325,7 +351,87 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
                 px[3] = 255;
             }
         }
+        // Seven 75% colour bars across the width. Static calibration pattern.
+        Pattern::SmpteBars => {
+            const BARS: [[u8; 3]; 7] = [
+                [192, 192, 192], // white
+                [192, 192, 0],   // yellow
+                [0, 192, 192],   // cyan
+                [0, 192, 0],     // green
+                [192, 0, 192],   // magenta
+                [192, 0, 0],     // red
+                [0, 0, 192],     // blue
+            ];
+            let w = width.max(1) as usize;
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                let x = p % w;
+                let [r, g, b] = BARS[(x * BARS.len() / w).min(BARS.len() - 1)];
+                px[0] = r;
+                px[1] = g;
+                px[2] = b;
+                px[3] = 255;
+            }
+        }
+        // Black/white checkerboard, square side ~1/8 of the width. Static.
+        Pattern::Checkerboard => {
+            let w = width.max(1) as usize;
+            let square = (w / 8).max(1);
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                let (x, y) = (p % w, p / w);
+                let v = if ((x / square) + (y / square)) & 1 == 0 { 255 } else { 0 };
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+                px[3] = 255;
+            }
+        }
+        // A filled white ball bouncing (reflecting at the edges) over a dark
+        // field. Center advances per frame; pixels inside the radius are white.
+        Pattern::Ball => {
+            let w = width.max(1) as usize;
+            let h = ((buf.len() / 4) / w).max(1);
+            let radius = (w.min(h) / 8).max(1) as i64;
+            let cx = bounce(seq, w, 3) as i64;
+            let cy = bounce(seq, h, 2) as i64;
+            let r2 = radius * radius;
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                let (dx, dy) = ((p % w) as i64 - cx, (p / w) as i64 - cy);
+                let v = if dx * dx + dy * dy <= r2 { 255 } else { 32 };
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+                px[3] = 255;
+            }
+        }
+        // Concentric rings about the centre. Ring frequency rises with radius
+        // because `d2` is quadratic (the zone-plate aliasing property); `seq`
+        // phase-shifts them so the rings pulse outward.
+        Pattern::ZonePlate => {
+            let w = width.max(1) as usize;
+            let h = ((buf.len() / 4) / w).max(1);
+            let (cx, cy) = ((w / 2) as i64, (h / 2) as i64);
+            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+                let (dx, dy) = ((p % w) as i64 - cx, (p / w) as i64 - cy);
+                let d2 = (dx * dx + dy * dy) as u64;
+                let v = if ((d2 >> 6).wrapping_add(seq)) & 1 == 0 { 255 } else { 0 };
+                px[0] = v;
+                px[1] = v;
+                px[2] = v;
+                px[3] = 255;
+            }
+        }
     }
+}
+
+/// A reflecting (triangle-wave) coordinate in `0..span`, advancing `speed` units
+/// per `seq` step: the ball bounces off the edges instead of wrapping.
+fn bounce(seq: u64, span: usize, speed: u64) -> usize {
+    if span <= 1 {
+        return 0;
+    }
+    let period = 2 * (span as u64 - 1);
+    let t = seq.wrapping_mul(speed) % period;
+    (if t < span as u64 { t } else { period - t }) as usize
 }
 
 impl PadTemplates for VideoTestSrc {
@@ -369,6 +475,58 @@ mod tests {
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             // Alpha stays opaque so the content survives a compositor blend.
             assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+        }
+    }
+
+    #[test]
+    fn animated_patterns_change_between_frames() {
+        for pattern in [Pattern::Ball, Pattern::ZonePlate] {
+            let mut a = [0u8; BYTES];
+            let mut b = [0u8; BYTES];
+            fill_pattern(pattern, &mut a, W, 0);
+            fill_pattern(pattern, &mut b, W, 1);
+            assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
+            assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+        }
+    }
+
+    #[test]
+    fn smpte_bars_run_white_to_blue_and_are_static() {
+        let mut f0 = [0u8; BYTES];
+        let mut f5 = [0u8; BYTES];
+        fill_pattern(Pattern::SmpteBars, &mut f0, W, 0);
+        fill_pattern(Pattern::SmpteBars, &mut f5, W, 5);
+        // Leftmost bar is 75% white, the last column falls in the blue bar.
+        assert_eq!(&f0[0..4], &[192, 192, 192, 255], "first bar white");
+        let last = ((W - 1) * 4) as usize;
+        assert_eq!(&f0[last..last + 4], &[0, 0, 192, 255], "last column blue");
+        assert_eq!(f0, f5, "smpte bars are a static calibration pattern");
+    }
+
+    #[test]
+    fn checkerboard_alternates_and_is_static() {
+        let mut f0 = [0u8; BYTES];
+        let mut f9 = [0u8; BYTES];
+        fill_pattern(Pattern::Checkerboard, &mut f0, W, 0);
+        fill_pattern(Pattern::Checkerboard, &mut f9, W, 9);
+        // Square side is W/8 = 2, so the first square is white and the next black.
+        assert_eq!(f0[0], 255, "top-left square white");
+        assert_eq!(f0[2 * 4], 0, "adjacent square black");
+        assert_eq!(f0, f9, "checkerboard is static");
+    }
+
+    #[test]
+    fn every_pattern_string_round_trips() {
+        for pattern in [
+            Pattern::Gradient,
+            Pattern::Snow,
+            Pattern::MovingBar,
+            Pattern::SmpteBars,
+            Pattern::Checkerboard,
+            Pattern::Ball,
+            Pattern::ZonePlate,
+        ] {
+            assert_eq!(pattern_from_str(pattern_to_str(pattern)), Some(pattern));
         }
     }
 }

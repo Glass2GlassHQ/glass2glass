@@ -440,9 +440,10 @@ presentation. Similar 5–8 session shape to macOS.
 
 ### Other
 
-- **`videotestsrc` pattern coverage.** 1 session. We have `VideoTestSrc`
-  but with limited patterns. SMPTE bars, snow, ball, gradient, checker,
-  zone plate — useful for codec testing.
+- **`videotestsrc` pattern coverage — DONE (M123).** `gradient` / `snow` /
+  `moving-bar` plus `smpte` (75% colour bars), `checker`, `ball` (bouncing), and
+  `zone-plate` (integer concentric-ring chirp). Integer-only, `no_std`-safe. A
+  sinusoidal (vs square-wave) zone plate would need `libm`; deferred.
 - **RTSP server (`rtsp-server`).** 4–5 sessions. `RtspSrc` is the client;
   hosting RTSP endpoints (one per pipeline, dynamic client connect) is the
   OBS / surveillance / contribution-server shape.

@@ -5,6 +5,18 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M123: VideoTestSrc pattern coverage
+
+- **Four new `videotestsrc` patterns (g2g-plugins).** `smpte` (seven 75% colour
+  bars), `checker` (black/white checkerboard), `ball` (a filled ball bouncing off
+  the edges), and `zone-plate` (concentric rings whose spacing tightens with
+  radius, the aliasing test). Integer-only math, so they hold on the `no_std`
+  baseline (no `libm`); `smpte` / `checker` are static, `ball` / `zone-plate`
+  animate. Reachable from text as `videotestsrc pattern=smpte` etc.
+- Tested: the bars run white-to-blue and stay static, the checkerboard alternates
+  and stays static, `ball` / `zone-plate` change between frames, and every pattern
+  string round-trips.
+
 ### M122: gst-launch muxer fan-in
 
 - **`g2g-core::runtime::MuxerFactory` + `Registry::register_muxer` / `make_muxer`.**
