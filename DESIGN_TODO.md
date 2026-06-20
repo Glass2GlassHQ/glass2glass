@@ -219,12 +219,12 @@ Production-shape needs that block specific real-world use cases.
 
 Smaller-scope items, mostly orthogonal to the architecture.
 
-- **Tag system — core + first producer DONE (M137).** `g2g_core::tag::{Tag,
+- **Tag system — core + two producers DONE (M137, M138).** `g2g_core::tag::{Tag,
   TagList}` (typed common keys + `Other` fallback) delivered via
-  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment and posts it.
-  Remaining: more producers (FLV `onMetaData` AMF0, Matroska Tags / Segment
-  title, MP4 `udta`/`ilst`) on the same primitive, and a per-stream tag merge
-  policy for multi-stream containers.
+  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment (M137) and
+  `flvdemux` parses FLV `onMetaData` AMF0 (M138). Remaining: more producers
+  (Matroska Tags / Segment title, MP4 `udta`/`ilst`) on the same primitive, and a
+  per-stream tag merge policy for multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation
@@ -369,8 +369,9 @@ modern PipeWire path remain.
   `FlvMux` elements) on the new `Caps::ByteStream{Flv}`: the "FLV" header then
   `PreviousTagSize` / tag pairs, the demuxer forwarding and the muxer wrapping the
   H.264 (AVC) video and AAC audio access units per `FlvStream` selection (h264 |
-  aac), sniffed by `typefind`. **Remaining:** the `onMetaData` script-tag
-  metadata, codec-config / extradata plumbing, and multi-track muxing.
+  aac), sniffed by `typefind`. The `onMetaData` script-tag metadata is surfaced
+  as tags (M138, see the tag system above). **Remaining:** codec-config /
+  extradata plumbing, and multi-track muxing.
 - **OGG demux — DONE (M116).** Pure RFC 3533 parser
   (`g2g-plugins::ogg::OggDemuxer` + the `OggDemux` element), fed by the new
   `Caps::ByteStream{Ogg}` link type: "OggS" pages, segment-table lacing with

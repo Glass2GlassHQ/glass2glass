@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M138: flvdemux onMetaData tags (AMF0)
+
+- **`flvdemux` surfaces FLV `onMetaData` as tags**, the second producer on the
+  M137 tag primitive (proving it generalizes past VorbisComment). The FLV parser
+  now retains the script tag's body (`FlvDemuxer::metadata`) instead of dropping
+  it; `FlvDemux::with_bus(...)` parses its AMF0 (`onMetaData` event name + an ECMA
+  array / object of properties) and posts the string-valued entries as a
+  `BusMessage::Tag` once. A small AMF0 reader walks the value types (number /
+  boolean / string / object / ECMA-array / strict-array / date / long-string) so
+  non-string properties (width, duration, ...) are skipped without losing
+  alignment; only string fields (encoder, title, ...) become tags. Without a bus
+  attached the demuxer is unchanged.
+- Tested: the parser retains the script-tag body while the media frame still
+  demuxes; `parse_on_metadata` extracts the string tags and skips numbers, and
+  ignores a non-`onMetaData` script; `flvdemux` posts a `BusMessage::Tag` with the
+  parsed encoder while the video AU flows to the sink. (No separate run_graph file:
+  M137 already covers the tag-through-runner path; the new surface, AMF0 + script
+  capture, is exercised end to end at the element here.)
+
 ### M137: tag system (stream metadata on the bus)
 
 - **`g2g-core::tag::{Tag, TagList}` (no_std baseline).** The GStreamer

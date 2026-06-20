@@ -10,9 +10,10 @@
 //!
 //! Scope (v1): H.264 video + AAC audio media frames. The sequence-header tags
 //! (the `AVCDecoderConfigurationRecord` / `AudioSpecificConfig`) are skipped, the
-//! codec-config / extradata side channel being a shared demuxer follow-up; the
-//! `onMetaData` script tag is skipped here (its metadata is surfaced by the tag
-//! system). Other codecs (VP6, H.263, MP3, Speex) are ignored.
+//! codec-config / extradata side channel being a shared demuxer follow-up. The
+//! `onMetaData` script tag's body is retained ([`FlvDemuxer::metadata`]) so the
+//! element can surface its AMF0 metadata via the tag system. Other codecs (VP6,
+//! H.263, MP3, Speex) are ignored.
 
 use alloc::vec::Vec;
 
@@ -20,6 +21,8 @@ use alloc::vec::Vec;
 const TAG_AUDIO: u8 = 8;
 /// FLV tag type: a video tag (codec-tagged video data).
 const TAG_VIDEO: u8 = 9;
+/// FLV tag type: a script-data tag (AMF, carries `onMetaData`).
+const TAG_SCRIPT: u8 = 18;
 
 /// FLV video codec id for AVC / H.264 (the low nibble of a video tag's first
 /// byte).
@@ -61,6 +64,9 @@ pub struct FlvDemuxer {
     buf: Vec<u8>,
     header_done: bool,
     units: Vec<FlvUnit>,
+    /// The first `onMetaData` script-tag body, kept so the element can parse its
+    /// AMF0 metadata into tags. `None` until a script tag is seen.
+    metadata: Option<Vec<u8>>,
 }
 
 impl FlvDemuxer {
@@ -77,6 +83,11 @@ impl FlvDemuxer {
     /// Take the access units parsed so far, leaving the demuxer ready for more.
     pub fn take_units(&mut self) -> Vec<FlvUnit> {
         core::mem::take(&mut self.units)
+    }
+
+    /// The `onMetaData` script-tag body (AMF0), once a script tag has been seen.
+    pub fn metadata(&self) -> Option<&[u8]> {
+        self.metadata.as_deref()
     }
 
     /// Consume the header (once) and every complete `PreviousTagSize` + tag
@@ -108,6 +119,7 @@ impl FlvDemuxer {
         // first tag, PreviousTagSize_i prefixes tag i+1) then an 11-byte tag
         // header and its body, so the final tag needs no trailing bytes.
         let mut units = Vec::new();
+        let mut metadata: Option<Vec<u8>> = None;
         loop {
             let header = pos + PREV_TAG_SIZE_LEN;
             if header + TAG_HEADER_LEN > self.buf.len() {
@@ -127,13 +139,18 @@ impl FlvDemuxer {
             if body_end > self.buf.len() {
                 break; // tag body not fully arrived yet
             }
-            if let Some(unit) = parse_tag(tag_type, timestamp, &self.buf[body_start..body_end]) {
+            if tag_type == TAG_SCRIPT && metadata.is_none() {
+                metadata = Some(self.buf[body_start..body_end].to_vec());
+            } else if let Some(unit) = parse_tag(tag_type, timestamp, &self.buf[body_start..body_end]) {
                 units.push(unit);
             }
             pos = body_end;
         }
         self.buf.drain(..pos);
         self.units.append(&mut units);
+        if self.metadata.is_none() {
+            self.metadata = metadata;
+        }
     }
 }
 
@@ -332,6 +349,18 @@ mod tests {
 
         assert_eq!(units.len(), 1, "only the media frame, not the headers");
         assert_eq!(units[0].data, vec![0x65, 0xAA]);
+    }
+
+    #[test]
+    fn captures_script_metadata_body() {
+        let stream = flv_stream(&[
+            tag(18, 0, b"onMetaData-amf0-blob"),
+            tag(TAG_VIDEO, 0, &avc_nalu(&[0x65, 0xAA])),
+        ]);
+        let mut d = FlvDemuxer::new();
+        d.push_data(&stream);
+        assert_eq!(d.metadata(), Some(&b"onMetaData-amf0-blob"[..]), "script body retained");
+        assert_eq!(d.take_units().len(), 1, "the media frame still demuxes");
     }
 
     #[test]

@@ -26,10 +26,13 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use alloc::string::String;
+
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Tag, TagList,
+    VideoCodec,
 };
 
 use crate::flv::{FlvDemuxer, FlvTrack, FlvUnit};
@@ -54,6 +57,8 @@ pub struct FlvDemux {
     stream: FlvStream,
     configured: bool,
     emitted: u64,
+    bus: Option<BusHandle>,
+    tags_posted: bool,
 }
 
 impl Default for FlvDemux {
@@ -64,13 +69,44 @@ impl Default for FlvDemux {
 
 impl FlvDemux {
     pub fn new() -> Self {
-        Self { demux: FlvDemuxer::new(), stream: FlvStream::H264, configured: false, emitted: 0 }
+        Self {
+            demux: FlvDemuxer::new(),
+            stream: FlvStream::H264,
+            configured: false,
+            emitted: 0,
+            bus: None,
+            tags_posted: false,
+        }
     }
 
     /// Select which elementary stream to forward (default [`FlvStream::H264`]).
     pub fn with_stream(mut self, stream: FlvStream) -> Self {
         self.stream = stream;
         self
+    }
+
+    /// Attach the pipeline bus so the FLV `onMetaData` metadata posts as a
+    /// [`BusMessage::Tag`] once the script tag is parsed.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Parse the `onMetaData` body into tags and post them once a bus is attached.
+    fn maybe_post_tags(&mut self) {
+        if self.tags_posted || self.bus.is_none() {
+            return;
+        }
+        let tags = match self.demux.metadata() {
+            Some(meta) => parse_on_metadata(meta),
+            None => return,
+        };
+        self.tags_posted = true;
+        if !tags.is_empty() {
+            if let Some(bus) = &self.bus {
+                bus.try_post(BusMessage::Tag(tags));
+            }
+        }
     }
 
     /// The elementary stream this instance forwards.
@@ -181,6 +217,7 @@ impl AsyncElement for FlvDemux {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.demux.push_data(slice.as_slice());
+                    self.maybe_post_tags();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                 }
@@ -188,6 +225,7 @@ impl AsyncElement for FlvDemux {
                     // Emit any final access units. The runner's transform arm
                     // forwards the EOS itself, so pushing it here would double it
                     // (the second hits a closed sink under a full link).
+                    self.maybe_post_tags();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                 }
@@ -253,6 +291,133 @@ impl PadTemplates for FlvDemux {
         ]));
         Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
     }
+}
+
+// AMF0 markers (the FLV `onMetaData` serialization uses this subset).
+mod amf0 {
+    pub(super) const NUMBER: u8 = 0x00;
+    pub(super) const BOOLEAN: u8 = 0x01;
+    pub(super) const STRING: u8 = 0x02;
+    pub(super) const OBJECT: u8 = 0x03;
+    pub(super) const NULL: u8 = 0x05;
+    pub(super) const UNDEFINED: u8 = 0x06;
+    pub(super) const ECMA_ARRAY: u8 = 0x08;
+    pub(super) const OBJECT_END: u8 = 0x09;
+    pub(super) const STRICT_ARRAY: u8 = 0x0A;
+    pub(super) const DATE: u8 = 0x0B;
+    pub(super) const LONG_STRING: u8 = 0x0C;
+}
+
+/// Parse an FLV `onMetaData` script body (AMF0) into a [`TagList`]. The body is
+/// the event-name string (`onMetaData`) followed by an ECMA array / object of
+/// properties; its string-valued entries become tags (numbers, booleans, nested
+/// objects are walked to stay aligned but not turned into tags). A malformed /
+/// truncated body yields whatever parsed before the error.
+fn parse_on_metadata(body: &[u8]) -> TagList {
+    let mut list = TagList::new();
+    let mut pos = 0usize;
+    // The first value is the event name; bail unless it is "onMetaData".
+    if read_amf0_value(body, &mut pos) != Some(Some(String::from("onMetaData"))) {
+        return list;
+    }
+    // The second value holds the properties: an ECMA array or an anonymous object.
+    let Some(marker) = body.get(pos).copied() else { return list };
+    pos += 1;
+    let _ = match marker {
+        amf0::ECMA_ARRAY => {
+            let _count = read_u32_be(body, &mut pos);
+            read_amf0_object(body, &mut pos, Some(&mut list))
+        }
+        amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut list)),
+        _ => Some(()),
+    };
+    list
+}
+
+/// Read an AMF0 value at `*pos`, advancing past it. Returns `Some(Some(s))` for a
+/// string value, `Some(None)` for any other (correctly skipped) value, or `None`
+/// on a parse error / unknown marker.
+fn read_amf0_value(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
+    let marker = *b.get(*pos)?;
+    *pos += 1;
+    match marker {
+        amf0::NUMBER => advance(b, pos, 8).map(|_| None),
+        amf0::BOOLEAN => advance(b, pos, 1).map(|_| None),
+        amf0::STRING => {
+            let len = read_u16_be(b, pos)? as usize;
+            Some(Some(read_amf0_str(b, pos, len)?))
+        }
+        amf0::OBJECT => read_amf0_object(b, pos, None).map(|_| None),
+        amf0::ECMA_ARRAY => {
+            let _count = read_u32_be(b, pos)?;
+            read_amf0_object(b, pos, None).map(|_| None)
+        }
+        amf0::NULL | amf0::UNDEFINED => Some(None),
+        amf0::STRICT_ARRAY => {
+            let count = read_u32_be(b, pos)?;
+            for _ in 0..count {
+                read_amf0_value(b, pos)?;
+            }
+            Some(None)
+        }
+        amf0::DATE => advance(b, pos, 10).map(|_| None), // f64 + s16 timezone
+        amf0::LONG_STRING => {
+            let len = read_u32_be(b, pos)? as usize;
+            advance(b, pos, len).map(|_| None)
+        }
+        _ => None,
+    }
+}
+
+/// Read AMF0 `(key, value)` property pairs until the object-end marker. When
+/// `collect` is set, each string-valued property is added as a [`Tag`].
+fn read_amf0_object(b: &[u8], pos: &mut usize, mut collect: Option<&mut TagList>) -> Option<()> {
+    loop {
+        let key_len = read_u16_be(b, pos)? as usize;
+        if key_len == 0 {
+            // An empty key precedes the object-end marker.
+            return if *b.get(*pos)? == amf0::OBJECT_END {
+                *pos += 1;
+                Some(())
+            } else {
+                None
+            };
+        }
+        let key = read_amf0_str(b, pos, key_len)?;
+        let value = read_amf0_value(b, pos)?;
+        if let (Some(list), Some(s)) = (collect.as_deref_mut(), value) {
+            list.push(Tag::from_key_value(&key, &s));
+        }
+    }
+}
+
+fn advance(b: &[u8], pos: &mut usize, n: usize) -> Option<()> {
+    let new = pos.checked_add(n)?;
+    if new > b.len() {
+        return None;
+    }
+    *pos = new;
+    Some(())
+}
+
+fn read_u16_be(b: &[u8], pos: &mut usize) -> Option<u16> {
+    let s = b.get(*pos..*pos + 2)?;
+    *pos += 2;
+    Some(u16::from_be_bytes([s[0], s[1]]))
+}
+
+fn read_u32_be(b: &[u8], pos: &mut usize) -> Option<u32> {
+    let s = b.get(*pos..*pos + 4)?;
+    *pos += 4;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// Read `len` bytes as a UTF-8 string (AMF0 object keys / string values are raw,
+/// not marker-prefixed).
+fn read_amf0_str(b: &[u8], pos: &mut usize, len: usize) -> Option<String> {
+    let s = b.get(*pos..*pos + len)?;
+    *pos += len;
+    core::str::from_utf8(s).ok().map(String::from)
 }
 
 #[cfg(test)]
@@ -378,6 +543,74 @@ mod tests {
         let mut asink = CaptureSink::default();
         run_demux(&mut audio, &stream, &mut asink).await;
         assert_eq!(asink.frames, alloc::vec![a0.to_vec(), a1.to_vec()], "audio only");
+    }
+
+    fn amf0_string(s: &str) -> Vec<u8> {
+        let mut v = alloc::vec![0x02u8]; // STRING marker
+        v.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    fn amf0_number(n: f64) -> Vec<u8> {
+        let mut v = alloc::vec![0x00u8]; // NUMBER marker
+        v.extend_from_slice(&n.to_be_bytes());
+        v
+    }
+
+    /// An `onMetaData` script body: the event name + an ECMA array of `props`
+    /// (each value already AMF0-encoded with its marker).
+    fn on_metadata(props: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut b = amf0_string("onMetaData");
+        b.push(0x08); // ECMA_ARRAY
+        b.extend_from_slice(&(props.len() as u32).to_be_bytes());
+        for (k, v) in props {
+            b.extend_from_slice(&(k.len() as u16).to_be_bytes());
+            b.extend_from_slice(k.as_bytes());
+            b.extend_from_slice(v);
+        }
+        b.extend_from_slice(&0u16.to_be_bytes()); // empty key
+        b.push(0x09); // OBJECT_END
+        b
+    }
+
+    #[test]
+    fn parse_on_metadata_extracts_string_tags() {
+        let body = on_metadata(&[
+            ("width", amf0_number(1280.0)),
+            ("encoder", amf0_string("Lavf58.76.100")),
+            ("title", amf0_string("Clip")),
+        ]);
+        let tags = parse_on_metadata(&body);
+        // The number is walked past; the two string fields become typed tags.
+        assert_eq!(
+            tags.tags(),
+            &[Tag::Encoder("Lavf58.76.100".into()), Tag::Title("Clip".into())]
+        );
+        // A body that is not onMetaData yields nothing.
+        assert!(parse_on_metadata(&amf0_string("onCuePoint")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn posts_on_metadata_tags_on_the_bus() {
+        use g2g_core::Bus;
+        let (bus, handle) = Bus::new(8);
+        let meta = on_metadata(&[("width", amf0_number(640.0)), ("encoder", amf0_string("g2g"))]);
+        let stream = flv_stream(&[tag(18, 0, &meta), tag(9, 0, &avc_nalu(&[0x65, 0xAA]))]);
+
+        let mut d = FlvDemux::new().with_bus(handle);
+        d.configure_pipeline(&FlvDemux::input_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        run_demux(&mut d, &stream, &mut sink).await;
+
+        assert_eq!(sink.frames, alloc::vec![alloc::vec![0x65, 0xAA]], "the video AU still flows");
+        let mut posted = None;
+        while let Some(m) = bus.try_recv() {
+            if let BusMessage::Tag(t) = m {
+                posted = Some(t);
+            }
+        }
+        assert_eq!(posted.expect("a Tag message was posted").tags(), &[Tag::Encoder("g2g".into())]);
     }
 
     #[test]
