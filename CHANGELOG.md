@@ -5,6 +5,16 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M146: compositor configurable background
+
+- **`Compositor` takes a configurable background colour** via
+  `with_background([r, g, b, a])`, shown wherever no input covers the canvas
+  (default unchanged: opaque black). `compose` fills the canvas with the configured
+  RGBA8 before painting the inputs in z-order, replacing the hard-coded
+  black-with-alpha fill.
+- Tested: a blue background shows in the area an undersized input 0 leaves
+  uncovered, and the default stays opaque black.
+
 ### M145: matroskamux Cluster batching
 
 - **`matroskamux` batches frames into Clusters** instead of writing one Cluster per

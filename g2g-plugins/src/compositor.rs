@@ -108,6 +108,8 @@ pub struct Compositor {
     /// keeps flowing, no frame is dropped); on prime the rest flush composited
     /// with the now-available overlays. Empty once primed.
     pending: alloc::collections::VecDeque<(FrameTiming, Box<[u8]>)>,
+    /// The canvas fill behind all inputs (RGBA8), default opaque black.
+    background: [u8; 4],
     emitted: u64,
 }
 
@@ -132,6 +134,7 @@ impl Compositor {
             // No overlays (single input) means nothing to wait for: start live.
             primed: n == 1,
             pending: alloc::collections::VecDeque::new(),
+            background: [0, 0, 0, 255],
             emitted: 0,
         }
     }
@@ -140,6 +143,13 @@ impl Compositor {
     /// still follows input 0's frames; this only labels the output caps.
     pub fn with_framerate(mut self, fps: u32) -> Self {
         self.framerate_q16 = fps << 16;
+        self
+    }
+
+    /// Set the RGBA8 background the inputs composite over (default opaque black).
+    /// Shows wherever no input covers the canvas.
+    pub fn with_background(mut self, rgba: [u8; 4]) -> Self {
+        self.background = rgba;
         self
     }
 
@@ -157,15 +167,14 @@ impl Compositor {
         }
     }
 
-    /// Composite onto a fresh opaque-black canvas in z-order and return the
+    /// Composite onto a fresh background-filled canvas in z-order and return the
     /// RGBA8 bytes. Input 0 uses `base0` (the frame currently driving output);
     /// every other input uses its latest cached frame.
     fn compose(&self, base0: &[u8]) -> Box<[u8]> {
         let (cw, ch) = (self.out_w as usize, self.out_h as usize);
         let mut canvas = vec![0u8; cw * ch * 4];
-        // Opaque black background.
         for px in canvas.chunks_exact_mut(4) {
-            px[3] = 255;
+            px.copy_from_slice(&self.background);
         }
         // Paint order: z-order ascending, ties by input index (input 0 backmost).
         let mut order: Vec<usize> = (0..self.pads.len()).collect();
@@ -559,6 +568,23 @@ mod tests {
         assert_eq!(px(&out, 8, 2, 2), [0, 255, 0, 255], "inset top-left green");
         assert_eq!(px(&out, 8, 3, 3), [0, 255, 0, 255], "inset bottom-right green");
         assert_eq!(px(&out, 8, 4, 4), [255, 0, 0, 255], "beyond the 2x2 inset red");
+    }
+
+    #[test]
+    fn background_shows_where_no_input_covers() {
+        // A 4x4 canvas with a blue background; input 0 is a 2x2 green frame at
+        // (0,0), so only the top-left quarter is green, the rest the background.
+        let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
+            .with_background([0, 0, 255, 255]);
+        comp.inputs[0] = Some((2, 2));
+        let out = comp.compose(&solid(2, 2, [0, 255, 0, 255]));
+        assert_eq!(px(&out, 4, 0, 0), [0, 255, 0, 255], "input 0 paints its 2x2");
+        assert_eq!(px(&out, 4, 3, 3), [0, 0, 255, 255], "uncovered area is the background");
+        // The default background stays opaque black.
+        let mut def = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]));
+        def.inputs[0] = Some((2, 2));
+        let out = def.compose(&solid(2, 2, [0, 255, 0, 255]));
+        assert_eq!(px(&out, 4, 3, 3), [0, 0, 0, 255], "default background opaque black");
     }
 
     #[test]
