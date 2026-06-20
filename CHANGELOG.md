@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M140: mp4src udta/ilst tags
+
+- **`Mp4Src` surfaces iTunes-style `moov/udta/meta/ilst` metadata**, the fourth
+  producer on the M137 tag primitive (after `oggdemux`, `flvdemux`, and
+  `matroskademux`), extending it to ISO-BMFF box metadata. A shared
+  `mp4box::parse_ilst_tags` descends `udta/meta/ilst` (handling `meta` as a
+  FullBox), reads each item's `data` box, and maps the `©`-prefixed text atoms
+  (`©nam`/`©ART`/`©alb`/`©too`/`©cmt`) to typed tags through `Tag::from_key_value`,
+  keeping an unrecognized atom's 4cc in `Tag::Other`; non-text items (cover art,
+  track number) are skipped. `Mp4Src::with_bus(...)` posts the list as a
+  `BusMessage::Tag` once at the start of `run`, before the samples flow. Without a
+  bus attached the source is unchanged.
+- Tested: `parse_ilst_tags` reads the text atoms in order, skips a binary
+  cover-art item, keeps an unknown atom's key, and is empty without `udta`;
+  end-to-end, a `udta/meta/ilst` spliced into an `Mp4Sink`-recorded file's `moov`
+  posts a `BusMessage::Tag` with the title + encoder while the sample still
+  demuxes and the geometry probe is unaffected.
+
 ### M139: matroskademux Tags + Segment Title
 
 - **`matroskademux` surfaces the Segment `Tags` element and `Info` `Title`**, the

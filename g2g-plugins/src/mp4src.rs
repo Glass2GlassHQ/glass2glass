@@ -28,8 +28,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, Rate, VideoCodec,
+    BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -50,6 +50,7 @@ pub struct Mp4Src {
     path: PathBuf,
     header: Option<Header>,
     configured: bool,
+    bus: Option<BusHandle>,
 }
 
 impl Mp4Src {
@@ -60,7 +61,15 @@ impl Mp4Src {
             path: path.into(),
             header: None,
             configured: false,
+            bus: None,
         }
+    }
+
+    /// Attach the pipeline bus so the file's `moov/udta/meta/ilst` metadata posts
+    /// as a [`BusMessage::Tag`] once read.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     fn probe(&mut self) -> Result<Caps, G2gError> {
@@ -116,6 +125,15 @@ impl SourceLoop for Mp4Src {
             if self.header.is_none() {
                 self.header = Some(parse_header(&data)?);
             }
+            // Surface the file's metadata once, before the samples flow.
+            if let Some(bus) = &self.bus {
+                if let Some(moov) = find_box(&data, b"moov") {
+                    let tags = parse_ilst_tags(moov);
+                    if !tags.is_empty() {
+                        bus.try_post(BusMessage::Tag(tags));
+                    }
+                }
+            }
             let header = self.header.as_ref().expect("parsed above");
             let samples = parse_fragments(&data, header.timescale)?;
 
@@ -165,7 +183,7 @@ struct Sample {
 }
 
 // box read primitives are shared across the MP4 elements.
-use crate::mp4box::{be32, be64, boxes, find_box, find_path};
+use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_ilst_tags};
 
 fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;

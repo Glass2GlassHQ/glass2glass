@@ -153,6 +153,80 @@ async fn round_trip_recovers_access_units_and_timing() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A size-prefixed MP4 box `[u32 size][4cc][payload]`.
+fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut b = (payload.len() as u32 + 8).to_be_bytes().to_vec();
+    b.extend_from_slice(kind);
+    b.extend_from_slice(payload);
+    b
+}
+
+/// An iTunes UTF-8 text item (`©nam`, ...) wrapping a `data` box.
+fn text_item(kind: &[u8; 4], value: &str) -> Vec<u8> {
+    let mut data = 1u32.to_be_bytes().to_vec(); // type 1 = UTF-8
+    data.extend_from_slice(&0u32.to_be_bytes()); // locale
+    data.extend_from_slice(value.as_bytes());
+    mp4_box(kind, &mp4_box(b"data", &data))
+}
+
+/// Insert `udta` at the end of the top-level `moov`'s children, patching the
+/// moov box size so the file stays well-formed.
+fn splice_into_moov(mp4: &[u8], udta: &[u8]) -> Vec<u8> {
+    let mut at = 0usize;
+    while at + 8 <= mp4.len() {
+        let size = u32::from_be_bytes(mp4[at..at + 4].try_into().unwrap()) as usize;
+        if &mp4[at + 4..at + 8] == b"moov" {
+            let new_size = (size + udta.len()) as u32;
+            let mut out = mp4[..at].to_vec();
+            out.extend_from_slice(&new_size.to_be_bytes());
+            out.extend_from_slice(&mp4[at + 4..at + size]); // moov 4cc + existing children
+            out.extend_from_slice(udta); // appended child
+            out.extend_from_slice(&mp4[at + size..]); // the rest (moof/mdat)
+            return out;
+        }
+        at += size;
+    }
+    panic!("no moov box found");
+}
+
+#[tokio::test]
+async fn surfaces_ilst_tags_on_the_bus() {
+    use g2g_core::{Bus, BusMessage, Tag};
+
+    let path = temp_path("tags");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr_au: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+    record(&path, &[idr_au], 64, 48).await;
+
+    // splice a udta/meta/ilst (title + encoder) into the recorded moov.
+    let ilst = [text_item(b"\xA9nam", "Spliced Clip"), text_item(b"\xA9too", "g2g")].concat();
+    let mut meta = vec![0u8, 0, 0, 0]; // meta full box version/flags
+    meta.extend_from_slice(&mp4_box(b"ilst", &ilst));
+    let udta = mp4_box(b"udta", &mp4_box(b"meta", &meta));
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, splice_into_moov(&original, &udta)).unwrap();
+
+    let (bus, handle) = Bus::new(8);
+    let mut src = Mp4Src::new(&path).with_bus(handle);
+    let caps = src.intercept_caps().await.expect("probe still works with udta");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut out = Collect::default();
+    src.run(&mut out).await.expect("demux");
+    assert_eq!(out.frames().len(), 1, "the sample still demuxes alongside the tags");
+
+    let mut posted = None;
+    while let Some(m) = bus.try_recv() {
+        if let BusMessage::Tag(t) = m {
+            posted = Some(t);
+        }
+    }
+    let tags = posted.expect("a Tag message was posted");
+    assert_eq!(tags.tags(), &[Tag::Title("Spliced Clip".into()), Tag::Encoder("g2g".into())]);
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn missing_or_invalid_file_fails_loud() {
     let mut missing = Mp4Src::new(temp_path("missing"));
