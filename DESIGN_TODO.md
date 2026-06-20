@@ -59,11 +59,13 @@ and auto-plug / `decodebin` / `playbin`. Architecture: DESIGN.md §4.13.3
 (runner), §4.14 (lifecycle + seek), §4.13.9 (auto-plug). The depth that rounds
 these out is no longer blocking but still open:
 
-- **Seek depth.** Non-flushing / accumulating `do_seek` (advance base by elapsed
-  running time), reverse + trick-mode (rate != 1.0) handling at the sink, segment
-  seeks (CMAF / DASH transitions), re-preroll after a flushing seek when paused,
-  and a real repositioning source (`Mp4Src` / `FileSrc`) — in-tree sources aren't
-  yet seek-aware.
+- **Seek depth.** `Mp4Src` is seek-aware (M148: flushing seek, keyframe `SNAP_BEFORE`
+  reposition, post-flush `Segment`), the first real repositioning source. Remaining:
+  non-flushing / accumulating `do_seek` (advance base by elapsed running time),
+  reverse + trick-mode (rate != 1.0) handling at the sink, segment seeks (CMAF / DASH
+  transitions), re-preroll after a flushing seek when paused, accurate (non-keyframe)
+  seek mode, and making the other repositionable sources (`FileSrc`, the demuxers)
+  seek-aware.
 - **Auto-plug depth.** The `uridecodebin` URI front door is done (DESIGN.md
   §4.13.9). Remaining: richer factory construction params (geometry / device /
   file path, beyond the chosen output caps) and a hardware-backed end-to-end

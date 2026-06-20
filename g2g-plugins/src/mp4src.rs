@@ -26,10 +26,10 @@ use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, Segment, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -51,6 +51,7 @@ pub struct Mp4Src {
     header: Option<Header>,
     configured: bool,
     bus: Option<BusHandle>,
+    seek: Option<SeekController>,
 }
 
 impl Mp4Src {
@@ -62,6 +63,7 @@ impl Mp4Src {
             header: None,
             configured: false,
             bus: None,
+            seek: None,
         }
     }
 
@@ -69,6 +71,15 @@ impl Mp4Src {
     /// as a [`BusMessage::Tag`] once read.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Make the source seekable: `run` polls `controller` between frames and, on a
+    /// flushing seek, emits `Flush`, repositions to the keyframe at or before the
+    /// target, emits the post-flush `Segment`, and resumes. The application keeps a
+    /// clone of the controller to drive scrubbing / editing.
+    pub fn with_seek(mut self, controller: SeekController) -> Self {
+        self.seek = Some(controller);
         self
     }
 
@@ -135,12 +146,32 @@ impl SourceLoop for Mp4Src {
                 }
             }
             let header = self.header.as_ref().expect("parsed above");
-            let samples = parse_fragments(&data, header.timescale)?;
+            let samples = parse_fragments(&data, header.timescale, header.codec)?;
 
             let mut sequence = 0u64;
-            for s in samples {
-                let mut annexb = s.annexb;
-                if sequence == 0 && !starts_with_param_set(&annexb, header.codec) {
+            // The next emitted frame is a (re)start: prepend the out-of-band
+            // parameter sets if it lacks them, so a decoder can resume. Set again
+            // after every seek, since the landed keyframe also needs them.
+            let mut need_param_sets = true;
+            let mut i = 0usize;
+            while i < samples.len() {
+                // A flushing seek repositions to the keyframe at or before the
+                // target before the next frame is produced (GStreamer-style:
+                // upstream to the source, latest-wins).
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                    if seek.is_flush() {
+                        out.push(PipelinePacket::Flush).await?;
+                        i = keyframe_index_for(&samples, seek.start);
+                        need_param_sets = true;
+                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(&seek, None)))
+                            .await?;
+                    }
+                    continue; // re-evaluate from the repositioned index
+                }
+
+                let s = &samples[i];
+                let mut annexb = s.annexb.clone();
+                if need_param_sets && !starts_with_param_set(&annexb, header.codec) {
                     // out-of-band parameter sets: prepend so a decoder can
                     // start (our own writer keeps them in-band).
                     let mut with_sets = Vec::new();
@@ -151,6 +182,7 @@ impl SourceLoop for Mp4Src {
                     with_sets.extend_from_slice(&annexb);
                     annexb = with_sets;
                 }
+                need_param_sets = false;
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         annexb.into_boxed_slice(),
@@ -166,6 +198,7 @@ impl SourceLoop for Mp4Src {
                     meta: Default::default(),
                 };
                 sequence += 1;
+                i += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
 
@@ -175,11 +208,40 @@ impl SourceLoop for Mp4Src {
     }
 }
 
+/// The index of the keyframe at or before `target_ns` (GStreamer `SNAP_BEFORE`,
+/// so a decoder can resume from a clean reference); 0 when none precedes it.
+fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
+    samples
+        .iter()
+        .enumerate()
+        .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// Whether an Annex-B access unit contains an IDR picture (the keyframe a seek
+/// snaps to). Mp4Src emits 4-byte start codes (from `avcc_to_annexb`), so NAL
+/// boundaries are `00 00 00 01`. H.264 IDR is NAL type 5; H.265 IDR is 19/20.
+fn contains_keyframe(annexb: &[u8], codec: VideoCodec) -> bool {
+    annexb
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == [0, 0, 0, 1])
+        .any(|(at, _)| {
+            annexb.get(at + 4).is_some_and(|&b| match codec {
+                VideoCodec::H265 => matches!((b >> 1) & 0x3F, 19 | 20),
+                _ => b & 0x1F == 5,
+            })
+        })
+}
+
 #[derive(Debug)]
 struct Sample {
     annexb: Vec<u8>,
     pts_ns: u64,
     duration_ns: u64,
+    /// Whether the access unit carries an IDR picture (a seek snap point).
+    keyframe: bool,
 }
 
 // box read primitives are shared across the MP4 elements.
@@ -313,8 +375,9 @@ fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
 }
 
 /// Walk the `moof`+`mdat` pairs and split every sample out of its `mdat`,
-/// converting AVCC framing back to Annex-B.
-fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
+/// converting AVCC framing back to Annex-B. `codec` selects the IDR NAL type used
+/// to flag keyframes (the seek snap points).
+fn parse_fragments(data: &[u8], timescale: u32, codec: VideoCodec) -> Result<Vec<Sample>, G2gError> {
     let mut samples = Vec::new();
     let mut pending: Option<Vec<(u32, u64)>> = None; // (size, pts_ns) per sample
     let mut durations: Vec<u64> = Vec::new();
@@ -350,10 +413,13 @@ fn parse_fragments(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError>
                     let raw = payload
                         .get(at..at + *size as usize)
                         .ok_or(G2gError::CapsMismatch)?;
+                    let annexb = avcc_to_annexb(raw)?;
+                    let keyframe = contains_keyframe(&annexb, codec);
                     samples.push(Sample {
-                        annexb: avcc_to_annexb(raw)?,
+                        annexb,
                         pts_ns: *pts_ns,
                         duration_ns: durations[i],
+                        keyframe,
                     });
                     at += *size as usize;
                 }

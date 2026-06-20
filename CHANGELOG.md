@@ -5,6 +5,24 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M148: Mp4Src seek-aware (scrub / edit repositioning)
+
+- **`Mp4Src` is the first real repositioning source**, closing the gap that left
+  seek a tested subsystem (M79-M82) with no in-tree source that could actually
+  reposition. `Mp4Src::with_seek(controller)` makes `run` poll the `SeekController`
+  between frames; on a flushing seek it emits `Flush`, snaps to the keyframe at or
+  before the target (GStreamer `SNAP_BEFORE`, so a decoder can resume), emits the
+  post-flush `Segment` (start = requested target), and plays on. Keyframes are
+  flagged per sample during fragment parsing (IDR NAL scan: H.264 type 5, H.265
+  19/20), and the parameter sets are re-prepended at the landed keyframe if it lacks
+  them in-band. This is the scrub / video-editing path: a seek lands frame-accurately
+  on a clean reference and resumes.
+- Tested: a pre-armed flushing seek to ~70 ms snaps back to the keyframe at ~66.6 ms
+  (emitting `Flush` + `Segment(start=70 ms)` + the keyframe with prepended parameter
+  sets + its follower); and a mid-stream scrub (a sink that fires the seek after the
+  first frame) yields `frame, flush, segment, frame, frame, eos`, the first frame the
+  pre-seek keyframe and the next the post-seek one.
+
 ### M147: mp4sink writes udta/ilst tags
 
 - **`Mp4Sink` writes iTunes `moov/udta/meta/ilst` metadata** into its init segment,

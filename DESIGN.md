@@ -1013,9 +1013,10 @@ flows. A `SeekController` (runtime) is a cloneable handle the application holds;
 a seek-aware source's run loop polls `take_pending()` between frames and, on a
 flushing seek, emits `Flush`, repositions, emits the post-flush `Segment`, and
 resumes, so a seek reaches the source GStreamer-style (upstream) without a
-back-reference. Non-flushing/accumulating seeks, reverse/trick-mode sink
-handling, and a real repositioning source (`Mp4Src`/`FileSrc`) are open
-(DESIGN_TODO).
+back-reference. `Mp4Src` is the first real repositioning source (M148: flushing
+seek, keyframe `SNAP_BEFORE`, re-prepended parameter sets). Non-flushing/
+accumulating seeks, reverse/trick-mode sink handling, accurate (non-keyframe) seek,
+and making the other sources seek-aware are open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

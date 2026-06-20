@@ -266,6 +266,130 @@ async fn surfaces_ilst_tags_on_the_bus() {
 }
 
 #[tokio::test]
+async fn flush_seek_repositions_to_keyframe() {
+    use g2g_core::runtime::SeekController;
+    use g2g_core::Seek;
+
+    let path = temp_path("seek");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    // The first AU carries the parameter sets in-band (so the moov picks them up);
+    // a later IDR does not, exercising the post-seek param-set prepend.
+    let idr0: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
+    let idr2: Vec<u8> = [&[0, 0, 0, 1][..], &[0x65, 0xA2][..]].concat();
+    let aus = vec![idr0, p(0xA1), idr2, p(0xA3)]; // keyframes at index 0 and 2
+    record(&path, &aus, 64, 48).await;
+
+    let ctl = SeekController::new();
+    // Target ~70 ms snaps back to the keyframe at ~66.6 ms (the 3rd AU).
+    ctl.seek(Seek::flush_to(70_000_000));
+
+    let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
+    let caps = src.intercept_caps().await.expect("probe");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut out = Collect::default();
+    let produced = src.run(&mut out).await.expect("run");
+
+    assert!(
+        out.packets.iter().any(|p| matches!(p, PipelinePacket::Flush)),
+        "the flushing seek flushed downstream"
+    );
+    let seg = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::Segment(s) => Some(s),
+            _ => None,
+        })
+        .expect("a post-seek segment");
+    assert_eq!(seg.start, 70_000_000, "segment starts at the requested target");
+
+    // Resumed from the keyframe (index 2), not from the file start: two frames.
+    let frames = out.frames();
+    assert_eq!(frames.len(), 2, "keyframe + following P-frame");
+    assert_eq!(produced, 2);
+    let first = frame_bytes(frames[0]);
+    assert!(first.windows(2).any(|w| w == [0x65, 0xA2]), "snapped to the 3rd AU's IDR");
+    assert!(first.windows(2).any(|w| w == [0x67, 0x42]), "parameter sets prepended for resume");
+    assert!(
+        (frames[0].timing.pts_ns as i64 - 66_666_666).abs() < 50_000,
+        "keyframe pts ~66.6 ms, got {}",
+        frames[0].timing.pts_ns
+    );
+}
+
+/// A sink that records like `Collect` and fires a one-shot seek the moment it
+/// receives its first frame, so the source repositions mid-stream (the scrub
+/// case): the source awaits this push, so the seek is pending before the next
+/// frame is produced.
+struct ScrubSink {
+    inner: Collect,
+    ctl: g2g_core::runtime::SeekController,
+    target: u64,
+    armed: bool,
+}
+
+impl OutputSink for ScrubSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+        Box::pin(async move {
+            if self.armed {
+                if let PipelinePacket::DataFrame(_) = &packet {
+                    self.ctl.seek(g2g_core::Seek::flush_to(self.target));
+                    self.armed = false;
+                }
+            }
+            self.inner.push(packet).await
+        })
+    }
+}
+
+#[tokio::test]
+async fn mid_stream_scrub_repositions_after_frames_flow() {
+    use g2g_core::runtime::SeekController;
+
+    let path = temp_path("scrub");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr0: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
+    let idr2: Vec<u8> = [&[0, 0, 0, 1][..], &[0x65, 0xA2][..]].concat();
+    record(&path, &[idr0, p(0xA1), idr2, p(0xA3)], 64, 48).await;
+
+    let ctl = SeekController::new();
+    let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
+    let caps = src.intercept_caps().await.expect("probe");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut sink = ScrubSink { inner: Collect::default(), ctl, target: 70_000_000, armed: true };
+    src.run(&mut sink).await.expect("run");
+
+    // First frame (idr0 at 0 ms) flows, then the scrub jumps to the keyframe near
+    // 70 ms: idr0, Flush, Segment, idr2, p3.
+    let kinds: Vec<&str> = sink
+        .inner
+        .packets
+        .iter()
+        .map(|p| match p {
+            PipelinePacket::DataFrame(_) => "frame",
+            PipelinePacket::Flush => "flush",
+            PipelinePacket::Segment(_) => "segment",
+            PipelinePacket::Eos => "eos",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["frame", "flush", "segment", "frame", "frame", "eos"]);
+    let frames = sink.inner.frames();
+    assert!(frame_bytes(frames[0]).windows(2).any(|w| w == [0x65, 0xA0]), "played idr0 first");
+    assert!(frame_bytes(frames[1]).windows(2).any(|w| w == [0x65, 0xA2]), "scrubbed to idr2");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn missing_or_invalid_file_fails_loud() {
     let mut missing = Mp4Src::new(temp_path("missing"));
     assert!(missing.intercept_caps().await.is_err());
