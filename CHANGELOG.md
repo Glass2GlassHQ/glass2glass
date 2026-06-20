@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M141: matroskamux writes Tags
+
+- **`matroskamux` writes a `Tags` element**, the first tag *writer* (the inverse of
+  M139's reader), so a `TagList` round-trips through the mux + demux. The pure
+  `MatroskaMuxer::with_tags(...)` emits one whole-stream `Tag` (empty `Targets`) with
+  a `SimpleTag` (TagName + TagString) per entry after Tracks in the header; the typed
+  keys write their conventional uppercase Matroska names (`TITLE` / `ARTIST` / ...) so
+  they decode back to the same `Tag` variant, and `Tag::Other` keeps its stored key.
+  `MkvMux::with_tags(...)` threads the list to the muxer built on the first frame.
+  Without tags the header is byte-identical to before (no empty `Tags` element).
+- Tested: `MatroskaMuxer::with_tags` + `MatroskaDemuxer` recovers the list (typed
+  keys and an `Other` key) while the frame still muxes, and an empty list writes no
+  `Tags` element; end-to-end, `MkvMux::with_tags ! mkvdemux(with_bus)` posts a
+  `BusMessage::Tag` with the title + encoder while the VP9 frame reaches the sink.
+
 ### M140: mp4src udta/ilst tags
 
 - **`Mp4Src` surfaces iTunes-style `moov/udta/meta/ilst` metadata**, the fourth

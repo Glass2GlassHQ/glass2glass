@@ -219,15 +219,16 @@ Production-shape needs that block specific real-world use cases.
 
 Smaller-scope items, mostly orthogonal to the architecture.
 
-- **Tag system — core + four producers DONE (M137-M140).** `g2g_core::tag::{Tag,
-  TagList}` (typed common keys + `Other` fallback) delivered via
-  `BusMessage::Tag`; `oggdemux` parses `OpusTags` VorbisComment (M137), `flvdemux`
-  parses FLV `onMetaData` AMF0 (M138), `matroskademux` parses the Segment `Tags`
-  element + `Info` `Title` (M139), and `mp4src` parses iTunes `udta/meta/ilst`
-  atoms (M140). Remaining: Matroska `Targets`-scoped (per-track) tags and nested
-  SimpleTags; MP4 freeform (`----`) and integer atoms (track/disc number); writing
-  tags on the mux side (`mp4mux`/`matroskamux`/`flvmux` `onMetaData`); and a
-  per-stream tag merge policy for multi-stream containers.
+- **Tag system — core + four readers + one writer DONE (M137-M141).**
+  `g2g_core::tag::{Tag, TagList}` (typed common keys + `Other` fallback) delivered
+  via `BusMessage::Tag`. Readers: `oggdemux` `OpusTags` VorbisComment (M137),
+  `flvdemux` FLV `onMetaData` AMF0 (M138), `matroskademux` Segment `Tags` + `Info`
+  `Title` (M139), `mp4src` iTunes `udta/meta/ilst` atoms (M140). Writer:
+  `matroskamux` emits a whole-stream `Tags` element via `with_tags` (M141), so a
+  `TagList` round-trips. Remaining: more writers (`mp4mux` `ilst`, `flvmux`
+  `onMetaData`); Matroska `Targets`-scoped (per-track) tags and nested SimpleTags;
+  MP4 freeform (`----`) and integer atoms (track/disc number); and a per-stream tag
+  merge policy for multi-stream containers.
 - **Audio mixer — v1 DONE (M130).** `g2g-plugins::audiomixer::AudioMixer` sums
   aligned S16LE inputs (arrival-aligned, registered as the `audiomixer` muxer for
   the M122 text fan-in). Remaining: sample-rate + channel-layout reconciliation

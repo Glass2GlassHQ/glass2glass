@@ -36,6 +36,7 @@ const ID_TIMESTAMP_SCALE: u32 = 0x002A_D7B1;
 const ID_TITLE: u32 = 0x7BA9;
 const ID_TAGS: u32 = 0x1254_C367;
 const ID_TAG: u32 = 0x7373;
+const ID_TARGETS: u32 = 0x63C0;
 const ID_SIMPLE_TAG: u32 = 0x67C8;
 const ID_TAG_NAME: u32 = 0x45A3;
 const ID_TAG_STRING: u32 = 0x4487;
@@ -619,16 +620,25 @@ pub struct MkvTrackSpec {
 #[derive(Debug)]
 pub struct MatroskaMuxer {
     spec: MkvTrackSpec,
+    tags: TagList,
     header_written: bool,
 }
 
 impl MatroskaMuxer {
     pub fn new(spec: MkvTrackSpec) -> Self {
-        Self { spec, header_written: false }
+        Self { spec, tags: TagList::new(), header_written: false }
     }
 
-    /// Mux one frame, writing the EBML header + Segment + Info + Tracks on the
-    /// first call, then a Cluster (Timestamp + SimpleBlock) for this frame.
+    /// Attach stream metadata, written as a `Tags` element after Tracks on the
+    /// first frame (the inverse of [`MatroskaDemuxer::tags`]).
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Mux one frame, writing the EBML header + Segment + Info + Tracks (+ Tags
+    /// when present) on the first call, then a Cluster (Timestamp + SimpleBlock)
+    /// for this frame.
     pub fn push_frame(&mut self, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
@@ -639,6 +649,9 @@ impl MatroskaMuxer {
             out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
             out.extend_from_slice(&info_element());
             out.extend_from_slice(&tracks_element(&self.spec));
+            if !self.tags.is_empty() {
+                out.extend_from_slice(&tags_element(&self.tags));
+            }
             self.header_written = true;
         }
         let ts = pts_ns / DEFAULT_TIMESTAMP_SCALE;
@@ -682,6 +695,35 @@ fn tracks_element(spec: &MkvTrackSpec) -> Vec<u8> {
     }
     let entry = elem_vec(ID_TRACK_ENTRY, &entry);
     elem_vec(ID_TRACKS, &entry)
+}
+
+/// A whole-stream `Tags` element: one `Tag` with an empty `Targets` and a
+/// `SimpleTag` (TagName + TagString) per entry. The inverse of [`parse_tags`];
+/// the typed keys write their conventional uppercase Matroska names.
+fn tags_element(tags: &TagList) -> Vec<u8> {
+    let mut tag = elem_vec(ID_TARGETS, &[]);
+    for t in tags.tags() {
+        let (name, value) = tag_name_value(t);
+        let mut simple = elem_vec(ID_TAG_NAME, name.as_bytes());
+        simple.extend_from_slice(&elem_vec(ID_TAG_STRING, value.as_bytes()));
+        tag.extend_from_slice(&elem_vec(ID_SIMPLE_TAG, &simple));
+    }
+    elem_vec(ID_TAGS, &elem_vec(ID_TAG, &tag))
+}
+
+/// A tag's Matroska `TagName` / `TagString` pair. Typed keys use the conventional
+/// uppercase names so they round-trip back to the same variant through
+/// [`Tag::from_key_value`]; [`Tag::Other`] keeps its stored key.
+fn tag_name_value(tag: &Tag) -> (&str, &str) {
+    match tag {
+        Tag::Title(v) => ("TITLE", v),
+        Tag::Artist(v) => ("ARTIST", v),
+        Tag::Album(v) => ("ALBUM", v),
+        Tag::Encoder(v) => ("ENCODER", v),
+        Tag::Language(v) => ("LANGUAGE", v),
+        Tag::Comment(v) => ("COMMENT", v),
+        Tag::Other { key, value } => (key, value),
+    }
 }
 
 /// A SimpleBlock body: track-number VINT, signed relative timestamp, flags, data.
@@ -1012,6 +1054,36 @@ mod tests {
                 Tag::Encoder("libvpx".into()),
             ]
         );
+    }
+
+    #[test]
+    fn mux_writes_tags_that_demux_recovers() {
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let tags: TagList = [
+            Tag::Title("Clip".into()),
+            Tag::Encoder("g2g".into()),
+            Tag::Other { key: "DIRECTOR".into(), value: "Ada".into() },
+        ]
+        .into_iter()
+        .collect();
+        let mut mux = MatroskaMuxer::new(spec).with_tags(tags.clone());
+        let bytes = mux.push_frame(&[1, 2, 3], 0, true);
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert_eq!(d.tags().tags(), tags.tags(), "tags survive the mux + demux round trip");
+        assert_eq!(d.take_frames().len(), 1, "the frame still muxes alongside the tags");
+    }
+
+    #[test]
+    fn mux_without_tags_writes_no_tags_element() {
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let bytes = MatroskaMuxer::new(spec).push_frame(&[0], 0, true);
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&bytes);
+        assert!(d.tags().is_empty());
     }
 
     #[test]

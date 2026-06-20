@@ -28,7 +28,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    Rate, TagList, VideoCodec,
 };
 
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackSpec};
@@ -40,6 +40,7 @@ pub struct MkvMux {
     /// first frame builds the muxer.
     caps: Option<Caps>,
     mux: Option<MatroskaMuxer>,
+    tags: TagList,
     configured: bool,
     emitted: u64,
 }
@@ -52,7 +53,13 @@ impl Default for MkvMux {
 
 impl MkvMux {
     pub fn new() -> Self {
-        Self { caps: None, mux: None, configured: false, emitted: 0 }
+        Self { caps: None, mux: None, tags: TagList::new(), configured: false, emitted: 0 }
+    }
+
+    /// Attach stream metadata, written as a `Tags` element in the header.
+    pub fn with_tags(mut self, tags: TagList) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Count of byte-stream frames forwarded.
@@ -154,7 +161,7 @@ impl AsyncElement for MkvMux {
                     if self.mux.is_none() {
                         let caps = self.caps.as_ref().ok_or(G2gError::NotConfigured)?;
                         let spec = Self::track_spec(caps).ok_or(G2gError::CapsMismatch)?;
-                        self.mux = Some(MatroskaMuxer::new(spec));
+                        self.mux = Some(MatroskaMuxer::new(spec).with_tags(self.tags.clone()));
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     // No upstream delta-frame signal yet: flag every frame a keyframe.
@@ -286,6 +293,42 @@ mod tests {
             f(&vp9_caps()).alternatives(),
             [Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }]
         ));
+    }
+
+    #[tokio::test]
+    async fn element_round_trips_tags_through_mkvdemux() {
+        use g2g_core::{Bus, BusMessage, Tag, TagList};
+
+        let tags: TagList =
+            [Tag::Title("My Clip".into()), Tag::Encoder("g2g".into())].into_iter().collect();
+        let mut mux = MkvMux::new().with_tags(tags.clone());
+        mux.configure_pipeline(&vp9_caps()).unwrap();
+        let mut mkv_sink = CaptureSink::default();
+        mux.process(frame(alloc::vec![0x11, 0x22], 0), &mut mkv_sink).await.unwrap();
+
+        let mut mkv = Vec::new();
+        for f in &mkv_sink.frames {
+            mkv.extend_from_slice(f);
+        }
+        let (bus, handle) = Bus::new(8);
+        let mut demux = MkvDemux::new().with_stream(MkvStream::Vp9).with_bus(handle);
+        demux.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::Matroska }).unwrap();
+        let mut frame_sink = CaptureSink::default();
+        let mkv_frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(mkv.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        demux.process(PipelinePacket::DataFrame(mkv_frame), &mut frame_sink).await.unwrap();
+
+        let mut posted = None;
+        while let Some(m) = bus.try_recv() {
+            if let BusMessage::Tag(t) = m {
+                posted = Some(t);
+            }
+        }
+        assert_eq!(posted.expect("a Tag message").tags(), tags.tags());
+        assert_eq!(frame_sink.frames, alloc::vec![alloc::vec![0x11, 0x22]]);
     }
 
     #[tokio::test]
