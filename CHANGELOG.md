@@ -5,6 +5,20 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M124: videobalance (brightness / contrast / saturation)
+
+- **`g2g-plugins::videobalance::VideoBalance` (no_std).** A per-pixel RGBA / BGRA
+  colour-balance transform: `brightness` (-1..1) adds an offset, `contrast`
+  (0..2) scales about mid-grey, `saturation` (0..2) lerps each channel toward the
+  pixel's Rec.601 luma (0 = greyscale). Format and geometry are preserved;
+  integer byte values round-trip exactly at the identity setting. Hue is omitted
+  (a faithful chroma rotation needs `libm` trig). Registered as `videobalance`
+  with `Double` properties, so `videobalance saturation=0.0 contrast=1.2` works as
+  text.
+- Tested: identity is byte-exact, brightness offsets, contrast pivots about 128,
+  saturation 0 greys out (RGBA and BGRA luma weighting respected), and the element
+  runs in a `videotestsrc ! videobalance ! fakesink` text pipeline.
+
 ### M123: VideoTestSrc pattern coverage
 
 - **Four new `videotestsrc` patterns (g2g-plugins).** `smpte` (seven 75% colour

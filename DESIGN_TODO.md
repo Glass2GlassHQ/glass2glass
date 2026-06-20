@@ -268,8 +268,9 @@ expects them. Grouped by category.
 `videoflip` / `videorotate` (M66) are DONE. A `WgpuVideoScale` GPU companion
 (DMABUF / D3D11Texture input, compute-shader resample) remains a follow-up.
 
-- **`videobalance`.** Brightness / contrast / hue / saturation. 1 session.
-  Niche; deferrable.
+- **`videobalance` — DONE (M124).** Brightness / contrast / saturation on packed
+  RGBA / BGRA (`g2g-plugins::videobalance`). Hue remains: a faithful chroma
+  rotation needs `sin`/`cos` (a `libm` dep the `no_std` baseline avoids).
 
 ### Audio transforms
 
