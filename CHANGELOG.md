@@ -5,6 +5,19 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M197 (coverage): branching decode pipelines
+
+Locks in the "decode once, fan out" shape end to end: `decodebin ! tee` with
+branches that process independently (the canonical display-on-one /
+store-on-another). Verified that each branch carries its own `queue` and
+converters and can target a different format / geometry off the tee's single
+broadcast, exactly as a gst line does, and that the whole graph runs with every
+frame reaching every branch. No production change; `m197_branching_decode`
+(decode + tee display/store; per-branch differing formats; per-branch differing
+scale) plus a manual `g2g-launch` run of a tee whose disk branch wrote the
+expected bytes. Gated to the baseline build (a real multi-codec decoder would be
+preferred over the test stub and then decode the synthetic frames).
+
 ### M196: `uridecodebin` / `playbin` in gst-launch lines
 
 `uridecodebin uri=X ! ...` and `playbin uri=X` now parse and build. `uridecodebin`
