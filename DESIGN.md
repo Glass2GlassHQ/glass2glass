@@ -721,9 +721,22 @@ downstream decoder re-derives and corrects them. SDP/SPS-driven caps discovery i
 a follow-up; `RtspSrc` (via `retina`) already covers the RTSP case with its own
 jitter buffer (§4.11.4).
 
-The remaining capture/ingress breadth — `HttpSrc` (gated on a byte-stream caps
-+ consumer; see DESIGN_TODO) and a `uridecodebin`-equivalent URI → source layer
-over the autoplug registry — is tracked in DESIGN_TODO.
+**RTMP ingest.** `RtmpSrc` (`rtmpsrc.rs`, `rtmp` feature) accepts one RTMP
+publisher (ffmpeg / OBS pushing `rtmp://host/app/key`) over TCP and streams the
+result downstream as `Caps::ByteStream{Flv}`, so the chain is
+`RtmpSrc -> flvdemux -> h264parse -> ...`. The protocol is Sans-IO (`rtmp.rs`,
+`RtmpSession`): the simple (non-digest) handshake publishers fall back to, the
+chunk-stream reassembly (per-chunk-stream header inheritance + `Set Chunk Size`),
+and the AMF0 `connect` / `createStream` / `publish` command flow (the session
+emits the Window-Ack / Set-Peer-Bandwidth / `_result` / `onStatus` replies). An
+RTMP audio/video message payload is exactly an FLV tag *body*, so the session
+reframes the messages into an FLV byte stream that the existing `flvdemux` (§4.17)
+recovers the H.264 / AAC access units from. Scope is one publisher / one stream,
+H.264 + AAC, AMF0; the RTMP egress (`rtmpsink` publish-out), SRT, the complex
+HMAC handshake, and multiple streams are follow-ups (DESIGN_TODO).
+
+The remaining capture/ingress breadth — a `uridecodebin`-equivalent URI → source
+layer over the autoplug registry — is tracked in DESIGN_TODO.
 
 ### 4.13 CSP Caps Negotiation
 

@@ -199,6 +199,11 @@ pub mod hlssrc;
 #[cfg(feature = "hls")]
 pub mod sampleaesdecrypt;
 
+// RTMP ingest: the sans-IO protocol (always compiled) and the tokio TCP source.
+pub mod rtmp;
+#[cfg(feature = "rtmp")]
+pub mod rtmpsrc;
+
 // DASH MPD parser and the DashSrc segment source.
 #[cfg(feature = "dash")]
 pub mod mpd;

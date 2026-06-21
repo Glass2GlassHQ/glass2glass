@@ -178,10 +178,13 @@ Production-shape needs that block specific real-world use cases.
   done), `SegmentList`/`SegmentBase` byte-range, multi-period, and
   throughput-driven ABR.
 
-- **SRT / RTMP transports.** 2–3 sessions each. RTMP for legacy
-  ingest (still ubiquitous), SRT for low-latency contribution. Each
-  needs a sans-IO protocol layer + a tokio I/O sink, paralleling the
-  RTP packetizer + UDP sink split.
+- **SRT / RTMP transports.** RTMP **ingest is DONE**: `RtmpSrc` (`rtmp` feature) +
+  the sans-IO `rtmp::RtmpSession` accept a publisher (handshake, chunk stream,
+  AMF0 publish flow) and emit `ByteStream{Flv}` for `flvdemux`, documented in
+  DESIGN.md §4.12b. Remaining: RTMP **egress** (`rtmpsink` publish-out, the
+  inverse), the complex HMAC handshake, multiple streams; and **SRT** ingest +
+  egress for low-latency contribution (a sans-IO protocol layer + tokio I/O,
+  paralleling the RTP/UDP split).
 
 - **RTP receive-side stack.** Largely **done**; RTX/FEC remain. The reordering
   jitter buffer (M94: `rtpjitter::RtpJitterBuffer`), the RTCP control protocol
@@ -346,7 +349,8 @@ modern PipeWire path remain.
   `FileSrc` does. **Remaining:** header-sniff (`bytestream-format=auto`) and a
   `uridecodebin` `http(s)://` handler (both need a negotiation-time ranged fetch),
   HTTP range requests / seeking, and retry/reconnect for live edges.
-- **`rtmpsrc`** (RTMP ingest). Tied to the RTMP transport in parity gaps.
+- **`rtmpsrc`** (RTMP ingest) is **DONE** (`RtmpSrc`, `rtmp` feature; see the
+  RTMP transport entry in parity gaps and DESIGN.md §4.12b).
 - **`srtsrc`** (SRT ingest). Tied to the SRT transport in parity gaps.
 
 ### Sinks

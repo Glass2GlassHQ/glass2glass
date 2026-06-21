@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M167: RTMP ingest (RtmpSrc + sans-IO rtmp session)
+
+- **`rtmp::RtmpSession`** (pure `no_std`, always compiled): a sans-IO RTMP
+  receive session. The simple (non-digest) handshake ffmpeg/OBS publishers use,
+  the chunk-stream protocol (per-chunk-stream header inheritance across fmt 0-3,
+  extended timestamps, `Set Chunk Size`, multi-chunk message reassembly), and the
+  AMF0 `connect` / `createStream` / `publish` command flow (replying with
+  Window-Ack / Set-Peer-Bandwidth / `_result` / `onStatus`). An RTMP audio/video
+  message payload is exactly an FLV tag body, so the session reframes the messages
+  into an FLV byte stream.
+- **`RtmpSrc`** (`rtmp` feature): the tokio TCP element around the session. It
+  accepts one publisher, drives the session, writes its replies back, and streams
+  the FLV out as `Caps::ByteStream{Flv}`, so `RtmpSrc ! flvdemux ! h264parse`
+  ingests an `rtmp://host/app/key` publish with no hand-set config. Verified
+  against the Adobe RTMP 1.0 spec (handshake fallback cross-checked with
+  ffmpeg/OBS).
+- Scope: one publisher / one stream, H.264 + AAC, AMF0, simple handshake. RTMP
+  egress (`rtmpsink`), the complex HMAC handshake, multiple streams, and SRT are
+  follow-ups.
+- Verified by `rtmp` sans-IO unit tests (handshake echo, publish flow + replies,
+  audio/video -> FLV via `FlvDemuxer`, a message split across the 128-byte chunk
+  size) and `m167_rtmpsrc.rs` end to end: a loopback TCP publisher handshakes,
+  runs the publish flow, and sends a video message that `RtmpSrc -> flvdemux`
+  recovers the access unit from.
+
 ### M166: DASH live (dynamic MPD) reload
 
 - **`mpd`** parses `MPD@type="dynamic"` (`Mpd::dynamic`) and `@minimumUpdatePeriod`

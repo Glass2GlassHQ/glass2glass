@@ -18,6 +18,11 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
 udp-egress = ["std", "tokio/net"]
+# RTMP ingest source (RtmpSrc): accepts one RTMP publisher (ffmpeg/OBS) over TCP
+# and streams the demuxed FLV byte stream for `flvdemux`. The `rtmp` sans-IO
+# protocol module is pure no_std and always compiled; only the tokio TCP element
+# needs this feature. Implies std + tokio net/io-util.
+rtmp = ["std", "tokio/net", "tokio/io-util"]
 # UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
 # depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
 # and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
