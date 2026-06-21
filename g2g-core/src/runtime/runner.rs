@@ -563,6 +563,12 @@ where
                         consumed += 1;
                     }
                     sink.process(packet, &mut null).await?;
+                    // M174 upstream QoS: a sink that dropped a late frame asks to
+                    // shed load; forward its report onto the incoming link, where
+                    // the source observes it as `PushOutcome::Qos` and skips ahead.
+                    if let Some(qos) = sink.take_qos() {
+                        link_rx.request_qos(qos);
+                    }
                     // M77: the first buffer in non-live `Paused` is the preroll
                     // frame; mark this arm prerolled so the gate flips from
                     // preroll-grant to hold, and report it for aggregation.

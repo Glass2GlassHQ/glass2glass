@@ -7,7 +7,7 @@ use core::task::{Context, Poll, Waker};
 use alloc::boxed::Box;
 use spin::Mutex;
 
-use crate::element::{BoxFuture, OutputSink, PushOutcome, Reconfigure};
+use crate::element::{BoxFuture, OutputSink, PushOutcome, QosMessage, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
@@ -215,6 +215,25 @@ impl ReconfigureSlot {
     }
 }
 
+/// Capacity-1 latest-wins slot carrying the upstream-traveling [`QosMessage`] of
+/// a bidirectional link (M174). Same shape as [`ReconfigureSlot`]: a later QoS
+/// report supersedes an unobserved earlier one (lateness is a current condition,
+/// not a stream).
+#[derive(Debug, Clone, Default)]
+pub struct QosSlot {
+    inner: Arc<Mutex<Option<QosMessage>>>,
+}
+
+impl QosSlot {
+    pub fn store(&self, value: QosMessage) {
+        *self.inner.lock() = Some(value);
+    }
+
+    pub fn take(&self) -> Option<QosMessage> {
+        self.inner.lock().take()
+    }
+}
+
 /// Upstream end of a bidirectional inter-element link: forward
 /// `PipelinePacket` channel + reverse `Reconfigure` slot. Held by the
 /// producing element (wrapped in [`SenderSink`]). Cloneable so a fan-in
@@ -224,6 +243,9 @@ impl ReconfigureSlot {
 pub struct LinkSender {
     pub(crate) data: Sender<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,
+    /// Reverse QoS slot (M174): a downstream sink stores a lateness report here;
+    /// the producer observes it on its next push as [`PushOutcome::Qos`].
+    pub(crate) qos: QosSlot,
     /// Backpressure policy for this link. `Block` (the default) awaits
     /// capacity; the leaky variants drop data frames under a full channel.
     pub(crate) policy: LinkPolicy,
@@ -264,6 +286,7 @@ impl LinkSender {
 pub struct LinkReceiver {
     pub(crate) data: Receiver<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,
+    pub(crate) qos: QosSlot,
 }
 
 impl LinkReceiver {
@@ -287,6 +310,13 @@ impl LinkReceiver {
     pub fn request_reconfigure(&self, r: Reconfigure) {
         self.reconfigure.store(r);
     }
+
+    /// Latest-wins QoS signal (M174): the consuming sink reports it ran behind
+    /// the clock; the producer observes it on its next [`OutputSink::push`] as
+    /// [`PushOutcome::Qos`] and may skip ahead to shed load.
+    pub fn request_qos(&self, q: QosMessage) {
+        self.qos.store(q);
+    }
 }
 
 /// Build a bidirectional inter-element link with `capacity` forward
@@ -294,14 +324,16 @@ impl LinkReceiver {
 pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
     let (data_tx, data_rx) = bounded::<PipelinePacket>(capacity);
     let slot = ReconfigureSlot::default();
+    let qos = QosSlot::default();
     (
         LinkSender {
             data: data_tx,
             reconfigure: slot.clone(),
+            qos: qos.clone(),
             policy: LinkPolicy::Block,
             dropped: None,
         },
-        LinkReceiver { data: data_rx, reconfigure: slot },
+        LinkReceiver { data: data_rx, reconfigure: slot, qos },
     )
 }
 
@@ -391,6 +423,19 @@ impl SenderSink {
     pub fn probe(&self) -> ProbeSlot {
         self.probe.clone()
     }
+
+    /// Outcome to report once a packet has been enqueued: a pending reverse
+    /// signal (reconfigure first, then QoS), else `Accepted`. Reconfigure takes
+    /// priority because it is negotiation-critical; QoS is advisory.
+    fn post_send_outcome(&self) -> PushOutcome {
+        if let Some(r) = self.link.reconfigure.take() {
+            PushOutcome::Reconfigure(r)
+        } else if let Some(q) = self.link.qos.take() {
+            PushOutcome::Qos(q)
+        } else {
+            PushOutcome::Accepted
+        }
+    }
 }
 
 impl OutputSink for SenderSink {
@@ -459,19 +504,13 @@ impl OutputSink for SenderSink {
                     },
                     LinkPolicy::Block => unreachable!("guarded by policy != Block"),
                 }
-                return Ok(match self.link.reconfigure.take() {
-                    Some(r) => PushOutcome::Reconfigure(r),
-                    None => PushOutcome::Accepted,
-                });
+                return Ok(self.post_send_outcome());
             }
             match self.link.data.send(packet).await {
-                Ok(()) => match self.link.reconfigure.take() {
-                    // Post-send check covers the "request fired while
-                    // we were awaiting capacity" window; the packet is
-                    // already in the link under old caps.
-                    Some(r) => Ok(PushOutcome::Reconfigure(r)),
-                    None => Ok(PushOutcome::Accepted),
-                },
+                // Post-send check covers the "request fired while we were
+                // awaiting capacity" window; the packet is already in the link
+                // under old caps.
+                Ok(()) => Ok(self.post_send_outcome()),
                 Err(SendError::Closed) => Err(G2gError::Shutdown),
                 Err(SendError::Full) => unreachable!("send().await never returns Full"),
             }
@@ -579,6 +618,41 @@ mod link_tests {
 
         let second = run_to_ready(sink.push(dummy_frame())).unwrap();
         assert_eq!(second, PushOutcome::Accepted);
+    }
+
+    #[test]
+    fn request_qos_surfaces_after_the_packet_is_sent() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+
+        // Downstream reports it is behind; QoS is advisory, so the packet still
+        // crosses and the producer sees Qos on the same push.
+        rx.request_qos(QosMessage { jitter_ns: 5_000_000, running_time_ns: 100 });
+        let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
+        match outcome {
+            PushOutcome::Qos(q) => {
+                assert_eq!(q.jitter_ns, 5_000_000);
+                assert_eq!(q.running_time_ns, 100);
+            }
+            other => panic!("expected Qos, got {other:?}"),
+        }
+        // Unlike reconfigure, the packet was enqueued (QoS does not hold it back).
+        assert!(rx.try_recv().is_some(), "QoS is advisory; the frame still flowed");
+    }
+
+    #[test]
+    fn reconfigure_takes_priority_over_qos() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+
+        // Both pending: negotiation correctness wins, QoS waits for the next push.
+        rx.request_qos(QosMessage { jitter_ns: 1_000, running_time_ns: 0 });
+        rx.request_reconfigure(Reconfigure::Renegotiate);
+        let first = run_to_ready(sink.push(dummy_frame())).unwrap();
+        assert!(matches!(first, PushOutcome::Reconfigure(_)), "reconfigure first");
+
+        let second = run_to_ready(sink.push(dummy_frame())).unwrap();
+        assert!(matches!(second, PushOutcome::Qos(_)), "QoS surfaces once reconfigure drained");
     }
 
     #[test]

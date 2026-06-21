@@ -182,7 +182,10 @@ fn apply_gain(src: &[u8], dst: &mut [u8], volume: f64, mute: bool) {
         let out = if mute {
             0
         } else {
-            ((sample as f64) * volume).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16
+            let scaled = (sample as f64) * volume;
+            // round half away from zero without libm, then clamp to i16.
+            let rounded = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 };
+            rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
         };
         d.copy_from_slice(&out.to_le_bytes());
     }

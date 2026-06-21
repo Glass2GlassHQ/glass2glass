@@ -5,6 +5,115 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M174: upstream QoS propagation (source sheds load on a behind sink)
+
+QoS now travels *upstream*, closing the gap M173 left: a sink that drops late
+frames signals the producer, which skips work to let the pipeline catch up (the
+GStreamer upstream QoS-event analog). Carried on the same per-link reverse channel
+as `Reconfigure`.
+
+- **`QosMessage { jitter_ns, running_time_ns }`** and **`PushOutcome::Qos`**: the
+  reverse signal a producer observes on its next `push`. Reconfigure takes
+  priority when both are pending (negotiation correctness over QoS); QoS is
+  advisory and never holds the packet back.
+- **Reverse `QosSlot`** on each link (parallel to `ReconfigureSlot`), with
+  `LinkReceiver::request_qos`.
+- **`AsyncElement::take_qos`** (default `None`, dyn-mirrored): a sink returns the
+  QoS it wants sent upstream; the `run_simple_pipeline` sink arm forwards it onto
+  the incoming link after `process`.
+- **`SyncSink`** originates it: on a QoS late-drop it sets the pending signal (the
+  same jitter it reports on the bus).
+- **`VideoTestSrc`** reacts: on `PushOutcome::Qos` it skips ~`jitter / frame`
+  frames (advancing `seq`/PTS without generating them), shedding generation load.
+  `VideoTestSrc::skipped()` exposes the count; the source now returns the number
+  of frames actually pushed (unchanged at the target when no QoS fires).
+
+Scope: source→sink (`run_simple_pipeline`). Forwarding QoS *through* a transform
+(`run_source_transform_sink`) and in the DAG runner (`run_graph`, which the
+`WaylandSink` demo uses) is the next step — the transform must relay the signal
+from its downstream link to its upstream one, owed (DESIGN_TODO).
+
+### M173: QoS late-drop in `WaylandSink`
+
+The display sink now sheds frames it can't present on time, the clock-sync
+track's next step after PTS pacing (M169/M172). Once PTS pacing is engaged, a
+frame already past its running-time deadline by more than a configurable bound is
+dropped instead of presented late, so the sink catches up rather than
+accumulating lag, and posts a `BusMessage::Qos` (running time, jitter, cumulative
+processed / dropped) for the application to react to. The `GST_MESSAGE_QOS` analog,
+matching `SyncSink`'s M85 behaviour.
+
+- **`WaylandSink::with_max_lateness_ns(ns)`**: drop a frame later than `ns` past
+  its deadline. Default `u64::MAX` never drops (every frame presented however
+  late, unchanged behaviour). `0` drops any frame past its deadline.
+- **`WaylandSink::with_bus(bus)`**: post a `Qos` report per late-drop.
+- **`WaylandSink::late_dropped()`**: cumulative QoS late-drop count (distinct from
+  `frames_dropped`, the compositor-side `DropOldest` count).
+- The `textoverlay_demo` example takes an optional 3rd arg (QoS bound in ms) and
+  reports late-drops.
+
+Note: sink QoS sheds the sink's own load (colour convert + commit). Shedding load
+*upstream* of the sink (skip-ahead in the decoder / source) needs QoS-event
+propagation, still owed (DESIGN_TODO).
+
+### M172: PTS pacing in the DAG runner (`run_graph` delivers `ClockSync`)
+
+The DAG runner now hands the elected pipeline clock to its sinks, closing the gap
+left by M169 (only the linear runners delivered it). `run_graph` already elected
+a clock; it now also calls `AsyncElement::set_clock_sync` on every sink node after
+election, so a display sink (`WaylandSink`) PTS-paces its presentation in a graph
+pipeline the same way it does in `run_source_transform_sink`. Verified end-to-end:
+60 frames at 30 fps through `videotestsrc ! textoverlay ! videoconvert !
+waylandsink` present in 2.0 s (was ASAP / compositor-paced before). No behaviour
+change when no clock is elected (sinks present as fast as backpressure allows).
+
+### M171: subtitle overlay (`textoverlay`) with SRT + WebVTT
+
+The `textoverlay` / `subtitleoverlay` analog: render timed subtitle text onto a
+raw video frame, the visible end of an SRT / WebVTT subtitle path. Fills the
+named "overlays / subtitles" gap in the parity TODO.
+
+- **`subparse`** (`no_std`): SRT (SubRip) and WebVTT parsers into a common timed
+  [`Cue`] list. Shared timestamp parser accepts `,`/`.` fractional separators and
+  the WebVTT short `MM:SS.mmm` form; tolerates BOM / CRLF, SRT indices and WebVTT
+  cue identifiers, skips the `WEBVTT` header and `NOTE` / `STYLE` / `REGION`
+  blocks, strips inline markup (`<i>`, `<c>`, cue timestamps). WebVTT cue
+  settings are parsed into `CueSettings { position, line, align }`. `parse_srt` /
+  `parse_webvtt` / `parse_auto`.
+- **`bitmapfont`** (`no_std`): an embedded 8x8 all-caps bitmap font (A-Z, 0-9,
+  space, common punctuation; lowercase folds to uppercase) so the baseline can
+  draw text with no font file or rasterizer.
+- **`TextOverlay`** (`no_std` CPU element): RGBA8 in / out, identity on the
+  pixels except the active cue text. Every cue covering the frame `pts_ns` is
+  rendered, not just the first, so overlapping WebVTT/SRT cues all show (the spec
+  allows simultaneous cues). Each cue is placed from its `CueSettings`:
+  `position` + `align` set the horizontal anchor / alignment, an explicit `line`
+  places it vertically, and auto-`line` cues stack upward from the bottom so they
+  don't collide. Each draws over its own translucent backing box, scaled to the
+  frame height. Cues
+  are set programmatically (`from_srt` / `from_webvtt`) or, on `std`, via the
+  `location=` property loading a `.srt` / `.vtt` file. Registered as
+  `textoverlay` for the text-launch parser. Mixed-case TrueType rendering is
+  deferred to a planned `vello` GPU backend (the analytics-overlay CPU/GPU split).
+- **`textoverlay_demo` example**: `videotestsrc ! textoverlay ! videoconvert !
+  waylandsink` (live Wayland window, `--features wayland-sink`) or a headless
+  still-image (PPM) render, demonstrating overlapping positioned cues.
+
+### M170: `g2g-launch` / `g2g-inspect` command-line binaries
+
+The `gst-launch` / `gst-inspect` analogs, shipped as runnable binaries in
+`g2g-plugins` (gated on `std`, `required-features = ["std"]`). Both drive the
+standard `default_registry()` (M107), so every registry element is reachable
+from the shell without writing Rust.
+
+- **`g2g-launch "<pipeline>"`**: joins its args into one text pipeline, parses
+  it with `parse_launch` (M106), and runs the graph to completion on a
+  single-thread tokio runtime against the `WallClock`, printing the
+  emitted/consumed/dropped frame stats.
+- **`g2g-inspect [element]`**: with no argument lists every registerable element
+  (`Registry::element_names`); with an element name dumps its role, properties,
+  and pad templates (`Registry::inspect`, M105).
+
 ### M169: clock-synchronised presentation (present each frame at its PTS)
 
 First step of the "use PTS to decide when to display" track (DESIGN.md §4.4,

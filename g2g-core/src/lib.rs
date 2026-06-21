@@ -54,7 +54,7 @@ pub use clock::{
     elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock,
 };
 pub use element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, QosMessage, Reconfigure,
 };
 pub use error::{G2gError, HardwareError};
 pub use format_element::{

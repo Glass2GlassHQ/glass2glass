@@ -168,7 +168,10 @@ impl PadTemplates for AudioPanorama {
 }
 
 fn scale(sample: i16, gain: f64) -> i16 {
-    ((sample as f64) * gain).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16
+    let scaled = (sample as f64) * gain;
+    // round half away from zero without libm, then clamp to i16.
+    let rounded = if scaled >= 0.0 { scaled + 0.5 } else { scaled - 0.5 };
+    rounded.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 /// Apply the balance pan to each interleaved L/R S16LE pair. A positive pan

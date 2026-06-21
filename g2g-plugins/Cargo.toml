@@ -341,5 +341,16 @@ cbc = { version = "0.1", features = ["alloc"] }
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
 
+# gst-launch / gst-inspect analogs over the standard registry (M107). Both need
+# the std-only registry + wall clock, so they are gated on `std`; the no_std
+# baseline build skips them rather than failing to resolve.
+[[bin]]
+name = "g2g-launch"
+required-features = ["std"]
+
+[[bin]]
+name = "g2g-inspect"
+required-features = ["std"]
+
 [lints]
 workspace = true

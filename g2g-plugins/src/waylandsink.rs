@@ -99,9 +99,9 @@ use smithay_client_toolkit::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
-    ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat, Segment, VideoCodec,
+    AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain,
+    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, Segment,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -175,6 +175,18 @@ pub struct WaylandSink {
     /// (the robust startup/live anchor; the `ClockSync::base_time_ns` anchor
     /// at `Playing` is the preroll-integrated refinement).
     anchor_ns: Option<u64>,
+    /// QoS (M173): drop a frame whose presentation deadline is already past by
+    /// more than this many ns, instead of presenting it late. `u64::MAX` (the
+    /// default) never drops, presenting every frame however late. Only consulted
+    /// when a `clock_sync` is set (PTS pacing engaged).
+    max_lateness_ns: u64,
+    /// Frames dropped by QoS late-drop (cumulative). Distinct from
+    /// `frames_dropped`, which counts compositor-side drops under `DropOldest`.
+    late_dropped: u64,
+    /// Pipeline bus for QoS reports. `Some` posts a [`BusMessage::Qos`] on each
+    /// late-drop so the application can react (lower the source rate, simplify
+    /// the pipeline).
+    bus: Option<BusHandle>,
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -214,6 +226,9 @@ impl WaylandSink {
             clock_sync: None,
             segment: None,
             anchor_ns: None,
+            max_lateness_ns: u64::MAX,
+            late_dropped: 0,
+            bus: None,
         }
     }
 
@@ -232,8 +247,37 @@ impl WaylandSink {
         self
     }
 
+    /// Enable QoS late-drop (M173): once PTS pacing is engaged, a frame already
+    /// past its deadline by more than `ns` is dropped instead of presented late,
+    /// so the sink catches up rather than accumulating lag. `0` drops any frame
+    /// that arrives after its deadline; the default (`u64::MAX`) never drops.
+    pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
+        self.max_lateness_ns = ns;
+        self
+    }
+
+    /// Attach the pipeline bus so each QoS late-drop posts a [`BusMessage::Qos`].
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
     pub fn frames_dropped(&self) -> u64 {
         self.frames_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Frames dropped by QoS late-drop (past their deadline beyond the configured
+    /// bound). Distinct from [`frames_dropped`](Self::frames_dropped), the
+    /// compositor-side `DropOldest` count.
+    pub fn late_dropped(&self) -> u64 {
+        self.late_dropped
+    }
+
+    /// QoS decision: whether a frame whose running-time deadline is `deadline` is
+    /// too late to present at clock time `now`, i.e. past it by more than the
+    /// configured bound. Saturating, so the `u64::MAX` default never trips.
+    fn is_too_late(&self, deadline: u64, now: u64) -> bool {
+        now > deadline.saturating_add(self.max_lateness_ns)
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -436,6 +480,24 @@ impl AsyncElement for WaylandSink {
                             *self.anchor_ns.get_or_insert(sync.now_ns().saturating_sub(rt));
                         let deadline = anchor.saturating_add(rt);
                         let now = sync.now_ns();
+                        // QoS: a frame already late beyond the bound is dropped,
+                        // not presented late, so the sink catches up instead of
+                        // accumulating lag. Posts a Qos report if a bus is set.
+                        if self.is_too_late(deadline, now) {
+                            self.late_dropped += 1;
+                            if let Some(bus) = &self.bus {
+                                let jitter = i64::try_from(now - deadline).unwrap_or(i64::MAX);
+                                // Control message: non-blocking, never stalls the
+                                // sink (a full bus drops the report).
+                                bus.try_post(BusMessage::Qos {
+                                    running_time_ns: deadline,
+                                    jitter_ns: jitter,
+                                    processed: self.frames_presented.load(Ordering::Relaxed),
+                                    dropped: self.late_dropped,
+                                });
+                            }
+                            return Ok(());
+                        }
                         if deadline > now {
                             tokio::time::sleep(Duration::from_nanos(deadline - now)).await;
                         }
@@ -886,7 +948,7 @@ mod parking_handshake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::Rate;
+    use g2g_core::{Rate, VideoCodec};
 
     #[test]
     fn intercept_passes_through_any_format() {
@@ -959,6 +1021,94 @@ mod tests {
         let sync = ClockSync::new(Arc::new(WaylandClock), 0);
         AsyncElement::set_clock_sync(&mut sink, sync);
         assert!(sink.clock_sync.is_some(), "clock sync stored, PTS pacing on");
+    }
+
+    #[test]
+    fn qos_lateness_decision_respects_the_bound() {
+        // Default: never too late (u64::MAX bound).
+        let sink = WaylandSink::new();
+        assert!(!sink.is_too_late(0, u64::MAX), "default bound never drops");
+
+        // Bound 0: any frame past its deadline is too late.
+        let strict = WaylandSink::new().with_max_lateness_ns(0);
+        assert!(!strict.is_too_late(100, 100), "on time is not late");
+        assert!(strict.is_too_late(100, 101), "1ns past the deadline is late");
+
+        // Bound N: late only once past the deadline by more than N.
+        let tol = WaylandSink::new().with_max_lateness_ns(10);
+        assert!(!tol.is_too_late(100, 110), "within tolerance");
+        assert!(tol.is_too_late(100, 111), "beyond tolerance");
+    }
+
+    /// A clock whose `now_ns` the test drives by hand.
+    struct ManualClock(Arc<AtomicU64>);
+    impl PipelineClock for ManualClock {
+        fn now_ns(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A no-op downstream (a sink has none, but `process` takes one).
+    struct NullOut;
+    impl OutputSink for NullOut {
+        fn push<'a>(
+            &'a mut self,
+            _p: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        }
+    }
+
+    fn nv12_frame(pts_ns: u64) -> Frame {
+        use g2g_core::frame::FrameTiming;
+        use g2g_core::memory::SystemSlice;
+        Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+            timing: FrameTiming { pts_ns, ..FrameTiming::default() },
+            sequence: 0,
+            meta: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_drops_a_late_frame_and_posts_to_the_bus() {
+        // A late frame is dropped before any compositor I/O, so this exercises
+        // the QoS path without a real Wayland window. With the anchor pre-set and
+        // the clock advanced past the deadline, the frame is too late.
+        let (bus, handle) = g2g_core::Bus::new(4);
+        let clock = Arc::new(AtomicU64::new(0));
+        let mut sink = WaylandSink::new().with_max_lateness_ns(0).with_bus(handle);
+        AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock.clone())), 0));
+        // Pretend the first frame already anchored presentation at clock 0.
+        sink.anchor_ns = Some(0);
+
+        // Clock is now 1 ms; a frame with deadline 0 is 1 ms late (> 0 bound).
+        clock.store(1_000_000, Ordering::Relaxed);
+        let mut out = NullOut;
+        sink.process(PipelinePacket::DataFrame(nv12_frame(0)), &mut out).await.unwrap();
+
+        assert_eq!(sink.late_dropped(), 1, "the late frame was dropped");
+        match bus.try_recv() {
+            Some(BusMessage::Qos { running_time_ns, jitter_ns, dropped, .. }) => {
+                assert_eq!(running_time_ns, 0, "deadline reported");
+                assert_eq!(jitter_ns, 1_000_000, "1 ms late");
+                assert_eq!(dropped, 1, "cumulative drop count");
+            }
+            other => panic!("expected a Qos message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn qos_default_does_not_drop() {
+        // Default bound (u64::MAX): an on-time frame is not dropped. The anchor is
+        // set on this first frame so its deadline equals now; it then proceeds to
+        // present (no window here, so we only assert it was not QoS-dropped).
+        let clock = Arc::new(AtomicU64::new(5_000_000));
+        let mut sink = WaylandSink::new();
+        AsyncElement::set_clock_sync(&mut sink, ClockSync::new(Arc::new(ManualClock(clock)), 0));
+        // First frame anchors at now, so it is never late under any bound.
+        assert!(!sink.is_too_late(0, 5_000_000), "anchored first frame on time");
+        assert_eq!(sink.late_dropped(), 0);
     }
 
     #[test]

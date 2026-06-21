@@ -37,9 +37,27 @@ pub enum Reconfigure {
     Renegotiate,
 }
 
+/// Downstream-originated quality-of-service signal: a synchronising sink is
+/// running behind the pipeline clock and dropped a late frame. Travels upstream
+/// along a link's reverse channel and is surfaced to the producing element as a
+/// [`PushOutcome::Qos`], so a source / decoder can shed load (skip frames) to let
+/// the pipeline catch up. The GStreamer QoS event analog (the
+/// [`BusMessage::Qos`](crate::BusMessage::Qos) report is the out-of-band sibling
+/// the application observes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QosMessage {
+    /// How far past its deadline the dropped frame was, ns. Positive is late
+    /// (behind the clock); the producer skips roughly this much stream time to
+    /// catch up.
+    pub jitter_ns: i64,
+    /// Running time (PTS) of the late frame, for reference.
+    pub running_time_ns: u64,
+}
+
 /// Outcome of pushing a packet downstream. Sources and transforms must
 /// react to `Reconfigure` before pushing any further data; terminal sinks
-/// and intermediate adapters that can't renegotiate may ignore it.
+/// and intermediate adapters that can't renegotiate may ignore it. `Qos` is
+/// advisory: the packet still flowed, but the producer may shed load.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PushOutcome {
     /// Downstream accepted the packet; continue normally.
@@ -48,6 +66,10 @@ pub enum PushOutcome {
     /// the previous one. The producer should handle the request before
     /// pushing further `DataFrame`s.
     Reconfigure(Reconfigure),
+    /// Downstream is behind the clock (a sink dropped a late frame). Advisory:
+    /// the producer may skip ahead to shed load. Reconfigure takes priority when
+    /// both are pending (negotiation correctness over QoS).
+    Qos(QosMessage),
 }
 
 /// Downstream output for elements. `push` is async so backpressure-aware
@@ -121,6 +143,15 @@ pub trait AsyncElement: ElementBound {
     /// elected. Default: ignore (present as fast as backpressure allows, the
     /// pre-sync behaviour). See [`ClockSync`].
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
+
+    /// Take any QoS signal this element wants to send upstream, consuming it. A
+    /// synchronising sink that dropped a late frame returns a [`QosMessage`]
+    /// here; the runner forwards it onto the element's incoming link, where the
+    /// producer observes it as [`PushOutcome::Qos`]. Called by the runner after
+    /// each `process`. Default: nothing to send.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        None
+    }
 
     /// Declares that this element changes the caps "domain" between its
     /// input and output: a decoder turns compressed bitstream into raw
@@ -260,6 +291,12 @@ pub trait DynAsyncElement: ElementBound {
     /// receives the elected clock + base time. Defaults to ignore.
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
+    /// Dyn-safe mirror of [`AsyncElement::take_qos`], so an erased sink can send
+    /// a QoS signal upstream. Defaults to nothing.
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        None
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -334,6 +371,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_clock_sync(self, sync)
     }
 
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        AsyncElement::take_qos(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -399,6 +440,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn set_clock_sync(&mut self, sync: ClockSync) {
         (**self).set_clock_sync(sync)
+    }
+
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        (**self).take_qos()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

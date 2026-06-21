@@ -52,6 +52,7 @@ use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
 use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
+use crate::textoverlay::TextOverlay;
 use crate::videotestsrc::VideoTestSrc;
 use crate::volume::Volume;
 use crate::tsdemux::TsDemux;
@@ -111,6 +112,11 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || Box::new(VideoBox::new())));
+    // Subtitle overlay (M171): the `location=` property loads an SRT / WebVTT
+    // file (std), so cues render by PTS without hand-built Rust.
+    reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
+        Box::new(TextOverlay::new())
+    }));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))

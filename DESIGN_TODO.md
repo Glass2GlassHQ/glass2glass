@@ -83,7 +83,9 @@ vpx) to drop the ffmpeg FFI dependency. See `### Codecs`.
 walk, dynamic / request pads, zero-copy tee, PTS-ordered fan-in for
 frame-accurate mixing (see `## Negotiation`). Seek: reverse / trick mode,
 non-flushing accumulating seek, more seekable sources (see Seek depth under
-`### Critical`). Overlays / subtitles (`textoverlay`, WebVTT/SRT), generic EGL
+`### Critical`). Overlays / subtitles: the CPU `textoverlay` with SRT + WebVTT
+parsing is done (M171, DESIGN.md §4.18); a mixed-case TrueType `vello` GPU
+backend and `clockoverlay` / `timeoverlay` siblings remain. Generic EGL
 `GlSink`, GPU compositor companion.
 
 The remaining items are mostly "add an element" breadth plus the two whole-
@@ -206,9 +208,22 @@ Production-shape needs that block specific real-world use cases.
   `AsyncElement::set_clock_sync` (default no-op, dyn-mirrored), delivered by the
   runner after clock election; `WaylandSink` holds each frame until its
   running-time deadline (Segment-mapped, first-frame-anchored, re-anchors on
-  Flush). **Remaining:** QoS late-drop + `BusMessage::Qos` from the display sinks
-  when behind; anchoring at the `Playing` transition (`base_time_ns`) once preroll
-  integration lands, rather than on the first frame; KMS vblank reconciliation
+  Flush). Delivered by both the linear runners and the DAG runner `run_graph`
+  (M172): after clock election the elected `ClockSync` is handed to every sink
+  node, so a display sink PTS-paces in any topology. QoS late-drop +
+  `BusMessage::Qos` from the display sinks DONE (M173, DESIGN.md §4.4):
+  `WaylandSink` drops a frame past its deadline by more than `max_lateness` and
+  posts a `Qos` report, matching `SyncSink` (M85). Upstream QoS propagation DONE
+  for the source→sink runner (M174, DESIGN.md §4.4): a sink's `take_qos` rides the
+  per-link reverse `QosSlot` to the producer as `PushOutcome::Qos`; `SyncSink`
+  originates it and `VideoTestSrc` skips frames in response. **Remaining:** relay
+  QoS *through* a transform (`run_source_transform_sink`) and in the DAG runner
+  (`run_graph`, which the `WaylandSink` demo uses) so multi-element pipelines shed
+  load at the source/decoder, not just one hop up; this needs runner mediation
+  because a transform sees the downstream `PushOutcome` inside `process` but holds
+  neither reverse slot (the reconfigure path solves the same problem). Also:
+  anchoring at the `Playing` transition (`base_time_ns`) once preroll integration
+  lands, rather than on the first frame; KMS vblank reconciliation
   (pick-frame-for-next-flip) and Wayland frame-callback co-scheduling; and A/V
   clock slaving (electing an audio device clock as master so video follows audio).
 
@@ -569,9 +584,13 @@ parsers have follow-ups:
 
 ### Overlay / effects
 
-- **`textoverlay` / `clockoverlay` / `timeoverlay`.** 2–3 sessions total.
-  Tied to the compositor work in parity gaps (overlays are one input to a
-  compositor). `textoverlay` rendering through `cosmic-text` or `swash`.
+- **`textoverlay` / `clockoverlay` / `timeoverlay`.** `textoverlay` is done
+  (M171, DESIGN.md §4.18): a `no_std` CPU element rendering SRT / WebVTT cues by
+  PTS with an embedded 8x8 bitmap font over a translucent box. Remaining: a
+  mixed-case TrueType GPU backend (`cosmic-text` / `swash` / `vello`, the
+  analytics-overlay CPU/GPU split) and the `clockoverlay` / `timeoverlay`
+  siblings (same renderer, clock-derived text). Tied to the compositor work in
+  parity gaps (overlays are one input to a compositor).
 
 ### Platform: macOS
 

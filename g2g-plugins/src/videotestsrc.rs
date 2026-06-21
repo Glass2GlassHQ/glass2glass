@@ -14,7 +14,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat,
 };
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
@@ -58,6 +58,9 @@ pub struct VideoTestSrc {
     pattern: Pattern,
     configured: bool,
     pool: Option<BufferPool<Box<[u8]>>>,
+    /// Frames skipped in response to upstream QoS (M174). Cumulative across the
+    /// run; surfaced for observability / tests.
+    skipped: u64,
 }
 
 impl VideoTestSrc {
@@ -71,6 +74,7 @@ impl VideoTestSrc {
             pattern: Pattern::default(),
             configured: false,
             pool: None,
+            skipped: 0,
         }
     }
 
@@ -101,7 +105,13 @@ impl VideoTestSrc {
             pattern: Pattern::default(),
             configured: false,
             pool: Some(pool),
+            skipped: 0,
         }
+    }
+
+    /// Frames skipped in response to upstream QoS over the run (M174).
+    pub fn skipped(&self) -> u64 {
+        self.skipped
     }
 
     fn caps(&self) -> Caps {
@@ -166,7 +176,9 @@ impl SourceLoop for VideoTestSrc {
                 .and_then(|n| n.checked_mul(4))
                 .ok_or(G2gError::CapsMismatch)?;
 
-            for seq in 0..self.target_frames {
+            let mut seq = 0u64;
+            let mut pushed = 0u64;
+            while seq < self.target_frames {
                 let domain = if let Some(pool) = &self.pool {
                     let mut buf = pool.acquire().await;
                     if buf.len() < bytes_per_frame {
@@ -205,11 +217,25 @@ impl SourceLoop for VideoTestSrc {
                     meta: Default::default(),
                 };
 
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
+                pushed += 1;
+                // M174: react to upstream QoS by skipping ahead, so a downstream
+                // that can't keep up sheds the source's frame-generation load.
+                // The skipped frames advance `seq` (and thus PTS) without being
+                // generated, so the timeline stays correct.
+                match outcome {
+                    PushOutcome::Qos(q) if q.jitter_ns > 0 => {
+                        let period = pts_step_ns.max(1);
+                        let skip = (q.jitter_ns as u64 / period).min(self.target_frames);
+                        self.skipped += skip;
+                        seq = seq.saturating_add(1).saturating_add(skip);
+                    }
+                    _ => seq += 1,
+                }
             }
 
             out.push(PipelinePacket::Eos).await?;
-            Ok(self.target_frames)
+            Ok(pushed)
         })
     }
 

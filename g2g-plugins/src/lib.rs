@@ -52,6 +52,11 @@ pub mod videoflip;
 pub mod videobalance;
 pub mod videobox;
 pub mod alpha;
+// Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
+// feeding the `textoverlay` element below.
+pub mod subparse;
+pub mod bitmapfont;
+pub mod textoverlay;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.

@@ -32,7 +32,7 @@ use core::pin::Pin;
 
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
-use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
+use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink, Reconfigure,
 };
@@ -463,6 +463,21 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),
     };
+
+    // Hand the elected clock + base time to every sink so each presents its
+    // frames at their running-time deadline (PTS pacing), the same as the linear
+    // runners (M169). Only when a clock was elected; without one the sinks present
+    // as fast as backpressure allows. A sink node always holds a
+    // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
+    if let Some(c) = &elected {
+        for &node in &topo {
+            if matches!(vg.kind(node), NodeKind::Sink) {
+                if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
+                    elem.set_clock_sync(ClockSync::new(c.clock.clone(), base_time_ns));
+                }
+            }
+        }
+    }
 
     // Phase 4: one bounded channel per edge, then one arm per node. Each arm
     // takes the senders of its outgoing edges and the receivers of its

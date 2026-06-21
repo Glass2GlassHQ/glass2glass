@@ -29,7 +29,7 @@ use alloc::boxed::Box;
 
 use g2g_core::{
     AsyncClock, AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, ConfigureOutcome,
-    ElementBound, G2gError, OutputSink, PipelinePacket, Segment,
+    ElementBound, G2gError, OutputSink, PipelinePacket, QosMessage, Segment,
 };
 
 #[derive(Debug)]
@@ -54,6 +54,10 @@ pub struct SyncSink<C: AsyncClock> {
     /// Frames dropped because they fell outside the segment (accurate-seek clip).
     clipped: u64,
     bus: Option<BusHandle>,
+    /// QoS signal pending delivery upstream (M174): set when a late frame is
+    /// dropped, consumed by the runner via [`take_qos`](AsyncElement::take_qos)
+    /// and forwarded onto the incoming link so the source can shed load.
+    pending_qos: Option<QosMessage>,
 }
 
 impl<C: AsyncClock> SyncSink<C> {
@@ -71,6 +75,7 @@ impl<C: AsyncClock> SyncSink<C> {
             segment: None,
             clipped: 0,
             bus: None,
+            pending_qos: None,
         }
     }
 
@@ -186,8 +191,8 @@ where
                     let now = self.clock.now_ns();
                     if now > deadline.saturating_add(self.max_lateness_ns) {
                         self.dropped += 1;
+                        let jitter = i64::try_from(now - deadline).unwrap_or(i64::MAX);
                         if let Some(bus) = &self.bus {
-                            let jitter = i64::try_from(now - deadline).unwrap_or(i64::MAX);
                             // Control message: non-blocking, never stalls the
                             // sink (a full bus drops the report).
                             bus.try_post(BusMessage::Qos {
@@ -197,6 +202,10 @@ where
                                 dropped: self.dropped,
                             });
                         }
+                        // M174: signal the same lateness upstream so the source /
+                        // decoder sheds load. The runner picks this up via
+                        // `take_qos` after `process` and forwards it.
+                        self.pending_qos = Some(QosMessage { jitter_ns: jitter, running_time_ns: deadline });
                         return Ok(());
                     }
                     self.clock.sleep_until_ns(deadline).await;
@@ -223,6 +232,10 @@ where
             }
             Ok(())
         })
+    }
+
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.pending_qos.take()
     }
 }
 

@@ -323,9 +323,11 @@ A free-running source feeding a sync sink is paced automatically by upstream bac
 
 #### Clock distribution to sinks
 
-A pipeline runs against one elected clock (`elect_clock`: a live source's hardware clock outranks an audio sink's clock, which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
+A pipeline runs against one elected clock (`elect_clock`: a live source's hardware clock outranks an audio sink's clock, which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election, M172), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
 
-`WaylandSink` is the first display sink to use it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. To stay robust against a slow source start (and the live case), it anchors the deadline against the first frame (`now - running_time`) rather than the startup base time, so the stream paces by PTS deltas without dumping a startup backlog. QoS late-drop from the display sinks, anchoring at the `Playing` transition, KMS vblank reconciliation, and slaving video to an audio device clock are the remaining steps (DESIGN_TODO).
+`WaylandSink` is the first display sink to use it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. To stay robust against a slow source start (and the live case), it anchors the deadline against the first frame (`now - running_time`) rather than the startup base time, so the stream paces by PTS deltas without dumping a startup backlog. It also does **QoS late-drop** (M173, matching `SyncSink`'s M85): a frame already past its deadline by more than a configurable `max_lateness` bound is dropped instead of presented late, so the sink catches up instead of accumulating lag, posting a `BusMessage::Qos` (running time, jitter, cumulative processed/dropped) per drop.
+
+**Upstream QoS (M174)** carries that lateness back to the producer so it sheds load too, not just the sink. It rides the same per-link reverse channel as `Reconfigure`: a sink returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the incoming link's reverse `QosSlot`, and the producer observes it as `PushOutcome::Qos` on its next push (reconfigure wins when both are pending; QoS is advisory and never holds the packet back). `SyncSink` originates it on a late-drop and `VideoTestSrc` reacts by skipping ~`jitter / frame_period` frames (advancing PTS without generating them). Wired for the source→sink runner (`run_simple_pipeline`); relaying QoS *through* a transform and in the DAG runner is owed (a transform sees the `PushOutcome` inside `process` but holds neither reverse slot, so the relay needs runner mediation, like the reconfigure path). Anchoring at the `Playing` transition, KMS vblank reconciliation, and slaving video to an audio device clock are the other remaining steps (DESIGN_TODO).
 
 ### 4.5 Backpressure & Scheduling
 Every link between elements has an explicit `LinkPolicy`, configured at graph construction time. The choice is per-link because a single pipeline may have lossy preview branches and lossless recording branches sharing an upstream source.
@@ -1235,6 +1237,46 @@ its `minimumUpdatePeriod`, each new segment played once (tracked by start time),
 ending when the manifest turns static, the same shape as the HLS live reload.
 Throughput-driven ABR, byte-range segments, and the wall-clock `@duration` live
 profile are follow-ups (DESIGN_TODO).
+
+### 4.18 Subtitle Overlay (`textoverlay`)
+
+`textoverlay::TextOverlay` (M171) is the `textoverlay` / `subtitleoverlay`
+analog: it renders timed subtitle text onto a raw video frame. The path splits
+into two `no_std` pieces feeding one element:
+
+- **`subparse`** parses SRT (SubRip) and WebVTT into a common timed `Cue`
+  (`{ start_ns, end_ns, text, settings }`). Both formats are blank-line-separated
+  blocks with a `start --> end` timing line and text on the following lines, so
+  one block walker covers both: the shared timestamp parser accepts the SRT comma
+  and the WebVTT dot fractional separators plus the WebVTT short `MM:SS.mmm` form;
+  leading lines (SRT index, WebVTT cue id) before the `-->` line are ignored; the
+  `WEBVTT` header and `NOTE` / `STYLE` / `REGION` blocks are skipped; inline
+  markup (`<i>`, `<c.class>`, inline cue timestamps) is stripped. BOM and CRLF are
+  tolerated. Malformed blocks are skipped rather than failing the parse, the way
+  players tolerate dirty files. The WebVTT cue settings after the end timestamp
+  are parsed into `CueSettings { position, line, align }` (the placement subset
+  the bitmap overlay honours; `size` / `vertical` / `region` are recognised but
+  not applied).
+- **`bitmapfont`** is an embedded 8x8 bitmap font (MSB = leftmost column) so the
+  baseline draws glyphs with no font file or rasterizer. It is an all-caps font
+  (A-Z, 0-9, space, common punctuation; lowercase folds to uppercase).
+
+`TextOverlay` is an RGBA8-in / RGBA8-out identity transform on the pixels
+(`VideoConvert` upstream for other formats) except for the active cue text. By a
+linear scan (subtitle tracks are small) it draws *every* cue covering the frame's
+`pts_ns`, not just the first: WebVTT (and SRT) allow overlapping cues to show at
+once. Each cue is placed independently from its `CueSettings`: `position` (% of
+width) is the horizontal anchor and `align` (start / center / end) decides how
+the box extends from it; an explicit `line` (% of height) places the box
+vertically, while auto-`line` cues stack upward from the bottom in cue order so
+overlapping subtitles don't collide. Each cue draws over its own translucent
+backing box, integer-scaled to the frame height. Cues are set programmatically (`from_srt` /
+`from_webvtt`) or, on `std`, through the `location=` property loading a `.srt` /
+`.vtt` file (format by extension, else content sniff); the element is registered
+as `textoverlay` for the `gst-launch` text parser. This mirrors the analytics
+overlay's CPU baseline (§5): the no_std bitmap renderer is the portable path, and
+a mixed-case TrueType `vello` GPU backend (and the `clockoverlay` / `timeoverlay`
+siblings) is the planned companion.
 
 ---
 

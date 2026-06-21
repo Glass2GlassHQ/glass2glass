@@ -18,9 +18,16 @@ use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::mp4sink::Mp4Sink;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A process-and-call-unique temp path. The two tests run on parallel threads
+/// and both build their fixture, so the filename must be unique per call (not
+/// just per process) or they race on the same file: one would delete the fixture
+/// while the other still reads it.
 fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("g2g_m158_{}_{}.mp4", std::process::id(), name))
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("g2g_m158_{}_{}_{}.mp4", std::process::id(), name, n))
 }
 
 fn h264_caps(w: u32, h: u32) -> Caps {

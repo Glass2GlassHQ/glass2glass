@@ -239,7 +239,8 @@ fn method_to_str(m: AlphaMethod) -> &'static str {
 }
 
 fn alpha_u8(alpha: f64) -> u8 {
-    (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+    // round to nearest without libm; the value is non-negative after clamping.
+    (alpha.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 impl PadTemplates for Alpha {

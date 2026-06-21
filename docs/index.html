@@ -361,38 +361,6 @@
         .tab-panel pre .num { color: var(--amber); }
         .tab-panel pre .ty  { color: var(--accent); }
 
-        /* ── ROADMAP ── */
-        #roadmap { border-bottom: 1px solid var(--border); }
-        .roadmap-table {
-            width: 100%; border-collapse: collapse;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border); border-radius: 16px;
-            overflow: hidden;
-        }
-        .roadmap-table th, .roadmap-table td {
-            padding: 14px 20px; text-align: left;
-            border-bottom: 1px solid var(--border);
-            font-size: 0.88rem;
-        }
-        .roadmap-table th {
-            background: var(--bg-tertiary);
-            color: var(--text-tertiary);
-            text-transform: uppercase;
-            font-size: 0.72rem; letter-spacing: 0.08em; font-weight: 700;
-        }
-        .roadmap-table tr:last-child td { border-bottom: none; }
-        .roadmap-table td:first-child { color: var(--text-primary); }
-        .roadmap-table td.status { width: 130px; }
-        .roadmap-table .pill {
-            display: inline-block; padding: 3px 10px;
-            border-radius: 100px; font-size: 0.7rem;
-            font-weight: 700; text-transform: uppercase;
-            letter-spacing: 0.06em;
-        }
-        .pill-done { background: rgba(52, 211, 153, 0.15); color: var(--green); }
-        .pill-wip  { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
-        .pill-plan { background: var(--bg-tertiary); color: var(--text-tertiary); }
-
         /* ── CTA ── */
         .cta-section { padding: 120px 32px; text-align: center; position: relative; overflow: hidden; }
         .cta-section::before {
@@ -469,7 +437,6 @@
             <li><a href="#features">Features</a></li>
             <li><a href="#targets">Targets</a></li>
             <li><a href="#quickstart">Quickstart</a></li>
-            <li><a href="#roadmap">Roadmap</a></li>
             <li><a href="https://github.com/GrokImageCompression/glass2glass/blob/master/DESIGN.md" class="nav-btn-ghost">Spec</a></li>
             <li><a href="https://github.com/GrokImageCompression/glass2glass" class="nav-btn-accent">GitHub</a></li>
         </ul>
@@ -908,36 +875,6 @@ wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async
 
             </div>
         </div>
-    </div>
-</section>
-
-<!-- ═══ ROADMAP ═══ -->
-<section id="roadmap">
-    <div class="section-inner">
-        <span class="section-label">Roadmap</span>
-        <h2 class="section-title">Where we are. Where we're going.</h2>
-        <p class="section-desc">
-            The full changelog is in <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/CHANGELOG.md" style="color: var(--accent);">CHANGELOG.md</a>.
-            What's headline-worthy, by capability area:
-        </p>
-
-        <table class="roadmap-table">
-            <thead><tr><th>Track</th><th class="status">Status</th></tr></thead>
-            <tbody>
-                <tr><td>Graph runtime: CSP caps negotiation, fan-out / fan-in, the DAG runner, bus + queries</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Lifecycle: state machine + preroll, seek + SEGMENT, auto-plug / decodebin / playbin</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Ingest: RTSP, RTP / UDP (jitter buffer + RTCP + NACK), HTTP, HLS / DASH, RTMP, V4L2 / PipeWire capture</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Containers: MP4, MPEG-TS, Matroska / WebM, FLV, Ogg demux + mux, with the tag system</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Codecs: ffmpeg decode (H.264/265, VP8/9, AV1) + AV1 / VP8-9 / MJPEG encode + bitstream parsers</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Display + audio out: Wayland / KMS / D3D11 / wgpu sinks, ALSA / PulseAudio / PipeWire / WASAPI audio</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>ML on the graph: WgpuPreprocess, ORT + Burn inference, per-frame metadata + analytics overlay</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Tooling: property system + introspection + the <code>gst-launch</code> text DSL</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>Browser / Wasm + Embassy / RTOS targets</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>CUDA zero-copy: NVDEC &rarr; CudaGlSink (Linux + NVIDIA)</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
-                <tr><td>Clock-synchronised display, QoS from the display sinks, A/V sync</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
-                <tr><td>RTP RTX + FEC, RTMP / SRT egress, RTSP server, macOS / Android platforms</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
-            </tbody>
-        </table>
     </div>
 </section>
 
