@@ -206,6 +206,13 @@ impl<E> Graph<E> {
         Ok(())
     }
 
+    /// The edges in declaration order, including each one's backpressure
+    /// [`LinkPolicy`]. Lets callers inspect the wiring before [`finish`](Self::finish)
+    /// (e.g. the launch parser's `queue`-to-policy mapping).
+    pub fn edges(&self) -> &[Edge] {
+        &self.edges
+    }
+
     fn kind_of(&self, node: NodeId) -> Result<NodeKind, GraphError> {
         self.nodes
             .get(node.0 as usize)

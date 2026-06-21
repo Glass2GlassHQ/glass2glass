@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M190: `queue` in gst-launch lines (maps to per-edge LinkPolicy)
+
+`queue` / `queue2` now parse in a `parse_launch` pipeline. g2g has no queue
+element by design, per-edge `LinkPolicy` is the leaky-queue analog, so a queue
+node collapses into the backpressure policy of the edge it sits on instead of
+becoming a buffering element with an extra hop. Real gst command lines (which
+use `queue` liberally to decouple branches) now paste and run.
+
+- `build_graph` contracts each `queue` out of the link list: it is validated as
+  1-in/1-out (a source/sink/branch-position queue is a loud `QueueRole` error),
+  its `leaky=` is read, then the edge is rewired straight from the queue's
+  predecessor to its consumer carrying the mapped policy. Runs of queues collapse
+  to a single edge (downstream-most `leaky` wins).
+- `leaky=` mapping (gst enum, value or nick): `0`/`no` -> `Block` (lossless,
+  default), `1`/`upstream` -> `DropNewest` (drop the incoming buffer),
+  `2`/`downstream` -> `DropOldest` (drop the oldest queued buffer).
+- The `max-size-*` / `min-threshold-*` bounds are accepted but not modeled: g2g
+  has no per-edge capacity (`link_capacity` is a single pipeline-wide knob), so
+  they are ignored for paste compatibility rather than rejected.
+- Added `Graph::edges()` so callers can inspect wiring + policy before `finish()`.
+
+Verified: `m190_queue_linkpolicy` (parses + runs; leaky nick/numeric -> policy;
+size bounds ignored; stacked queues collapse; queue on a tee branch; source/sink
+misuse fails loud). Launch suites (m106/m118/m122) + core (216) stay green;
+no_std + clippy clean.
+
 ### M189: mid-stream re-cascade re-resolves caps-driven transform output
 
 `configure_output` (M185, how a caps-driven `videoscale` / `videoconvert` /

@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
+use crate::link::LinkPolicy;
 use crate::property::PropValue;
 use crate::runtime::autoplug::Registry;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
@@ -78,6 +79,10 @@ pub enum ParseError {
     /// A muxer (an element with several inputs) has no outgoing link; its single
     /// output pad must feed a downstream consumer.
     MuxerWithoutOutput(String),
+    /// A `queue` / `queue2` sits anywhere but a 1-in/1-out position. It is not an
+    /// element in g2g (it collapses into the edge's backpressure policy), so it
+    /// cannot be a source, a sink, or a fan-out / fan-in node.
+    QueueRole(String),
     /// Linking two nodes into the graph failed.
     Graph(GraphError),
 }
@@ -115,6 +120,9 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::MuxerWithoutOutput(n) => {
                 write!(f, "{n}: muxer has no outgoing link; its output must feed a consumer")
+            }
+            ParseError::QueueRole(n) => {
+                write!(f, "{n}: a queue must sit between two elements (1-in/1-out); it maps to an edge policy, not a source/sink/branch")
             }
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
         }
@@ -367,7 +375,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     }
 
     // Resolve references and collect the directed links (by element index).
-    let mut links: Vec<(usize, usize)> = Vec::new();
+    let mut raw_links: Vec<(usize, usize)> = Vec::new();
     for eps in &chain_eps {
         let mut idxs: Vec<usize> = Vec::with_capacity(eps.len());
         for ep in eps {
@@ -381,14 +389,60 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             });
         }
         for w in idxs.windows(2) {
-            links.push((w[0], w[1]));
+            raw_links.push((w[0], w[1]));
         }
     }
 
-    // Link degree per element fixes its role and any tee's output width.
+    // M190: `queue` / `queue2` is not an element in g2g. Per the design,
+    // per-edge `LinkPolicy` (Block / DropOldest / DropNewest) is the leaky-queue
+    // analog, so a queue node collapses into the backpressure policy of the edge
+    // it sits on rather than becoming a buffering element + extra hop. Validate
+    // each queue is 1-in/1-out, read its `leaky=`, then contract it out of the
+    // link list, walking chains of queues to the first real consumer and keeping
+    // the downstream-most leaky policy.
+    let is_queue = |ei: usize| matches!(specs[ei].name.as_str(), "queue" | "queue2");
+    let mut raw_in = alloc::vec![0usize; specs.len()];
+    let mut raw_out = alloc::vec![0usize; specs.len()];
+    for &(s, d) in &raw_links {
+        raw_out[s] += 1;
+        raw_in[d] += 1;
+    }
+    let mut queue_succ: Vec<Option<usize>> = alloc::vec![None; specs.len()];
+    let mut queue_policy = alloc::vec![LinkPolicy::Block; specs.len()];
+    for ei in 0..specs.len() {
+        if is_queue(ei) {
+            if raw_in[ei] != 1 || raw_out[ei] != 1 {
+                return Err(ParseError::QueueRole(specs[ei].name.clone()));
+            }
+            queue_policy[ei] = queue_leaky_policy(&specs[ei]);
+            queue_succ[ei] = raw_links.iter().find(|(s, _)| *s == ei).map(|(_, d)| *d);
+        }
+    }
+    // Each edge whose source is a real element walks through any run of queues to
+    // its terminal consumer, carrying the accumulated policy; edges out of a queue
+    // are consumed by that walk (skipped here).
+    let mut links: Vec<(usize, usize, LinkPolicy)> = Vec::new();
+    for &(s, d) in &raw_links {
+        if is_queue(s) {
+            continue;
+        }
+        let mut cur = d;
+        let mut policy = LinkPolicy::Block;
+        while is_queue(cur) {
+            if queue_policy[cur] != LinkPolicy::Block {
+                policy = queue_policy[cur];
+            }
+            cur = queue_succ[cur].expect("queue validated 1-out above");
+        }
+        links.push((s, cur, policy));
+    }
+
+    // Link degree per element fixes its role and any tee's output width. Computed
+    // over the contracted links, so queue indices drop to degree 0 and are skipped
+    // as nodes below.
     let mut in_deg = alloc::vec![0usize; specs.len()];
     let mut out_deg = alloc::vec![0usize; specs.len()];
-    for &(s, d) in &links {
+    for &(s, d, _) in &links {
         out_deg[s] += 1;
         in_deg[d] += 1;
     }
@@ -413,10 +467,16 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         }
     }
 
-    // Construct nodes in element-index order so `node_of[ei]` lines up.
+    // Construct nodes in element-index order so `node_of[ei]` lines up. Queue
+    // indices were contracted into edge policies above, so they get no node
+    // (`None`); they never appear as an endpoint in the contracted links.
     let mut graph: Graph<GraphNode> = Graph::new();
-    let mut node_of: Vec<NodeId> = Vec::with_capacity(specs.len());
+    let mut node_of: Vec<Option<NodeId>> = Vec::with_capacity(specs.len());
     for ei in 0..specs.len() {
+        if is_queue(ei) {
+            node_of.push(None);
+            continue;
+        }
         let spec = &specs[ei];
         let node = if is_tee(ei) {
             graph.add_tee(out_deg[ei] as u8).node()
@@ -444,33 +504,57 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             apply_element_props(&mut el, &spec.name, &spec.props)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };
-        node_of.push(node);
+        node_of.push(Some(node));
     }
 
     // Wire edges. Each tee branch takes a distinct output pad (0..n) and each
     // muxer input a distinct input pad (0..n); every other output and input is
-    // pad 0.
+    // pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
     let mut tee_next = alloc::vec![0u8; specs.len()];
     let mut mux_next = alloc::vec![0u8; specs.len()];
-    for &(s, d) in &links {
+    for &(s, d, policy) in &links {
+        let node_s = node_of[s].expect("contracted link source is a real node");
+        let node_d = node_of[d].expect("contracted link destination is a real node");
         let src = if is_tee(s) {
             let index = tee_next[s];
             tee_next[s] += 1;
-            PadId { node: node_of[s], index }
+            PadId { node: node_s, index }
         } else {
-            PadId::from(node_of[s])
+            PadId::from(node_s)
         };
         let dst = if is_muxer(d) {
             let index = mux_next[d];
             mux_next[d] += 1;
-            PadId { node: node_of[d], index }
+            PadId { node: node_d, index }
         } else {
-            PadId::from(node_of[d])
+            PadId::from(node_d)
         };
-        graph.link(src, dst)?;
+        graph.link_with(src, dst, policy)?;
     }
 
     Ok(graph)
+}
+
+/// Map a `queue` / `queue2` node's `leaky=` property to the edge backpressure
+/// policy it stands in for (M190). gst accepts the enum by value or nick:
+/// `0`/`no` (lossless, the default), `1`/`upstream` (drop the newest incoming
+/// buffer), `2`/`downstream` (drop the oldest queued buffer). Other queue
+/// properties (the `max-size-*` / `min-threshold-*` bounds, `silent`, ...) are
+/// accepted but not modeled: g2g has no per-edge capacity (`link_capacity` is a
+/// single pipeline-wide knob), so they are ignored for paste compatibility
+/// rather than rejected.
+fn queue_leaky_policy(spec: &ElementSpec) -> LinkPolicy {
+    for (k, v) in &spec.props {
+        if k == "leaky" {
+            return match v.as_str() {
+                "1" | "upstream" => LinkPolicy::DropNewest,
+                "2" | "downstream" => LinkPolicy::DropOldest,
+                // "0" / "no" and anything unrecognized: lossless block.
+                _ => LinkPolicy::Block,
+            };
+        }
+    }
+    LinkPolicy::Block
 }
 
 /// Parse a `gst-launch`-style pipeline string into a runnable [`Graph`], building
