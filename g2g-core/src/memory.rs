@@ -1,11 +1,22 @@
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 #[cfg(feature = "runtime")]
 use crate::pool::PooledBuffer;
+use crate::tensor::TensorView;
 
 #[derive(Debug)]
 pub enum MemoryDomain {
     System(SystemSlice),
+    /// Shared-CPU strided buffer: reference-counted bytes plus a [`TensorView`]
+    /// describing how to read them (M180). A layout-preserving transform (flip,
+    /// transpose, crop) hands the frame downstream by composing strides on the
+    /// *same* `Arc` allocation, so zero bytes are copied. The system-memory
+    /// analog of the per-plane stride metadata the GPU domains (eg
+    /// [`OwnedCudaBuffer`]) already carry. A consumer that needs contiguous
+    /// bytes calls [`SystemView::materialize`]; a stride-aware consumer reads
+    /// the view directly.
+    SystemView(SystemView),
     DmaBuf(OwnedDmaBuf),
     VulkanTexture(OwnedVulkanTexture),
     WebGPUBuffer(OwnedWebGPUBuffer),
@@ -45,6 +56,7 @@ pub enum MemoryDomain {
 pub enum MemoryDomainKind {
     #[default]
     System,
+    SystemView,
     DmaBuf,
     VulkanTexture,
     WebGPUBuffer,
@@ -59,6 +71,7 @@ impl MemoryDomain {
     pub fn kind(&self) -> MemoryDomainKind {
         match self {
             MemoryDomain::System(_) => MemoryDomainKind::System,
+            MemoryDomain::SystemView(_) => MemoryDomainKind::SystemView,
             MemoryDomain::DmaBuf(_) => MemoryDomainKind::DmaBuf,
             MemoryDomain::VulkanTexture(_) => MemoryDomainKind::VulkanTexture,
             MemoryDomain::WebGPUBuffer(_) => MemoryDomainKind::WebGPUBuffer,
@@ -115,6 +128,40 @@ impl SystemSlice {
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
         }
+    }
+}
+
+/// Shared-CPU strided buffer (M180): an `Arc<[u8]>` backing plus a
+/// [`TensorView`] over it. The payload of [`MemoryDomain::SystemView`]. Cloning
+/// it (or composing a new view, eg a flip) shares the same allocation, so a
+/// layout-preserving transform copies nothing. Two `SystemView`s alias the same
+/// bytes iff `Arc::ptr_eq(a.backing(), b.backing())` (the zero-copy witness used
+/// in tests).
+#[derive(Debug, Clone)]
+pub struct SystemView {
+    backing: Arc<[u8]>,
+    view: TensorView,
+}
+
+impl SystemView {
+    pub fn new(backing: Arc<[u8]>, view: TensorView) -> Self {
+        Self { backing, view }
+    }
+
+    /// The shared backing buffer (the whole allocation the view indexes into).
+    pub fn backing(&self) -> &Arc<[u8]> {
+        &self.backing
+    }
+
+    /// The strided view describing how to read [`backing`](Self::backing).
+    pub fn view(&self) -> &TensorView {
+        &self.view
+    }
+
+    /// Materialize the view into a fresh dense row-major buffer: the one copy a
+    /// strided chain pays, and only when a consumer needs contiguous bytes.
+    pub fn materialize(&self) -> Box<[u8]> {
+        self.view.materialize(&self.backing)
     }
 }
 

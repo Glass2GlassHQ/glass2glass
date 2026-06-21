@@ -415,6 +415,18 @@ pub enum TensorDType {
     U8,
 }
 
+impl TensorDType {
+    /// Size in bytes of one element of this dtype. Used by [`crate::tensor`]
+    /// to turn element strides into byte strides and size a materialization.
+    pub const fn size(self) -> usize {
+        match self {
+            TensorDType::F16 => 2,
+            TensorDType::F32 => 4,
+            TensorDType::I8 | TensorDType::U8 => 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TensorShape(pub Vec<u32>);
 

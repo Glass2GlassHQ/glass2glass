@@ -5,16 +5,18 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::runtime::SourceLoop;
+use g2g_core::tensor::TensorView;
 use g2g_core::{
     BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat,
+    PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, TensorDType,
 };
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
@@ -61,6 +63,20 @@ pub struct VideoTestSrc {
     /// Frames skipped in response to upstream QoS (M174). Cumulative across the
     /// run; surfaced for observability / tests.
     skipped: u64,
+    /// M180: emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
+    /// (an `Arc`-backed contiguous `[H, W, 4]` view) instead of an owned
+    /// `System` buffer, so a downstream stride transform (VideoFlip) can flip
+    /// zero-copy. Off by default; opt in with [`VideoTestSrc::with_shared_memory`].
+    /// Incompatible with the pool path (a pooled buffer isn't `Arc`-shared).
+    shared: bool,
+    /// Data pointers of the shared backings emitted (M180), in push order. Lets
+    /// a test prove a downstream element aliased the source's buffer rather than
+    /// copying it. Only populated in `shared` mode.
+    emitted_ptrs: Vec<usize>,
+    /// Contiguous bytes of each shared frame emitted (M180), in push order. A
+    /// test verifies a downstream flip against these. Only populated in `shared`
+    /// mode; test-only bookkeeping, independent of the zero-copy claim.
+    emitted_frames: Vec<Vec<u8>>,
 }
 
 impl VideoTestSrc {
@@ -75,6 +91,9 @@ impl VideoTestSrc {
             configured: false,
             pool: None,
             skipped: 0,
+            shared: false,
+            emitted_ptrs: Vec::new(),
+            emitted_frames: Vec::new(),
         }
     }
 
@@ -106,12 +125,36 @@ impl VideoTestSrc {
             configured: false,
             pool: Some(pool),
             skipped: 0,
+            shared: false,
+            emitted_ptrs: Vec::new(),
+            emitted_frames: Vec::new(),
         }
+    }
+
+    /// M180: emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
+    /// so a downstream stride transform can flip / crop them zero-copy. See the
+    /// [`shared`](Self::shared) field. Has no effect when a pool is configured.
+    pub fn with_shared_memory(mut self) -> Self {
+        self.shared = true;
+        self
     }
 
     /// Frames skipped in response to upstream QoS over the run (M174).
     pub fn skipped(&self) -> u64 {
         self.skipped
+    }
+
+    /// Data pointers of the shared backings emitted in `shared` mode (M180), in
+    /// push order. A test asserts a downstream element's received pointers equal
+    /// these to prove the frames flowed through with zero copies.
+    pub fn emitted_ptrs(&self) -> &[usize] {
+        &self.emitted_ptrs
+    }
+
+    /// Contiguous pre-transform bytes of each shared frame emitted (M180), in
+    /// push order. A test verifies a downstream flip's output against these.
+    pub fn emitted_frames(&self) -> &[Vec<u8>] {
+        &self.emitted_frames
     }
 
     fn caps(&self) -> Caps {
@@ -186,6 +229,21 @@ impl SourceLoop for VideoTestSrc {
                     }
                     fill_pattern(self.pattern, &mut buf.as_mut()[..bytes_per_frame], self.width, seq);
                     MemoryDomain::System(SystemSlice::from_pool(buf, bytes_per_frame))
+                } else if self.shared {
+                    // M180: hand the frame out as Arc-shared bytes with a
+                    // contiguous [H, W, 4] view, so a downstream flip composes
+                    // strides on this same allocation. Record the data pointer
+                    // and bytes for the zero-copy / correctness assertions.
+                    let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
+                    fill_pattern(self.pattern, &mut buf, self.width, seq);
+                    self.emitted_frames.push(buf.to_vec());
+                    let backing: Arc<[u8]> = Arc::from(buf);
+                    self.emitted_ptrs.push(backing.as_ptr() as usize);
+                    let view = TensorView::contiguous(
+                        TensorDType::U8,
+                        &[self.height, self.width, 4],
+                    );
+                    MemoryDomain::SystemView(SystemView::new(backing, view))
                 } else {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
                     fill_pattern(self.pattern, &mut buf, self.width, seq);

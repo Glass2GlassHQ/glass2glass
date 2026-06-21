@@ -31,6 +31,7 @@ pub mod segment;
 pub mod state;
 pub mod staticpool;
 pub mod tag;
+pub mod tensor;
 
 #[cfg(feature = "runtime")]
 pub mod bus;
@@ -79,8 +80,10 @@ pub use link::LinkPolicy;
 pub use memory::{
     CudaKeepAlive, D3D11KeepAlive, MemoryDomain, MemoryDomainKind, OwnedCudaBuffer,
     OwnedD3D11Texture, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer,
-    OwnedWebGPUExternalTexture, OwnedWgpuTexture, SystemSlice, WebGPUKeepAlive, WgpuKeepAlive,
+    OwnedWebGPUExternalTexture, OwnedWgpuTexture, SystemSlice, SystemView, WebGPUKeepAlive,
+    WgpuKeepAlive,
 };
+pub use tensor::{TensorView, MAX_TENSOR_RANK};
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};

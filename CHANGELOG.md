@@ -5,6 +5,42 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M180: strided `TensorView` substrate + zero-copy `VideoFlip`
+
+First step of the tensor-as-substrate direction: a strided tensor *view* so a
+layout-preserving transform (flip, transpose, crop) is expressed as a new view
+over the *same* bytes instead of a copy. The motivating win, proven by code: a
+`rotate-180` that previously allocated and gathered every pixel now moves zero
+bytes.
+
+Core (`g2g-core`):
+- `tensor::TensorView { dtype, shape, strides, offset }`: NumPy-style *byte*
+  strides + byte offset over a `[u8]` backing, fixed-rank (`MAX_TENSOR_RANK = 6`)
+  so it is `Copy` and heap-free on the `no_std` baseline. `contiguous`,
+  `reversed_axis` (a flip = negated stride + far-end offset), `transposed`
+  (a transpose = swapped axes), `is_contiguous`, and `materialize` (the one copy
+  a strided chain pays, only when a consumer needs dense bytes). `TensorDType::size`.
+- `MemoryDomain::SystemView(SystemView)`: shared-CPU strided buffer, an
+  `Arc<[u8]>` backing plus a `TensorView`. Additive variant (the GPU domains
+  already carry per-plane stride/pitch; this is the system-memory analog), so no
+  existing single-pattern `let MemoryDomain::System(..)` consumer changes.
+
+Plugins (`g2g-plugins`):
+- `VideoFlip`: packed RGBA/BGRA on a `SystemView` input composes strides on the
+  same `Arc` and emits a `SystemView`, copying nothing. Owned `System` buffers
+  and planar 4:2:0 keep the existing copy path (no regression; subsampled planes
+  aren't a single strided tensor).
+- `VideoTestSrc::with_shared_memory()`: opt-in `SystemView` emission (off by
+  default, so existing pipelines are unchanged).
+- `FakeSink` is stride-aware: records each `SystemView` backing pointer and
+  materializes the latest frame, for the zero-copy witness and correctness check.
+
+Verified: `tensor` unit tests (strides, flip/transpose/rotate math, RGBA pixel
+integrity, `Arc` aliasing) and `m180_zerocopy_flip` end-to-end (the source's
+buffer pointers reach the sink *through* the flip unchanged = zero copies, and
+the materialized image is a correct rotate-180). Full `g2g-core` (216) and
+default `g2g-plugins` suites pass; Linux feature-gated elements still compile.
+
 ### M179: element-granular logging framework (`GST_DEBUG` analog) + instance names
 
 A hand-rolled `no_std` logging layer in `g2g-core` (`g2g-core::log`), pulling no

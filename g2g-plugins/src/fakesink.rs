@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
 };
 
 #[cfg(feature = "std")]
@@ -46,6 +46,16 @@ pub struct FakeSink {
     /// don't stamp) are skipped silently. Test code can pull a
     /// snapshot via [`FakeSink::latency_snapshot`] and assert bounds.
     latency: LatencyHistogram,
+    /// M180: data pointer of each received [`MemoryDomain::SystemView`] frame's
+    /// backing, in arrival order. A test compares these to the source's emitted
+    /// pointers to prove the frames crossed the pipeline (through a flip) with
+    /// zero copies. `System` / GPU frames don't contribute. This is what makes
+    /// the sink "stride-aware": it inspects the shared-view domain rather than
+    /// assuming a contiguous buffer.
+    view_backing_ptrs: Vec<usize>,
+    /// Materialized (dense row-major) bytes of the most recent `SystemView`
+    /// frame, for correctness checks on a strided transform's output.
+    last_view_bytes: Option<Vec<u8>>,
 }
 
 impl FakeSink {
@@ -91,6 +101,19 @@ impl FakeSink {
     /// the source doesn't stamp, or no frames have arrived yet).
     pub fn latency_snapshot(&self) -> LatencySnapshot {
         self.latency.snapshot()
+    }
+
+    /// M180: data pointers of received [`MemoryDomain::SystemView`] frames, in
+    /// arrival order. Equal to the source's emitted pointers iff every frame
+    /// crossed the pipeline with zero copies.
+    pub fn view_backing_ptrs(&self) -> &[usize] {
+        &self.view_backing_ptrs
+    }
+
+    /// M180: materialized dense bytes of the most recent `SystemView` frame, or
+    /// `None` if no shared-view frame has arrived.
+    pub fn last_view_bytes(&self) -> Option<&[u8]> {
+        self.last_view_bytes.as_deref()
     }
 }
 
@@ -147,6 +170,14 @@ impl AsyncElement for FakeSink {
                     }
                     self.last_sequence = Some(f.sequence);
                     self.received += 1;
+                    // M180: stride-aware path. A shared-view frame is recorded
+                    // by its backing pointer (the zero-copy witness) and
+                    // materialized for correctness checks; a contiguous frame
+                    // needs neither.
+                    if let MemoryDomain::SystemView(sv) = &f.domain {
+                        self.view_backing_ptrs.push(sv.backing().as_ptr() as usize);
+                        self.last_view_bytes = Some(sv.materialize().into_vec());
+                    }
                     // Record glass-to-glass latency if the source stamped
                     // arrival_ns. Sub-monotonic stamps (zero, or future
                     // values) are skipped silently — they're either

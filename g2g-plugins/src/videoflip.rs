@@ -16,7 +16,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{SystemSlice, SystemView};
+use g2g_core::tensor::TensorView;
 use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
@@ -180,22 +181,8 @@ impl AsyncElement for VideoFlip {
                         Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
                         None => return Err(G2gError::NotConfigured),
                     };
-                    let MemoryDomain::System(slice) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    let src = slice.as_slice();
-                    if src.len() < frame_byte_size(format, in_w, in_h) {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let flipped = flip(
-                        src,
-                        format,
-                        (in_w as usize, in_h as usize),
-                        self.method,
-                    );
 
                     let (out_w, out_h) = self.output_dims(in_w, in_h);
-                    g2g_trace!(self, "flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
                     let new_caps = Caps::RawVideo {
                         format,
                         width: Dim::Fixed(out_w),
@@ -206,11 +193,58 @@ impl AsyncElement for VideoFlip {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                         self.last_caps = Some(new_caps);
                     }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
+
+                    // Packed RGBA/BGRA already in shared CPU memory is the
+                    // zero-copy case: a flip is a pure coordinate remap, so we
+                    // compose strides on the *same* `Arc` backing and copy
+                    // nothing. Planar (4:2:0) is excluded because its subsampled
+                    // planes aren't one strided tensor (see tensor.rs), and an
+                    // owned `System` buffer has no shared backing to alias, so
+                    // both fall through to the copy path below.
+                    let packed =
+                        matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8);
+                    let out_frame = match &frame.domain {
+                        MemoryDomain::SystemView(sv) if packed => {
+                            let out_view = flip_view(*sv.view(), self.method);
+                            g2g_trace!(self, "zero-copy flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
+                            Frame {
+                                domain: MemoryDomain::SystemView(SystemView::new(
+                                    sv.backing().clone(),
+                                    out_view,
+                                )),
+                                timing: frame.timing,
+                                sequence: self.emitted,
+                                meta: Default::default(),
+                            }
+                        }
+                        _ => {
+                            // Copy path: owned `System` bytes, or a non-packed
+                            // `SystemView` materialized to contiguous first.
+                            let flipped = match &frame.domain {
+                                MemoryDomain::System(slice) => {
+                                    let src = slice.as_slice();
+                                    if src.len() < frame_byte_size(format, in_w, in_h) {
+                                        return Err(G2gError::CapsMismatch);
+                                    }
+                                    flip(src, format, (in_w as usize, in_h as usize), self.method)
+                                }
+                                MemoryDomain::SystemView(sv) => {
+                                    let src = sv.materialize();
+                                    if src.len() < frame_byte_size(format, in_w, in_h) {
+                                        return Err(G2gError::CapsMismatch);
+                                    }
+                                    flip(&src, format, (in_w as usize, in_h as usize), self.method)
+                                }
+                                _ => return Err(G2gError::UnsupportedDomain),
+                            };
+                            g2g_trace!(self, "flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
+                            Frame {
+                                domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
+                                timing: frame.timing,
+                                sequence: self.emitted,
+                                meta: Default::default(),
+                            }
+                        }
                     };
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
@@ -334,6 +368,21 @@ fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
         RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
         RawVideoFormat::Yuyv => w * h * 2,
+    }
+}
+
+/// The zero-copy analog of [`flip`] for a packed `[H, W, C]` view: express the
+/// method as stride manipulations over the same bytes (M180). A mirror reverses
+/// one spatial axis; a 90-degree rotation transposes the H/W axes then reverses
+/// one. The channel axis (2) is never touched, so each pixel's bytes stay
+/// intact. Matches [`src_coord`]'s mapping exactly, verified by the m180 test.
+fn flip_view(view: TensorView, method: FlipMethod) -> TensorView {
+    match method {
+        FlipMethod::HorizontalMirror => view.reversed_axis(1),
+        FlipMethod::VerticalMirror => view.reversed_axis(0),
+        FlipMethod::Rotate180 => view.reversed_axis(0).reversed_axis(1),
+        FlipMethod::Rotate90Cw => view.transposed(0, 1).reversed_axis(1),
+        FlipMethod::Rotate90Ccw => view.transposed(0, 1).reversed_axis(0),
     }
 }
 
