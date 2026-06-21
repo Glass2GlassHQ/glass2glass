@@ -27,7 +27,7 @@ See [DESIGN.md](DESIGN.md) for the architecture specification.
 | Crate | Role | Profile |
 | :--- | :--- | :--- |
 | `g2g-core` | Traits, `Frame`/`PipelinePacket`, caps algebra, clock, runner. | `no_std + alloc` |
-| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, V4L2 capture, ffmpeg, VAAPI, MF, Wayland, KMS, WASAPI, compositor, Embassy, web). | mixed |
+| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 capture, ffmpeg, VAAPI, MF, Wayland, KMS, WASAPI, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
 | `g2g-enterprise` | Multi-stream tensor batcher. | `std` |
@@ -57,13 +57,31 @@ OS-coupled elements live behind cargo features:
 | `CudaDownload`, `CudaGlSink` | `cuda`, `cuda-gl` | Linux + NVIDIA driver (libcuda) + EGL + GL |
 | `UdpSink` + RTP packetizer | `udp-egress` | — |
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
+| `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
+| `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
+| `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
+| `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
+| `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
+| `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
+| `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | — |
+| `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WgpuPreprocess` | `wgpu` (in `g2g-ml`) | wgpu |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
+
+The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
+`matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux`,
+`fmp4demux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
+`opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
+transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
+`videobalance` / `videobox` / `alpha`, `audioconvert` / `audioresample` /
+`audiomixer` / `volume` / `audiopanorama`), the `compositor`, the tag system,
+and the `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the
+pure `no_std + alloc` default build (no feature flag).
 
 ## Sample pipelines
 
@@ -138,6 +156,62 @@ let sink  = Mp4Sink::open("out.mp4")?;
 
 run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?;
 ```
+
+### MPEG-TS file → demux → H.264 parse → decode → Wayland
+
+The container demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`,
+`fmp4demux`) accept a `Caps::ByteStream` and split out elementary streams.
+
+```rust
+let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+let demux = TsDemux::new().with_stream(TsStream::H264);   // PAT/PMT/PES -> Annex-B
+let parse = H264Parse::new();
+let dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let sink  = WaylandSink::new();
+
+run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
+                 &clock, LatencyProfile::Live).await?;
+```
+
+Features: `ffmpeg wayland-sink`.
+
+### Adaptive streaming: HLS / DASH → decode → display
+
+```rust
+let src   = HlsSrc::new("https://example.com/master.m3u8");  // or DashSrc::new(mpd_url)
+let demux = TsDemux::new().with_stream(TsStream::H264);
+let parse = H264Parse::new();
+let dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let sink  = WaylandSink::new();
+
+run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
+                 &clock, LatencyProfile::Live).await?;
+```
+
+Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
+follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
+`DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs.
+
+### `gst-launch` text pipeline
+
+`parse_launch` builds a runnable `Graph` from a GStreamer-style string against
+the `default_registry`, including caps filters, `tee` branching, and muxer
+fan-in. `Registry::inspect(name)` is the `gst-inspect` analog.
+
+```rust
+let graph = parse_launch(
+    "videotestsrc num-buffers=90 pattern=ball ! video/x-raw,format=nv12 \
+     ! videoflip method=rotate-180 ! matroskamux ! filesink location=out.mkv",
+    &default_registry(),
+)?;
+run_graph(graph, &clock, LatencyProfile::Live).await?;
+```
+
+Registered launch elements include `videotestsrc` / `audiotestsrc`, the SW
+transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`)
+and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `funnel`, `audiomixer`),
+`filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
+elements still need explicit Rust construction.
 
 ### Camera → encode → RTP egress over UDP
 

@@ -486,7 +486,7 @@
     <div class="hero-content">
         <div class="hero-badge">
             <div class="badge-dot"></div>
-            Pre-release &middot; <span>0.1.0 &middot; 54 milestones in</span>
+            Pre-release &middot; <span>0.1.0 &middot; 167 milestones in</span>
         </div>
         <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
         <p class="hero-sub">
@@ -521,8 +521,8 @@
         </div>
 
         <div class="stats-row">
-            <div class="stat-cell"><h3>96</h3><p>Milestones</p></div>
-            <div class="stat-cell"><h3>50+</h3><p>Elements</p></div>
+            <div class="stat-cell"><h3>167</h3><p>Milestones</p></div>
+            <div class="stat-cell"><h3>120+</h3><p>Elements</p></div>
             <div class="stat-cell"><h3>5</h3><p>Target Profiles</p></div>
             <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
         </div>
@@ -596,7 +596,7 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-plugins</div>
                 <div class="crate-tag">mixed</div>
-                <p>The element library: RTSP, RTP, H.264 parser/AVCC/Annex-B, ffmpeg / VAAPI / MF decoders, Wayland / KMS / D3D11 sinks, WASAPI, fMP4, file I/O, Embassy bindings, web elements. LGPL v2.1+.</p>
+                <p>The element library: RTSP / RTP / HTTP / HLS / DASH / RTMP ingest, V4L2 capture, ffmpeg (H.264/265, VP8/9, AV1) / VAAPI / MF decoders, AV1 / VP8/9 / MJPEG encoders, container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), Wayland / KMS / D3D11 / wgpu sinks, WASAPI, compositor, the <code>gst-launch</code> DSL, Embassy, web. LGPL v2.1+.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
@@ -635,14 +635,14 @@
         <div class="features-grid">
             <div class="feature-card">
                 <span class="f-icon">&#127909;</span>
-                <h3>Receive: RTSP / RTP / V4L2 / WebRTC / file</h3>
-                <p><code>RtspSrc</code> over <code>retina</code> (DESCRIBE + SETUP probe), <code>UdpSrc</code> raw-RTP ingest, <code>V4l2Src</code> camera capture, <code>WebRtcSrc</code> / <code>WebSocketSrc</code> for browsers, <code>FileSrc</code>, <code>Mp4Src</code> fMP4 demuxer.</p>
+                <h3>Receive: RTSP / RTP / HTTP / HLS / DASH / RTMP / V4L2</h3>
+                <p><code>RtspSrc</code> over <code>retina</code>, <code>UdpSrc</code> raw-RTP ingest, <code>HttpSrc</code> byte streams, <code>HlsSrc</code> / <code>DashSrc</code> adaptive streaming (live + AES / SAMPLE-AES), <code>RtmpSrc</code> publisher ingest, <code>V4l2Src</code> capture, <code>WebRtcSrc</code> / <code>WebSocketSrc</code>, <code>FileSrc</code>, <code>Mp4Src</code>.</p>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
-                <h3>Decode: ffmpeg / VAAPI / MF / WebCodecs</h3>
-                <p><code>FfmpegH264Dec</code> with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code> on Windows; <code>VaapiH264Dec</code> via cros-codecs; <code>WebCodecsDecode</code> in browser.</p>
+                <h3>Decode + encode: ffmpeg / VAAPI / MF / WebCodecs</h3>
+                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code>, <code>VaapiH264Dec</code>, <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
@@ -672,8 +672,38 @@
             <div class="feature-card">
                 <span class="f-icon">&#127916;</span>
                 <h3>Compositor: pixel mixer</h3>
-                <p><code>Compositor</code> overlays N raw RGBA8 inputs onto one canvas (position, z-order, per-pad alpha) for picture-in-picture, camera grids, and sub-window UIs &mdash; input-0-driven cadence, CPU / <code>no_std</code> baseline.</p>
+                <p><code>Compositor</code> overlays N raw RGBA8 inputs onto one canvas (position, z-order, per-pad alpha, bilinear scale, background colour) for picture-in-picture, camera grids, and sub-window UIs &mdash; input-0-driven cadence, CPU / <code>no_std</code> baseline.</p>
                 <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128230;</span>
+                <h3>Containers: MP4 / TS / MKV / FLV / Ogg</h3>
+                <p>Pure-Rust demux + mux: <code>mp4src</code> / <code>mp4sink</code> (fMP4), <code>tsdemux</code> / <code>mpegtsmux</code>, <code>matroskademux</code> / <code>matroskamux</code> (WebM), <code>flvdemux</code> / <code>flvmux</code>, <code>oggdemux</code>, <code>fmp4demux</code> (CMAF) &mdash; on the typed <code>Caps::ByteStream</code> link with <code>typefind</code> sniffing and a tag system on the bus.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128250;</span>
+                <h3>Adaptive streaming: HLS / DASH / RTMP</h3>
+                <p><code>HttpSrc</code> byte-stream fetch under <code>HlsSrc</code> (TS + fMP4/CMAF, live reload, AES-128 + SAMPLE-AES decrypt) and <code>DashSrc</code> (<code>SegmentTemplate</code> / <code>SegmentTimeline</code>, <code>$Number$</code>/<code>$Time$</code>, dynamic MPDs). <code>RtmpSrc</code> accepts an OBS / ffmpeg publisher over a sans-IO RTMP session.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128209;</span>
+                <h3>Parsers + transforms</h3>
+                <p>Bitstream parsers <code>h264parse</code> / <code>h265parse</code> / <code>aacparse</code> / <code>opusparse</code> / <code>vp8parse</code> / <code>vp9parse</code> / <code>av1parse</code> feed negotiation; SW transforms <code>videoscale</code> / <code>videorate</code> / <code>videocrop</code> / <code>videoflip</code> / <code>videobalance</code> / <code>videobox</code> / <code>alpha</code> and <code>audioconvert</code> / <code>audioresample</code> / <code>audiomixer</code> / <code>volume</code>.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128221;</span>
+                <h3>gst-launch DSL + introspection</h3>
+                <p><code>parse_launch("a key=v ! caps ! tee ! ...")</code> builds a runnable <code>Graph</code> from text against a <code>Registry</code>: properties (<code>set_property</code> / <code>get_property</code>), caps-filter grammar, <code>tee</code> branching, and muxer fan-in. <code>inspect(name)</code> is the <code>gst-inspect</code> analog.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127919;</span>
+                <h3>Per-frame metadata + analytics overlay</h3>
+                <p>Typed <code>FrameMeta</code> / <code>AnalyticsMeta</code> relation graph (detection / classification / tracking) survives tee fan-out copy-on-write. <code>DetectionPostprocess</code> (YOLOv8 + NMS) produces it; <code>AnalyticsOverlay</code> (CPU) and <code>VelloAnalyticsOverlay</code> &rarr; <code>WgpuSink</code> (GPU, no readback) draw it.</p>
+                <span class="feature-tag tag-ml">ML</span>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#127932;</span>
@@ -914,9 +944,16 @@ wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async
                 <tr><td>M90-92</td><td>V4L2 capture, UDP/RTP ingest, uridecodebin URI front door</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
                 <tr><td>M93</td><td>Compositor: software RGBA8 pixel mixer (PiP / grids)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
                 <tr><td>M94-96</td><td>RTP receive resilience: jitter buffer, RTCP, NACK retransmission</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M97-103</td><td>Per-frame metadata (FrameMeta / AnalyticsMeta), detection postproc, CPU + Vello GPU analytics overlay, WgpuSink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M104-107</td><td>Property system + introspection + the <code>gst-launch</code> text DSL (parse_launch / gst-inspect / registry)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M108-122</td><td>Containers: MPEG-TS, Matroska/WebM, FLV, Ogg demux + mux; multi-codec ffmpeg decode; caps-filter / tee / funnel DSL</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M123-132</td><td>Transform + test-pattern coverage (videobalance / videobox / alpha / volume / audiomixer); native caps_constraint</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M133-145</td><td>Codec parsers (opus / vp8 / vp9 / av1) + the tag system across all containers</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M146-154</td><td>Seek depth (Mp4Src seek, accurate clip), MP4 tags, AV1 / VP8-9 / MJPEG encode</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>M155-167</td><td>Adaptive streaming: HttpSrc, HLS (TS + CMAF, live, AES / SAMPLE-AES), DASH (live), RTMP ingest</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
                 <tr><td>C3</td><td>CUDA zero-copy: NVDEC &rarr; CudaGlSink (Linux+NVIDIA)</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
                 <tr><td>M48</td><td>Fixed DMA-ring capture source for Embassy</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
-                <tr><td>&mdash;</td><td>RTP RTX + FEC, RTSP ANNOUNCE/RECORD (Wowza-style ingest), HLS/DASH</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
+                <tr><td>&mdash;</td><td>RTP RTX + FEC, RTMP/SRT egress, RTSP ANNOUNCE/RECORD, macOS / Android platforms</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
             </tbody>
         </table>
     </div>
