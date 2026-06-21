@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M187: audio sample-rate "any" + caps-driven audioresample
+
+`Caps::Audio` gained an "any rate" wildcard so `audioresample` can be caps-driven
+like videoscale/videoconvert: `audioresample ! audio/x-raw,rate=16000` takes its
+output rate from a downstream capsfilter.
+
+- `ANY_SAMPLE_RATE` (0) is the sentinel for an unspecified raw-PCM rate (0 Hz is
+  never real). Chosen over a `sample_rate` *type* change because that field is a
+  bare `u32` read across ~50 files (many feature-gated audio elements that can't
+  be built here), the sentinel leaves every concrete-rate site untouched.
+  `Caps::intersect` treats it as a wildcard (`any ∩ x = x`) and `fixate` rejects
+  it, but only for raw PCM: compressed audio (AAC/Opus) keeps `0` as its existing
+  "unknown until parsed" nominal value (strict equality, still fixable), so the
+  demux/parse paths are unchanged.
+- `audioresample` with `samplerate` unset (auto, the registry default) advertises
+  a preference-ordered output `[passthrough input-rate, any]`; `configure_output`
+  records the negotiated rate and `resample` retargets to it. The property still
+  wins; a bare audioresample is a passthrough.
+
+Verified: `m187_caps_driven_resample` (capsfilter-driven 48k->16k, incl. a
+format-less rate-only capsfilter; bare passthrough; property still works); the
+PCM gating keeps `m109` (tsdemux AAC select) and the audio suite (m25/m84/m177)
+green. Core (216) + plugins (134 blocks) pass; opus/alsa/pulse builds + no_std clean.
+
 ### M186: caps-driven videoconvert (format from the solve)
 
 Extends M185's `configure_output` mechanism to `videoconvert`: with no `format`

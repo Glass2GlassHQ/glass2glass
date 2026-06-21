@@ -67,12 +67,13 @@ edits (the typed core is unaffected, only the string<->enum boundary).
     (format) with unset props take their target from a downstream capsfilter
     (`videoscale ! video/x-raw,width=160`, `videoconvert ! video/x-raw,format=NV12`);
     props still override; a bare instance is a passthrough. REMAINING:
-    - **`audioresample` (rate)** is blocked on `Caps::Audio` carrying a rate
-      *range* (its `sample_rate` is a bare `u32`; rates aren't a small enumerable
-      set like the 5 pixel formats, so the M184 CapsSet-expansion trick doesn't
-      apply). Needs an audio sample-rate range type, a caps-type change rippling
-      through every audio element (audioconvert, wavsink, opus/aac, capsfilter
-      audio parse, audiomixer, ...). Its own milestone.
+    - **`audioresample` (rate) DONE, M187.** `Caps::Audio` gained an
+      `ANY_SAMPLE_RATE` (0) wildcard (a sentinel, not a type change, to avoid
+      rippling the bare-`u32` `sample_rate` across ~50 audio files). `intersect`
+      wildcards it and `fixate` rejects it for raw PCM only; compressed audio
+      keeps `0` as its "unknown until parsed" nominal value. `audioresample`
+      (auto by default) takes its rate from a downstream capsfilter
+      (`audioresample ! audio/x-raw,rate=16000`); property still overrides.
     - **Stacked auto transforms** (`videoconvert ! videoscale ! caps`, two
       auto transforms before one far capsfilter) don't back-propagate a format /
       geometry pin through a passthrough transform: `DerivedOutput` is forward

@@ -24,7 +24,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    PropKind, PropValue, PropertySpec, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{read_sample, sample_bytes, write_sample, PCM_FORMATS};
@@ -43,10 +43,18 @@ fn floor_isize(x: f64) -> isize {
 
 #[derive(Debug)]
 pub struct AudioResample {
+    /// Target output rate from the `samplerate` property. `0` means "auto": take
+    /// the output rate from the negotiated caps (a downstream capsfilter), the
+    /// gst caps-driven idiom (M187).
     target_rate: u32,
     /// Input format/channels/rate of the configured stream, updated by a
     /// mid-stream `CapsChanged`.
     input: Option<(AudioFormat, u8, u32)>,
+    /// Output rate resolved from the negotiated output caps (M187), set by
+    /// `configure_output`. Used in auto mode; `None` until then so `process`
+    /// falls back to the property and runners that don't deliver output caps
+    /// keep the property-driven behavior.
+    resolved: Option<u32>,
     /// Per-channel last input sample carried from the previous buffer, so an
     /// output sample whose read position falls before the current buffer's
     /// first sample interpolates against the real predecessor. `None` until the
@@ -66,6 +74,23 @@ impl AudioResample {
         Self {
             target_rate,
             input: None,
+            resolved: None,
+            prev: None,
+            phase: 0.0,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
+    /// Caps-driven (M187): take the output rate from the negotiated caps (a
+    /// downstream capsfilter). With no downstream constraint it defaults to
+    /// passthrough (no resampling).
+    pub fn auto() -> Self {
+        Self {
+            target_rate: 0,
+            input: None,
+            resolved: None,
             prev: None,
             phase: 0.0,
             configured: false,
@@ -76,6 +101,16 @@ impl AudioResample {
 
     pub fn target_rate(&self) -> u32 {
         self.target_rate
+    }
+
+    /// The effective output rate: the property when set, else the caps-resolved
+    /// rate (auto). `None` for an unconfigured auto instance.
+    fn out_rate(&self) -> Option<u32> {
+        if self.target_rate != 0 {
+            Some(self.target_rate)
+        } else {
+            self.resolved
+        }
     }
 
     /// Validate a PCM caps as a resamplable input, returning its
@@ -118,15 +153,25 @@ impl AsyncElement for AudioResample {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target_rate = self.target_rate;
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::Audio {
-                format,
-                channels,
-                sample_rate: _,
-            } if PCM_FORMATS.contains(format) && *channels > 0 => CapsSet::one(Caps::Audio {
-                format: *format,
-                channels: *channels,
-                sample_rate: target_rate,
-            }),
+            Caps::Audio { format, channels, sample_rate }
+                if PCM_FORMATS.contains(format) && *channels > 0 =>
+            {
+                let mk = |rate| Caps::Audio {
+                    format: *format,
+                    channels: *channels,
+                    sample_rate: rate,
+                };
+                if target_rate != 0 {
+                    // Property-driven: the fixed target rate.
+                    CapsSet::one(mk(target_rate))
+                } else {
+                    // Caps-driven (auto): default to passthrough (the input
+                    // rate, no resampling), but advertise "any rate" so a
+                    // downstream capsfilter pins the target. Passthrough is the
+                    // preferred (first) alternative.
+                    CapsSet::from_alternatives(alloc::vec![mk(*sample_rate), mk(ANY_SAMPLE_RATE)])
+                }
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -137,6 +182,20 @@ impl AsyncElement for AudioResample {
         self.reset_state();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// M187: take the output rate from the negotiated output caps when the
+    /// `samplerate` property is unset (caps-driven). The rate is already
+    /// fixated, so it is concrete (non-zero).
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        let Caps::Audio { sample_rate, .. } = output_caps else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if *sample_rate == ANY_SAMPLE_RATE {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.resolved = Some(*sample_rate);
+        Ok(())
     }
 
     fn process<'a>(
@@ -155,12 +214,15 @@ impl AsyncElement for AudioResample {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let resampled = self.resample(slice.as_slice(), in_format, in_channels, in_rate)?;
+                    // Effective output rate: property, or caps-resolved (auto).
+                    let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;
+                    let resampled =
+                        self.resample(slice.as_slice(), in_format, in_channels, in_rate, out_rate)?;
 
                     let new_caps = Caps::Audio {
                         format: in_format,
                         channels: in_channels,
-                        sample_rate: self.target_rate,
+                        sample_rate: out_rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
@@ -222,7 +284,7 @@ impl AsyncElement for AudioResample {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "samplerate" => Some(PropValue::Uint(self.target_rate as u64)),
+            "samplerate" => self.out_rate().map(|r| PropValue::Uint(r as u64)),
             _ => None,
         }
     }
@@ -233,7 +295,7 @@ static AUDIORESAMPLE_PROPS: &[PropertySpec] =
     &[PropertySpec::new("samplerate", PropKind::Uint, "output samples per second")];
 
 impl AudioResample {
-    /// Resample one interleaved PCM buffer from `in_rate` to `self.target_rate`,
+    /// Resample one interleaved PCM buffer from `in_rate` to `out_rate`,
     /// advancing the per-channel carry + fractional phase. At rate 1:1 the
     /// output equals the input (phase stays integral, interpolation is exact).
     fn resample(
@@ -242,6 +304,7 @@ impl AudioResample {
         in_format: AudioFormat,
         in_channels: u8,
         in_rate: u32,
+        out_rate: u32,
     ) -> Result<Box<[u8]>, G2gError> {
         let bytes = sample_bytes(in_format);
         let ch = in_channels as usize;
@@ -265,7 +328,7 @@ impl AudioResample {
         }
 
         // input samples advanced per output sample.
-        let step = in_rate as f64 / self.target_rate as f64;
+        let step = in_rate as f64 / out_rate as f64;
         // `phase` is the read position relative to this buffer's sample 0; it is
         // carried across calls (typically negative, pointing into `prev`).
         let mut rel = self.phase;
@@ -374,7 +437,7 @@ mod tests {
         let mut r = AudioResample::new(48_000);
         r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
         let src = interleave_f32(&[&[0.0, 0.25, 0.5, 0.75]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000).unwrap();
+        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 48_000).unwrap();
         let got = f32_samples(&out);
         // 1:1 produces n-1 outputs from this buffer (the last sample is carried
         // to interpolate with the next buffer) and reproduces them exactly.
@@ -388,7 +451,7 @@ mod tests {
         // ramp 0,1,2,3; upsample 2x -> step 0.5 -> 0,0.5,1,1.5,2,2.5 (stops
         // before the last sample, which is carried).
         let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000).unwrap();
+        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap();
         let got = f32_samples(&out);
         assert_eq!(got.len(), 6, "2x upsample of 4 samples yields ~2*(n-1) outputs");
         let want = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5];
@@ -404,7 +467,7 @@ mod tests {
         // step 2.0 over indices 0..7 -> reads at 0,2,4,6 (the loop runs while
         // rel < n-1 = 7, so rel=6 still interpolates 6..7).
         let src = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]);
-        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000).unwrap();
+        let out = r.resample(&src, AudioFormat::PcmF32Le, 1, 48_000, 24_000).unwrap();
         let got = f32_samples(&out);
         assert_eq!(got, &[0.0, 2.0, 4.0, 6.0]);
     }
@@ -418,8 +481,8 @@ mod tests {
         r.configure_pipeline(&audio(AudioFormat::PcmF32Le, 1, 48_000)).unwrap();
         let b1 = interleave_f32(&[&[0.0, 1.0, 2.0, 3.0]]);
         let b2 = interleave_f32(&[&[4.0, 5.0, 6.0, 7.0]]);
-        let o1 = f32_samples(&r.resample(&b1, AudioFormat::PcmF32Le, 1, 48_000).unwrap());
-        let o2 = f32_samples(&r.resample(&b2, AudioFormat::PcmF32Le, 1, 48_000).unwrap());
+        let o1 = f32_samples(&r.resample(&b1, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap());
+        let o2 = f32_samples(&r.resample(&b2, AudioFormat::PcmF32Le, 1, 48_000, 96_000).unwrap());
         assert_eq!(o1, &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5]);
         // buffer 2 resumes at read position 3.0 (carried): 3,3.5,4,4.5,5,5.5,6.5?
         // grid: 3.0,3.5,4.0,4.5,5.0,5.5,6.0,6.5 stopping before last (index 7).
@@ -433,7 +496,7 @@ mod tests {
         r.configure_pipeline(&audio(AudioFormat::PcmS16Le, 2, 44_100)).unwrap();
         // 3 bytes is not a whole s16 stereo frame (4 bytes).
         assert_eq!(
-            r.resample(&[0, 0, 0], AudioFormat::PcmS16Le, 2, 44_100),
+            r.resample(&[0, 0, 0], AudioFormat::PcmS16Le, 2, 44_100, 48_000),
             Err(G2gError::CapsMismatch)
         );
     }

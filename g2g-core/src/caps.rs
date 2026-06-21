@@ -2,6 +2,14 @@ use alloc::vec::Vec;
 
 use crate::error::G2gError;
 
+/// Sentinel sample rate meaning "any / unspecified" in [`Caps::Audio`] (M187).
+/// `Caps::Audio.sample_rate` is a bare `u32` (not a ranged [`Dim`]); 0 Hz is
+/// never a real rate, so it serves as the wildcard a caps-driven element
+/// (`audioresample`) advertises so a downstream capsfilter can pin the rate.
+/// `intersect` treats it as a wildcard and `fixate` rejects it (like
+/// [`Dim::Any`]).
+pub const ANY_SAMPLE_RATE: u32 = 0;
+
 /// Caps describes one fixated (or partially-narrowed) link.
 ///
 /// Video is split into [`Caps::CompressedVideo`] and [`Caps::RawVideo`]
@@ -89,7 +97,21 @@ impl Caps {
             (
                 Caps::Audio { format: fa, channels: ca, sample_rate: sa },
                 Caps::Audio { format: fb, channels: cb, sample_rate: sb },
-            ) if fa == fb && ca == cb && sa == sb => Ok(self.clone()),
+            ) if fa == fb && ca == cb => {
+                // The "any rate" wildcard (M187) is a raw-PCM concept: a
+                // caps-driven resampler leaves its output rate open. Compressed
+                // audio (AAC/Opus) uses `sample_rate: 0` as "unknown until
+                // parsed" and keeps strict equality, unchanged.
+                let rate = if is_pcm(*fa) {
+                    intersect_sample_rate(*sa, *sb)
+                } else {
+                    (sa == sb).then_some(*sa)
+                };
+                match rate {
+                    Some(sample_rate) => Ok(Caps::Audio { format: *fa, channels: *ca, sample_rate }),
+                    None => Err(G2gError::CapsMismatch),
+                }
+            }
             (
                 Caps::Tensor { dtype: da, shape: sha, layout: la },
                 Caps::Tensor { dtype: db, shape: shb, layout: lb },
@@ -104,6 +126,11 @@ impl Caps {
     /// True when every ranged field is `Fixed`. Scalar-only variants are
     /// always fixed.
     pub fn is_fixed(&self) -> bool {
+        if let Caps::Audio { format, sample_rate, .. } = self {
+            // Only raw PCM uses the "any rate" wildcard (M187); compressed audio
+            // keeps `0` as a fixed (if nominal) value.
+            return !(is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE);
+        }
         match self.dims() {
             Some((width, height, framerate)) => {
                 width.is_fixed() && height.is_fixed() && framerate.is_fixed()
@@ -135,6 +162,13 @@ impl Caps {
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
                 framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
             }),
+            // A raw-PCM "any" sample rate carries no value to fixate against
+            // (M187); compressed audio's nominal `0` fixates as-is.
+            Caps::Audio { format, sample_rate, .. }
+                if is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE =>
+            {
+                Err(G2gError::CapsMismatch)
+            }
             Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => Ok(self.clone()),
         }
     }
@@ -242,6 +276,23 @@ impl Rate {
             (u32::MIN, u32::MAX) => Rate::Any, // full span is unconstrained
             (lo, hi) => Rate::Range { min_q16: lo, max_q16: hi },
         }
+    }
+}
+
+/// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
+/// and the resampler apply to.
+fn is_pcm(f: AudioFormat) -> bool {
+    matches!(f, AudioFormat::PcmS16Le | AudioFormat::PcmF32Le)
+}
+
+/// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is
+/// a wildcard (M187): `any ∩ x = x`, equal rates agree, distinct concrete rates
+/// are disjoint (`None`).
+fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
+    match (a, b) {
+        (ANY_SAMPLE_RATE, x) | (x, ANY_SAMPLE_RATE) => Some(x),
+        (x, y) if x == y => Some(x),
+        _ => None,
     }
 }
 

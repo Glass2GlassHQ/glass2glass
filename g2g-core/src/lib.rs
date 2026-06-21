@@ -50,7 +50,7 @@ pub mod slot;
 
 pub use caps::{
     AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout,
-    TensorShape, VideoCodec, RawVideoFormat,
+    TensorShape, VideoCodec, RawVideoFormat, ANY_SAMPLE_RATE,
 };
 pub use clock::{
     elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock,

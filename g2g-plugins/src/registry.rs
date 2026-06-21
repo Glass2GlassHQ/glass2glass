@@ -174,7 +174,9 @@ pub fn default_registry() -> Registry {
         Box::new(AudioConvert::new(AudioFormat::PcmS16Le, 2))
     }));
     reg.register_launch(LaunchFactory::of::<AudioResample>("audioresample", || {
-        Box::new(AudioResample::new(48_000))
+        // Caps-driven by default (M187): a bare `audioresample` takes its output
+        // rate from a downstream capsfilter, or passes through.
+        Box::new(AudioResample::auto())
     }));
     reg.register_launch(LaunchFactory::of::<Volume>("volume", || Box::new(Volume::new())));
     reg.register_launch(LaunchFactory::of::<AudioPanorama>("audiopanorama", || {
