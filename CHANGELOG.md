@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M192: gst-canonical-name element aliases
+
+Pasted `gst-launch` lines that use GStreamer's element names now resolve to the
+g2g equivalents, instead of failing as unknown elements.
+
+- `Registry::register_alias(name, targets)`: an alias resolves at
+  `make_source` / `make_element` time to the first of `targets` that is actually
+  registered. A plain rename is a one-entry list; an `auto*` element is a
+  fallback chain. One hop only (aliases don't chain).
+- Registered in `default_registry`:
+  - `autovideosink` -> first of `waylandsink` / `kmssink` / `fakesink`;
+    `autoaudiosink` -> `alsasink` / `pulsesink` / `fakesink`. The `fakesink`
+    fallback (always present) keeps a tutorial line running headless.
+  - `xvimagesink` / `ximagesink` / `glimagesink` -> the available display sink.
+  - `avdec_h264` -> `ffmpegdec`; `vaapih264dec` / `vah264dec` -> `vaapidec`
+    (resolve only when their feature is on).
+  - `vp8enc` / `vp9enc` -> the single `vpxenc`.
+
+Verified: `m192_gst_aliases` (autovideosink/autoaudiosink resolve + run via the
+fakesink fallback; desktop video-sink names alias to a sink; canonical names
+still work; `avdec_h264` resolves under the `ffmpeg` feature). Core (216) +
+plugins (138 blocks) green; no_std + clippy clean.
+
 ### M191: `g2g-launch` CLI flag parity with gst-launch
 
 `g2g-launch` now accepts leading `gst-launch-1.0`-style options, so a pasted

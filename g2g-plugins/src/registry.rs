@@ -237,8 +237,32 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
 
     register_feature_gated(&mut reg);
+    register_aliases(&mut reg);
 
     reg
+}
+
+/// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
+/// GStreamer's element names resolve to the g2g equivalents. Each alias resolves
+/// at construction time to the first of its targets that is actually registered,
+/// so the decoder / display aliases work only when their feature is on, and the
+/// `auto*sink` aliases fall back through the available display / audio sinks to
+/// `fakesink` (always present), which keeps a tutorial line running headless.
+fn register_aliases(reg: &mut Registry) {
+    // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
+    reg.register_alias("autovideosink", &["waylandsink", "kmssink", "fakesink"]);
+    reg.register_alias("autoaudiosink", &["alsasink", "pulsesink", "fakesink"]);
+    // Common desktop video-sink names map onto whatever display sink we have.
+    for name in ["xvimagesink", "ximagesink", "glimagesink"] {
+        reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);
+    }
+    // Decoders: GStreamer's libav / VA-API names -> the g2g decoders.
+    reg.register_alias("avdec_h264", &["ffmpegdec"]);
+    reg.register_alias("vaapih264dec", &["vaapidec"]);
+    reg.register_alias("vah264dec", &["vaapidec"]);
+    // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
+    reg.register_alias("vp8enc", &["vpxenc"]);
+    reg.register_alias("vp9enc", &["vpxenc"]);
 }
 
 /// Register the feature- and platform-gated elements. Each block compiles only

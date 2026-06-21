@@ -471,6 +471,12 @@ mod factory {
         uris: Vec<UriSourceFactory>,
         launch: Vec<LaunchFactory>,
         muxers: Vec<MuxerFactory>,
+        /// gst-canonical-name aliases (M192): each maps a name to an ordered list
+        /// of registered targets, the first that is actually registered wins. A
+        /// plain rename is a one-entry list; `autovideosink` is a fallback chain
+        /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
+        /// so an alias whose targets are all feature-gated-out simply misses.
+        aliases: Vec<(&'static str, &'static [&'static str])>,
     }
 
     impl Registry {
@@ -515,16 +521,49 @@ mod factory {
             self
         }
 
+        /// Register a gst-canonical-name alias (M192): `name` resolves, at
+        /// `make_source` / `make_element` time, to the first of `targets` that is
+        /// actually registered. Use a one-entry list for a plain rename
+        /// (`avdec_h264` -> `ffmpegdec`) and a fallback chain for an auto element
+        /// (`autovideosink` -> `["waylandsink", "kmssink", "fakesink"]`). Returns
+        /// `&mut self` to chain calls.
+        pub fn register_alias(
+            &mut self,
+            name: &'static str,
+            targets: &'static [&'static str],
+        ) -> &mut Self {
+            self.aliases.push((name, targets));
+            self
+        }
+
+        /// Resolve a name through the alias table to the first registered target,
+        /// or the name itself when it is not an alias. One hop only (aliases do not
+        /// chain to other aliases).
+        fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
+            if let Some((_, targets)) = self.aliases.iter().find(|(a, _)| *a == name) {
+                for &t in *targets {
+                    if self.sources.iter().any(|s| s.name == t)
+                        || self.launch.iter().any(|f| f.name == t)
+                    {
+                        return t;
+                    }
+                }
+            }
+            name
+        }
+
         /// Construct a registered source by name (the parser's first element).
-        /// `None` if no source is registered under `name`.
+        /// `None` if no source is registered under `name` (after alias resolution).
         pub fn make_source(&self, name: &str) -> Option<Box<dyn DynSourceLoop>> {
+            let name = self.resolve_alias(name);
             self.sources.iter().find(|s| s.name == name).map(|s| (s.build)())
         }
 
         /// Construct a registered transform / sink by name (a parser interior or
         /// tail element), default-configured. `None` if `name` is not registered
-        /// via [`register_launch`](Self::register_launch).
+        /// via [`register_launch`](Self::register_launch) (after alias resolution).
         pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
+            let name = self.resolve_alias(name);
             self.launch.iter().find(|f| f.name == name).map(|f| (f.build)())
         }
 
