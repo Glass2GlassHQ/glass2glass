@@ -43,6 +43,51 @@ Compositor, HLS/DASH, RTMP/SRT, VP8/VP9/AV1/Opus, MKV/TS. Architectural cost is
 low (each is "add an element"); sequence against whatever product target
 matters. Detail for these lives in the sections below.
 
+## Tensor substrate / zero-copy layout transforms (M180+)
+
+Direction: make a strided tensor *view* the substrate for raw numeric media, so
+layout-preserving transforms (flip, transpose, crop, channel reorder) are views
+over the same bytes rather than copies, and raw frames feed ML inference
+zero-copy. Tensor is the substrate *beneath* the semantic `Caps`, not a
+replacement for them; planar/subsampled video (NV12, I420) is a *list* of views,
+not one tensor. The zero-copy win is real but bounded to layout-preserving ops
+(decode / colorspace / normalize / resample are arithmetic and copy regardless).
+
+- **M180 (done).** `g2g-core::tensor::TensorView {dtype, shape, signed byte
+  strides, offset}` (fixed-rank, `Copy`, heap-free) + `MemoryDomain::SystemView`
+  (`Arc<[u8]>` backing + view). `VideoFlip` flips packed RGBA/BGRA zero-copy by
+  composing strides on the same `Arc`; planar / owned-buffer inputs keep the copy
+  path. Proven by `m180_zerocopy_flip` (source buffer pointer reaches the sink
+  *through* the flip = zero copies).
+
+- **M181: deferred orientation descriptor + sink-capability negotiation.** An
+  *eagerly-applied* strided view defeats hardware flip silicon: DRM/KMS
+  `plane.rotation`, Wayland `set_buffer_transform`, VAAPI VPP
+  `rotation_state`/`mirror_state`, and the D3D11 VideoProcessor all rotate/mirror
+  in fixed-function for free, but they want "original buffer + a rotate
+  descriptor", not pre-flipped pixels in a negative-stride layout (a DRM FB has a
+  single positive pitch). A hw sink handed a flipped `SystemView` would have to
+  materialize (full CPU copy) first and miss the silicon, i.e. worse than not
+  flipping. So a layout transform needs *two* code paths, chosen by the sink:
+  - **deferred descriptor** (leave bytes + layout untouched, tag "rotate-180")
+    when the sink advertises it can absorb an orientation -> `VideoFlip` is a
+    pass-through that tags the frame, sink applies the transform in hardware;
+  - **eager realization** (strided view, or CPU materialize) as the fallback, and
+    the right path for CPU / GPU-shader-sampling consumers and for chaining
+    multiple view-ops before one materialize.
+
+  Reuse the existing capability-negotiation pattern (M12 allocation query +
+  zero-copy GPU domains; GStreamer's `video-direction` / `GstVideoOrientation`
+  pushed to `waylandsink` / KMS). Pieces: an orientation descriptor on the frame
+  (or caps/segment) the sink can read; a sink-capability advertisement
+  ("absorbs rotation X"); `VideoFlip` branching on it; one sink (KMS or Wayland)
+  wired to consume it. CI-testable via a mock capability-advertising sink that
+  records "applied in hardware vs materialized".
+
+- **Queued (other modalities):** `Caps::Audio` gains a real `[frames, channels]`
+  view (clean-win, no subsampling); planar video plane-LIST
+  (`SmallVec<TensorView>`); text-as-embedding once an embedding element lands.
+
 ## Gap analysis to 80% parity (post-M167, 2026-06-20)
 
 The honest read after M167: the ~80% / "credible GStreamer replacement" bar is
