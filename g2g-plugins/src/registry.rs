@@ -58,6 +58,49 @@ use crate::volume::Volume;
 use crate::tsdemux::TsDemux;
 use crate::tsmux::TsMux;
 
+// Feature- (and platform-) gated elements, registered when their feature is on so
+// `gst-inspect`, `gst-inspect --all`, and `parse_launch` see them. Each registers
+// exactly as its `#[cfg]` in `lib.rs` gates the module.
+#[cfg(feature = "opus")]
+use crate::{opusdec::OpusDec, opusenc::OpusEnc};
+#[cfg(feature = "av1-encode")]
+use crate::av1enc::Av1Enc;
+#[cfg(feature = "vpx")]
+use crate::vpxenc::VpxEnc;
+#[cfg(feature = "mjpeg")]
+use crate::mjpegdec::MjpegDec;
+#[cfg(feature = "mjpeg-encode")]
+use crate::mjpegenc::MjpegEnc;
+use crate::fmp4demux::Fmp4Demux;
+#[cfg(feature = "rtsp")]
+use crate::rtspsrc::RtspSrc;
+#[cfg(feature = "udp-ingress")]
+use crate::udpsrc::UdpSrc;
+#[cfg(feature = "udp-egress")]
+use crate::udpsink::UdpSink;
+#[cfg(feature = "http-src")]
+use crate::httpsrc::HttpSrc;
+#[cfg(feature = "hls")]
+use crate::hlssrc::HlsSrc;
+#[cfg(feature = "dash")]
+use crate::dashsrc::DashSrc;
+#[cfg(feature = "rtmp")]
+use crate::rtmpsrc::RtmpSrc;
+#[cfg(all(target_os = "linux", feature = "wayland-sink"))]
+use crate::waylandsink::WaylandSink;
+#[cfg(all(target_os = "linux", feature = "alsa-sink"))]
+use crate::alsasink::AlsaSink;
+#[cfg(all(target_os = "linux", feature = "pulse-sink"))]
+use crate::pulsesink::PulseSink;
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+use crate::v4l2src::V4l2Src;
+#[cfg(all(target_os = "linux", feature = "kms-sink"))]
+use crate::kmssink::KmsSink;
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+use crate::ffmpegdec::FfmpegH264Dec;
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
+use crate::vaapidec::VaapiH264Dec;
+
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
 /// [`inspect`](g2g_core::runtime::Registry::inspect).
@@ -140,6 +183,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
     reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
+    reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || Box::new(Fmp4Demux::new())));
     reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
     reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || Box::new(FlvMux::new())));
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
@@ -186,5 +230,114 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
 
+    register_feature_gated(&mut reg);
+
     reg
+}
+
+/// Register the feature- and platform-gated elements. Each block compiles only
+/// when its `#[cfg]` (the same gate as the module in `lib.rs`) holds, so a build
+/// without the feature is unchanged. Sources whose constructor needs a runtime
+/// value (a URL, a socket, a device) are default-built with a placeholder; the
+/// real value comes from a property / builder before use (the placeholder only
+/// has to be side-effect-free, since `inspect` default-builds to read metadata).
+#[allow(unused_variables)]
+fn register_feature_gated(reg: &mut Registry) {
+    // Codecs (cross-platform).
+    #[cfg(feature = "opus")]
+    {
+        reg.register_launch(LaunchFactory::of::<OpusEnc>("opusenc", || Box::new(OpusEnc::new())));
+        reg.register_launch(LaunchFactory::of::<OpusDec>("opusdec", || Box::new(OpusDec::new())));
+    }
+    #[cfg(feature = "av1-encode")]
+    reg.register_launch(LaunchFactory::of::<Av1Enc>("av1enc", || Box::new(Av1Enc::new())));
+    #[cfg(feature = "vpx")]
+    reg.register_launch(LaunchFactory::of::<VpxEnc>("vpxenc", || Box::new(VpxEnc::new())));
+    #[cfg(feature = "mjpeg")]
+    reg.register_launch(LaunchFactory::of::<MjpegDec>("mjpegdec", || Box::new(MjpegDec::new())));
+    #[cfg(feature = "mjpeg-encode")]
+    reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || Box::new(MjpegEnc::new())));
+
+    // Network sources / sinks.
+    #[cfg(feature = "rtsp")]
+    reg.register_source(SourceFactory::new(
+        "rtspsrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(RtspSrc::new("")),
+    ));
+    #[cfg(feature = "udp-ingress")]
+    reg.register_source(SourceFactory::new(
+        "udpsrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(UdpSrc::new("0.0.0.0:5004".parse().unwrap())),
+    ));
+    #[cfg(feature = "udp-egress")]
+    reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
+        Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
+    }));
+    #[cfg(feature = "http-src")]
+    reg.register_source(SourceFactory::new(
+        "httpsrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(HttpSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
+    ));
+    #[cfg(feature = "hls")]
+    reg.register_source(SourceFactory::new(
+        "hlssrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(HlsSrc::new("")),
+    ));
+    #[cfg(feature = "dash")]
+    reg.register_source(SourceFactory::new(
+        "dashsrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff },
+        || Box::new(DashSrc::new("")),
+    ));
+    #[cfg(feature = "rtmp")]
+    reg.register_source(SourceFactory::new(
+        "rtmpsrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::Flv },
+        || Box::new(RtmpSrc::new("0.0.0.0:1935".parse().unwrap())),
+    ));
+
+    // Linux capture / decode / display.
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    reg.register_source(SourceFactory::new(
+        "v4l2src",
+        Caps::RawVideo {
+            format: RawVideoFormat::Yuyv,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(V4l2Src::new("/dev/video0")),
+    ));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
+        Box::new(FfmpegH264Dec::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
+        Box::new(VaapiH264Dec::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
+    reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
+        Box::new(WaylandSink::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "kms-sink"))]
+    reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || Box::new(KmsSink::new())));
+    #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
+    reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())));
+    #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
+    reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || Box::new(PulseSink::new())));
 }
