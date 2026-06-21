@@ -76,8 +76,9 @@ directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588) +
 FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP entries
 under `### High`.
 
-**Codecs.** Opus encode + decode; pure-Rust / wasm decode paths (dav1d/rav1d,
-vpx) to drop the ffmpeg FFI dependency. See `### Codecs`.
+**Codecs.** Opus encode + decode is **DONE** (M177, `opus` feature: `OpusEnc` /
+`OpusDec` via libopus through `audiopus`). Remaining: pure-Rust / wasm decode
+paths (dav1d/rav1d, vpx) to drop the ffmpeg FFI dependency. See `### Codecs`.
 
 **Depth (works today, not yet future-proof).** Negotiation: forward re-solve
 walk, dynamic / request pads, zero-copy tee, PTS-ordered fan-in for
@@ -553,8 +554,17 @@ and the pure-Rust / browser decode paths:
   Round-trips through `av1parse` (M136). **Remaining:** bitrate / quantizer rate
   control surface, 10-bit / 4:4:4, and an `Av1Dec` pure-Rust decode (`dav1d` /
   `rav1d`) to pair with it ffmpeg-free.
-- **Opus encode + decode.** 2 sessions. WebRTC audio default; we have AAC
-  only. `opus` crate or libopus FFI.
+- **Opus encode + decode — DONE (M177).** `g2g-plugins::opusenc::OpusEnc` and
+  `opusdec::OpusDec` (`opus` feature) wrap libopus via the `audiopus` crate, the
+  WebRTC-default audio codec to pair with the existing `opusparse` (M133): `OpusEnc`
+  buffers interleaved S16LE PCM and emits one Opus packet per 20 ms frame
+  (zero-padding a partial tail at EOS); `OpusDec` decodes each packet back to
+  S16LE. v1 is 48 kHz mono/stereo (the rate Opus always decodes at, so no
+  resample). Not pure Rust (libopus FFI), so gated + std-only; the `opus` feature
+  needs a system libopus dev package (pkg-config), like the other native codecs.
+  **Remaining:** float (F32) PCM in/out, other frame durations, packet-loss
+  concealment (decode of a missing packet), and bitrate/complexity tuning beyond
+  the bitrate setter; a pure-Rust Opus path if one matures.
 - **MJPEG decode — DONE (M152, I420 in M154).** `g2g-plugins::mjpegdec::MjpegDec`
   (`mjpeg` feature) decodes `CompressedVideo{Mjpeg}` to `RawVideo{Rgba8}` (default)
   or `RawVideo{I420}` (`with_output_format`) via the pure-Rust `zune-jpeg` crate (no

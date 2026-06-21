@@ -188,6 +188,13 @@ pub mod mjpegdec;
 #[cfg(feature = "mjpeg-encode")]
 pub mod mjpegenc;
 
+// Opus audio encode + decode via libopus (FFI through audiopus). Not pure Rust;
+// links libopus (system or bundled-and-built), gated behind the `opus` feature.
+#[cfg(feature = "opus")]
+pub mod opusdec;
+#[cfg(feature = "opus")]
+pub mod opusenc;
+
 // HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
 #[cfg(feature = "http-src")]
 pub mod httpsrc;

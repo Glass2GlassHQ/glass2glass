@@ -163,6 +163,12 @@ mjpeg = ["std", "dep:zune-jpeg"]
 # RawVideo{Rgba8|I420} -> CompressedVideo{Mjpeg}). The jpegenc analog: intra-only
 # JPEG per frame for snapshot / thumbnail / low-latency capture. No system deps.
 mjpeg-encode = ["std", "dep:jpeg-encoder"]
+# Opus audio encode + decode (OpusEnc / OpusDec) via libopus through the
+# `audiopus` crate. The WebRTC default audio codec; pairs with `opusparse` (M133).
+# NOT pure Rust: links libopus (system or the bundled source built with cmake),
+# so it is gated and excluded from pure-Rust / no_std builds. Implies std. v1 is
+# 48 kHz mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
+opus = ["std", "dep:audiopus"]
 # HTTP(S) byte-stream source (HttpSrc) via the `reqwest` async client: a single
 # GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
 # souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
@@ -216,6 +222,15 @@ vpx-encode = { version = "0.6", optional = true, features = ["vp9"] }
 zune-jpeg = { version = "0.5", optional = true }
 # Pure-Rust JPEG encoder (mjpeg-encode feature). No system dependency.
 jpeg-encoder = { version = "0.7", optional = true }
+# libopus encode + decode wrapper (opus feature) for OpusEnc / OpusDec. Not pure
+# Rust (there is no mature pure-Rust Opus codec): `audiopus` wraps libopus via
+# `audiopus_sys`. It prefers a pkg-config-discovered system libopus, so install
+# the dev package like the other native features (Fedora: opus-devel; Debian:
+# libopus-dev; macOS: brew opus; Windows: vcpkg opus). Without pkg-config it
+# falls back to building the bundled libopus source with cmake, but that fallback
+# mis-locates the lib on multiarch lib64 layouts, so the dev package is the
+# supported path. Gated + std-only, excluded from no_std builds.
+audiopus = { version = "0.3.0-rc.0", optional = true }
 # Async HTTP client for HttpSrc (http-src feature). Default features keep
 # default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
 # used. Runs on the caller's tokio runtime.

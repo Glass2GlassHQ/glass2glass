@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M177: Opus audio encode + decode (`OpusEnc` / `OpusDec`, `opus` feature)
+
+The WebRTC-default audio codec, to pair with the existing `opusparse` (M133); we
+had AAC only. Both wrap libopus via the `audiopus` crate (no mature pure-Rust Opus
+codec exists), so the `opus` feature is gated + std-only and excluded from the
+no_std baseline.
+
+- **`OpusEnc`** (`g2g-plugins::opusenc`): `Audio{PcmS16Le}` -> `Audio{Opus}`. Opus
+  only encodes whole frames of a fixed duration, so it buffers interleaved S16LE
+  samples and emits one packet per 20 ms frame (960 samples/channel at 48 kHz),
+  zero-padding a partial tail at EOS so no audio is lost. Output PTS is anchored to
+  the first input frame and advanced one frame duration per packet. `with_bitrate`
+  sets the target bitrate (default libopus auto).
+- **`OpusDec`** (`g2g-plugins::opusdec`): `Audio{Opus}` -> `Audio{PcmS16Le}`. One
+  packet in, one interleaved-S16LE frame out; emits the PCM caps before the first
+  frame.
+- v1 is 48 kHz mono/stereo (48 kHz is the rate Opus always decodes at, so the path
+  needs no resample); float PCM, other frame durations, and packet-loss
+  concealment are follow-ups.
+- The `opus` feature links libopus via `audiopus` / `audiopus_sys`; install a system
+  libopus dev package (Fedora `opus-devel`, Debian `libopus-dev`) so pkg-config finds
+  it, as with the other native codec features.
+
+Verified by `m177_opus_codec`: a stereo PCM tone round-trips encode -> `opusparse`
+(recovers the channel count, proving a valid Opus stream) -> decode, asserting
+packet count, caps, decoded length, and preserved signal energy (lossy, so energy
+not samples); plus a mono silence-in/silence-out case.
+
 ### M176: presentation base time anchored at the `Playing` transition
 
 The presentation base time was sampled at runner startup, before the data plane
