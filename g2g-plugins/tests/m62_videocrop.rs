@@ -17,7 +17,8 @@ impl PipelineClock for NullClock {
 #[tokio::test]
 async fn crops_rgba_source_to_rect() {
     let mut src = VideoTestSrc::new(8, 8, 30, 4);
-    let mut crop = VideoCrop::new(2, 2, 4, 4);
+    // Crop 2px off every edge of the 8x8 frame -> 4x4 (gst videocrop insets).
+    let mut crop = VideoCrop::new(2, 2, 2, 2);
     let mut sink = FakeSink::new();
 
     run_source_transform_sink(&mut src, &mut crop, &mut sink, &NullClock, 4)

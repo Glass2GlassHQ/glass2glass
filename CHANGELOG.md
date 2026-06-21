@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M183: align videocrop / videobox property model with GStreamer
+
+Follows M182 (the naming pass) with the property-*model* changes that are
+behavior, not spelling. Pre-release, so the old property names are replaced, not
+aliased.
+
+- **`videocrop`** now uses GStreamer's per-edge insets `top` / `bottom` / `left`
+  / `right` (`Int`, default 0) instead of the `x`/`y`/`width`/`height` rect.
+  Output geometry is the input minus the edge insets; all-zero is an identity
+  pass-through. gst's `-1` auto-crop sentinel is unsupported (negatives
+  rejected). 4:2:0 still requires even insets.
+- **`videobox`** now uses GStreamer's signed `top` / `bottom` / `left` / `right`
+  (`Int`): a positive value crops that edge, a negative value adds that many
+  border pixels of `fill`. A single source->output mapping handles both. `fill`
+  gains `yellow` (gst's palette is black/green/blue/red/yellow/white; g2g keeps
+  `transparent` as an extension). The old unsigned `border-*` properties are
+  gone (a border is now a negative edge).
+
+Verified: `m183_gst_crop_box` (gst crop insets, videobox border via negative
+edges + crop via positive edges), updated `m62`/`m67`/`m69` (rect -> insets) and
+`m129` (`border-*` -> negative edges), module unit tests for both. Full
+`g2g-core` (216) + `g2g-plugins` suites pass.
+
 ### M182: harmonize the gst-launch DSL vocabulary with GStreamer
 
 Pre-release, so the human-facing DSL spellings are aligned to GStreamer's so a

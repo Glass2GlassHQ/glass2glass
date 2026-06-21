@@ -58,7 +58,7 @@ async fn tee_branches_run_independent_transforms() {
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
     let tee = g.add_tee(2);
     let flip = g.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate90Cw)));
-    let crop = g.add_transform(GraphNode::element(VideoCrop::new(2, 2, 4, 4)));
+    let crop = g.add_transform(GraphNode::element(VideoCrop::new(2, 2, 2, 2)));
     let s0 = g.add_sink(GraphNode::element(FakeSink::new()));
     let s1 = g.add_sink(GraphNode::element(FakeSink::new()));
     g.link(src, tee.input()).unwrap();

@@ -73,12 +73,11 @@ edits (the typed core is unaffected, only the string<->enum boundary).
     route work) over strict gst-only; the two items above are what "make the caps
     route work" actually requires.
 
-- **M183 (next): videocrop / videobox property-model alignment.** gst `videocrop`
-  uses per-edge insets `top/bottom/left/right`; g2g uses a rect `x/y/width/height`
-  (a behavior change, not a rename). gst `videobox` uses signed
-  `top/bottom/left/right` (negative = add border) + `fill`; g2g uses unsigned
-  `border-*` + `fill`. Rename + convert the model, with tests; kept separate from
-  M182 because it changes behavior, not just spelling.
+- **M183 (done): videocrop / videobox property-model alignment.** `videocrop`
+  now uses gst's per-edge insets `top/bottom/left/right` (was `x/y/width/height`);
+  `videobox` uses gst's signed `top/bottom/left/right` (>0 crop, <0 border) +
+  `fill` (added `yellow`), replacing the unsigned `border-*`. Old names replaced,
+  not aliased (pre-release).
 
 ## Tensor substrate / zero-copy layout transforms (M180+)
 

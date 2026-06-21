@@ -1,11 +1,16 @@
-//! Software rectangular crop (Tier-1 A1). Extracts a sub-rectangle of a raw
+//! Software rectangular crop (Tier-1 A1). Removes pixels from each edge of a raw
 //! video frame, preserving the pixel format, for ROI-driven flows (a detector
-//! emits boxes, the cropper extracts patches a classifier sees). No
-//! resampling, a per-plane row copy.
+//! emits boxes, the cropper extracts patches a classifier sees). No resampling,
+//! a per-plane row copy.
 //!
-//! 4:2:0 (`Nv12`, `I420`) needs an even crop origin and size, since chroma is
-//! subsampled 2x2; odd coords fail negotiation/configure loud. Packed formats
-//! (`Rgba8`, `Bgra8`) crop at any coords. CPU-only `no_std` baseline.
+//! Properties follow GStreamer's `videocrop`: `top` / `bottom` / `left` /
+//! `right` are the pixels to crop off each edge (M183). Output geometry is the
+//! input minus the edge insets. GStreamer's `-1` auto-crop sentinel is not
+//! supported; negative values are rejected.
+//!
+//! 4:2:0 (`Nv12`, `I420`) needs even insets on all four edges, since chroma is
+//! subsampled 2x2; odd values fail negotiation/configure loud. Packed formats
+//! (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std` baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -31,10 +36,12 @@ const FORMATS: [RawVideoFormat; 4] = [
 
 #[derive(Debug)]
 pub struct VideoCrop {
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
+    /// Pixels cropped from each edge (GStreamer `videocrop` model). Output
+    /// geometry is the input minus `left + right` by `top + bottom`.
+    top: u32,
+    bottom: u32,
+    left: u32,
+    right: u32,
     /// Format, dims, and framerate of the configured input stream, updated by
     /// a mid-stream `CapsChanged`.
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
@@ -44,12 +51,14 @@ pub struct VideoCrop {
 }
 
 impl VideoCrop {
-    pub fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+    /// Crop `top` / `bottom` / `left` / `right` pixels off the respective edges
+    /// (GStreamer `videocrop` order). All-zero is an identity pass-through.
+    pub fn new(top: u32, bottom: u32, left: u32, right: u32) -> Self {
         Self {
-            x,
-            y,
-            w: width,
-            h: height,
+            top,
+            bottom,
+            left,
+            right,
             input: None,
             configured: false,
             last_caps: None,
@@ -57,8 +66,9 @@ impl VideoCrop {
         }
     }
 
-    pub fn rect(&self) -> (u32, u32, u32, u32) {
-        (self.x, self.y, self.w, self.h)
+    /// The configured edge insets `(top, bottom, left, right)`.
+    pub fn insets(&self) -> (u32, u32, u32, u32) {
+        (self.top, self.bottom, self.left, self.right)
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
@@ -80,25 +90,36 @@ impl VideoCrop {
         Ok((*format, *w, *h, framerate.clone()))
     }
 
-    /// The crop rect must be non-empty, lie inside the input frame, and be even
-    /// on all four coords when the format is 4:2:0.
-    fn validate_rect(&self, format: RawVideoFormat, in_w: u32, in_h: u32) -> Result<(), G2gError> {
-        if self.w == 0 || self.h == 0 {
+    /// The insets must leave a non-empty frame (`left + right < in_w`,
+    /// `top + bottom < in_h`) and be even on all four edges when the format is
+    /// 4:2:0 (so the derived crop origin and size stay even).
+    fn validate_insets(&self, format: RawVideoFormat, in_w: u32, in_h: u32) -> Result<(), G2gError> {
+        if self.left + self.right >= in_w || self.top + self.bottom >= in_h {
             return Err(G2gError::CapsMismatch);
         }
-        if (self.x as u64 + self.w as u64) > in_w as u64
-            || (self.y as u64 + self.h as u64) > in_h as u64
-        {
-            return Err(G2gError::CapsMismatch);
-        }
-        if is_yuv420(format) && (self.x % 2 != 0 || self.y % 2 != 0 || self.w % 2 != 0 || self.h % 2 != 0) {
+        if is_yuv420(format) && !self.even_insets() {
             return Err(G2gError::CapsMismatch);
         }
         Ok(())
     }
 
-    fn even_rect_ok(&self, format: RawVideoFormat) -> bool {
-        !is_yuv420(format) || (self.x % 2 == 0 && self.y % 2 == 0 && self.w % 2 == 0 && self.h % 2 == 0)
+    fn even_insets(&self) -> bool {
+        self.top % 2 == 0 && self.bottom % 2 == 0 && self.left % 2 == 0 && self.right % 2 == 0
+    }
+
+    fn even_insets_ok(&self, format: RawVideoFormat) -> bool {
+        !is_yuv420(format) || self.even_insets()
+    }
+
+    /// The crop rectangle `(x, y, w, h)` the insets describe on an `in_w x in_h`
+    /// frame. Callers ensure the insets fit (via [`validate_insets`]).
+    fn rect(&self, in_w: u32, in_h: u32) -> (u32, u32, u32, u32) {
+        (
+            self.left,
+            self.top,
+            in_w - self.left - self.right,
+            in_h - self.top - self.bottom,
+        )
     }
 }
 
@@ -123,20 +144,25 @@ impl AsyncElement for VideoCrop {
     }
 
     /// Native `DerivedOutput`: any supported raw input maps to the same format
-    /// at the crop rect's dims, framerate preserved. A 4:2:0 format with an odd
-    /// rect collapses to the empty set so the solve fails loud; the rect-fits-
-    /// the-frame check is deferred to configure where input dims are absolute.
+    /// at the input geometry minus the edge insets, framerate preserved. A
+    /// 4:2:0 format with an odd inset, or insets that consume the whole frame,
+    /// collapses to the empty set so the solve fails loud.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let (w, h) = (self.w, self.h);
-        let even_rect_ok = |format| self.even_rect_ok(format);
+        let (lr, tb) = (self.left + self.right, self.top + self.bottom);
+        let even_insets_ok = |format| self.even_insets_ok(format);
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, framerate, .. } if FORMATS.contains(format) && even_rect_ok(*format) => {
-                CapsSet::one(Caps::RawVideo {
-                    format: *format,
-                    width: Dim::Fixed(w),
-                    height: Dim::Fixed(h),
-                    framerate: framerate.clone(),
-                })
+            Caps::RawVideo { format, width, height, framerate }
+                if FORMATS.contains(format) && even_insets_ok(*format) =>
+            {
+                match (shrink(width, lr), shrink(height, tb)) {
+                    (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
+                        format: *format,
+                        width: w,
+                        height: h,
+                        framerate: framerate.clone(),
+                    }),
+                    _ => CapsSet::from_alternatives(Vec::new()),
+                }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -144,7 +170,7 @@ impl AsyncElement for VideoCrop {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, w, h, rate) = self.accept_input(absolute_caps)?;
-        self.validate_rect(format, w, h)?;
+        self.validate_insets(format, w, h)?;
         self.input = Some((format, w, h, rate));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -172,17 +198,18 @@ impl AsyncElement for VideoCrop {
                     if src.len() < frame_byte_size(format, in_w, in_h) {
                         return Err(G2gError::CapsMismatch);
                     }
+                    let (x, y, w, h) = self.rect(in_w, in_h);
                     let cropped = crop(
                         src,
                         format,
                         (in_w as usize, in_h as usize),
-                        (self.x as usize, self.y as usize, self.w as usize, self.h as usize),
+                        (x as usize, y as usize, w as usize, h as usize),
                     );
 
                     let new_caps = Caps::RawVideo {
                         format,
-                        width: Dim::Fixed(self.w),
-                        height: Dim::Fixed(self.h),
+                        width: Dim::Fixed(w),
+                        height: Dim::Fixed(h),
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
@@ -200,7 +227,7 @@ impl AsyncElement for VideoCrop {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     let (format, w, h, rate) = self.accept_input(&c)?;
-                    self.validate_rect(format, w, h)?;
+                    self.validate_insets(format, w, h)?;
                     self.input = Some((format, w, h, rate));
                 }
                 PipelinePacket::Flush => {
@@ -225,18 +252,24 @@ impl AsyncElement for VideoCrop {
         ElementMetadata::new(
             "Video cropper",
             "Filter/Effect/Video",
-            "Crops a rectangular region from raw video",
+            "Crops pixels from the edges of raw video",
             "g2g",
         )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        let v = value.as_uint().ok_or(PropError::Type)? as u32;
+        // GStreamer `videocrop` props are gint; `-1` means auto-crop, which we
+        // don't implement, so negatives are rejected.
+        let v = value.as_int().ok_or(PropError::Type)?;
+        if v < 0 {
+            return Err(PropError::Value);
+        }
+        let v = v as u32;
         match name {
-            "x" => self.x = v,
-            "y" => self.y = v,
-            "width" => self.w = v,
-            "height" => self.h = v,
+            "top" => self.top = v,
+            "bottom" => self.bottom = v,
+            "left" => self.left = v,
+            "right" => self.right = v,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -244,22 +277,23 @@ impl AsyncElement for VideoCrop {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         let v = match name {
-            "x" => self.x,
-            "y" => self.y,
-            "width" => self.w,
-            "height" => self.h,
+            "top" => self.top,
+            "bottom" => self.bottom,
+            "left" => self.left,
+            "right" => self.right,
             _ => return None,
         };
-        Some(PropValue::Uint(v as u64))
+        Some(PropValue::Int(v as i64))
     }
 }
 
-/// `VideoCrop`'s settable properties (M107): the crop rectangle on the input.
+/// `VideoCrop`'s settable properties (GStreamer `videocrop` model, M183): the
+/// pixels to crop off each edge.
 static VIDEOCROP_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("x", PropKind::Uint, "crop rectangle left edge in pixels"),
-    PropertySpec::new("y", PropKind::Uint, "crop rectangle top edge in pixels"),
-    PropertySpec::new("width", PropKind::Uint, "crop rectangle width in pixels"),
-    PropertySpec::new("height", PropKind::Uint, "crop rectangle height in pixels"),
+    PropertySpec::new("top", PropKind::Int, "pixels to crop at the top").with_default("0"),
+    PropertySpec::new("bottom", PropKind::Int, "pixels to crop at the bottom").with_default("0"),
+    PropertySpec::new("left", PropKind::Int, "pixels to crop at the left").with_default("0"),
+    PropertySpec::new("right", PropKind::Int, "pixels to crop at the right").with_default("0"),
 ];
 
 impl PadTemplates for VideoCrop {
@@ -277,6 +311,20 @@ impl PadTemplates for VideoCrop {
 
 fn is_yuv420(format: RawVideoFormat) -> bool {
     matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
+}
+
+/// Shrink a dimension by `by`, collapsing to `None` (an empty caps) when the
+/// crop would consume the whole extent.
+fn shrink(d: &Dim, by: u32) -> Option<Dim> {
+    match d {
+        Dim::Fixed(v) => v.checked_sub(by).filter(|&r| r > 0).map(Dim::Fixed),
+        Dim::Range { min, max } => {
+            let max = max.checked_sub(by).filter(|&r| r > 0)?;
+            let min = min.saturating_sub(by).max(1).min(max);
+            Some(Dim::Range { min, max })
+        }
+        Dim::Any => Some(Dim::Any),
+    }
 }
 
 fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
@@ -385,12 +433,31 @@ mod tests {
         }
     }
 
+    fn nv12_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+        }
+    }
+
     #[test]
     fn crop_plane_copies_subrect() {
         // 4x2 single-channel plane; crop a 2x2 at (1,0).
         let src: Vec<u8> = (0..8).collect();
         let out = crop_plane(&src, 4, 1, 0, 2, 2, 1);
         assert_eq!(&out[..], &[1, 2, 5, 6]);
+    }
+
+    #[test]
+    fn insets_derive_the_crop_rect() {
+        // 8x8, crop top=2 bottom=2 left=2 right=2 -> rect (2,2) sized 4x4.
+        let c = VideoCrop::new(2, 2, 2, 2);
+        assert_eq!(c.rect(8, 8), (2, 2, 4, 4));
+        // Asymmetric: top=0 bottom=4 left=0 right=4 -> rect (0,0) sized 4x4.
+        let c = VideoCrop::new(0, 4, 0, 4);
+        assert_eq!(c.rect(8, 8), (0, 0, 4, 4));
     }
 
     #[test]
@@ -419,8 +486,9 @@ mod tests {
     }
 
     #[test]
-    fn derived_output_maps_to_rect_dims() {
-        let crop = VideoCrop::new(1, 1, 2, 2);
+    fn derived_output_maps_to_inset_dims() {
+        // 8x8 with 2px insets all round -> 4x4.
+        let crop = VideoCrop::new(2, 2, 2, 2);
         let CapsConstraint::DerivedOutput(f) = crop.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
@@ -429,8 +497,8 @@ mod tests {
             out.alternatives(),
             &[Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(2),
-                height: Dim::Fixed(2),
+                width: Dim::Fixed(4),
+                height: Dim::Fixed(4),
                 framerate: Rate::Fixed(30 << 16),
             }]
         );
@@ -444,46 +512,48 @@ mod tests {
     }
 
     #[test]
-    fn derived_output_rejects_odd_rect_for_yuv420() {
-        let crop = VideoCrop::new(1, 0, 2, 2);
+    fn derived_output_rejects_odd_inset_for_yuv420() {
+        // left=1 is odd: invalid for 4:2:0, fine for packed.
+        let crop = VideoCrop::new(0, 0, 1, 1);
         let CapsConstraint::DerivedOutput(f) = crop.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
-        let nv12 = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(8),
-            height: Dim::Fixed(8),
-            framerate: Rate::Any,
+        assert!(f(&nv12_caps(8, 8)).is_empty(), "odd inset is invalid for 4:2:0");
+        assert!(!f(&rgba_caps(8, 8)).is_empty(), "packed formats allow odd insets");
+    }
+
+    #[test]
+    fn derived_output_empty_when_insets_consume_frame() {
+        // left+right == width leaves nothing.
+        let crop = VideoCrop::new(0, 0, 4, 4);
+        let CapsConstraint::DerivedOutput(f) = crop.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
         };
-        assert!(f(&nv12).is_empty(), "odd x is invalid for 4:2:0");
-        assert!(!f(&rgba_caps(8, 8)).is_empty(), "packed formats allow odd coords");
+        assert!(f(&rgba_caps(8, 8)).is_empty(), "insets consume the whole width");
     }
 
     #[test]
     fn configure_validates_fit_and_evenness() {
-        // rect outside the frame fails.
-        let mut c = VideoCrop::new(6, 0, 4, 4);
+        // insets wider than the frame fail.
+        let mut c = VideoCrop::new(0, 0, 6, 4);
         assert_eq!(
-            c.configure_pipeline(&rgba_caps(8, 8)).expect_err("rect overruns width"),
+            c.configure_pipeline(&rgba_caps(8, 8)).expect_err("insets overrun width"),
             G2gError::CapsMismatch
         );
-        // odd rect into a 4:2:0 stream fails.
-        let nv12 = |w, h| Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate: Rate::Any,
-        };
-        let mut c = VideoCrop::new(1, 2, 2, 2);
+        // odd inset into a 4:2:0 stream fails.
+        let mut c = VideoCrop::new(0, 0, 1, 0);
         assert_eq!(
-            c.configure_pipeline(&nv12(8, 8)).expect_err("odd x for 4:2:0"),
+            c.configure_pipeline(&nv12_caps(8, 8)).expect_err("odd left for 4:2:0"),
             G2gError::CapsMismatch
         );
-        // valid even rect inside the frame is accepted.
-        let mut c = VideoCrop::new(2, 2, 4, 4);
-        assert!(c.configure_pipeline(&nv12(8, 8)).is_ok());
-        // packed format with an odd rect inside the frame is fine.
-        let mut c = VideoCrop::new(1, 1, 3, 3);
+        // valid even insets are accepted.
+        let mut c = VideoCrop::new(2, 2, 2, 2);
+        assert!(c.configure_pipeline(&nv12_caps(8, 8)).is_ok());
+        // packed format with odd insets inside the frame is fine.
+        let mut c = VideoCrop::new(1, 1, 1, 1);
+        assert!(c.configure_pipeline(&rgba_caps(8, 8)).is_ok());
+        // all-zero insets are an identity pass-through.
+        let mut c = VideoCrop::new(0, 0, 0, 0);
         assert!(c.configure_pipeline(&rgba_caps(8, 8)).is_ok());
     }
 }

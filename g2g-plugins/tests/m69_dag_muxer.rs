@@ -91,7 +91,7 @@ async fn tee_to_muxer_diamond_runs() {
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
     let tee = g.add_tee(2);
     let flip = g.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate180)));
-    let crop = g.add_transform(GraphNode::element(VideoCrop::new(0, 0, 4, 4)));
+    let crop = g.add_transform(GraphNode::element(VideoCrop::new(0, 4, 0, 4)));
     let mux = g.add_muxer(GraphNode::muxer(InterleaveMux::new(2, rgba(8, 8))), 2);
     let sink = g.add_sink(GraphNode::element(AnySink));
     g.link(src, tee.input()).unwrap();
