@@ -142,8 +142,11 @@ impl AsyncElement for CapsFilter {
         match name {
             "caps" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
-                let caps = parse_caps(s).ok_or(PropError::Value)?;
-                self.filter = CapsSet::one(caps);
+                let set = parse_caps_set(s).ok_or(PropError::Value)?;
+                if set.alternatives().is_empty() {
+                    return Err(PropError::Value);
+                }
+                self.filter = set;
                 self.caps_str = s.into();
                 Ok(())
             }
@@ -166,11 +169,28 @@ static CAPSFILTER_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "caps to filter to, gst-launch syntax: e.g. video/x-raw,format=nv12,width=320,height=240",
 )];
 
+/// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
+/// the preference the solver fixates by when several survive; in practice the
+/// upstream format narrows it to one.
+const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Yuyv,
+];
+
+/// The raw sample formats a format-less `audio/x-raw` expands to (M184).
+const RAW_AUDIO_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
+
 /// Parse a `gst-launch` caps description (`media/type,field=value,...`) into a
-/// [`Caps`]. `None` on an unknown media type or a missing / unparseable required
-/// field. Field values use the lowercase convention of the element format
-/// properties (`format=nv12`), not the GStreamer uppercase fourcc.
-pub fn parse_caps(desc: &str) -> Option<Caps> {
+/// [`CapsSet`]. A `video/x-raw` or `audio/x-raw` with no `format` field expands
+/// to all supported raw formats at the given geometry (the gst-idiomatic
+/// format-less caps), so a downstream capsfilter can pin geometry while leaving
+/// the format to negotiation. Other media types yield a single-alternative set.
+/// `None` on an unknown media type or an unparseable field. Format values are
+/// case-insensitive (GStreamer's uppercase or the historical lowercase, M182).
+pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
     let mut parts = desc.split(',');
     let media = parts.next()?.trim();
     let fields: Vec<(&str, &str)> =
@@ -179,23 +199,58 @@ pub fn parse_caps(desc: &str) -> Option<Caps> {
     let dim = |key: &str| field(&fields, key).and_then(|v| v.parse::<u32>().ok()).map_or(Dim::Any, Dim::Fixed);
     let framerate = field(&fields, "framerate").and_then(parse_rate).unwrap_or(Rate::Any);
 
+    let one = |caps: Caps| Some(CapsSet::one(caps));
     match media {
-        "video/x-raw" => Some(Caps::RawVideo {
-            format: parse_raw_format(field(&fields, "format")?)?,
-            width: dim("width"),
-            height: dim("height"),
-            framerate,
-        }),
-        "video/x-h264" => Some(compressed(VideoCodec::H264, dim("width"), dim("height"), framerate)),
-        "video/x-h265" => Some(compressed(VideoCodec::H265, dim("width"), dim("height"), framerate)),
-        "video/x-vp8" => Some(compressed(VideoCodec::Vp8, dim("width"), dim("height"), framerate)),
-        "video/x-vp9" => Some(compressed(VideoCodec::Vp9, dim("width"), dim("height"), framerate)),
-        "video/x-av1" => Some(compressed(VideoCodec::Av1, dim("width"), dim("height"), framerate)),
-        "image/jpeg" => Some(compressed(VideoCodec::Mjpeg, dim("width"), dim("height"), framerate)),
-        "audio/x-opus" => Some(audio(AudioFormat::Opus, &fields)),
+        "video/x-raw" => {
+            let (width, height) = (dim("width"), dim("height"));
+            match field(&fields, "format") {
+                Some(f) => one(Caps::RawVideo {
+                    format: parse_raw_format(f)?,
+                    width,
+                    height,
+                    framerate,
+                }),
+                // Format-less: any supported pixel format at this geometry.
+                None => Some(CapsSet::from_alternatives(
+                    RAW_VIDEO_FORMATS
+                        .iter()
+                        .map(|&format| Caps::RawVideo {
+                            format,
+                            width: width.clone(),
+                            height: height.clone(),
+                            framerate: framerate.clone(),
+                        })
+                        .collect(),
+                )),
+            }
+        }
+        "audio/x-raw" => match field(&fields, "format") {
+            Some(f) => one(audio(parse_audio_format(f)?, &fields)),
+            // Format-less: any supported sample format at these channels / rate.
+            None => Some(CapsSet::from_alternatives(
+                RAW_AUDIO_FORMATS.iter().map(|&format| audio(format, &fields)).collect(),
+            )),
+        },
+        "video/x-h264" => one(compressed(VideoCodec::H264, dim("width"), dim("height"), framerate)),
+        "video/x-h265" => one(compressed(VideoCodec::H265, dim("width"), dim("height"), framerate)),
+        "video/x-vp8" => one(compressed(VideoCodec::Vp8, dim("width"), dim("height"), framerate)),
+        "video/x-vp9" => one(compressed(VideoCodec::Vp9, dim("width"), dim("height"), framerate)),
+        "video/x-av1" => one(compressed(VideoCodec::Av1, dim("width"), dim("height"), framerate)),
+        "image/jpeg" => one(compressed(VideoCodec::Mjpeg, dim("width"), dim("height"), framerate)),
+        "audio/x-opus" => one(audio(AudioFormat::Opus, &fields)),
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
-        "audio/mpeg" => Some(audio(AudioFormat::Aac, &fields)),
-        "audio/x-raw" => Some(audio(parse_audio_format(field(&fields, "format")?)?, &fields)),
+        "audio/mpeg" => one(audio(AudioFormat::Aac, &fields)),
+        _ => None,
+    }
+}
+
+/// Parse a `gst-launch` caps description into a single concrete [`Caps`]. Returns
+/// `None` when the description expands to more than one alternative (a
+/// format-less raw caps, see [`parse_caps_set`]) or is unparseable.
+pub fn parse_caps(desc: &str) -> Option<Caps> {
+    let set = parse_caps_set(desc)?;
+    match set.alternatives() {
+        [only] => Some(only.clone()),
         _ => None,
     }
 }
@@ -330,7 +385,34 @@ mod tests {
                 framerate: Rate::Any,
             })
         );
-        assert_eq!(parse_caps("video/x-raw,width=320"), None, "raw video needs a format");
+        // `parse_caps` yields a single Caps, so a format-less (multi-format) raw
+        // description is `None` here; `parse_caps_set` expands it instead.
+        assert_eq!(parse_caps("video/x-raw,width=320"), None, "format-less is not a single caps");
+    }
+
+    #[test]
+    fn parse_caps_set_expands_format_less_raw_video() {
+        // No `format` -> all supported pixel formats at the fixed geometry (M184).
+        let set = parse_caps_set("video/x-raw,width=160,height=120").expect("parses");
+        assert_eq!(set.alternatives().len(), RAW_VIDEO_FORMATS.len());
+        assert!(set.alternatives().iter().all(|c| matches!(
+            c,
+            Caps::RawVideo { width: Dim::Fixed(160), height: Dim::Fixed(120), .. }
+        )));
+        // Every supported format is represented at that geometry.
+        for fmt in RAW_VIDEO_FORMATS {
+            assert!(set.alternatives().iter().any(|c| matches!(
+                c,
+                Caps::RawVideo { format, .. } if *format == fmt
+            )));
+        }
+        // A pinned format still yields exactly one alternative.
+        assert_eq!(parse_caps_set("video/x-raw,format=NV12").unwrap().alternatives().len(), 1);
+        // Format-less audio expands to the raw sample formats.
+        assert_eq!(
+            parse_caps_set("audio/x-raw,channels=2").unwrap().alternatives().len(),
+            RAW_AUDIO_FORMATS.len()
+        );
     }
 
     #[test]

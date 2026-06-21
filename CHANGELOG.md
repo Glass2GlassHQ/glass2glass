@@ -5,6 +5,21 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M184: format-less / partial geometry caps
+
+`capsfilter` now accepts the gst-idiomatic geometry-only caps where the pixel /
+sample format is left to negotiation: `video/x-raw,width=160,height=120` (no
+`format`) and `audio/x-raw,channels=2` now parse. `parse_caps_set` expands a
+format-less raw caps to a `CapsSet` over all supported formats at the given
+geometry; the solver intersects it down to whatever the upstream produces.
+`parse_caps` (single-`Caps`) is retained and delegates, returning `None` for a
+multi-format description. Closes one of the two gst-porting gaps from M182.
+
+Verified: `parse_caps_set` unit test (format-less video expands to all 5 pixel
+formats at the geometry; audio to the 2 raw sample formats; a pinned format
+stays one) and `m184_formatless_caps` end-to-end (geometry-only and
+framerate-only capsfilters parse + negotiate). Full suites pass.
+
 ### M183: align videocrop / videobox property model with GStreamer
 
 Follows M182 (the naming pass) with the property-*model* changes that are

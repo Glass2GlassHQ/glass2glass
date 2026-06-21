@@ -56,12 +56,10 @@ edits (the typed core is unaffected, only the string<->enum boundary).
   `bar`/`checkers-8`. Old g2g spellings remain aliases.
 
 - **Remaining gst-porting gaps (uncovered by M182, both real, both > naming):**
-  - **Format-less / partial geometry caps.** `video/x-raw,width=160,height=120`
-    (no `format`) fails to parse: `Caps::RawVideo`'s format field is a concrete
-    `RawVideoFormat` enum, not an "any". gst caps are field-sets where a
-    capsfilter may fix a subset. Needs a partial/`CapsSet`-backed capsfilter that
-    can express "any format at fixed geometry" (the M16 `CapsSet` machinery is
-    the lever).
+  - **Format-less / partial geometry caps (DONE, M184).** `capsfilter` parses
+    `video/x-raw,width=160,height=120` (no `format`) by expanding to a `CapsSet`
+    over all raw formats at that geometry (`parse_caps_set`); the solver
+    intersects down to the upstream format. `audio/x-raw` likewise.
   - **Caps-driven transform operation.** `videoscale ! video/x-raw,...,width=160`
     does not resize; `videoscale`/`videoconvert`/`audioresample` key off their
     convenience properties, not the negotiated downstream caps. gst drives these
