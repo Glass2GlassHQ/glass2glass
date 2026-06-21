@@ -796,6 +796,25 @@ mod factory {
         /// playback); the source's runtime caps are resolved at negotiation, so
         /// the handler's declared output caps only need to name the *media type*
         /// the right decoder is plugged for.
+        /// Dispatch a URI to its registered scheme handler, constructing the
+        /// source from the URI and returning it with the caps it produces (the
+        /// decode-chain input). The lower half of
+        /// [`build_uridecodebin`](Self::build_uridecodebin), exposed so the
+        /// `uridecodebin` / `playbin` text-parser nodes can splice the source into
+        /// a larger graph instead of getting a complete one.
+        pub fn build_uri_source(
+            &self,
+            uri: &str,
+        ) -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> {
+            let parsed = Uri::parse(uri).ok_or(UriError::Malformed)?;
+            let handler = self
+                .uris
+                .iter()
+                .find(|h| h.scheme == parsed.scheme)
+                .ok_or(UriError::UnknownScheme)?;
+            (handler.build)(&parsed)
+        }
+
         pub fn build_uridecodebin<Sk: AsyncElement + 'static>(
             &self,
             uri: &str,
@@ -803,13 +822,7 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
-            let parsed = Uri::parse(uri).ok_or(UriError::Malformed)?;
-            let handler = self
-                .uris
-                .iter()
-                .find(|h| h.scheme == parsed.scheme)
-                .ok_or(UriError::UnknownScheme)?;
-            let (source, output) = (handler.build)(&parsed)?;
+            let (source, output) = self.build_uri_source(uri)?;
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source));
             let snk = graph.add_sink(GraphNodeRef::element(sink));

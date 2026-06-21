@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M196: `uridecodebin` / `playbin` in gst-launch lines
+
+`uridecodebin uri=X ! ...` and `playbin uri=X` now parse and build. `uridecodebin`
+builds its source from the `uri=` scheme handler and auto-plugs the decode chain
+to raw, splicing both into the pipeline; `playbin` is that plus an auto sink
+(`autovideosink`, or a `video-sink=` override), i.e. a complete pipeline from a
+single element.
+
+- The URI source and the auto-plugged decoders are *pre-built* nodes (the source
+  comes boxed from a scheme handler, the decoders from `Registry::autoplug`), so
+  the parser gained a `PrebuiltNode` path: `expand_uri_sources` splices them in,
+  and `build_graph` constructs them directly instead of by name (a parallel
+  `prebuilt` table; placeholder specs keep the queue / tee / muxer closures
+  oblivious). The decoded output flows into any normal parser-built chain
+  (`uridecodebin uri=X ! videoconvert ! fakesink`).
+- `Registry::build_uri_source(uri)` exposes the scheme-handler dispatch (the lower
+  half of `build_uridecodebin`); `default_registry` registers the `file://`
+  handler (`Mp4Src`, baseline) plus `udp://` / `rtsp://` / `v4l2://` behind their
+  features.
+- Loud failures: `MissingUri`, `UriSourceNotAtHead` (it provides the source, so
+  it must start the pipeline), `Uri(..)` (bad URI / unregistered scheme),
+  `NoDecodeChain` (no decoder to raw).
+- Known limit: `file://` uses the self-demuxing `Mp4Src` (MP4 / H.264 only), as
+  the existing handler does; other containers over `file://` are a follow-up.
+
+Verified: `m196_uridecodebin` (uridecodebin expands source + decoder; feeds a
+custom chain; playbin appends an auto sink; missing-uri / unknown-scheme /
+not-at-head / no-decoder all fail loud). Core (216) + plugins (142 blocks) green
+under `std` and `std,ffmpeg`; no_std + clippy clean.
+
 ### M195: reflect `bytestream-format` into decodebin's auto-plug input
 
 `filesrc bytestream-format=matroska ! decodebin` now selects `matroskademux`

@@ -239,8 +239,24 @@ pub fn default_registry() -> Registry {
     register_feature_gated(&mut reg);
     register_aliases(&mut reg);
     register_autoplug_candidates(&mut reg);
+    register_uri_handlers(&mut reg);
 
     reg
+}
+
+/// Register the `uri=` scheme handlers (M196) so `uridecodebin` / `playbin` in a
+/// text pipeline can build their source from a URI. Each handler is gated to its
+/// source's feature (the same gate as in [`uridecodebin`](crate::uridecodebin)),
+/// so a scheme is available only when its source is compiled in.
+fn register_uri_handlers(reg: &mut Registry) {
+    // file:// -> Mp4Src (self-demuxing MP4, emits H.264). Available under std.
+    reg.register_uri(crate::uridecodebin::file_handler());
+    #[cfg(feature = "udp-ingress")]
+    reg.register_uri(crate::uridecodebin::udp_handler());
+    #[cfg(feature = "rtsp")]
+    reg.register_uri(crate::uridecodebin::rtsp_handler());
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    reg.register_uri(crate::uridecodebin::v4l2_handler());
 }
 
 /// Register the parsers and decoders as auto-plug [`ElementFactory`] candidates

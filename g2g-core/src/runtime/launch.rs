@@ -44,7 +44,7 @@ use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
 use crate::property::PropValue;
-use crate::runtime::autoplug::{is_raw_audio, is_raw_video, Registry};
+use crate::runtime::autoplug::{is_raw_audio, is_raw_video, Registry, UriError};
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
 /// Why [`parse_launch`] could not build a graph.
@@ -93,6 +93,14 @@ pub enum ParseError {
     /// feature is compiled in, or the input is a container that needs a demuxer
     /// (auto-plugging through fan-out demuxers is not yet supported).
     NoDecodeChain(String),
+    /// A `uridecodebin` / `playbin` was not at the head of its chain. It provides
+    /// the source, so it must start the pipeline.
+    UriSourceNotAtHead(String),
+    /// A `uridecodebin` / `playbin` had no `uri=` property.
+    MissingUri(String),
+    /// The `uri=` could not be turned into a source (bad URI, or no handler
+    /// registered for its scheme). The message quotes the URI and reason.
+    Uri(String),
     /// Linking two nodes into the graph failed.
     Graph(GraphError),
 }
@@ -140,6 +148,11 @@ impl core::fmt::Display for ParseError {
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
             }
+            ParseError::UriSourceNotAtHead(n) => {
+                write!(f, "{n}: provides the source, so it must start the pipeline (be the first element)")
+            }
+            ParseError::MissingUri(n) => write!(f, "{n}: missing required 'uri=' property"),
+            ParseError::Uri(msg) => write!(f, "uri error: {msg}"),
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
         }
     }
@@ -154,11 +167,22 @@ struct ElementSpec {
     instance: Option<String>,
 }
 
-/// An item in a chain: an element to build, or a `t.` reference to a named
-/// element declared elsewhere (the branching / link-by-name syntax).
+/// An item in a chain: an element to build, a `t.` reference to a named element
+/// declared elsewhere (the branching / link-by-name syntax), or a node already
+/// constructed by a macro expansion (`uridecodebin` / `playbin`, M196), spliced
+/// in directly rather than built by name.
 enum Item {
     Element(ElementSpec),
     Ref(String),
+    Prebuilt(PrebuiltNode),
+}
+
+/// A node a macro expansion built ahead of the structural pass: a source
+/// constructed from a `uri=` scheme handler, or a decoder the auto-plug search
+/// instantiated. Spliced into the graph as-is (it has no name to build by).
+enum PrebuiltNode {
+    Source(Box<dyn DynSourceLoop>),
+    Element(Box<dyn DynAsyncElement>),
 }
 
 /// A run of items linked left-to-right by `!`. Branches are separate chains
@@ -407,6 +431,14 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                     upstream = None;
                     new_chain.push(Item::Ref(name));
                 }
+                // A pre-built node (from `uridecodebin` / `playbin`) carries no
+                // name to take declared caps from, so a `decodebin` cannot follow
+                // it. Clear the upstream; if a decodebin does follow, it reports
+                // the missing-upstream error.
+                prebuilt @ Item::Prebuilt(_) => {
+                    upstream = None;
+                    new_chain.push(prebuilt);
+                }
             }
         }
         out.push(new_chain);
@@ -436,9 +468,67 @@ fn resolve_upstream_caps(
     registry.declared_output_caps(name).ok_or(ParseError::DecodebinNoUpstream)
 }
 
+/// `uridecodebin` / `playbin`: a source-providing macro. `uridecodebin uri=X`
+/// builds the source from the URI scheme handler and auto-plugs the decode chain
+/// to raw; `playbin uri=X` is that plus an auto sink (`autovideosink`, or the
+/// `video-sink=` override), i.e. a complete pipeline.
+fn is_uri_source(name: &str) -> bool {
+    matches!(name, "uridecodebin" | "uridecodebin3" | "playbin" | "playbin3")
+}
+
+/// The value of a spec property by key, if present.
+fn prop<'a>(spec: &'a ElementSpec, key: &str) -> Option<&'a str> {
+    spec.props.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// Expand every `uridecodebin` / `playbin` (a source position element) into the
+/// `uri=` scheme handler's source plus the auto-plugged decode chain, as
+/// pre-built nodes spliced straight into the chain. `playbin` additionally
+/// appends an auto sink so the line is a complete pipeline. The element must head
+/// its chain (it provides the source).
+fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let mut new_chain: Chain = Vec::with_capacity(chain.len());
+        for (i, item) in chain.into_iter().enumerate() {
+            let spec = match item {
+                Item::Element(spec) if is_uri_source(&spec.name) => spec,
+                other => {
+                    new_chain.push(other);
+                    continue;
+                }
+            };
+            if i != 0 {
+                return Err(ParseError::UriSourceNotAtHead(spec.name));
+            }
+            let is_playbin = spec.name.starts_with("playbin");
+            let uri = prop(&spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
+            let (source, caps) = registry
+                .build_uri_source(uri)
+                .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+            let decoders = registry
+                .autoplug(&caps, &target, DECODEBIN_MAX_DEPTH)
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+            new_chain.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+            for dec in decoders {
+                new_chain.push(Item::Prebuilt(PrebuiltNode::Element(dec)));
+            }
+            if is_playbin {
+                let sink = prop(&spec, "video-sink").unwrap_or("autovideosink").to_string();
+                new_chain.push(Item::Element(ElementSpec { name: sink, props: Vec::new(), instance: None }));
+            }
+        }
+        out.push(new_chain);
+    }
+    Ok(out)
+}
+
 fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {
-    // Expand decodebin macros into concrete decoder chains before the structural
-    // build, so the rest of the builder sees only real elements.
+    // Expand the source-providing (uridecodebin / playbin) and mid-chain
+    // (decodebin) macros into concrete nodes before the structural build, so the
+    // rest of the builder sees only real elements and pre-built nodes.
+    let chains = expand_uri_sources(registry, chains)?;
     let chains = expand_decodebin(registry, chains)?;
 
     // A chain endpoint after flattening: a concrete element index, or a still
@@ -449,6 +539,12 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     }
 
     let mut specs: Vec<ElementSpec> = Vec::new();
+    // Parallel to `specs`: the pre-built node for that index (a `uridecodebin` /
+    // `playbin` source or decoder), or `None` for a normal name-built element.
+    // The placeholder spec for a pre-built node carries a benign name so the
+    // structural closures (`is_queue` / `is_tee`) never match it, and node
+    // construction uses the pre-built node instead of looking the name up.
+    let mut prebuilt: Vec<Option<PrebuiltNode>> = Vec::new();
     let mut names: Vec<(String, usize)> = Vec::new();
     let mut chain_eps: Vec<Vec<Endpoint>> = Vec::with_capacity(chains.len());
 
@@ -465,6 +561,17 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                         names.push((inst.clone(), ei));
                     }
                     specs.push(spec);
+                    prebuilt.push(None);
+                    eps.push(Endpoint::Element(ei));
+                }
+                Item::Prebuilt(node) => {
+                    let ei = specs.len();
+                    let name = match node {
+                        PrebuiltNode::Source(_) => "uridecodebin",
+                        PrebuiltNode::Element(_) => "(decoder)",
+                    };
+                    specs.push(ElementSpec { name: name.to_string(), props: Vec::new(), instance: None });
+                    prebuilt.push(Some(node));
                     eps.push(Endpoint::Element(ei));
                 }
                 Item::Ref(name) => eps.push(Endpoint::Ref(name)),
@@ -580,6 +687,20 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             node_of.push(None);
             continue;
         }
+        // A pre-built node (uridecodebin / playbin source or decoder) is spliced
+        // in directly; its role still follows link degree (a source has no input,
+        // a terminal decoder no output).
+        if let Some(node) = prebuilt[ei].take() {
+            let nid = match node {
+                PrebuiltNode::Source(src) => graph.add_source(GraphNodeRef::Source(src)),
+                PrebuiltNode::Element(el) if out_deg[ei] == 0 => {
+                    graph.add_sink(GraphNodeRef::Element(el))
+                }
+                PrebuiltNode::Element(el) => graph.add_transform(GraphNodeRef::Element(el)),
+            };
+            node_of.push(Some(nid));
+            continue;
+        }
         let spec = &specs[ei];
         let node = if is_tee(ei) {
             graph.add_tee(out_deg[ei] as u8).node()
@@ -684,6 +805,7 @@ mod tests {
             .map(|i| match i {
                 Item::Element(s) => s.name.as_str(),
                 Item::Ref(n) => n.as_str(),
+                Item::Prebuilt(_) => "(prebuilt)",
             })
             .collect()
     }
