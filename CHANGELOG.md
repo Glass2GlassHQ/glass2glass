@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M191: `g2g-launch` CLI flag parity with gst-launch
+
+`g2g-launch` now accepts leading `gst-launch-1.0`-style options, so a pasted
+command line like `gst-launch-1.0 -v -e <pipeline>` runs verbatim instead of
+treating `-v` as an element name and failing to parse.
+
+- Implemented: `-v`/`--verbose` (prints the parsed pipeline + each link's
+  backpressure policy), `-q`/`--quiet` (suppresses the PLAYING / Done lines),
+  `-h`/`--help`.
+- Accepted for compatibility (recognized and ignored, not rejected): `-e`/
+  `--eos-on-shutdown`, `-m`/`--messages`, `-f`/`--no-fault`, `-t`/`--tags`.
+  These govern live-shutdown / bus output, which g2g has no run-time channel for
+  yet (sources run to their natural EOS or until killed).
+- Only *leading* `-`/`--` tokens are parsed as flags; once a non-flag token is
+  seen the rest is the pipeline, so a negative property value (`videobox
+  top=-5`, always inside a `key=value` token) is never mistaken for a flag.
+- Parse errors now print via `Display` (the readable message) instead of `{:?}`.
+
+Verified: bin unit tests (leading flags split from pipeline; negative property
+value stays in the pipeline; combined long flags) + manual `-v -e` / `-q` / `-h`
+runs.
+
 ### M190: `queue` in gst-launch lines (maps to per-edge LinkPolicy)
 
 `queue` / `queue2` now parse in a `parse_launch` pipeline. g2g has no queue
