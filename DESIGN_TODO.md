@@ -74,11 +74,21 @@ edits (the typed core is unaffected, only the string<->enum boundary).
       keeps `0` as its "unknown until parsed" nominal value. `audioresample`
       (auto by default) takes its rate from a downstream capsfilter
       (`audioresample ! audio/x-raw,rate=16000`); property still overrides.
-    - **Stacked auto transforms** (`videoconvert ! videoscale ! caps`, two
-      auto transforms before one far capsfilter) don't back-propagate a format /
-      geometry pin through a passthrough transform: `DerivedOutput` is forward
-      only (input->output). The forward-resolve / multi-element subgraph re-solve
-      walk would fix it. A capsfilter after each transform is the supported form.
+    - **Stacked auto transforms (M188, partial).** Two auto transforms before
+      one far capsfilter now back-propagate the pin: the solver evaluates each
+      `DerivedOutput`'s forward image per input alternative and drops the inputs
+      whose image can't reach the constrained output
+      (`backward_filter_derived`), while the forward pass narrows the output by
+      the union of `f` over the surviving inputs (`forward_derived_union`).
+      `videoconvert ! videoscale ! video/x-raw,format=NV12,width=160,height=120`
+      resolves; a bare `videoconvert ! videoscale` stays passthrough.
+      KNOWN LIMIT: the reverse order, `videoscale ! videoconvert ! caps`, where a
+      *geometry* pin sits behind a geometry-passthrough transform, does not
+      resolve and fails loud at runtime (CapsMismatch, no silent mis-fixate).
+      Dropping whole alternatives can't narrow a `Range` *within* an alternative;
+      that needs field-level bidirectional coupling, a larger redesign deferred
+      past M188. `backward_feasible()` likewise still returns `None` for
+      `DerivedOutput`, so mid-stream re-solve back-prop is separate and deferred.
     - Wire `configure_output` into the remaining runners (run_simple_pipeline /
       fanout / fanin) and the mid-stream re-cascade (only graph +
       linear-coordinator paths deliver it today).

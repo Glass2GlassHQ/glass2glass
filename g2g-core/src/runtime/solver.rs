@@ -595,22 +595,34 @@ fn apply_constraint(
             let (Some(ii), Some(oi)) = (in_idx, out_idx) else {
                 return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
             };
-            // Only fire once the input link has fixated to a single
-            // concrete Caps. Until then the derived output is unknown
-            // and we leave the output link to other constraints.
+            // Forward (M188): narrow the output by the union of `f` over every
+            // input alternative. For a single fixated input this is just
+            // `f(input)` (the M185/M186 single-transform behaviour); for a still
+            // ambiguous input (a stacked auto transform whose upstream hasn't
+            // fixated) it still produces an output to narrow, so the second
+            // transform's output link no longer stalls at `None`.
             if let Some(input_set) = &links[ii] {
-                if let Some(fixed_input) = input_set.fixate() {
-                    if input_set.alternatives().len() == 1
-                        && input_set.alternatives()[0] == fixed_input
-                    {
-                        let derived = f(&fixed_input);
-                        if derived.is_empty() {
-                            return Err(NegotiationFailure::EmptyLink {
-                                upstream: i,
-                                downstream: i + 1,
-                            });
-                        }
-                        narrow(links, oi, &derived, i, i + 1)?;
+                let derived = forward_derived_union(f.as_ref(), input_set);
+                if derived.is_empty() {
+                    return Err(NegotiationFailure::EmptyLink {
+                        upstream: i,
+                        downstream: i + 1,
+                    });
+                }
+                narrow(links, oi, &derived, i, i + 1)?;
+            }
+            // Backward (M188): propagate a constrained output back to an
+            // ambiguous input by dropping alternatives that can't reach it, so
+            // stacked auto transforms resolve.
+            if let (Some(in_set), Some(out_set)) = (links[ii].clone(), links[oi].clone()) {
+                match backward_filter_derived(f.as_ref(), &in_set, &out_set) {
+                    Ok(Some(narrowed)) => links[ii] = Some(narrowed),
+                    Ok(None) => {}
+                    Err(()) => {
+                        return Err(NegotiationFailure::EmptyLink {
+                            upstream: i - 1,
+                            downstream: i,
+                        })
                     }
                 }
             }
@@ -961,15 +973,30 @@ fn apply_transform_node<E>(
             Ok(())
         }
         CapsConstraint::DerivedOutput(f) => {
-            // Fire once the input edge has fixated to a single concrete caps,
-            // mirroring the linear solver.
-            if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
-                let derived = f(&fixed_input);
+            // Forward (M188): narrow the output edge by the union of `f` over
+            // every input alternative, mirroring the linear solver. A single
+            // fixated input gives `f(input)`; a still ambiguous input (a stacked
+            // auto transform) still yields an output to narrow instead of leaving
+            // the output edge at `None`.
+            if let Some(in_set) = edges[in_e].clone() {
+                let derived = forward_derived_union(f.as_ref(), &in_set);
                 if derived.is_empty() {
                     let (up, down) = edge_endpoints(graph, out_e);
                     return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
                 }
-                return narrow_edge(graph, edges, out_e, &derived);
+                narrow_edge(graph, edges, out_e, &derived)?;
+            }
+            // Backward (M188): propagate a constrained output back to an
+            // ambiguous input by dropping alternatives that can't reach it.
+            if let (Some(in_set), Some(out_set)) = (edges[in_e].clone(), edges[out_e].clone()) {
+                match backward_filter_derived(f.as_ref(), &in_set, &out_set) {
+                    Ok(Some(narrowed)) => edges[in_e] = Some(narrowed),
+                    Ok(None) => {}
+                    Err(()) => {
+                        let (up, down) = edge_endpoints(graph, in_e);
+                        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                    }
+                }
             }
             Ok(())
         }
@@ -996,6 +1023,52 @@ fn apply_transform_node<E>(
 fn fixed_single(set: &CapsSet) -> Option<Caps> {
     let fixed = set.fixate()?;
     (set.alternatives().len() == 1 && set.alternatives()[0] == fixed).then_some(fixed)
+}
+
+/// Forward image of a `DerivedOutput` transform over its (possibly ambiguous)
+/// input set: the union of `f` over the input alternatives (M188). For a single
+/// fixated input this is just `f(input)`; for a multi-alternative input it lets a
+/// downstream auto transform still receive an output to narrow, instead of
+/// stalling until the input fixates (which it can't, with no downstream pin).
+fn forward_derived_union(f: &dyn Fn(&Caps) -> CapsSet, in_set: &CapsSet) -> CapsSet {
+    in_set
+        .alternatives()
+        .iter()
+        .fold(CapsSet::from_alternatives(Vec::new()), |acc, a| acc.union(&f(a)))
+}
+
+/// M188 backward narrowing for a `DerivedOutput` transform: given the (already
+/// constrained) output set, drop input alternatives whose forward image `f(a)`
+/// can no longer satisfy it. `f` is not analytically invertible, but it is
+/// evaluable per candidate, so a downstream pin propagates back through a
+/// not-yet-fixated transform, letting stacked auto transforms
+/// (`videoconvert ! videoscale ! caps`) resolve.
+///
+/// Only narrows when the input is still ambiguous (more than one alternative),
+/// so single-input transforms (decoders, the single-transform pipelines of
+/// M185/M186) are untouched. Returns `Some(narrowed)` when it removed
+/// alternatives, `None` when unchanged, `Err(())` when nothing survives.
+fn backward_filter_derived(
+    f: &dyn Fn(&Caps) -> CapsSet,
+    in_set: &CapsSet,
+    out_set: &CapsSet,
+) -> Result<Option<CapsSet>, ()> {
+    if in_set.alternatives().len() <= 1 {
+        return Ok(None);
+    }
+    let kept: Vec<Caps> = in_set
+        .alternatives()
+        .iter()
+        .filter(|a| !f(a).intersect(out_set).is_empty())
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        return Err(());
+    }
+    if kept.len() == in_set.alternatives().len() {
+        return Ok(None);
+    }
+    Ok(Some(CapsSet::from_alternatives(kept)))
 }
 
 /// A tee fans its input caps out to every output unchanged: couple the input

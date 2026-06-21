@@ -5,6 +5,43 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M188: forward-resolve walk (stacked auto transforms)
+
+Two caps-driven (auto) transforms stacked before a single far capsfilter now
+resolve: the downstream pin propagates *back* through both transforms. This is
+the case M186 explicitly couldn't do (a capsfilter after each transform was the
+only supported form).
+
+- `DerivedOutput` is not analytically invertible, but it is evaluable per
+  candidate. The solver exploits this from both directions in the iterative
+  fixpoint:
+  - **Backward** (`backward_filter_derived`): given the already-constrained
+    output set, drop the input alternatives whose forward image `f(a)` can no
+    longer intersect it. Only fires when the input is still ambiguous (>1
+    alternative), so single-input transforms (decoders, the M185/M186
+    single-transform pipelines) are untouched.
+  - **Forward** (`forward_derived_union`): narrow the output by the union of `f`
+    over every surviving input alternative. Replaces the old "fire only once the
+    input fixates to a single concrete caps" gate, so the second transform in a
+    stack still produces an output to narrow instead of stalling its output link
+    at `None` (the bare `videoconvert ! videoscale` passthrough case).
+  Wired into both the linear (`apply_constraint`) and graph
+  (`apply_transform_node`) `DerivedOutput` arms.
+- `videoconvert ! videoscale ! video/x-raw,format=NV12,width=160,height=120`
+  resolves (videoscale passes format through, so it must be NV12, so videoconvert
+  must produce NV12); a bare `videoconvert ! videoscale` stays passthrough.
+- KNOWN LIMIT: the reverse order `videoscale ! videoconvert ! caps`, a *geometry*
+  pin behind a geometry-passthrough transform, does not resolve. Narrowing a
+  `Range` *within* an alternative needs field-level bidirectional coupling (a
+  larger redesign, deferred). It fails loud at runtime (CapsMismatch), never
+  silently mis-fixates. Documented in DESIGN_TODO.
+
+Verified: `m188_stacked_auto` (convert!scale resolves; bare stack passthrough;
+incompatible pin fails loud; the geometry-passthrough order asserts the loud
+failure). Solver-core change re-verified against the negotiation + DAG suites
+(m8 / m16 / m18 / m67 / m70) and the caps-driven milestones (m185/m186/m187).
+Core (216) + plugins (135 blocks) pass; no_std + clippy clean.
+
 ### M187: audio sample-rate "any" + caps-driven audioresample
 
 `Caps::Audio` gained an "any rate" wildcard so `audioresample` can be caps-driven
