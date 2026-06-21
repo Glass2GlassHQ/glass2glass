@@ -29,8 +29,8 @@ use libpulse_binding::stream::Direction;
 use libpulse_simple_binding::Simple;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// Negotiated PCM parameters as a PulseAudio `Spec`. Compressed audio
@@ -188,6 +188,15 @@ impl AsyncElement for PulseSink {
         self.worker = Some(join);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "PulseAudio audio sink",
+            "Sink/Audio",
+            "Plays interleaved PCM via PulseAudio",
+            "g2g",
+        )
     }
 
     fn process<'a>(

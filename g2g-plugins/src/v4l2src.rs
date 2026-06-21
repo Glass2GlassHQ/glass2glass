@@ -23,9 +23,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 use v4l::buffer::Type;
@@ -162,6 +162,15 @@ impl SourceLoop for V4l2Src {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "V4L2 camera source",
+            "Source/Video",
+            "Captures video from a V4L2 device (YUYV)",
+            "g2g",
+        )
     }
 
     /// Live source: contributes one frame period of latency so the sink keeps a

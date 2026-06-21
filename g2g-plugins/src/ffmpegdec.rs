@@ -98,8 +98,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
-    Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Pixel layout emitted on the decoder's output side.
@@ -644,6 +644,15 @@ impl AsyncElement for FfmpegH264Dec {
         self.decoder = Some(decoder);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "FFmpeg video decoder",
+            "Codec/Decoder/Video",
+            "Decodes H.264 / H.265 / VP8 / VP9 / AV1 via libavcodec",
+            "g2g",
+        )
     }
 
     fn process<'a>(

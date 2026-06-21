@@ -18,8 +18,8 @@ use alloc::string::String;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
@@ -158,6 +158,15 @@ impl SourceLoop for DashSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         DASHSRC_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "DASH source",
+            "Source/Network",
+            "Reads a DASH MPD and streams its segments",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

@@ -63,8 +63,8 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    Dim, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -517,6 +517,15 @@ impl AsyncElement for KmsSink {
         }
         self.allocate_slots(w, h)?;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "KMS / DRM video sink",
+            "Sink/Video",
+            "Presents video via DRM / KMS",
+            "g2g",
+        )
     }
 
     fn process<'a>(

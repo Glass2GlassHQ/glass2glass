@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -215,6 +215,15 @@ impl AsyncElement for UdpSink {
         socket.connect(self.dest).map_err(io_err)?;
         self.std_socket = Some(socket);
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "UDP RTP sink",
+            "Sink/Network",
+            "Sends RTP H.264 over UDP, honoring NACK retransmit",
+            "g2g",
+        )
     }
 
     fn process<'a>(

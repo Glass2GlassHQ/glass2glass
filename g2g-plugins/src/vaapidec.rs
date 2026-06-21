@@ -74,9 +74,9 @@ use cros_codecs::{BlockingMode, Fourcc};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    VideoCodec, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -336,6 +336,15 @@ impl AsyncElement for VaapiH264Dec {
         self.decoder = Some(decoder);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "VA-API H.264 decoder",
+            "Codec/Decoder/Video/Hardware",
+            "Hardware H.264 decode via VA-API",
+            "g2g",
+        )
     }
 
     fn process<'a>(

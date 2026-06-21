@@ -18,8 +18,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
+    VideoCodec,
 };
 
 use jpeg_encoder::{ColorType, Encoder};
@@ -184,6 +185,15 @@ impl AsyncElement for MjpegEnc {
         self.framerate = framerate.clone();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "JPEG / MJPEG encoder",
+            "Codec/Encoder/Video",
+            "Encodes raw video to JPEG / Motion-JPEG via jpeg-encoder",
+            "g2g",
+        )
     }
 
     fn process<'a>(

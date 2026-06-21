@@ -35,8 +35,8 @@ use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// Negotiated PCM parameters: (ALSA sample format, channels, rate). Compressed
@@ -189,6 +189,15 @@ impl AsyncElement for AlsaSink {
         self.worker = Some(join);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "ALSA audio sink",
+            "Sink/Audio",
+            "Plays interleaved PCM via ALSA",
+            "g2g",
+        )
     }
 
     fn process<'a>(

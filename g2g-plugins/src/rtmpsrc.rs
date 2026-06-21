@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
 };
 
 use crate::filesink::io_err;
@@ -100,6 +100,15 @@ impl SourceLoop for RtmpSrc {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "RTMP ingest source",
+            "Source/Network",
+            "Accepts an RTMP publisher and emits an FLV byte stream",
+            "g2g",
+        )
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

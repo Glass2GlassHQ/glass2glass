@@ -20,9 +20,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, RawVideoFormat, Rate, VideoCodec,
 };
 
 use vpx_encode::{Config, Encoder, VideoCodecId};
@@ -246,6 +246,15 @@ impl AsyncElement for VpxEnc {
         self.build_encoder()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "VP8 / VP9 encoder",
+            "Codec/Encoder/Video",
+            "Encodes raw I420 video to VP8 or VP9 via libvpx",
+            "g2g",
+        )
     }
 
     fn process<'a>(

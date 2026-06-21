@@ -22,8 +22,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::fmp4::{parse_fragments, parse_header, starts_with_param_set, CencDefaults, Header, Sample};
@@ -308,6 +308,15 @@ impl AsyncElement for Fmp4Demux {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "fMP4 / CMAF demuxer",
+            "Codec/Demuxer",
+            "Demuxes a fragmented-MP4 / CMAF byte stream",
+            "g2g",
+        )
     }
 
     fn process<'a>(

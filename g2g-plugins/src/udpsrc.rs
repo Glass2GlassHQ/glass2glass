@@ -22,8 +22,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, LatencyReport,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
+    VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -183,6 +184,15 @@ impl SourceLoop for UdpSrc {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "UDP RTP source",
+            "Source/Network",
+            "Receives raw RTP H.264 over UDP with a jitter buffer",
+            "g2g",
+        )
     }
 
     /// Live source: contributes one frame period so the sink keeps a frame in

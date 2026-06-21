@@ -100,8 +100,8 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, Segment,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, Segment,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -496,6 +496,15 @@ impl AsyncElement for WaylandSink {
         self.width = w;
         self.height = h;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Wayland video sink",
+            "Sink/Video",
+            "Presents NV12 video to a Wayland surface (software SHM)",
+            "g2g",
+        )
     }
 
     fn process<'a>(

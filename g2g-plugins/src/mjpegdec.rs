@@ -22,8 +22,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
+    VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -149,6 +150,15 @@ impl AsyncElement for MjpegDec {
         self.framerate = framerate.clone();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "JPEG / MJPEG decoder",
+            "Codec/Decoder/Video",
+            "Decodes JPEG / Motion-JPEG to RGBA or I420 via zune-jpeg",
+            "g2g",
+        )
     }
 
     fn process<'a>(

@@ -22,9 +22,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
-    VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    RawVideoFormat, Rate, VideoCodec,
 };
 
 use rav1e::prelude::{
@@ -253,6 +253,15 @@ impl AsyncElement for Av1Enc {
         self.build_context()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "AV1 encoder",
+            "Codec/Encoder/Video",
+            "Encodes raw I420 video to AV1 via rav1e",
+            "g2g",
+        )
     }
 
     fn process<'a>(

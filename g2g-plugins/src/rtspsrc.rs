@@ -44,8 +44,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
@@ -237,6 +237,15 @@ impl SourceLoop for RtspSrc {
     ) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "RTSP source",
+            "Source/Network",
+            "Receives an RTSP / RTP H.264 stream via retina",
+            "g2g",
+        )
     }
 
     fn run<'a>(
