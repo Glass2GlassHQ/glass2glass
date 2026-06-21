@@ -33,6 +33,13 @@ pub enum HardwareError {
     /// Raw OS error code from a filesystem operation (`FileSrc` /
     /// `FileSink`), zero when the OS reported none.
     Io(i32),
+    /// ALSA `snd_*` return code (negative errno) from `alsasink`.
+    Alsa(i32),
+    /// PulseAudio error code (`pa_error_code_t`) from `pulsesink`.
+    PulseAudio(i32),
+    /// PipeWire / SPA failure from `pipewiresink` / `pipewiresrc`; carries a
+    /// negative errno where one is available, else -1.
+    PipeWire(i32),
     /// Other backend-specific failure.
     Other,
 }

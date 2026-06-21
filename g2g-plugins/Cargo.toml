@@ -179,6 +179,28 @@ hls = ["http-src", "dep:aes", "dep:cbc"]
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
 # `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
 dash = ["http-src", "dep:roxmltree"]
+# Linux ALSA render sink (AlsaSink): plays interleaved PCM (PcmS16Le / PcmF32Le)
+# on an ALSA PCM device (`default` by default) via libasound. The Linux analog of
+# WasapiSink; blocking writes run on a dedicated worker thread. Pulls the `alsa`
+# crate (links system libasound: alsa-lib-devel / libasound2-dev). Linux-only,
+# implies std.
+alsa-sink = ["std", "dep:alsa"]
+# Linux PulseAudio render sink (PulseSink): plays interleaved PCM on the default
+# PulseAudio / PipeWire-pulse server via the blocking libpulse "simple" API on a
+# worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
+# Linux-only, implies std.
+pulse-sink = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
+# Linux PipeWire audio render sink + capture source (PipeWireSink / PipeWireSrc):
+# the modern Linux media layer. Drives a pw::stream on a pw::main_loop worker,
+# negotiating an SPA audio format pod. Pulls the `pipewire` crate (libpipewire-0.3
+# + libspa via bindgen; needs clang). Linux-only, implies std. Video / screen
+# capture is a follow-up on the same elements.
+pipewire = ["std", "dep:pipewire"]
+# Windows Media Foundation camera capture source (MfVideoSrc): enumerates video
+# capture devices and drains frames via an IMFSourceReader (NV12 / YUY2 to system
+# memory), the video sibling of WasapiSrc. Pulls the windows crate; Windows-only,
+# implies std.
+mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
@@ -269,6 +291,16 @@ smithay-client-toolkit = { version = "0.20", optional = true }
 khronos-egl = { version = "6", optional = true, features = ["static"] }
 glow = { version = "0.17", optional = true }
 wayland-egl = { version = "0.32", optional = true }
+# Linux audio output / capture backends. All link system libraries via
+# pkg-config and are Linux-only.
+# ALSA render sink (alsa-sink): the `alsa` crate over libasound.
+alsa = { version = "0.9", optional = true }
+# PulseAudio render sink (pulse-sink): the blocking "simple" API + the binding.
+libpulse-binding = { version = "2", optional = true, default-features = false }
+libpulse-simple-binding = { version = "2", optional = true, default-features = false }
+# PipeWire src/sink (pipewire): the high-level pipewire-rs crate (re-exports spa
+# as pipewire::spa). Links libpipewire-0.3 + libspa via bindgen (needs clang).
+pipewire = { version = "0.8", optional = true }
 
 # Browser / WebAssembly bindings (web feature). wasm32-only target gate so
 # native builds never resolve them. wasm-bindgen-futures drives the runner

@@ -43,6 +43,53 @@ Compositor, HLS/DASH, RTMP/SRT, VP8/VP9/AV1/Opus, MKV/TS. Architectural cost is
 low (each is "add an element"); sequence against whatever product target
 matters. Detail for these lives in the sections below.
 
+## Gap analysis to 80% parity (post-M167, 2026-06-20)
+
+The honest read after M167: the ~80% / "credible GStreamer replacement" bar is
+**essentially reached**. The two hardest tracks (CSP negotiation, the DAG
+runner) and the full lifecycle spine (state machine + preroll, seek + SEGMENT,
+auto-plug / decodebin / playbin) were done by M96. M107-M167 then filled the
+breadth that bar called for: containers (MP4 / MPEG-TS / Matroska-WebM / FLV /
+Ogg / fMP4-CMAF demux + mux), multi-codec ffmpeg decode (H.264/265, VP8/9, AV1),
+encoders (AV1 / VP8-9 / MJPEG), codec parsers (opus / vp8 / vp9 / av1), the tag
+system across all containers, the property system + `gst-launch` text DSL +
+`gst-inspect`, seek depth (Mp4Src reposition, accurate clip), and adaptive
+streaming (HttpSrc, HLS with live reload + AES-128 / SAMPLE-AES, DASH static +
+live, RTMP ingest). What remains is breadth and platform integration, not
+structural runtime work. Grouped by category, in rough priority order:
+
+**Platforms (the biggest real gap).**
+- macOS: zero element coverage (VideoToolbox decode/encode, AVFoundation
+  capture, Core Audio, Metal present). 5-8 sessions; see `### Platform: macOS`.
+- Android: zero coverage (MediaCodec, Camera2, AAudio, Surface). 5-8 sessions.
+- **Linux audio out + modern capture -- DONE.** `AlsaSink` (`alsa-sink`),
+  `PulseSink` (`pulse-sink`), and `PipeWireSink` + `PipeWireSrc` (`pipewire`) on
+  Linux, plus `MfVideoSrc` (`mf-video-src`) on Windows, closed the host-audio /
+  modern-capture gap (WASAPI previously covered Windows audio only). See
+  `### Sinks` and `### Capture sources`. Remaining depth: PipeWire video / screen
+  capture, DMABUF zero-copy out of the sinks, and the Linux smoke-test pass on a
+  host with a real device (the unit tests cover caps mapping / pad templates; the
+  device path needs a manual run, like `wayland_smoke`).
+
+**Egress / transports.** RTMP egress (`rtmpsink`, ingest done), SRT (both
+directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588) +
+FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP entries
+under `### High`.
+
+**Codecs.** Opus encode + decode; pure-Rust / wasm decode paths (dav1d/rav1d,
+vpx) to drop the ffmpeg FFI dependency. See `### Codecs`.
+
+**Depth (works today, not yet future-proof).** Negotiation: forward re-solve
+walk, dynamic / request pads, zero-copy tee, PTS-ordered fan-in for
+frame-accurate mixing (see `## Negotiation`). Seek: reverse / trick mode,
+non-flushing accumulating seek, more seekable sources (see Seek depth under
+`### Critical`). Overlays / subtitles (`textoverlay`, WebVTT/SRT), generic EGL
+`GlSink`, GPU compositor companion.
+
+The remaining items are mostly "add an element" breadth plus the two whole-
+platform integrations (macOS / Android), which are the only items with high
+fixed cost. The structural runtime is finished.
+
 ## GStreamer parity gaps
 
 Capabilities GStreamer's core runtime has that g2g doesn't. Each is sized
@@ -313,19 +360,30 @@ expects them. Grouped by category.
 ### Capture sources
 
 Platform-coverage. Linux video capture is done (`v4l2src`, DESIGN.md §4.12a);
-WASAPI covers Windows audio in/out. Windows video capture, Linux audio, and the
-modern PipeWire path remain.
+WASAPI covers Windows audio in/out; Linux video capture is `v4l2src`. Windows
+video capture (`mfvideosrc`) and the modern PipeWire path (`pipewiresrc`) landed
+(see below). Linux non-PipeWire audio capture (`alsasrc` / `pulsesrc`) and
+PipeWire *video* / screen capture remain.
 
 - **`v4l2src` follow-ups.** The element streams system-memory YUYV today. Next:
   MMAP DMABUF output (maps to `MemoryDomain::DmaBuf` for zero-copy into the GPU
   decode/display path) and format-flexible negotiation (MJPEG-mode UVC, other
   fourccs) instead of the fixed YUYV.
-- **`pipewiresrc`** (Linux PipeWire video + audio, screen capture).
-  2–3 sessions. PipeWire is the modern Linux media layer (replacing v4l2 +
-  PulseAudio + screen-capture-via-DBUS); a single element covers camera +
-  microphone + screen.
-- **`mfvideosrc`** (Windows camera via Media Foundation). 2 sessions. The
-  video sibling of `WasapiSrc`; Media Foundation Source Reader pattern.
+- **`pipewiresrc` — DONE (audio).** `g2g-plugins::pipewiresrc::PipeWireSrc`
+  (`pipewire` feature, Linux) captures interleaved PCM (`PcmS16Le` / `PcmF32Le`)
+  off the PipeWire graph: a `pw::stream` input on a dedicated main-loop worker
+  thread feeds the async `run` loop over a channel, with a fixed requested format
+  the PipeWire adapter converts to (deterministic caps). **Remaining:** video +
+  screen capture (the SPA video pod + `param_changed` negotiation), and DMABUF
+  output for zero-copy into the GPU path.
+- **`mfvideosrc` — DONE (authored, Windows-only).**
+  `g2g-plugins::mfvideosrc::MfVideoSrc` (`mf-video-src` feature) enumerates video
+  capture devices and drains frames via an `IMFSourceReader` (NV12 / YUY2 to
+  system memory) on a COM/MTA worker thread, the video sibling of `WasapiSrc`.
+  Type-checked for the `x86_64-pc-windows-gnu` target; owes a first build + camera
+  smoke test on a real Windows host (the unverified-on-Linux situation it shares
+  with `mf-decode` / `wasapi-src`). **Remaining:** D3D11 zero-copy output, and a
+  size/rate request beyond the device default.
 - **`alsasrc` / `pulsesrc`** (Linux audio capture, non-PipeWire). 1 session
   each. Wide host coverage where PipeWire isn't installed.
 - **Screen capture.** 2–3 sessions per platform. Linux: PipeWire (via the
@@ -355,8 +413,15 @@ modern PipeWire path remain.
 
 ### Sinks
 
-- **Linux audio sinks: `alsasink` / `pulsesink` / `pipewiresink`.** 1 session
-  each. We have `WasapiSink` for Windows; Linux audio output has nothing.
+- **Linux audio sinks — DONE.** `alsasink` (`g2g-plugins::alsasink::AlsaSink`,
+  `alsa-sink`, libasound), `pulsesink` (`pulsesink::PulseSink`, `pulse-sink`, the
+  blocking libpulse "simple" API), and `pipewiresink` (`pipewiresink::PipeWireSink`,
+  `pipewire`) all play interleaved PCM (`PcmS16Le` / `PcmF32Le`) on a dedicated
+  worker thread, the Linux analogs of `WasapiSink`. ALSA / Pulse backpressure via
+  the blocking write; PipeWire pulls on its own clock so its queue is leaky
+  (bounded ~1 s, drops oldest). **Remaining:** a host smoke test against a real
+  device, channel-count / sample-format reconciliation beyond stereo S16/F32, and
+  DMABUF/zero-copy paths where the stack supports it.
 - **Generic `GlSink` over EGL.** 2–3 sessions. `CudaGlSink` is NVIDIA-specific;
   `WaylandSink` is software NV12. A vendor-neutral GL ES presentation sink
   over EGL with a generic NV12 / RGBA shader covers Mesa / Intel / AMD

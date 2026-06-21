@@ -232,6 +232,11 @@ pub mod wasapisink;
 #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
 pub mod wasapisrc;
 
+// Media Foundation camera capture source: drains frames from a video capture
+// device via an IMFSourceReader. Windows-only; the video sibling of WasapiSrc.
+#[cfg(all(target_os = "windows", feature = "mf-video-src"))]
+pub mod mfvideosrc;
+
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
@@ -264,6 +269,25 @@ pub mod v4l2src;
 // desktop-dev convenience sink — see module docs.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 pub mod waylandsink;
+
+// Linux audio render sinks: the audible-output end of the audio path, the
+// analogs of the Windows-only WasapiSink. Each links a different system audio
+// stack and is target-gated to Linux behind its own feature.
+// ALSA (libasound), the lowest-level path.
+#[cfg(all(target_os = "linux", feature = "alsa-sink"))]
+pub mod alsasink;
+// PulseAudio / PipeWire-pulse via the blocking libpulse "simple" API.
+#[cfg(all(target_os = "linux", feature = "pulse-sink"))]
+pub mod pulsesink;
+// PipeWire audio render sink + capture source (the modern Linux media layer).
+// Both elements share the `pipewire` feature, the pipewire-rs crate, and the
+// pwaudio SPA-format helper.
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+mod pwaudio;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewiresink;
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pipewiresrc;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`

@@ -682,6 +682,29 @@ Two design points carry the element:
 MJPEG-mode UVC and format-flexible negotiation (the source fixes YUYV today)
 are follow-ups (DESIGN_TODO).
 
+Two more capture sources follow the same blocking-work-off-the-async-path shape:
+`PipeWireSrc` (`pipewire` feature, Linux) captures interleaved PCM off the
+PipeWire graph (the modern Linux media layer) by running a `pw::stream` input on
+a dedicated main-loop worker thread feeding the `run` loop over a channel; it
+requests a fixed PCM format the PipeWire adapter converts to, so the produced
+caps are deterministic (video / screen capture is a follow-up). `MfVideoSrc`
+(`mf-video-src`, Windows) is the camera sibling of `WasapiSrc`: it enumerates
+video capture devices and drains NV12 / YUY2 frames via an `IMFSourceReader` on a
+COM/MTA worker thread.
+
+#### Linux audio output
+
+The audible-output end of the audio path on Linux mirrors the Windows-only
+`WasapiSink` across the three Linux audio stacks, each a `std`-gated element with
+a dedicated render worker thread: `AlsaSink` (`alsa-sink`, libasound, lowest
+level), `PulseSink` (`pulse-sink`, the blocking libpulse "simple" API), and
+`PipeWireSink` (`pipewire`). ALSA / Pulse backpressure naturally through the
+blocking write; PipeWire's `process` callback pulls on its own clock and cannot
+backpressure, so that sink's hand-off queue is leaky (bounded to ~1 s, dropping
+the oldest bytes, the `LinkPolicy::DropOldest` analog for an external clock). All
+accept interleaved `PcmS16Le` / `PcmF32Le` and reject compressed audio
+structurally. Errors surface as `HardwareError::{Alsa,PulseAudio,PipeWire}`.
+
 ### 4.12b Live Ingress (UDP / RTP)
 
 `UdpSrc` (`udpsrc.rs`, `udp-ingress` feature) is the receive-side inverse of

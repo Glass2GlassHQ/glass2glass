@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M168: Linux audio sinks + modern capture (alsa/pulse/pipewire, mfvideosrc)
+
+Closes the "Linux audio output + modern capture" parity gap (DESIGN.md §4.12a,
+DESIGN_TODO "Gap analysis to 80% parity"). WASAPI previously covered Windows
+audio only; Linux had no audio sink and only `v4l2src` for capture.
+
+- **`AlsaSink`** (`alsa-sink`, Linux): plays interleaved PCM
+  (`PcmS16Le` / `PcmF32Le`) on an ALSA PCM device via libasound (the `alsa`
+  crate). Blocking `writei` on a dedicated worker thread provides the pacing and
+  backpressure, mirroring `WasapiSink`. Underrun recovery via `try_recover`.
+- **`PulseSink`** (`pulse-sink`, Linux): the same PCM on the default PulseAudio /
+  PipeWire-pulse server via the blocking libpulse "simple" API
+  (`libpulse-binding` + `libpulse-simple-binding`).
+- **`PipeWireSink`** + **`PipeWireSrc`** (`pipewire`, Linux): render sink and
+  audio capture source over the PipeWire graph (the modern Linux media layer),
+  driving a `pw::stream` on a dedicated main-loop worker thread with a shared
+  queue (sink) / channel (source) and a `pw::channel` quit signal. The sink's
+  hand-off queue is leaky (bounded ~1 s) because PipeWire pulls on its own clock.
+  Shared SPA audio-format helper in `pwaudio.rs`.
+- **`MfVideoSrc`** (`mf-video-src`, Windows): camera capture via an
+  `IMFSourceReader` (NV12 / YUY2 to system memory) on a COM/MTA worker thread,
+  the video sibling of `WasapiSrc`. Type-checked for `x86_64-pc-windows-gnu`;
+  owes a first build + smoke test on a real Windows host.
+- **Core:** `HardwareError::{Alsa, PulseAudio, PipeWire}` arms for the new
+  backends.
+- All elements unit-test their caps mapping + pad templates (12 new tests);
+  the device path needs a manual host smoke test (no audio device in CI).
+
 ### M167: RTMP ingest (RtmpSrc + sans-IO rtmp session)
 
 - **`rtmp::RtmpSession`** (pure `no_std`, always compiled): a sans-IO RTMP
