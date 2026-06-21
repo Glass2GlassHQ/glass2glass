@@ -143,6 +143,18 @@ pub trait SourceLoop: ElementBound {
         async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
     }
 
+    /// The fixed output caps this source already knows from its properties,
+    /// readable synchronously without negotiation or I/O (M195). The auto-plug
+    /// `decodebin` parser consults it to learn its upstream caps, so a property
+    /// that re-types the output (a `filesrc`'s `bytestream-format`) is reflected
+    /// into the chain search. The default `None` means "fall back to the
+    /// registry's declared caps"; a source whose output media type is
+    /// property-driven overrides it. Returns `None` when the caps are only known
+    /// at run time (e.g. `bytestream-format=auto`, which sniffs the file header).
+    fn configured_output_caps(&self) -> Option<Caps> {
+        None
+    }
+
     /// The runtime properties this source type exposes (M104), the GObject
     /// property-spec analog. Default: none. A source overrides this (and
     /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))

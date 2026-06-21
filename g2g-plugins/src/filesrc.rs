@@ -136,6 +136,14 @@ impl SourceLoop for FileSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// Expose the container caps set by `bytestream-format` (M195), so a
+    /// downstream `decodebin` auto-plugs the right demuxer. `None` in
+    /// `bytestream-format=auto` mode, where the container is only known after
+    /// sniffing the file header at run time.
+    fn configured_output_caps(&self) -> Option<Caps> {
+        (!self.auto_detect).then(|| self.caps.clone())
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {

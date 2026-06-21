@@ -376,15 +376,16 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
-        // The name whose declared caps feed the next decodebin: the most recent
-        // real element. A `Ref` clears it (its caps live in another chain).
-        let mut upstream: Option<String> = None;
+        // The element (name + props) whose output caps feed the next decodebin:
+        // the most recent real element. A `Ref` clears it (its caps live in
+        // another chain). Props matter because they can re-type the output (a
+        // `filesrc`'s `bytestream-format` selects the container).
+        let mut upstream: Option<(String, Vec<(String, String)>)> = None;
         for item in chain {
             match item {
                 Item::Element(spec) if is_decodebin(&spec.name) => {
-                    let pred = upstream.as_deref().ok_or(ParseError::DecodebinNoUpstream)?;
-                    let caps =
-                        registry.declared_output_caps(pred).ok_or(ParseError::DecodebinNoUpstream)?;
+                    let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
+                    let caps = resolve_upstream_caps(registry, pred, props)?;
                     let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
                     let names = registry
                         .autoplug_names(&caps, &target, DECODEBIN_MAX_DEPTH)
@@ -395,11 +396,11 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                             props: Vec::new(),
                             instance: None,
                         }));
-                        upstream = Some(name.to_string());
+                        upstream = Some((name.to_string(), Vec::new()));
                     }
                 }
                 Item::Element(spec) => {
-                    upstream = Some(spec.name.clone());
+                    upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
                 Item::Ref(name) => {
@@ -411,6 +412,28 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
         out.push(new_chain);
     }
     Ok(out)
+}
+
+/// The caps a `decodebin` predecessor produces, used as the auto-plug input
+/// (M195). For a registered source, build it and apply its properties so a
+/// property that re-types the output (a `filesrc`'s `bytestream-format`) is
+/// reflected via [`SourceLoop::configured_output_caps`]; fall back to the
+/// registry's declared caps (a fixed source, or a transform's source-pad
+/// template). `bytestream-format=auto` returns `None` from `configured_output_caps`
+/// (the container is only known after a run-time header sniff), so it too falls
+/// back to the declared default.
+fn resolve_upstream_caps(
+    registry: &Registry,
+    name: &str,
+    props: &[(String, String)],
+) -> Result<Caps, ParseError> {
+    if let Some(mut src) = registry.make_source(name) {
+        apply_source_props(&mut src, name, props)?;
+        if let Some(caps) = src.configured_output_caps() {
+            return Ok(caps);
+        }
+    }
+    registry.declared_output_caps(name).ok_or(ParseError::DecodebinNoUpstream)
 }
 
 fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {

@@ -69,6 +69,12 @@ pub trait DynSourceLoop: ElementBound {
     /// of the M12 allocation cascade.
     fn configure_allocation(&mut self, params: &AllocationParams);
 
+    /// Dyn-safe mirror of [`SourceLoop::configured_output_caps`] (M195), so the
+    /// `decodebin` parser can read an erased source's property-driven caps.
+    fn configured_output_caps(&self) -> Option<Caps> {
+        None
+    }
+
     /// Dyn-safe mirror of [`SourceLoop::properties`], for `gst-inspect` /
     /// `gst-launch` introspection of an erased source.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -144,6 +150,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::configure_allocation(self, params)
     }
 
+    fn configured_output_caps(&self) -> Option<Caps> {
+        SourceLoop::configured_output_caps(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         SourceLoop::properties(self)
     }
@@ -203,6 +213,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
         (**self).configure_allocation(params)
+    }
+
+    fn configured_output_caps(&self) -> Option<Caps> {
+        (**self).configured_output_caps()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

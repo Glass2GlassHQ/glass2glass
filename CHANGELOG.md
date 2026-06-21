@@ -5,6 +5,37 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M195: reflect `bytestream-format` into decodebin's auto-plug input
+
+`filesrc bytestream-format=matroska ! decodebin` now selects `matroskademux`
+instead of `filesrc`'s factory-default container (MPEG-TS). The decodebin parser
+reads the predecessor's property-configured caps, so the chain search starts from
+the right container, closing the M193/M194 "property-driven source caps not
+reflected" limit for explicit containers.
+
+- New `SourceLoop::configured_output_caps(&self) -> Option<Caps>` (default
+  `None`, dyn-mirrored on `DynSourceLoop`): the fixed output caps a source
+  already knows from its properties, readable synchronously without negotiation
+  or I/O. `FileSrc` overrides it to return the `ByteStream{..}` its
+  `bytestream-format` selected; `None` in `bytestream-format=auto` mode, where the
+  container is only known after a run-time header sniff.
+- `expand_decodebin` resolves the predecessor's caps via `resolve_upstream_caps`:
+  for a registered source it builds the source, applies its properties, and reads
+  `configured_output_caps`, falling back to the registry's declared caps (a fixed
+  source, a transform's source-pad template, or `auto` mode).
+- Known limits (unchanged, deferred): `bytestream-format=auto` is not resolved at
+  parse time (needs the run-time sniff); a container's non-default elementary
+  stream (audio out of a muxed A/V file) is still not auto-selected; the decodebin
+  macro builds demuxers parameterless (their default stream), which matches the
+  search when only one decoder reaches raw.
+
+Verified: `m195_bytestream_format_reflection` (`FileSrc` reflects matroska / mp4 /
+flv / mpegts and reports `auto` as unknown; each reflected container routes to its
+demuxer; `filesrc bytestream-format=matroska ! decodebin` builds demux+decoder via
+a VP9 stub, while the MPEG-TS default fails for lack of a matching decoder). Green
+under both `std` and `std,ffmpeg`; core (216) + plugins (141 blocks); no_std +
+clippy clean.
+
 ### M194: container-demux auto-plug
 
 `decodebin` (and `Registry::autoplug` / `build_playbin`) now route a container
