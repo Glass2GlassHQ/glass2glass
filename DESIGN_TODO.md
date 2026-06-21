@@ -312,7 +312,16 @@ Production-shape needs that block specific real-world use cases.
   §4.16. Property coverage broadened in M107 (`VideoScale` / `VideoCrop` /
   `VideoConvert` / `AudioTestSrc` / `AudioConvert` / `AudioResample` / `FileSink` /
   `FileSrc`) plus `g2g-plugins::registry::default_registry()` so `parse_launch`
-  works out of the box. **Remaining depth:** property-enable the
+  works out of the box. **Done (M178): rich `gst-inspect` dump.** Element types
+  declare `ElementMetadata { long_name, klass, description, author }` via a
+  zero-cost `metadata()` opt-in (like `properties()`), and `PropertySpec` gained
+  `default` / `range` / enum `values` / read-write `flags`; `inspect(name)` now
+  emits a GStreamer-shaped Factory Details + Element Properties dump and the no-arg
+  list shows `name: Long-name`. Metadata is declared on a representative set of
+  elements so far (the common sources / transforms / parsers / sinks + Opus);
+  remaining elements default to name-only and adopt the one-line override
+  incrementally. **Remaining depth:** carry metadata + properties on muxers (their
+  inspect path does not build an instance today); property-enable the
   feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
   `waylandsink`, ...) and register them in `default_registry` per feature; a value
   grammar for spaces / enums-as-named-flags; and a GUI/tooling introspection

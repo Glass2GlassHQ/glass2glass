@@ -28,8 +28,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -182,6 +183,15 @@ impl SourceLoop for FileSrc {
 
     fn properties(&self) -> &'static [PropertySpec] {
         FILESRC_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "File source",
+            "Source/File",
+            "Reads a local file as a byte stream",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

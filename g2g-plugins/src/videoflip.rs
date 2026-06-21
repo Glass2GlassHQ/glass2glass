@@ -18,9 +18,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 4] = [
@@ -225,6 +225,15 @@ impl AsyncElement for VideoFlip {
         VIDEOFLIP_PROPS
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video flip / rotate",
+            "Filter/Effect/Video",
+            "Flips or rotates raw video (mirror, 90/180/270 degree rotations)",
+            "g2g",
+        )
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "method" => {
@@ -248,8 +257,12 @@ impl AsyncElement for VideoFlip {
 static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "method",
     PropKind::Str,
-    "flip/rotate: horizontal-mirror | vertical-mirror | rotate-90cw | rotate-180 | rotate-90ccw",
-)];
+    "flip / rotate method",
+)
+.with_enum_values(
+    "horizontal-mirror | vertical-mirror | rotate-90cw | rotate-180 | rotate-90ccw",
+)
+.with_default("horizontal-mirror")];
 
 /// Parse a `method` property string to a [`FlipMethod`].
 fn flip_method_from_str(s: &str) -> Option<FlipMethod> {

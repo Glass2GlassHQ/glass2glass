@@ -548,6 +548,37 @@ mod factory {
                 .collect()
         }
 
+        /// One line per registerable element, `name: Long-name` (the long name
+        /// from the element's [`metadata`](crate::AsyncElement::metadata), or just
+        /// the name when it declares none), for the `gst-inspect` element index.
+        /// Sources, then transforms / sinks, then muxers. Each non-muxer element is
+        /// default-built to read its metadata (side-effect-free, like
+        /// [`inspect`](Self::inspect)).
+        pub fn element_listing(&self) -> Vec<String> {
+            use alloc::string::ToString;
+            let line = |name: &str, long: &str| {
+                if long.is_empty() {
+                    name.to_string()
+                } else {
+                    let mut s = name.to_string();
+                    s.push_str(": ");
+                    s.push_str(long);
+                    s
+                }
+            };
+            let mut lines = Vec::new();
+            for s in &self.sources {
+                lines.push(line(s.name, (s.build)().metadata().long_name));
+            }
+            for f in &self.launch {
+                lines.push(line(f.name, (f.build)().metadata().long_name));
+            }
+            for m in &self.muxers {
+                lines.push(m.name.to_string());
+            }
+            lines
+        }
+
         /// A `gst-inspect`-style dump for the named element: its role, its
         /// settable properties, and (for a transform / sink) its pad templates.
         /// `None` if the name is not registered. The element is default-built to
@@ -556,22 +587,27 @@ mod factory {
         /// constructors are.
         pub fn inspect(&self, name: &str) -> Option<String> {
             use core::fmt::Write;
+            use crate::property::format_metadata;
             let mut out = String::new();
             if let Some(s) = self.sources.iter().find(|s| s.name == name) {
                 let src = (s.build)();
-                let _ = writeln!(out, "{name} (source)");
-                let _ = writeln!(out, "Output caps: {:?}", s.output);
-                let _ = write!(out, "Properties:\n{}", format_specs(src.properties()));
+                out.push_str(&format_metadata(name, &src.metadata()));
+                let _ = writeln!(out, "  Role        source");
+                let _ = writeln!(out, "\nOutput caps:\n  {:?}", s.output);
+                let _ = write!(out, "\nElement Properties:\n{}", format_specs(src.properties()));
                 Some(out)
             } else if let Some(f) = self.launch.iter().find(|f| f.name == name) {
                 let el = (f.build)();
-                let _ = writeln!(out, "{name} (element)");
-                let _ = write!(out, "Pad templates:\n{}", format_templates(&f.templates));
-                let _ = write!(out, "Properties:\n{}", format_specs(el.properties()));
+                out.push_str(&format_metadata(name, &el.metadata()));
+                let _ = writeln!(out, "  Role        element");
+                let _ = write!(out, "\nPad Templates:\n{}", format_templates(&f.templates));
+                let _ = write!(out, "\nElement Properties:\n{}", format_specs(el.properties()));
                 Some(out)
             } else if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
-                let _ = writeln!(out, "{} (muxer)", m.name);
-                let _ = writeln!(out, "Inputs: derived from link degree");
+                let _ = writeln!(out, "Factory Details:");
+                let _ = writeln!(out, "  Name        {}", m.name);
+                let _ = writeln!(out, "  Role        muxer (fan-in)");
+                let _ = writeln!(out, "\nInputs: derived from link degree");
                 Some(out)
             } else {
                 None

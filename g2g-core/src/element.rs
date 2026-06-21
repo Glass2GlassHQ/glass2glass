@@ -8,7 +8,7 @@ use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
 use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
 use crate::frame::PipelinePacket;
-use crate::property::{PropError, PropValue, PropertySpec};
+use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
 #[cfg(feature = "multi-thread")]
@@ -221,6 +221,14 @@ pub trait AsyncElement: ElementBound {
         &[]
     }
 
+    /// Static introspection metadata for this element type (M178): the
+    /// `gst-inspect` "Factory Details" (long-name / classification / description
+    /// / author). Default: empty, like [`properties`](Self::properties). An
+    /// element overrides it with a `const ElementMetadata` to document itself.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
+    }
+
     /// Set a property by name (M104). Default: every name is
     /// [`PropError::Unknown`] (no properties). An overriding element validates
     /// the value kind against its [`properties`](Self::properties) spec and
@@ -303,6 +311,12 @@ pub trait DynAsyncElement: ElementBound {
         &[]
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::metadata`], so a `gst-inspect` dump can
+    /// read an erased element's "Factory Details". Defaults to empty.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::set_property`]. Defaults to "no
     /// properties" so a hand-written `DynAsyncElement` need not implement it; the
     /// blanket `impl<T: AsyncElement>` overrides it to forward to the element.
@@ -379,6 +393,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::properties(self)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        AsyncElement::metadata(self)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         AsyncElement::set_property(self, name, value)
     }
@@ -448,6 +466,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn properties(&self) -> &'static [PropertySpec] {
         (**self).properties()
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        (**self).metadata()
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

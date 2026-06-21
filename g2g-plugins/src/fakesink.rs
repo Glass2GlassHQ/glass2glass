@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 
 use g2g_core::metrics::{LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Segment,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Segment,
 };
 
 #[cfg(feature = "std")]
@@ -118,6 +118,15 @@ impl AsyncElement for FakeSink {
     ) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Fake sink",
+            "Sink",
+            "Discards all buffers (a no-op terminal for testing)",
+            "g2g",
+        )
     }
 
     fn process<'a>(

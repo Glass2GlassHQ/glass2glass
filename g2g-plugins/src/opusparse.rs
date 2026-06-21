@@ -29,8 +29,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// Opus decodes at 48 kHz for every coded bandwidth (NB..FB), so refined caps
@@ -85,6 +85,15 @@ impl AsyncElement for OpusParse {
             }
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Opus parser",
+            "Codec/Parser/Audio",
+            "Refines Opus caps (channel count) from each packet's TOC byte",
+            "g2g",
+        )
     }
 
     fn process<'a>(

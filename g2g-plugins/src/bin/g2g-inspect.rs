@@ -17,10 +17,11 @@ fn main() {
     let reg = default_registry();
     let mut args = std::env::args().skip(1);
     match args.next() {
-        // No element named: list them all, one per line, the `gst-inspect` index.
+        // No element named: list them all, `name: Long-name` per line, the
+        // `gst-inspect` index.
         None => {
-            for name in reg.element_names() {
-                println!("{name}");
+            for line in reg.element_listing() {
+                println!("{line}");
             }
         }
         Some(name) => match reg.inspect(&name) {

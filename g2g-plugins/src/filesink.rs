@@ -19,9 +19,9 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// Map a filesystem error to the structured `Hardware(Io)` variant, carrying
@@ -122,6 +122,15 @@ impl AsyncElement for FileSink {
 
     fn properties(&self) -> &'static [PropertySpec] {
         FILESINK_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "File sink",
+            "Sink/File",
+            "Writes incoming buffers to a local file",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

@@ -12,9 +12,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat,
+    BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat,
 };
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
@@ -243,6 +243,15 @@ impl SourceLoop for VideoTestSrc {
         VIDEOTESTSRC_PROPS
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Video test source",
+            "Source/Video",
+            "Generates a synthetic test pattern (SMPTE bars, snow, moving bar, ball, ...)",
+            "g2g",
+        )
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "pattern" => {
@@ -296,15 +305,16 @@ impl SourceLoop for VideoTestSrc {
 
 /// `VideoTestSrc`'s settable properties (M104).
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "pattern",
-        PropKind::Str,
-        "drawn pattern: gradient | snow | moving-bar | smpte | checker | ball | zone-plate",
-    ),
-    PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)"),
-    PropertySpec::new("width", PropKind::Uint, "frame width in pixels"),
-    PropertySpec::new("height", PropKind::Uint, "frame height in pixels"),
-    PropertySpec::new("framerate", PropKind::Fraction, "frames per second (e.g. 30/1)"),
+    PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
+        .with_enum_values("gradient | snow | moving-bar | smpte | checker | ball | zone-plate")
+        .with_default("smpte"),
+    PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)")
+        .with_range("-1", "9223372036854775807")
+        .with_default("-1"),
+    PropertySpec::new("width", PropKind::Uint, "frame width in pixels").with_default("320"),
+    PropertySpec::new("height", PropKind::Uint, "frame height in pixels").with_default("240"),
+    PropertySpec::new("framerate", PropKind::Fraction, "frames per second (e.g. 30/1)")
+        .with_default("30/1"),
 ];
 
 /// Parse a `pattern` property string to a [`Pattern`].

@@ -11,7 +11,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
-use crate::property::{PropError, PropValue, PropertySpec};
+use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
@@ -150,6 +150,12 @@ pub trait SourceLoop: ElementBound {
     /// location=...`, `videotestsrc pattern=...`).
     fn properties(&self) -> &'static [PropertySpec] {
         &[]
+    }
+
+    /// Static introspection metadata for this source type (M178), the
+    /// `gst-inspect` "Factory Details". Default: empty.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
     }
 
     /// Set a property by name (M104). Default: [`PropError::Unknown`].

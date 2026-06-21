@@ -29,7 +29,7 @@ use crate::error::G2gError;
 use crate::fanout::{Merger, MultiInputElement};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
-use crate::property::{PropError, PropValue, PropertySpec};
+use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
@@ -73,6 +73,12 @@ pub trait DynSourceLoop: ElementBound {
     /// `gst-launch` introspection of an erased source.
     fn properties(&self) -> &'static [PropertySpec] {
         &[]
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::metadata`], for the `gst-inspect`
+    /// "Factory Details" of an erased source. Defaults to empty.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
     }
 
     /// Dyn-safe mirror of [`SourceLoop::set_property`]. Defaults to "no
@@ -133,6 +139,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::properties(self)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        SourceLoop::metadata(self)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         SourceLoop::set_property(self, name, value)
     }
@@ -180,6 +190,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn properties(&self) -> &'static [PropertySpec] {
         (**self).properties()
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        (**self).metadata()
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

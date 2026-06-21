@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use audiopus::coder::Encoder;
@@ -231,6 +231,15 @@ impl AsyncElement for OpusEnc {
         self.buf.clear();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Opus audio encoder",
+            "Codec/Encoder/Audio",
+            "Encodes raw S16LE PCM to Opus",
+            "g2g",
+        )
     }
 
     fn process<'a>(

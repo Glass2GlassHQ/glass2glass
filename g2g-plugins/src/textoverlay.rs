@@ -24,9 +24,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, RawVideoFormat, Rate,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, RawVideoFormat, Rate,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
@@ -396,6 +396,15 @@ impl AsyncElement for TextOverlay {
 
     fn properties(&self) -> &'static [PropertySpec] {
         TEXTOVERLAY_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Text overlay",
+            "Filter/Editor/Video",
+            "Renders SRT / WebVTT subtitle cues over video by PTS",
+            "g2g",
+        )
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

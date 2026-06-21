@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M178: rich `gst-inspect` introspection (element metadata + detailed properties)
+
+`inspect(name)` (and the `g2g-inspect` binary) previously dumped only the role,
+property one-liners, and pad templates. It now produces a GStreamer-shaped report:
+a Factory Details header, then pad templates, then a detailed Element Properties
+section, the way `gst-inspect-1.0 <element>` does.
+
+- **`ElementMetadata { long_name, klass, description, author }`** (g2g-core), the
+  `gst_element_class_set_static_metadata` analog. An element type declares it via a
+  new `metadata()` trait method (on `AsyncElement` / `SourceLoop` + their dyn
+  mirrors), a zero-cost opt-in defaulting to empty, exactly like `properties()`.
+- **Enriched `PropertySpec`**: added `default`, numeric `range`, enum `values`, and
+  read/write `flags` (`PropFlags`), all `&'static str` so the spec stays `Copy` /
+  `const`. `PropertySpec::new(name, kind, blurb)` is unchanged; the extras are set
+  with `const` builders (`with_default`, `with_range`, `with_enum_values`,
+  `read_only`), so existing call sites keep working.
+- **`Registry::inspect`** reformatted to emit Factory Details (from `metadata()`) +
+  Pad Templates + Element Properties (type, flags, range/values, default per
+  property). **`Registry::element_listing`** is the new no-arg index, `name:
+  Long-name` per element; `g2g-inspect` with no argument uses it.
+- Metadata declared on a representative set: `videotestsrc` / `audiotestsrc` /
+  `filesrc` sources, `videoconvert` / `videoscale` / `videocrop` / `videoflip` /
+  `audioconvert` / `audioresample` / `volume` / `textoverlay` transforms,
+  `h264parse` / `aacparse` / `opusparse` parsers, `filesink` / `fakesink` sinks, and
+  `opusenc` / `opusdec`. `videotestsrc` and `videoflip` also gained property
+  defaults / enum values. Elements without metadata yet degrade gracefully to
+  name-only.
+
+Verified: enriched `m105_registry_inspect` (asserts the Factory Details header,
+long-name, classification, role, and a property default/flags line) plus
+`property` unit tests for the new formatters and `ElementMetadata`. `no_std`
+baseline unaffected (metadata/specs are core, std-gated tooling only renders them).
+
 ### M177: Opus audio encode + decode (`OpusEnc` / `OpusDec`, `opus` feature)
 
 The WebRTC-default audio codec, to pair with the existing `opusparse` (M133); we

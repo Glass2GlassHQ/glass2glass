@@ -63,7 +63,9 @@ pub use format_element::{
 };
 pub use frame::{Frame, FrameTiming, PipelinePacket};
 pub use meta::FrameMetaSet;
-pub use property::{PropError, PropKind, PropValue, PropertySpec};
+pub use property::{
+    ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec,
+};
 #[cfg(feature = "metadata")]
 pub use meta::{
     AnalyticsMeta, AnalyticsNode, BBox, Classification, FrameMeta, ObjectDetection, Propagation,

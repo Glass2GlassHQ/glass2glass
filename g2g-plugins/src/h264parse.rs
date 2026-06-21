@@ -22,8 +22,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
 use crate::annexb::{strip_emulation_prevention, BitReader};
@@ -94,6 +94,15 @@ impl AsyncElement for H264Parse {
             }
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "H.264 parser",
+            "Codec/Parser/Video",
+            "Parses an H.264 Annex-B stream and refines caps from SPS/PPS",
+            "g2g",
+        )
     }
 
     fn process<'a>(

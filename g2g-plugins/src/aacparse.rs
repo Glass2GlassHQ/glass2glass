@@ -24,8 +24,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 /// ADTS sampling-frequency-index table (ISO/IEC 14496-3). Indices 13/14 are
@@ -82,6 +82,15 @@ impl AsyncElement for AacParse {
             }
             _ => Err(G2gError::CapsMismatch),
         }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "AAC parser",
+            "Codec/Parser/Audio",
+            "Parses an AAC ADTS stream and refines caps",
+            "g2g",
+        )
     }
 
     fn process<'a>(

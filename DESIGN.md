@@ -1112,7 +1112,14 @@ the last (M104-M106):
   registers a transform / sink under a name with a parameterless constructor and
   its pad templates (sources reuse the parameterless `SourceFactory`).
   `make_source` / `make_element` build by name; `inspect(name)` dumps an element's
-  role, properties, and pad templates, the `gst-inspect` analog.
+  role, properties, and pad templates, the `gst-inspect` analog. The dump is
+  GStreamer-shaped (M178): a "Factory Details" header from the element type's
+  `metadata()` (`ElementMetadata { long_name, klass, description, author }`, the
+  `gst_element_class_set_static_metadata` analog, a zero-cost opt-in like
+  `properties()`), then pad templates, then an "Element Properties" section where
+  each `PropertySpec` carries its `default`, numeric `range`, enum `values`, and
+  read/write `flags` alongside the blurb. `element_listing()` is the no-arg index,
+  `name: Long-name` per element.
 - **The text parser (`runtime::parse_launch`, std).** Turns
   `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` into a
   runnable `Graph`: each `!`-separated stage is `element-name key=value ...`;

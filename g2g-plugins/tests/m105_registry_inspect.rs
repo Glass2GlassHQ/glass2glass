@@ -44,12 +44,19 @@ fn inspect_dumps_properties_and_templates() {
     let reg = registry();
 
     let src = reg.inspect("videotestsrc").expect("source registered");
-    assert!(src.contains("(source)"));
+    // M178: gst-inspect-shaped dump with a Factory Details header + role.
+    assert!(src.contains("Factory Details:"), "has the metadata header:\n{src}");
+    assert!(src.contains("Long-name   Video test source"), "shows the long name:\n{src}");
+    assert!(src.contains("Role        source"));
     assert!(src.contains("pattern"), "lists the pattern property:\n{src}");
     assert!(src.contains("framerate"), "lists the framerate property:\n{src}");
+    // Enriched property detail: the pattern default and its flags line.
+    assert!(src.contains("Default: smpte"), "shows the pattern default:\n{src}");
+    assert!(src.contains("flags: readable, writable"), "shows property flags:\n{src}");
 
     let flip = reg.inspect("videoflip").expect("element registered");
-    assert!(flip.contains("(element)"));
+    assert!(flip.contains("Role        element"));
+    assert!(flip.contains("Klass       Filter/Effect/Video"), "shows the classification:\n{flip}");
     assert!(flip.contains("method"), "lists the method property:\n{flip}");
     // VideoFlip declares pad templates, so the dump shows SINK / SRC lines.
     assert!(flip.contains("SINK") && flip.contains("SRC"), "lists pad templates:\n{flip}");
