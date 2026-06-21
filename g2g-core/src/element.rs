@@ -100,6 +100,18 @@ pub trait AsyncElement: ElementBound {
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError>;
 
+    /// Receive this element's negotiated OUTPUT (source-pad) caps after the
+    /// solve, alongside the input caps from [`configure_pipeline`] (M185). A
+    /// geometry / format / rate-changing transform (videoscale, videoconvert,
+    /// audioresample) uses this to take its target from a downstream capsfilter
+    /// instead of its own properties, the gst caps-driven idiom. Default: no-op,
+    /// so elements that don't need it (and runners that don't yet deliver it)
+    /// are unaffected. Called only on transforms, with their single output
+    /// link's caps; sources and sinks never receive it.
+    fn configure_output(&mut self, _output_caps: &Caps) -> Result<(), G2gError> {
+        Ok(())
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -261,6 +273,12 @@ pub trait DynAsyncElement: ElementBound {
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError>;
 
+    /// Dyn-safe mirror of [`AsyncElement::configure_output`] (M185). Defaults to
+    /// no-op so unaffected erased elements need not implement it.
+    fn configure_output(&mut self, _output_caps: &Caps) -> Result<(), G2gError> {
+        Ok(())
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -366,6 +384,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::configure_pipeline(self, absolute_caps)
     }
 
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        AsyncElement::configure_output(self, output_caps)
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -447,6 +469,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
         (**self).configure_pipeline(absolute_caps)
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        (**self).configure_output(output_caps)
     }
 
     fn process<'a>(

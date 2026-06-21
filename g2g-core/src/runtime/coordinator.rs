@@ -337,7 +337,13 @@ where
         }
         match refixate {
             Some(counter) => refix_counter = Some(counter),
-            None => break (src_caps, sink_caps, allocation),
+            None => {
+                // M185: hand the transform its negotiated output caps (the
+                // sink-side link) so a caps-driven transform can take its target
+                // from the solve, not just its properties.
+                transform.configure_output(&sink_caps)?;
+                break (src_caps, sink_caps, allocation);
+            }
         }
     };
     Ok(LinearNegotiation { source_link, sink_link, allocation })

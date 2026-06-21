@@ -5,6 +5,36 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M185: caps-driven transforms (videoscale takes its target from the solve)
+
+A transform can now take its output geometry from a downstream capsfilter, the
+gst idiom `videoscale ! video/x-raw,width=160,height=120` (previously a
+`CapsMismatch` because videoscale only scaled via its own properties). Closes the
+second gst-porting gap from M182.
+
+- New `AsyncElement::configure_output(&mut self, output_caps)` hook (default
+  no-op, mirrored on `DynAsyncElement`): after the solve, a transform is handed
+  its negotiated OUTPUT (source-pad) caps, alongside the input caps from
+  `configure_pipeline`. Wired in the `graph_runner` (DSL path) and the linear
+  `coordinator`; the per-link fixated caps already existed, they just weren't
+  delivered. Untouched runners simply don't call it (no regression).
+- `videoscale` is the first caps-driven transform: with `width`/`height` unset
+  (auto) it advertises a preference-ordered output `[passthrough input-geometry,
+  scalable Range(1..32768)]`, so it defaults to passthrough but a downstream
+  capsfilter pins the target; `configure_output` records the resolved dims and
+  `process` resizes to them. The convenience properties still win when set, and a
+  runner that doesn't deliver output caps falls back to them. Bonus: a bare
+  `videoscale` (no props, no downstream constraint) is now a passthrough instead
+  of failing to negotiate.
+
+Verified: `m185_caps_driven_scale` (capsfilter-driven geometry, incl. combined
+with M184's format-less caps; bare-videoscale passthrough; properties still
+work). Negotiation / DAG suites (m8, m16, m18, m67, m70), `m55_videoscale`,
+`m107` all green. Full `g2g-core` (216) + `g2g-plugins` suites pass.
+
+`videoconvert` (format) and `audioresample` (rate) get the same treatment next
+(M186); the mechanism is in place.
+
 ### M184: format-less / partial geometry caps
 
 `capsfilter` now accepts the gst-idiomatic geometry-only caps where the pixel /

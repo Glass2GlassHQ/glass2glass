@@ -60,13 +60,17 @@ edits (the typed core is unaffected, only the string<->enum boundary).
     `video/x-raw,width=160,height=120` (no `format`) by expanding to a `CapsSet`
     over all raw formats at that geometry (`parse_caps_set`); the solver
     intersects down to the upstream format. `audio/x-raw` likewise.
-  - **Caps-driven transform operation.** `videoscale ! video/x-raw,...,width=160`
-    does not resize; `videoscale`/`videoconvert`/`audioresample` key off their
-    convenience properties, not the negotiated downstream caps. gst drives these
-    purely from a downstream capsfilter. Wiring each transform's `configure` to
-    take its target from the fixated output caps would make the gst-idiomatic
-    form work (the convenience properties stay as the g2g extension). Pairs with
-    the partial-caps item.
+  - **Caps-driven transform operation (videoscale DONE, M185).** Added
+    `AsyncElement::configure_output(output_caps)` (default no-op, dyn-mirrored),
+    delivered by the graph_runner + coordinator from the already-fixated output
+    link. `videoscale` with unset props now advertises a preference-ordered
+    output `[passthrough, Range]` and takes its target from a downstream
+    capsfilter (`videoscale ! video/x-raw,width=160`); props still override.
+    REMAINING (M186): give `videoconvert` (format) and `audioresample` (rate) the
+    same caps-driven path; wire `configure_output` into the remaining runners
+    (run_simple_pipeline / fanout / fanin) and the mid-stream re-cascade so
+    caps-driven transforms work there too (only graph + linear-coordinator paths
+    deliver it today).
   - Decided **pragmatic** (keep convenience props as extensions + make the caps
     route work) over strict gst-only; the two items above are what "make the caps
     route work" actually requires.

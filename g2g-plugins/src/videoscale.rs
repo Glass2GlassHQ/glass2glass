@@ -39,14 +39,27 @@ const FORMATS: [RawVideoFormat; 4] = [
     RawVideoFormat::I420,
 ];
 
+/// Upper bound on the scalable output range advertised in caps-driven (auto)
+/// mode (M185). Covers up to 8K with headroom; a downstream capsfilter pins a
+/// concrete dim within it.
+const MAX_DIM: u32 = 32768;
+
 #[derive(Debug)]
 pub struct VideoScale {
+    /// Target geometry from the `width`/`height` properties. Zero on either axis
+    /// means "auto": take the output geometry from the negotiated caps instead
+    /// (a downstream capsfilter), the gst caps-driven idiom.
     target_w: u32,
     target_h: u32,
     /// Format and dims of the configured input stream, updated by a
     /// mid-stream `CapsChanged`. Carries the framerate so the output caps
     /// preserve it (scaling is spatial only).
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    /// Output dims resolved from the negotiated output caps (M185), set by
+    /// `configure_output`. Used when the properties are unset (auto); `None`
+    /// until then, so `process` falls back to the properties and runners that
+    /// don't deliver output caps keep the property-driven behavior.
+    resolved: Option<(u32, u32)>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -58,6 +71,7 @@ impl VideoScale {
             target_w: target_width,
             target_h: target_height,
             input: None,
+            resolved: None,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -66,6 +80,17 @@ impl VideoScale {
 
     pub fn target_dims(&self) -> (u32, u32) {
         (self.target_w, self.target_h)
+    }
+
+    /// Auto / caps-driven mode: neither property pins the geometry.
+    fn is_auto(&self) -> bool {
+        self.target_w == 0 || self.target_h == 0
+    }
+
+    /// The effective output geometry: caps-resolved when available (auto),
+    /// otherwise the configured target properties.
+    fn out_dims(&self) -> (u32, u32) {
+        self.resolved.unwrap_or((self.target_w, self.target_h))
     }
 
     /// Validate a raw-video caps as a scalable input and return its format,
@@ -132,16 +157,39 @@ impl AsyncElement for VideoScale {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let (tw, th) = (self.target_w, self.target_h);
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, framerate, .. } if FORMATS.contains(format) => {
-                if is_yuv420(*format) && (tw % 2 != 0 || th % 2 != 0) {
-                    return CapsSet::from_alternatives(Vec::new());
+            Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
+                if tw > 0 && th > 0 {
+                    // Property-driven: fixed target geometry.
+                    if is_yuv420(*format) && (tw % 2 != 0 || th % 2 != 0) {
+                        return CapsSet::from_alternatives(Vec::new());
+                    }
+                    CapsSet::one(Caps::RawVideo {
+                        format: *format,
+                        width: Dim::Fixed(tw),
+                        height: Dim::Fixed(th),
+                        framerate: framerate.clone(),
+                    })
+                } else {
+                    // Caps-driven (auto): default to passthrough (the input
+                    // geometry), but advertise we can scale to any geometry so a
+                    // downstream capsfilter pins the target. Passthrough is the
+                    // preferred (first) alternative, so with no downstream
+                    // constraint the output is the input size (identity scale).
+                    CapsSet::from_alternatives(vec![
+                        Caps::RawVideo {
+                            format: *format,
+                            width: width.clone(),
+                            height: height.clone(),
+                            framerate: framerate.clone(),
+                        },
+                        Caps::RawVideo {
+                            format: *format,
+                            width: Dim::Range { min: 1, max: MAX_DIM },
+                            height: Dim::Range { min: 1, max: MAX_DIM },
+                            framerate: framerate.clone(),
+                        },
+                    ])
                 }
-                CapsSet::one(Caps::RawVideo {
-                    format: *format,
-                    width: Dim::Fixed(tw),
-                    height: Dim::Fixed(th),
-                    framerate: framerate.clone(),
-                })
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -149,10 +197,34 @@ impl AsyncElement for VideoScale {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (format, w, h, rate) = self.accept_input(absolute_caps)?;
-        self.validate_target(format)?;
+        // In auto mode the output geometry comes from `configure_output`, not the
+        // properties, so only validate a property-pinned target here.
+        if !self.is_auto() {
+            self.validate_target(format)?;
+        }
         self.input = Some((format, w, h, rate));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// M185: take the output geometry from the negotiated output caps when the
+    /// `width`/`height` properties are unset (caps-driven). When they are set,
+    /// the solve already fixated the output to them, so this just records the
+    /// same dims. Validates the resolved geometry (non-zero, even for 4:2:0).
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        let Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } =
+            output_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if *w == 0 || *h == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if is_yuv420(*format) && (*w % 2 != 0 || *h % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.resolved = Some((*w, *h));
+        Ok(())
     }
 
     fn process<'a>(
@@ -177,19 +249,26 @@ impl AsyncElement for VideoScale {
                     if src.len() < frame_byte_size(format, in_w, in_h) {
                         return Err(G2gError::CapsMismatch);
                     }
+                    // Effective output geometry: caps-resolved (auto) or the
+                    // configured target. Auto without a delivered output caps
+                    // (a runner that doesn't call configure_output) is unfixed.
+                    let (out_w, out_h) = self.out_dims();
+                    if out_w == 0 || out_h == 0 {
+                        return Err(G2gError::NotConfigured);
+                    }
                     let scaled = scale(
                         src,
                         format,
                         in_w as usize,
                         in_h as usize,
-                        self.target_w as usize,
-                        self.target_h as usize,
+                        out_w as usize,
+                        out_h as usize,
                     );
 
                     let new_caps = Caps::RawVideo {
                         format,
-                        width: Dim::Fixed(self.target_w),
-                        height: Dim::Fixed(self.target_h),
+                        width: Dim::Fixed(out_w),
+                        height: Dim::Fixed(out_h),
                         framerate: rate,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
@@ -207,7 +286,9 @@ impl AsyncElement for VideoScale {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     let (format, w, h, rate) = self.accept_input(&c)?;
-                    self.validate_target(format)?;
+                    if !self.is_auto() {
+                        self.validate_target(format)?;
+                    }
                     self.input = Some((format, w, h, rate));
                 }
                 PipelinePacket::Flush => {

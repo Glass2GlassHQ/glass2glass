@@ -401,6 +401,14 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             }
             NodeKind::Transform | NodeKind::Sink => {
                 let caps = solution[vg.in_edges(node)[0]].clone();
+                // A transform also learns its negotiated OUTPUT caps (M185), so a
+                // caps-driven transform (videoscale fed by a downstream
+                // capsfilter) can take its target from the solve. Sinks have no
+                // output edge and skip it.
+                let out_caps = vg
+                    .out_edges(node)
+                    .first()
+                    .map(|&eid| solution[eid].clone());
                 let GraphNodeRef::Element(elem) =
                     vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                 else {
@@ -408,6 +416,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 };
                 if let ConfigureOutcome::ReFixate(_) = elem.configure_pipeline(&caps)? {
                     return Err(G2gError::FixationFailed);
+                }
+                if let Some(out_caps) = out_caps {
+                    elem.configure_output(&out_caps)?;
                 }
             }
             NodeKind::Tee(_) => {}
