@@ -48,31 +48,62 @@ const INPUT_FORMATS: [RawVideoFormat; 5] = [
 
 #[derive(Debug)]
 pub struct VideoConvert {
-    target: RawVideoFormat,
+    /// Target output format from the `format` property. `None` means "auto":
+    /// take the output format from the negotiated caps (a downstream
+    /// capsfilter), the gst caps-driven idiom (M186).
+    target: Option<RawVideoFormat>,
     /// Format, geometry, and framerate of the configured input stream, updated
     /// by a mid-stream `CapsChanged`. The framerate is carried through to the
     /// output caps unchanged (a convert does not retime), so downstream sees a
     /// fixed rate rather than `Rate::Any` (which a fixating peer, e.g. a
     /// compositor input, would reject).
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    /// Output format resolved from the negotiated output caps (M186), set by
+    /// `configure_output`. Used in auto mode; `None` until then so `process`
+    /// falls back to the property and runners that don't deliver output caps
+    /// keep the property-driven behavior.
+    resolved: Option<RawVideoFormat>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
 }
 
 impl VideoConvert {
+    /// Convert to a fixed `target` format (property-driven).
     pub fn new(target: RawVideoFormat) -> Self {
         Self {
-            target,
+            target: Some(target),
             input: None,
+            resolved: None,
             configured: false,
             last_caps: None,
             emitted: 0,
         }
     }
 
-    pub fn target(&self) -> RawVideoFormat {
+    /// Caps-driven (M186): take the output format from the negotiated caps (a
+    /// downstream capsfilter). With no downstream constraint it defaults to
+    /// passthrough (no conversion).
+    pub fn auto() -> Self {
+        Self {
+            target: None,
+            input: None,
+            resolved: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
+    /// The configured target format, or `None` in auto mode.
+    pub fn target(&self) -> Option<RawVideoFormat> {
         self.target
+    }
+
+    /// The effective output format: the property when set, else the
+    /// caps-resolved format (auto).
+    fn out_format(&self) -> Option<RawVideoFormat> {
+        self.target.or(self.resolved)
     }
 
     /// Validate a raw-video caps as a convertible input and return its
@@ -90,7 +121,8 @@ impl VideoConvert {
         if !INPUT_FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if (is_yuv420(*format) || is_yuv420(self.target)) && (*w % 2 != 0 || *h % 2 != 0) {
+        if (is_yuv420(*format) || self.target.is_some_and(is_yuv420)) && (*w % 2 != 0 || *h % 2 != 0)
+        {
             return Err(G2gError::CapsMismatch);
         }
         // YUYV pairs two horizontal pixels per macropixel, so the width must be
@@ -128,21 +160,39 @@ impl AsyncElement for VideoConvert {
     /// format at the same dims/framerate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target = self.target;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            match input {
-                Caps::RawVideo {
-                    format,
-                    width,
-                    height,
-                    framerate,
-                } if INPUT_FORMATS.contains(format) => CapsSet::one(Caps::RawVideo {
-                    format: target,
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+            Caps::RawVideo { format, width, height, framerate }
+                if INPUT_FORMATS.contains(format) =>
+            {
+                let mk = |f: RawVideoFormat| Caps::RawVideo {
+                    format: f,
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
-                }),
-                _ => CapsSet::from_alternatives(Vec::new()),
+                };
+                match target {
+                    // Property-driven: the fixed target format.
+                    Some(t) => CapsSet::one(mk(t)),
+                    // Caps-driven (auto): any producible format at this geometry,
+                    // preferring passthrough (the input format, no conversion)
+                    // when it is itself producible. Yuyv is input-only, so a
+                    // Yuyv input must convert and lists the producible set.
+                    None => {
+                        let passthrough = FORMATS.contains(format);
+                        let mut alts = Vec::new();
+                        if passthrough {
+                            alts.push(mk(*format));
+                        }
+                        for f in FORMATS {
+                            if !(passthrough && f == *format) {
+                                alts.push(mk(f));
+                            }
+                        }
+                        CapsSet::from_alternatives(alts)
+                    }
+                }
             }
+            _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
@@ -151,6 +201,27 @@ impl AsyncElement for VideoConvert {
         self.input = Some((format, w, h, framerate));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// M186: take the output format from the negotiated output caps when the
+    /// `format` property is unset (caps-driven). Validates the format is
+    /// producible and, if 4:2:0, that the input dims are even.
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        let Caps::RawVideo { format, .. } = output_caps else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !FORMATS.contains(format) {
+            return Err(G2gError::CapsMismatch);
+        }
+        if is_yuv420(*format) {
+            if let Some((_, w, h, _)) = self.input {
+                if w % 2 != 0 || h % 2 != 0 {
+                    return Err(G2gError::CapsMismatch);
+                }
+            }
+        }
+        self.resolved = Some(*format);
+        Ok(())
     }
 
     fn process<'a>(
@@ -173,13 +244,17 @@ impl AsyncElement for VideoConvert {
                     if src.len() < frame_byte_size(format, w, h) {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let converted = convert(src, format, self.target, w as usize, h as usize);
+                    // Effective output format: property, or caps-resolved (auto).
+                    // Auto without a delivered output caps (a runner that doesn't
+                    // call configure_output) is unfixed.
+                    let out_fmt = self.out_format().ok_or(G2gError::NotConfigured)?;
+                    let converted = convert(src, format, out_fmt, w as usize, h as usize);
 
                     // A convert changes format/geometry but not rate: carry the
                     // input framerate so a fixating downstream peer (e.g. a
                     // compositor input) does not reject a `Rate::Any`.
                     let new_caps = Caps::RawVideo {
-                        format: self.target,
+                        format: out_fmt,
                         width: Dim::Fixed(w),
                         height: Dim::Fixed(h),
                         framerate,
@@ -231,8 +306,8 @@ impl AsyncElement for VideoConvert {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "format" => {
-                let s = value.as_str().ok_or(PropError::Type)?;
-                self.target = raw_format_from_str(s).ok_or(PropError::Value)?;
+                self.target = Some(raw_format_from_str(value.as_str().ok_or(PropError::Type)?)
+                    .ok_or(PropError::Value)?);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -241,7 +316,9 @@ impl AsyncElement for VideoConvert {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "format" => Some(PropValue::Str(raw_format_to_str(self.target).into())),
+            // The effective output format: the property, or the caps-resolved
+            // one once negotiated. `None` for an unconfigured auto instance.
+            "format" => self.out_format().map(|f| PropValue::Str(raw_format_to_str(f).into())),
             _ => None,
         }
     }

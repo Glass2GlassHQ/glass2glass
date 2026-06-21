@@ -60,17 +60,27 @@ edits (the typed core is unaffected, only the string<->enum boundary).
     `video/x-raw,width=160,height=120` (no `format`) by expanding to a `CapsSet`
     over all raw formats at that geometry (`parse_caps_set`); the solver
     intersects down to the upstream format. `audio/x-raw` likewise.
-  - **Caps-driven transform operation (videoscale DONE, M185).** Added
-    `AsyncElement::configure_output(output_caps)` (default no-op, dyn-mirrored),
-    delivered by the graph_runner + coordinator from the already-fixated output
-    link. `videoscale` with unset props now advertises a preference-ordered
-    output `[passthrough, Range]` and takes its target from a downstream
-    capsfilter (`videoscale ! video/x-raw,width=160`); props still override.
-    REMAINING (M186): give `videoconvert` (format) and `audioresample` (rate) the
-    same caps-driven path; wire `configure_output` into the remaining runners
-    (run_simple_pipeline / fanout / fanin) and the mid-stream re-cascade so
-    caps-driven transforms work there too (only graph + linear-coordinator paths
-    deliver it today).
+  - **Caps-driven transform operation (videoscale M185, videoconvert M186).**
+    Added `AsyncElement::configure_output(output_caps)` (default no-op,
+    dyn-mirrored), delivered by the graph_runner + coordinator from the
+    already-fixated output link. `videoscale` (geometry) and `videoconvert`
+    (format) with unset props take their target from a downstream capsfilter
+    (`videoscale ! video/x-raw,width=160`, `videoconvert ! video/x-raw,format=NV12`);
+    props still override; a bare instance is a passthrough. REMAINING:
+    - **`audioresample` (rate)** is blocked on `Caps::Audio` carrying a rate
+      *range* (its `sample_rate` is a bare `u32`; rates aren't a small enumerable
+      set like the 5 pixel formats, so the M184 CapsSet-expansion trick doesn't
+      apply). Needs an audio sample-rate range type, a caps-type change rippling
+      through every audio element (audioconvert, wavsink, opus/aac, capsfilter
+      audio parse, audiomixer, ...). Its own milestone.
+    - **Stacked auto transforms** (`videoconvert ! videoscale ! caps`, two
+      auto transforms before one far capsfilter) don't back-propagate a format /
+      geometry pin through a passthrough transform: `DerivedOutput` is forward
+      only (input->output). The forward-resolve / multi-element subgraph re-solve
+      walk would fix it. A capsfilter after each transform is the supported form.
+    - Wire `configure_output` into the remaining runners (run_simple_pipeline /
+      fanout / fanin) and the mid-stream re-cascade (only graph +
+      linear-coordinator paths deliver it today).
   - Decided **pragmatic** (keep convenience props as extensions + make the caps
     route work) over strict gst-only; the two items above are what "make the caps
     route work" actually requires.

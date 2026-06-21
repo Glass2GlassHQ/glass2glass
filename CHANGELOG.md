@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M186: caps-driven videoconvert (format from the solve)
+
+Extends M185's `configure_output` mechanism to `videoconvert`: with no `format`
+property it takes its output format from a downstream capsfilter
+(`videoconvert ! video/x-raw,format=NV12`). `target` became `Option`
+(`None` = auto); `VideoConvert::auto()` is the registry default, so a bare
+`videoconvert` is caps-driven and defaults to passthrough (no conversion) rather
+than the old hardcoded RGBA. In auto mode it advertises a preference-ordered
+output `[passthrough input-format, then the producible set]`, and
+`configure_output` records the negotiated format. The `format` property still
+wins; programmatic `VideoConvert::new(fmt)` is unchanged.
+
+Verified: `m186_caps_driven_convert` (capsfilter-driven RGBA->NV12; convert + scale
+each pinned by its own capsfilter; bare passthrough; property still works);
+`m23`, `m83_autoplug`, `m107`, `m182`, `m185` green. Core (216) + plugins pass.
+
+Two known limits documented (DESIGN_TODO): `audioresample` can't be caps-driven
+until `Caps::Audio` gains a rate range (its `sample_rate` is a bare `u32`, and
+rates aren't a small enumerable set like the pixel formats); and stacking two
+auto transforms before a single far capsfilter
+(`videoconvert ! videoscale ! caps`) doesn't back-propagate through a
+passthrough-format transform (the forward-resolve walk), a capsfilter after each
+transform is the supported form.
+
 ### M185: caps-driven transforms (videoscale takes its target from the solve)
 
 A transform can now take its output geometry from a downstream capsfilter, the

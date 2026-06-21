@@ -141,7 +141,9 @@ pub fn default_registry() -> Registry {
 
     // Video transforms.
     reg.register_launch(LaunchFactory::of::<VideoConvert>("videoconvert", || {
-        Box::new(VideoConvert::new(RawVideoFormat::Rgba8))
+        // Caps-driven by default (M186): a bare `videoconvert` takes its output
+        // format from a downstream capsfilter, or passes through.
+        Box::new(VideoConvert::auto())
     }));
     reg.register_launch(LaunchFactory::of::<VideoScale>("videoscale", || {
         Box::new(VideoScale::new(0, 0))
