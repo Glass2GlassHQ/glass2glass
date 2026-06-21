@@ -64,6 +64,10 @@ pub struct Mpd {
     pub base_url: Option<String>,
     /// `mediaPresentationDuration` in seconds (for the VOD segment count).
     pub duration_secs: f64,
+    /// `@type="dynamic"`: a live manifest, refetched until it turns static.
+    pub dynamic: bool,
+    /// `@minimumUpdatePeriod` in seconds: how often a live manifest is reloaded.
+    pub minimum_update_period_secs: Option<f64>,
     pub representations: Vec<Representation>,
 }
 
@@ -147,6 +151,9 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
 
     let duration_secs =
         root.attribute("mediaPresentationDuration").and_then(parse_iso_duration).unwrap_or(0.0);
+    let dynamic = root.attribute("type") == Some("dynamic");
+    let minimum_update_period_secs =
+        root.attribute("minimumUpdatePeriod").and_then(parse_iso_duration);
     let base_url = root
         .descendants()
         .find(|n| n.has_tag_name("BaseURL"))
@@ -171,7 +178,7 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     if representations.is_empty() {
         return Err(MpdError::Invalid);
     }
-    Ok(Mpd { base_url, duration_secs, representations })
+    Ok(Mpd { base_url, duration_secs, dynamic, minimum_update_period_secs, representations })
 }
 
 /// The nearest `SegmentTemplate` for a Representation (its own, else inherited
@@ -385,6 +392,24 @@ mod tests {
         assert_eq!(parse_iso_duration("PT12.0S"), Some(12.0));
         assert_eq!(parse_iso_duration("PT1H2M3S"), Some(3723.0));
         assert_eq!(parse_iso_duration("PT0.5S"), Some(0.5));
+    }
+
+    #[test]
+    fn static_manifest_is_not_dynamic() {
+        let mpd = parse(MPD).unwrap();
+        assert!(!mpd.dynamic);
+        assert_eq!(mpd.minimum_update_period_secs, None);
+    }
+
+    #[test]
+    fn dynamic_manifest_carries_update_period() {
+        let xml = r#"<MPD type="dynamic" minimumUpdatePeriod="PT2S"><Period><AdaptationSet>
+          <SegmentTemplate media="$Number$.m4s" startNumber="1" duration="1000" timescale="1000"/>
+          <Representation id="r" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        assert!(mpd.dynamic);
+        assert_eq!(mpd.minimum_update_period_secs, Some(2.0));
     }
 
     #[test]

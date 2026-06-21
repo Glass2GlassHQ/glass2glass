@@ -10,6 +10,8 @@ use core::pin::Pin;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use g2g_core::element::AsyncElement;
@@ -79,7 +81,9 @@ fn access_units() -> Vec<Vec<u8>> {
 }
 
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    let path = temp_path("dash");
+    // Unique file per call so parallel tests don't race on one temp path.
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let path = temp_path(&format!("dash{}", N.fetch_add(1, Ordering::Relaxed)));
     let mut sink = Mp4Sink::new(&path);
     sink.configure_pipeline(&Caps::CompressedVideo {
         codec: VideoCodec::H264,
@@ -244,6 +248,108 @@ fn serve_timeline(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
         }
     });
     format!("http://127.0.0.1:{port}/manifest.mpd")
+}
+
+/// The dynamic MPD returned on the Nth reload: a 2-segment sliding window over
+/// the SegmentTimeline that advances each time and turns `static` on the third.
+fn live_mpd(reload: usize) -> String {
+    let (start_t, mpd_type) = match reload {
+        0 => (0, "dynamic"),
+        1 => (1000, "dynamic"),
+        _ => (2000, "static"),
+    };
+    format!(
+        "<?xml version=\"1.0\"?>\n\
+         <MPD type=\"{mpd_type}\" minimumUpdatePeriod=\"PT1S\">\n\
+           <Period>\n\
+             <AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
+               <SegmentTemplate initialization=\"init.mp4\" media=\"seg$Time$.m4s\" \
+                  startNumber=\"1\" timescale=\"1000\">\n\
+                 <SegmentTimeline><S t=\"{start_t}\" d=\"1000\" r=\"1\"/></SegmentTimeline>\n\
+               </SegmentTemplate>\n\
+               <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\"/>\n\
+             </AdaptationSet>\n\
+           </Period>\n\
+         </MPD>"
+    )
+}
+
+fn serve_live(init: Vec<u8>, segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reloads = Arc::new(AtomicUsize::new(0));
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/manifest.mpd" {
+                live_mpd(reloads.fetch_add(1, Ordering::SeqCst)).into_bytes()
+            } else if path == "/init.mp4" {
+                init.clone()
+            } else if let Some(time) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".m4s"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(time / 1000).cloned().unwrap_or_default()
+            } else {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/manifest.mpd")
+}
+
+#[tokio::test]
+async fn dash_live_reloads_dynamic_mpd_and_plays_each_segment_once() {
+    // Four access units -> four 1s fragments addressed by $Time$ (0,1000,2000,3000).
+    let mut aus = access_units();
+    aus.push([&[0, 0, 0, 1][..], &[0x41u8, 3, 3]].concat());
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 4);
+    let url = serve_live(init.clone(), segs.clone());
+
+    let mut src = DashSrc::new(url).with_reload_interval_ms(20);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert_eq!(count, 5, "init + 4 segments, each played once across reloads");
+    let mut expected = init.clone();
+    for s in &segs {
+        expected.extend_from_slice(s);
+    }
+    assert_eq!(sink.body, expected, "sliding-window segments delivered once, in order");
+
+    // End to end through the demuxer.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "live DASH -> Fmp4Demux recovers all access units once");
 }
 
 #[tokio::test]

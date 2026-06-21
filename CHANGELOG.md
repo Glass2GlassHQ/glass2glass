@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M166: DASH live (dynamic MPD) reload
+
+- **`mpd`** parses `MPD@type="dynamic"` (`Mpd::dynamic`) and `@minimumUpdatePeriod`
+  (`Mpd::minimum_update_period_secs`, ISO-8601 seconds).
+- **`DashSrc` reloads a dynamic MPD** on its `minimumUpdatePeriod` (override via
+  `with_reload_interval_ms` / the `reload-interval-ms` property), playing each new
+  segment once (tracked by SegmentTimeline start time, which is monotonic) and
+  ending when a reloaded manifest is static, the DASH analog of the M157 HLS live
+  reload. A static manifest still plays through once and ends, as before.
+- Scope: the SegmentTimeline live case (the timeline grows / slides per reload).
+  The wall-clock `@duration` live profile (segment availability derived from
+  `availabilityStartTime`) is a follow-up.
+- Verified by an `mpd` unit test (dynamic + update-period parsing) and
+  `m160_dashsrc.rs`: a dynamic MPD whose 2-segment SegmentTimeline window advances
+  each reload and turns static on the last delivers all four segments once,
+  in order, round-tripping through `Fmp4Demux`.
+- Fixed a latent test race: the DASH e2e helpers shared one temp fMP4 path; each
+  `make_fmp4` call now uses a unique file so the parallel tests don't collide.
+
 ### M165: DASH SegmentTimeline + $Time$ addressing
 
 - **`mpd` parses `SegmentTimeline`**: the `SegmentTemplate`'s `<SegmentTimeline>`

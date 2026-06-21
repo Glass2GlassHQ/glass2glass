@@ -165,16 +165,18 @@ Production-shape needs that block specific real-world use cases.
   SAMPLE-AES H.264 + AAC, key auto-wired from `HlsSrc` via a shared handle), fMP4
   `cbcs` SAMPLE-AES decryption in `fmp4demux` (H.264/H.265, `tenc`+`senc`-driven,
   same shared key handle), and `DashSrc` (static MPD, `SegmentTemplate`
-  `@duration` or `SegmentTimeline`, `$Number$`/`$Time$` addressing).
+  `@duration` or `SegmentTimeline`, `$Number$`/`$Time$` addressing, dynamic
+  (live) MPD reload).
   **Remaining HLS:** SAMPLE-AES key rotation mid-stream (the shared handle holds a
   single key, fine for a constant per-stream key); cbcs audio (AAC) and per-sample
   IV (cenc/cbc1), `saiz`/`saio` aux-info + `seig` sample groups (the cbcs path uses
   `senc` + `tenc` defaults); encrypted fMP4 init segments; byte-range segments;
   throughput-driven ABR (the current pick is static by declared bandwidth);
   live-edge start (skip to the last few segments); and mid-stream variant switching.
-  **Remaining DASH:** dynamic (live) MPD reload, `SegmentList`/`SegmentBase`
-  byte-range, multi-period, and throughput-driven ABR. (`SegmentTimeline` +
-  `$Time$` addressing are done.)
+  **Remaining DASH:** the wall-clock `@duration` live profile (segment
+  availability from `availabilityStartTime`; the SegmentTimeline live case is
+  done), `SegmentList`/`SegmentBase` byte-range, multi-period, and
+  throughput-driven ABR.
 
 - **SRT / RTMP transports.** 2–3 sessions each. RTMP for legacy
   ingest (still ubiquitous), SRT for low-latency contribution. Each

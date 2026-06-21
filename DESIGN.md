@@ -1188,8 +1188,11 @@ is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its fMP4 init + media segments
 into `fmp4demux`. `SegmentTemplate` is supported both as the `@duration` profile
 and as a `SegmentTimeline` (the `<S t d r>` entries expanded into per-segment
-times), addressed by `$Number$` or `$Time$`. Throughput-driven ABR, byte-range
-segments, and live DASH are follow-ups (DESIGN_TODO).
+times), addressed by `$Number$` or `$Time$`. A dynamic (live) MPD is reloaded on
+its `minimumUpdatePeriod`, each new segment played once (tracked by start time),
+ending when the manifest turns static, the same shape as the HLS live reload.
+Throughput-driven ABR, byte-range segments, and the wall-clock `@duration` live
+profile are follow-ups (DESIGN_TODO).
 
 ---
 
