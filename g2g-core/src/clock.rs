@@ -1,4 +1,5 @@
 use core::future::Future;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::sync::Arc;
 
@@ -67,15 +68,64 @@ impl core::fmt::Debug for ClockCandidate {
     }
 }
 
+/// A presentation base time resolved lazily at the `Playing` transition (M176).
+///
+/// The eager `ClockSync::base_time_ns` is sampled at runner startup, before the
+/// data plane and the `Playing` transition. For a non-live, prerolled pipeline
+/// that sits in `Paused` for a while before the application presses play, that
+/// is the wrong epoch: the preroll frame is consumed during `Paused`, and a sink
+/// that anchored on it then rushes/drops once `Playing` finally arrives. A
+/// `PlayAnchor` is a shared cell the [`StateController`](crate::runtime) stamps
+/// with `clock.now_ns()` at the exact `Playing` edge, so a sink can anchor
+/// presentation to when streaming actually began.
+///
+/// `u64::MAX` is the unset sentinel (a base time that large is never a real
+/// clock reading in this epoch).
+#[derive(Clone, Debug, Default)]
+pub struct PlayAnchor {
+    inner: Arc<AtomicU64>,
+}
+
+impl PlayAnchor {
+    const UNSET: u64 = u64::MAX;
+
+    /// A fresh, unstamped anchor.
+    pub fn new() -> Self {
+        Self { inner: Arc::new(AtomicU64::new(Self::UNSET)) }
+    }
+
+    /// Stamp the base time (the elected clock's `now_ns()` at the `Playing`
+    /// edge). Latest-wins so a re-`Playing` after a stop re-anchors.
+    pub fn stamp(&self, base_time_ns: u64) {
+        self.inner.store(base_time_ns, Ordering::Release);
+    }
+
+    /// Clear the anchor (a transition down to `Ready`/`Null`), so the next
+    /// `Playing` re-stamps rather than reusing a stale epoch.
+    pub fn clear(&self) {
+        self.inner.store(Self::UNSET, Ordering::Release);
+    }
+
+    /// The stamped base time, or `None` until `Playing` stamps it.
+    pub fn get(&self) -> Option<u64> {
+        match self.inner.load(Ordering::Acquire) {
+            Self::UNSET => None,
+            v => Some(v),
+        }
+    }
+}
+
 /// The pipeline's elected clock plus its base time, handed to a sink so it can
 /// present each frame at the right wall-clock moment (the "use PTS to decide
 /// when to display" path).
 ///
-/// A frame's presentation deadline on `clock` is `base_time_ns + running_time`,
+/// A frame's presentation deadline on `clock` is `base_time + running_time`,
 /// where running time is the frame's `pts_ns` mapped through the active
 /// [`Segment`](crate::segment::Segment) (or the PTS directly when no segment is
-/// set). `clock` is the [`elected`](elect_clock) pipeline clock; `base_time_ns`
-/// is its `now_ns()` sampled when streaming began (running-time zero).
+/// set). `clock` is the [`elected`](elect_clock) pipeline clock. The base time
+/// comes from [`base_time`](ClockSync::base_time): the `Playing`-stamped
+/// [`PlayAnchor`] once armed and stamped, else the eager `base_time_ns` sampled
+/// when streaming began (running-time zero).
 ///
 /// The runner calls [`set_clock_sync`](crate::AsyncElement::set_clock_sync) on
 /// each element once, after clock election. A sink that wants to synchronise
@@ -86,18 +136,53 @@ pub struct ClockSync {
     /// The elected pipeline clock; shared because every synchronising element
     /// reads the same timeline.
     pub clock: Arc<dyn PipelineClock + Send + Sync>,
-    /// `clock.now_ns()` at running-time zero (streaming start / `Playing`).
+    /// `clock.now_ns()` at running-time zero, sampled at runner startup. The
+    /// eager fallback used when no `Playing` anchor is armed (the non-stateful
+    /// runners) or before it is stamped.
     pub base_time_ns: u64,
+    /// Optional `Playing`-transition anchor (M176). When armed and stamped it
+    /// supersedes `base_time_ns`; `None` on the eager path.
+    play_anchor: Option<PlayAnchor>,
 }
 
 impl ClockSync {
+    /// Eager base time, no `Playing` anchor (the non-stateful runners).
     pub fn new(clock: Arc<dyn PipelineClock + Send + Sync>, base_time_ns: u64) -> Self {
-        Self { clock, base_time_ns }
+        Self { clock, base_time_ns, play_anchor: None }
+    }
+
+    /// As [`new`](ClockSync::new), but carries a [`PlayAnchor`] the
+    /// `StateController` stamps at `Playing`, so the sink anchors to when
+    /// streaming actually began rather than to startup or the preroll frame.
+    pub fn with_play_anchor(
+        clock: Arc<dyn PipelineClock + Send + Sync>,
+        base_time_ns: u64,
+        play_anchor: PlayAnchor,
+    ) -> Self {
+        Self { clock, base_time_ns, play_anchor: Some(play_anchor) }
     }
 
     /// Current time on the elected clock.
     pub fn now_ns(&self) -> u64 {
         self.clock.now_ns()
+    }
+
+    /// The presentation base time: the `Playing`-stamped anchor when armed and
+    /// stamped, otherwise the eager `base_time_ns`. A sink reads this each frame
+    /// so that, once `Playing` stamps the anchor, deadlines re-base onto the
+    /// play epoch.
+    pub fn base_time(&self) -> u64 {
+        match &self.play_anchor {
+            Some(a) => a.get().unwrap_or(self.base_time_ns),
+            None => self.base_time_ns,
+        }
+    }
+
+    /// Whether a `Playing` anchor is armed and has been stamped. A sink uses
+    /// this to decide whether to trust [`base_time`](ClockSync::base_time) as a
+    /// real anchor or fall back to first-frame anchoring until `Playing`.
+    pub fn play_anchored(&self) -> bool {
+        self.play_anchor.as_ref().is_some_and(|a| a.get().is_some())
     }
 }
 
@@ -105,6 +190,7 @@ impl core::fmt::Debug for ClockSync {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClockSync")
             .field("base_time_ns", &self.base_time_ns)
+            .field("play_anchored", &self.play_anchored())
             .field("now_ns", &self.clock.now_ns())
             .finish()
     }
@@ -173,5 +259,30 @@ mod tests {
         assert!(ClockPriority::LiveSource > ClockPriority::Provider);
         assert!(ClockPriority::Provider > ClockPriority::SystemFallback);
         assert_eq!(ClockPriority::default(), ClockPriority::SystemFallback);
+    }
+
+    #[test]
+    fn play_anchor_resolves_base_time() {
+        // Eager `ClockSync` (no anchor) always reports its startup base time.
+        let eager = ClockSync::new(Arc::new(Fixed(0)), 100);
+        assert_eq!(eager.base_time(), 100);
+        assert!(!eager.play_anchored());
+
+        // Armed but unstamped: falls back to the eager base time, not yet
+        // play-anchored (so a sink first-frame-anchors until `Playing`).
+        let anchor = PlayAnchor::new();
+        let sync = ClockSync::with_play_anchor(Arc::new(Fixed(7_000)), 100, anchor.clone());
+        assert_eq!(sync.base_time(), 100, "unstamped anchor uses eager fallback");
+        assert!(!sync.play_anchored());
+
+        // Stamped at the play edge: supersedes the eager base time.
+        anchor.stamp(7_000);
+        assert_eq!(sync.base_time(), 7_000, "stamped anchor supersedes eager base");
+        assert!(sync.play_anchored());
+
+        // Cleared (a stop): back to the eager fallback until the next stamp.
+        anchor.clear();
+        assert_eq!(sync.base_time(), 100);
+        assert!(!sync.play_anchored());
     }
 }

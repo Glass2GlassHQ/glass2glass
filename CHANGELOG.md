@@ -5,6 +5,44 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M176: presentation base time anchored at the `Playing` transition
+
+The presentation base time was sampled at runner startup, before the data plane
+and before the application presses play. For a non-live, prerolled pipeline that
+sits in `Paused` for a while, that is the wrong epoch: the preroll frame is
+consumed during `Paused`, so a sink that anchored on the startup base (or on that
+first frame) then rushes/drops once `Playing` arrives. M176 stamps the base time
+at the actual play edge.
+
+- **`PlayAnchor`** (`g2g-core::clock`): a cheap shared cell (`Arc<AtomicU64>`,
+  `u64::MAX` = unset) for a base time resolved lazily at `Playing`. `stamp` /
+  `clear` / `get`.
+- **`ClockSync::with_play_anchor`** + **`base_time()`** / **`play_anchored()`**:
+  the sync now resolves its base time to the stamped play-edge value once armed,
+  else the eager startup `base_time_ns` (kept as a field, still the non-stateful
+  path's value). `ClockSync::new` is unchanged (eager, no anchor).
+- **`StateController::arm_play_anchor(clock)`**: the runner arms the anchor on the
+  elected clock after election; `set_state(Playing)` stamps it with
+  `clock.now_ns()` at the play edge, and a transition down to `Ready`/`Null`
+  clears it so a replay re-bases. `Inner` gains a manual `Debug` (the clock trait
+  object isn't `Debug`).
+- **Runners**: `run_simple_pipeline` (stateful path) and the DAG runner
+  (`run_graph` / `run_linear_chain`) arm the anchor when a `StateController` is
+  present and hand sinks `ClockSync::with_play_anchor`; one shared anchor across a
+  graph's sinks. The bespoke `run_source_transform_sink` (no stateful variant)
+  keeps the eager base time.
+- **`WaylandSink`**: anchors on the play-edge base time when available; a preroll
+  frame consumed during `Paused` first-frame-anchors (presented immediately) then
+  re-bases onto the play edge once `Playing` stamps it; a seek `Flush` forces a
+  first-frame re-anchor so the seek target presents immediately, not against the
+  stale play base. Extracted into a `presentation_anchor` helper.
+
+Verified: `m176_play_anchor` (end-to-end: a prerolled stateful pipeline, clock
+advanced during the pause, asserts the sink's `ClockSync` reports the play-edge
+instant after `Playing`, not the startup one); unit tests for `PlayAnchor`
+resolution, the `StateController` stamp/clear lifecycle, and `WaylandSink`'s
+preroll re-base + seek re-anchor. `no_std` baseline (the anchor is core).
+
 ### M175: relay QoS through a transform (multi-element pipelines shed at the source)
 
 Closes the gap M174 left: a QoS report now reaches the source *through* interior

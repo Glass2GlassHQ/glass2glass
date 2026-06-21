@@ -464,8 +464,19 @@ where
     // Hand the elected clock + base time to the sink so it can present each
     // frame at its running-time deadline (PTS pacing). Only when a clock was
     // elected; without one the sink presents as fast as backpressure allows.
+    // M176: under a state controller, arm a Playing-transition anchor so the
+    // sink bases presentation on the play edge, not on startup / the preroll
+    // frame; without one, the eager startup base time stands.
     if let Some(c) = &elected {
-        AsyncElement::set_clock_sync(sink, ClockSync::new(c.clock.clone(), base_time_ns));
+        let sync = match &state {
+            Some(sc) => ClockSync::with_play_anchor(
+                c.clock.clone(),
+                base_time_ns,
+                sc.arm_play_anchor(c.clock.clone()),
+            ),
+            None => ClockSync::new(c.clock.clone(), base_time_ns),
+        };
+        AsyncElement::set_clock_sync(sink, sync);
     }
 
     let (link_tx, link_rx) = link(link_capacity);

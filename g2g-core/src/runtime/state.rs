@@ -39,9 +39,9 @@ use core::task::{Context, Poll, Waker};
 use spin::Mutex;
 
 use crate::bus::{BusHandle, BusMessage};
+use crate::clock::{PipelineClock, PlayAnchor};
 use crate::state::{PipelineState, StateChangeReturn};
 
-#[derive(Debug)]
 struct Inner {
     state: AtomicU8,
     /// Whether the pipeline has a live source. A live pipeline produces no
@@ -69,6 +69,28 @@ struct Inner {
     /// Optional bus; `set_state` posts a [`BusMessage::StateChanged`] and
     /// `notify_prerolled` posts a [`BusMessage::AsyncDone`] when set.
     bus: Option<BusHandle>,
+    /// Elected clock + presentation base-time anchor (M176). Armed by the runner
+    /// after clock election; `set_state(Playing)` stamps the anchor with
+    /// `clock.now_ns()` (and a transition down to `Ready`/`Null` clears it), so a
+    /// sink anchors presentation to the play edge rather than to runner startup
+    /// or the preroll frame. `None` until armed (the non-stateful path, or a
+    /// pipeline with no elected clock).
+    play_anchor: Mutex<Option<(Arc<dyn PipelineClock + Send + Sync>, PlayAnchor)>>,
+}
+
+// `dyn PipelineClock` is not `Debug`, so the `play_anchor` field blocks a
+// derive; report whether it is armed (and the stamped base time, if any).
+impl core::fmt::Debug for Inner {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let anchor = self.play_anchor.lock().as_ref().map(|(_, a)| a.get());
+        f.debug_struct("Inner")
+            .field("state", &PipelineState::from_u8(self.state.load(Ordering::Acquire)))
+            .field("live", &self.live.load(Ordering::Acquire))
+            .field("prerolled", &self.prerolled.load(Ordering::Acquire))
+            .field("pending_preroll", &self.pending_preroll.load(Ordering::Acquire))
+            .field("play_anchor", &anchor)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Cloneable controller for a pipeline's lifecycle state. Every clone shares
@@ -101,8 +123,26 @@ impl StateController {
                 wakers: Mutex::new(Vec::new()),
                 preroll_wakers: Mutex::new(Vec::new()),
                 bus,
+                play_anchor: Mutex::new(None),
             }),
         }
+    }
+
+    /// Arm the `Playing`-transition presentation anchor (M176): the runner passes
+    /// the elected clock after clock election, and the returned [`PlayAnchor`] is
+    /// stamped with `clock.now_ns()` on the next `set_state(Playing)` (cleared on
+    /// a transition down to `Ready`/`Null`). The runner hands the same anchor to
+    /// each sink via [`ClockSync::with_play_anchor`](crate::clock::ClockSync), so
+    /// the sink presents the first frame at the moment streaming actually began.
+    pub fn arm_play_anchor(&self, clock: Arc<dyn PipelineClock + Send + Sync>) -> PlayAnchor {
+        let anchor = PlayAnchor::new();
+        // If the pipeline is already `Playing` when armed (unusual; arming is a
+        // startup step), stamp immediately so the anchor is never left unset.
+        if self.state() == PipelineState::Playing {
+            anchor.stamp(clock.now_ns());
+        }
+        *self.inner.play_anchor.lock() = Some((clock, anchor.clone()));
+        anchor
     }
 
     /// Mark the pipeline live (a live source) or non-live. Set once at build
@@ -170,10 +210,20 @@ impl StateController {
             // Playing trivially satisfies preroll regardless of how many sinks
             // were still pending.
             PipelineState::Playing => {
+                // M176: stamp the presentation base time at the play edge, so a
+                // sink anchors to when streaming began (not startup / preroll).
+                if let Some((clock, anchor)) = &*self.inner.play_anchor.lock() {
+                    anchor.stamp(clock.now_ns());
+                }
                 self.inner.pending_preroll.store(0, Ordering::Release);
                 self.complete_preroll();
             }
             PipelineState::Ready | PipelineState::Null => {
+                // M176: clear the anchor so the next `Playing` re-stamps rather
+                // than reusing a stale epoch (a stop/replay re-bases presentation).
+                if let Some((_, anchor)) = &*self.inner.play_anchor.lock() {
+                    anchor.clear();
+                }
                 self.inner.prerolled.store(false, Ordering::Release);
             }
             PipelineState::Paused => {}
@@ -539,6 +589,33 @@ mod tests {
             .filter(|m| matches!(m, BusMessage::AsyncDone))
             .count();
         assert_eq!(dones, 1);
+    }
+
+    #[test]
+    fn play_anchor_stamps_at_playing_and_clears_on_stop() {
+        use crate::clock::PipelineClock;
+        // A clock that advances each read, so a stamp captures a distinct value.
+        struct Ticking(core::sync::atomic::AtomicU64);
+        impl PipelineClock for Ticking {
+            fn now_ns(&self) -> u64 {
+                self.0.fetch_add(1000, Ordering::SeqCst)
+            }
+        }
+        let clock = Arc::new(Ticking(core::sync::atomic::AtomicU64::new(5000)));
+
+        let sc = StateController::new(PipelineState::Paused); // non-live, prerolling
+        let anchor = sc.arm_play_anchor(clock.clone());
+        assert_eq!(anchor.get(), None, "unstamped until Playing");
+
+        // The play edge stamps the anchor with the clock reading at that moment.
+        sc.set_state(PipelineState::Playing);
+        assert_eq!(anchor.get(), Some(5000), "stamped at the Playing transition");
+
+        // A stop clears it so a later Playing re-stamps a fresh epoch.
+        sc.set_state(PipelineState::Ready);
+        assert_eq!(anchor.get(), None, "cleared on the way down");
+        sc.set_state(PipelineState::Playing);
+        assert_eq!(anchor.get(), Some(6000), "re-stamped on the next play");
     }
 
     #[test]

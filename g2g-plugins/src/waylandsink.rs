@@ -172,9 +172,18 @@ pub struct WaylandSink {
     /// `clock.now_ns() - running_time(first)`. Subsequent deadlines are
     /// `anchor + running_time(frame)`, so the stream paces by PTS deltas
     /// regardless of how long the source took to produce the first frame
-    /// (the robust startup/live anchor; the `ClockSync::base_time_ns` anchor
-    /// at `Playing` is the preroll-integrated refinement).
+    /// (the robust startup/live anchor). When the runner armed a
+    /// `Playing`-transition anchor (M176), the anchor is instead the play-edge
+    /// base time, so a long `Paused` before play doesn't make the stream rush.
     anchor_ns: Option<u64>,
+    /// M176: `anchor_ns` was set provisionally from a preroll frame consumed
+    /// during `Paused`, before `Playing` stamped the base time. The next frame
+    /// once `Playing` is anchored re-bases onto the play edge and clears this.
+    anchor_pre_play: bool,
+    /// M176: a seek `Flush` asks the next frame to first-frame-anchor (present
+    /// the seek target immediately) rather than reuse the stale play-edge base
+    /// time. Cleared once that frame re-anchors.
+    seek_reanchor: bool,
     /// QoS (M173): drop a frame whose presentation deadline is already past by
     /// more than this many ns, instead of presenting it late. `u64::MAX` (the
     /// default) never drops, presenting every frame however late. Only consulted
@@ -226,6 +235,8 @@ impl WaylandSink {
             clock_sync: None,
             segment: None,
             anchor_ns: None,
+            anchor_pre_play: false,
+            seek_reanchor: false,
             max_lateness_ns: u64::MAX,
             late_dropped: 0,
             bus: None,
@@ -278,6 +289,40 @@ impl WaylandSink {
     /// configured bound. Saturating, so the `u64::MAX` default never trips.
     fn is_too_late(&self, deadline: u64, now: u64) -> bool {
         now > deadline.saturating_add(self.max_lateness_ns)
+    }
+
+    /// The clock-time anchor a frame's deadline is measured from: `deadline =
+    /// anchor + running_time`. Three cases (M176):
+    ///
+    /// - **`Playing` anchor armed and stamped** (a state-driven run): anchor on
+    ///   the play-edge base time, so the first played frame presents when
+    ///   streaming began, not at runner startup. A preroll frame consumed during
+    ///   `Paused` (before the stamp) re-bases onto the play edge here once
+    ///   `Playing` arrives.
+    /// - **Seek flush pending**: first-frame-anchor (`now - running_time`) so the
+    ///   seek target presents immediately, ignoring the stale play-edge base.
+    /// - **Otherwise** (slow start, live, or pre-`Playing` preroll): first-frame
+    ///   anchor, then pace by PTS deltas.
+    fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> u64 {
+        // Re-base a provisional preroll anchor onto the play edge once `Playing`
+        // has stamped the base time.
+        if self.anchor_pre_play && sync.play_anchored() && !self.seek_reanchor {
+            self.anchor_ns = Some(sync.base_time());
+            self.anchor_pre_play = false;
+        }
+        if let Some(a) = self.anchor_ns {
+            return a;
+        }
+        // No anchor yet: establish one. Prefer the stamped play-edge base time
+        // unless a seek just flushed (then present the target now).
+        let use_play = sync.play_anchored() && !self.seek_reanchor;
+        let anchor = if use_play { sync.base_time() } else { sync.now_ns().saturating_sub(rt) };
+        self.anchor_ns = Some(anchor);
+        // Mark provisional only if anchored before `Playing` stamped, so it
+        // re-bases later; a post-seek first-frame anchor is final.
+        self.anchor_pre_play = !use_play && !sync.play_anchored();
+        self.seek_reanchor = false;
+        anchor
     }
 
     pub fn with_title<S: Into<String>>(mut self, title: S) -> Self {
@@ -467,17 +512,18 @@ impl AsyncElement for WaylandSink {
 
                     // PTS pacing: hold the frame until its running-time deadline
                     // on the elected clock. The deadline is anchored against the
-                    // first frame (`now - running_time`), so a slow source start
-                    // doesn't dump the backlog and the stream then paces by PTS
-                    // deltas. Without a clock_sync, present immediately (pre-sync).
+                    // play edge (M176) when the runner armed a `Playing` anchor,
+                    // else against the first frame (`now - running_time`), so a
+                    // slow source start doesn't dump the backlog and the stream
+                    // then paces by PTS deltas. Without a clock_sync, present
+                    // immediately (pre-sync).
                     if let Some(sync) = self.clock_sync.clone() {
                         let rt = match self.running_time(timing.pts_ns) {
                             Some(rt) => rt,
                             // Outside the segment: clip (accurate-seek pre-target).
                             None => return Ok(()),
                         };
-                        let anchor =
-                            *self.anchor_ns.get_or_insert(sync.now_ns().saturating_sub(rt));
+                        let anchor = self.presentation_anchor(&sync, rt);
                         let deadline = anchor.saturating_add(rt);
                         let now = sync.now_ns();
                         // QoS: a frame already late beyond the bound is dropped,
@@ -544,7 +590,11 @@ impl AsyncElement for WaylandSink {
                 PipelinePacket::Flush => {
                     // Seek flush: re-anchor presentation to the post-seek
                     // timeline; the following Segment installs the new mapping.
+                    // The next frame first-frame-anchors (present the seek target
+                    // now), not at the stale play-edge base time (M176).
                     self.anchor_ns = None;
+                    self.anchor_pre_play = false;
+                    self.seek_reanchor = true;
                     Ok(())
                 }
                 PipelinePacket::CapsChanged(_) => Ok(()),
@@ -1068,6 +1118,43 @@ mod tests {
             sequence: 0,
             meta: Default::default(),
         }
+    }
+
+    #[test]
+    fn presentation_anchor_uses_play_edge_and_rebases_preroll() {
+        use g2g_core::clock::PlayAnchor;
+        let clock = Arc::new(AtomicU64::new(1_000));
+        let mut sink = WaylandSink::new();
+        let anchor = PlayAnchor::new();
+        let sync = ClockSync::with_play_anchor(
+            Arc::new(ManualClock(clock.clone())),
+            0,
+            anchor.clone(),
+        );
+
+        // Preroll frame consumed during `Paused` (anchor not yet stamped): the
+        // sink first-frame-anchors so it presents immediately, provisionally.
+        let a0 = sink.presentation_anchor(&sync, 0);
+        assert_eq!(a0, 1_000, "preroll first-frame anchor = now - rt");
+        assert!(sink.anchor_pre_play, "marked provisional, awaiting Playing");
+
+        // Playing stamps the base time at 5_000. The next frame re-bases onto the
+        // play edge, discarding the preroll-time anchor.
+        anchor.stamp(5_000);
+        let a1 = sink.presentation_anchor(&sync, 100);
+        assert_eq!(a1, 5_000, "re-anchored to the play-edge base time");
+        assert!(!sink.anchor_pre_play, "re-base is final");
+        // Deadline for this frame is base + running_time.
+        assert_eq!(a1.saturating_add(100), 5_100);
+
+        // A seek flush forces a first-frame re-anchor (present the target now),
+        // ignoring the stale play-edge base.
+        clock.store(8_000, Ordering::Relaxed);
+        sink.anchor_ns = None;
+        sink.seek_reanchor = true;
+        let a2 = sink.presentation_anchor(&sync, 200);
+        assert_eq!(a2, 7_800, "post-seek first-frame anchor = now - rt");
+        assert!(!sink.seek_reanchor, "seek re-anchor consumed");
     }
 
     #[tokio::test]

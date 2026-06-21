@@ -470,10 +470,21 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // as fast as backpressure allows. A sink node always holds a
     // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
     if let Some(c) = &elected {
+        // M176: under a state controller, arm one Playing-transition anchor
+        // (shared across sinks) so each bases presentation on the play edge,
+        // not on startup / its preroll frame; without one, the eager base time
+        // stands. Armed once outside the loop; the anchor is cheaply cloned.
+        let anchor = state.as_ref().map(|sc| sc.arm_play_anchor(c.clock.clone()));
         for &node in &topo {
             if matches!(vg.kind(node), NodeKind::Sink) {
                 if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
-                    elem.set_clock_sync(ClockSync::new(c.clock.clone(), base_time_ns));
+                    let sync = match &anchor {
+                        Some(a) => {
+                            ClockSync::with_play_anchor(c.clock.clone(), base_time_ns, a.clone())
+                        }
+                        None => ClockSync::new(c.clock.clone(), base_time_ns),
+                    };
+                    elem.set_clock_sync(sync);
                 }
             }
         }

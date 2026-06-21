@@ -222,10 +222,15 @@ Production-shape needs that block specific real-world use cases.
   `QosSlot`, so a downstream QoS report walks one hop at a time back to the source
   across any number of generic transforms; wired in both `run_source_transform_sink`
   and the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink`
-  demo uses). **Remaining:** a QoS-aware transform that acts on the report itself
-  (a decoder dropping non-reference frames) rather than only relaying; anchoring
-  at the `Playing` transition (`base_time_ns`) once preroll integration lands,
-  rather than on the first frame; KMS vblank reconciliation
+  demo uses). Playing-transition anchoring DONE (M176, DESIGN.md §4.4): under a
+  `StateController` the runner arms a `PlayAnchor` on the elected clock and hands
+  each sink `ClockSync::with_play_anchor`; `set_state(Playing)` stamps it with
+  `clock.now_ns()` at the play edge (cleared on the way down), so a sink anchors to
+  when streaming began rather than to startup / the preroll frame consumed during
+  `Paused`. `WaylandSink` re-bases a provisional preroll anchor onto the play edge
+  and forces a first-frame re-anchor after a seek `Flush`. **Remaining:** a
+  QoS-aware transform that acts on the report itself (a decoder dropping
+  non-reference frames) rather than only relaying; KMS vblank reconciliation
   (pick-frame-for-next-flip) and Wayland frame-callback co-scheduling; and A/V
   clock slaving (electing an audio device clock as master so video follows audio).
 
