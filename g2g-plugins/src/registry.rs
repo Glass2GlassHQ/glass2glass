@@ -7,13 +7,15 @@
 //! chains, and the `fakesink` / `filesink` sinks. Each is default-constructed and
 //! then configured by the parser from its `key=value` properties (M104/M106).
 //!
-//! `std`-only (the `Registry` is). Feature-gated capture / decode / display
-//! elements (`v4l2src`, `ffmpeg`, `waylandsink`, ...) are not registered here yet;
-//! a caller adds them to the returned registry with `register_source` /
-//! `register_launch` as their features are enabled. `filesrc` is registered
-//! (M112): its `bytestream-format` property supplies the container type a raw
-//! byte stream lacks, so `filesrc location=x.ts bytestream-format=mpegts ! tsdemux`
-//! works as text.
+//! `std`-only (the `Registry` is). Feature- and platform-gated elements (the
+//! opus / av1 / vpx / mjpeg codecs, `fmp4demux`, the rtsp / udp / http / hls /
+//! dash / rtmp network sources and sinks, and the Linux v4l2 / ffmpeg / vaapi /
+//! wayland / kms / alsa / pulse elements) are registered by
+//! [`register_feature_gated`], each block `#[cfg]`-gated like its module, so they
+//! appear in `gst-inspect` / `parse_launch` when their feature is enabled.
+//! `filesrc` is registered (M112): its `bytestream-format` property supplies the
+//! container type a raw byte stream lacks, so `filesrc location=x.ts
+//! bytestream-format=mpegts ! tsdemux` works as text.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

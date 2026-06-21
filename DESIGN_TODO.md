@@ -332,14 +332,17 @@ Production-shape needs that block specific real-world use cases.
   `default` / `range` / enum `values` / read-write `flags`; `inspect(name)` now
   emits a GStreamer-shaped Factory Details + Element Properties dump and the no-arg
   list shows `name: Long-name`. Metadata is declared on a representative set of
-  elements so far (the common sources / transforms / parsers / sinks + Opus);
-  remaining elements default to name-only and adopt the one-line override
-  incrementally. **Remaining depth:** carry metadata + properties on muxers (their
-  inspect path does not build an instance today); property-enable the
-  feature-gated capture / decode / display elements (`v4l2src`, `ffmpeg`,
-  `waylandsink`, ...) and register them in `default_registry` per feature; a value
-  grammar for spaces / enums-as-named-flags; and a GUI/tooling introspection
-  surface beyond the text dump. **Done (M112):** `filesrc` takes its byte-stream caps via a
+  elements so far. **The feature-gated elements are now registered + carry
+  metadata** (`default_registry` gains a `register_feature_gated` helper, each
+  block `#[cfg]`-gated like its module: the codecs opus/av1/vpx/mjpeg, `fmp4demux`,
+  the network sources/sinks rtsp/udp/http/hls/dash/rtmp, and the Linux A/V
+  elements v4l2/ffmpeg/vaapi/wayland/kms/alsa/pulse), so `gst-inspect --all` and
+  `parse_launch` see them when their feature is on. **Remaining depth:** carry
+  metadata + properties on muxers (their inspect path does not build an instance
+  today); property-set the feature-gated sources from text (`location=` / `uri=`
+  on rtsp/http/hls/dash/v4l2, currently default placeholders); a value grammar for
+  spaces / enums-as-named-flags; and a GUI/tooling introspection surface beyond the
+  text dump. **Done (M112):** `filesrc` takes its byte-stream caps via a
   `bytestream-format` property (`mpegts` / `matroska` / `ogg` / `auto`, the last
   sniffing via `typefind`), so a text pipeline feeds a demuxer from a file.
   **Done (M117):** the `Caps` text grammar (`capsfilter::parse_caps`) + the
