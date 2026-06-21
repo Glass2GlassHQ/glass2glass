@@ -38,6 +38,8 @@ const FORMATS: [RawVideoFormat; 4] = [
 /// transpose the frame and so swap width and height; the rest preserve it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlipMethod {
+    /// Pass-through (GStreamer `none`). The default, matching `gst videoflip`.
+    Identity,
     HorizontalMirror,
     VerticalMirror,
     Rotate90Cw,
@@ -306,30 +308,36 @@ static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "flip / rotate method",
 )
 .with_enum_values(
-    "horizontal-mirror | vertical-mirror | rotate-90cw | rotate-180 | rotate-90ccw",
+    "none | clockwise | rotate-180 | counterclockwise | horizontal-flip | vertical-flip",
 )
-.with_default("horizontal-mirror")];
+.with_default("none")];
 
-/// Parse a `method` property string to a [`FlipMethod`].
+/// Parse a `method` property string to a [`FlipMethod`]. Canonical names are
+/// GStreamer's `videoflip` nicknames; the historical g2g spellings are accepted
+/// as aliases so both port. GStreamer's `upper-left-diagonal` /
+/// `upper-right-diagonal` / `automatic` have no g2g equivalent and return `None`
+/// (a loud "unsupported method" rather than silent wrong behavior).
 fn flip_method_from_str(s: &str) -> Option<FlipMethod> {
     match s {
-        "horizontal-mirror" => Some(FlipMethod::HorizontalMirror),
-        "vertical-mirror" => Some(FlipMethod::VerticalMirror),
-        "rotate-90cw" => Some(FlipMethod::Rotate90Cw),
+        "none" | "identity" => Some(FlipMethod::Identity),
+        "horizontal-flip" | "horizontal-mirror" => Some(FlipMethod::HorizontalMirror),
+        "vertical-flip" | "vertical-mirror" => Some(FlipMethod::VerticalMirror),
+        "clockwise" | "rotate-90cw" => Some(FlipMethod::Rotate90Cw),
         "rotate-180" => Some(FlipMethod::Rotate180),
-        "rotate-90ccw" => Some(FlipMethod::Rotate90Ccw),
+        "counterclockwise" | "rotate-90ccw" => Some(FlipMethod::Rotate90Ccw),
         _ => None,
     }
 }
 
-/// The `method` property string for a [`FlipMethod`].
+/// The canonical (GStreamer) `method` property string for a [`FlipMethod`].
 fn flip_method_to_str(m: FlipMethod) -> &'static str {
     match m {
-        FlipMethod::HorizontalMirror => "horizontal-mirror",
-        FlipMethod::VerticalMirror => "vertical-mirror",
-        FlipMethod::Rotate90Cw => "rotate-90cw",
+        FlipMethod::Identity => "none",
+        FlipMethod::HorizontalMirror => "horizontal-flip",
+        FlipMethod::VerticalMirror => "vertical-flip",
+        FlipMethod::Rotate90Cw => "clockwise",
         FlipMethod::Rotate180 => "rotate-180",
-        FlipMethod::Rotate90Ccw => "rotate-90ccw",
+        FlipMethod::Rotate90Ccw => "counterclockwise",
     }
 }
 
@@ -378,6 +386,7 @@ fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
 /// intact. Matches [`src_coord`]'s mapping exactly, verified by the m180 test.
 fn flip_view(view: TensorView, method: FlipMethod) -> TensorView {
     match method {
+        FlipMethod::Identity => view,
         FlipMethod::HorizontalMirror => view.reversed_axis(1),
         FlipMethod::VerticalMirror => view.reversed_axis(0),
         FlipMethod::Rotate180 => view.reversed_axis(0).reversed_axis(1),
@@ -391,6 +400,7 @@ fn flip_view(view: TensorView, method: FlipMethod) -> TensorView {
 /// mirrors and 180 reflect within the same dims.
 fn src_coord(method: FlipMethod, ox: usize, oy: usize, pw: usize, ph: usize) -> (usize, usize) {
     match method {
+        FlipMethod::Identity => (ox, oy),
         FlipMethod::HorizontalMirror => (pw - 1 - ox, oy),
         FlipMethod::VerticalMirror => (ox, ph - 1 - oy),
         FlipMethod::Rotate180 => (pw - 1 - ox, ph - 1 - oy),

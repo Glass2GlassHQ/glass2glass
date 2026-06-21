@@ -66,9 +66,15 @@ fn spec_tables_describe_each_property() {
 #[test]
 fn videoflip_method_enum_property() {
     let mut flip = VideoFlip::new(FlipMethod::HorizontalMirror);
-    flip.set_property("method", PropValue::Str("rotate-90cw".into())).unwrap();
+    // Canonical GStreamer nickname round-trips unchanged (M182).
+    flip.set_property("method", PropValue::Str("clockwise".into())).unwrap();
     assert_eq!(flip.method(), FlipMethod::Rotate90Cw);
-    assert_eq!(flip.get_property("method"), Some(PropValue::Str("rotate-90cw".into())));
+    assert_eq!(flip.get_property("method"), Some(PropValue::Str("clockwise".into())));
+    // The historical g2g spelling is still accepted as an alias, normalized to
+    // the gst name on read.
+    flip.set_property("method", PropValue::Str("rotate-90ccw".into())).unwrap();
+    assert_eq!(flip.method(), FlipMethod::Rotate90Ccw);
+    assert_eq!(flip.get_property("method"), Some(PropValue::Str("counterclockwise".into())));
 }
 
 #[test]
@@ -85,11 +91,12 @@ fn set_property_through_dyn_erasure() {
     // The whole point of the dyn mirrors: a registry holds Box<dyn ...> and still
     // sets properties by name. This is the path the gst-launch parser uses.
     let mut src: Box<dyn DynSourceLoop> = Box::new(VideoTestSrc::new(16, 16, 30, 1));
+    // Old g2g spelling accepted as an alias; normalized to the gst name on read.
     src.set_property("pattern", PropValue::Str("moving-bar".into())).unwrap();
-    assert_eq!(src.get_property("pattern"), Some(PropValue::Str("moving-bar".into())));
+    assert_eq!(src.get_property("pattern"), Some(PropValue::Str("bar".into())));
     assert!(src.properties().iter().any(|s| s.name == "pattern"));
 
     let mut flip: Box<dyn DynAsyncElement> = Box::new(VideoFlip::new(FlipMethod::Rotate180));
     flip.set_property("method", PropValue::Str("vertical-mirror".into())).unwrap();
-    assert_eq!(flip.get_property("method"), Some(PropValue::Str("vertical-mirror".into())));
+    assert_eq!(flip.get_property("method"), Some(PropValue::Str("vertical-flip".into())));
 }

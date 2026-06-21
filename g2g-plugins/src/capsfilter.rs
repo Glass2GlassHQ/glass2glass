@@ -216,8 +216,10 @@ fn audio(format: AudioFormat, fields: &[(&str, &str)]) -> Caps {
     }
 }
 
+// GStreamer caps name formats uppercase (NV12, RGBA, YUY2, S16LE); accept any
+// case and the historical lowercase spellings so both port.
 fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
-    Some(match s {
+    Some(match s.to_ascii_lowercase().as_str() {
         "rgba" => RawVideoFormat::Rgba8,
         "bgra" => RawVideoFormat::Bgra8,
         "nv12" => RawVideoFormat::Nv12,
@@ -228,7 +230,7 @@ fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
 }
 
 fn parse_audio_format(s: &str) -> Option<AudioFormat> {
-    Some(match s {
+    Some(match s.to_ascii_lowercase().as_str() {
         "s16le" => AudioFormat::PcmS16Le,
         "f32le" => AudioFormat::PcmF32Le,
         _ => return None,

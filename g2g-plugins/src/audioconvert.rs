@@ -239,14 +239,15 @@ impl AsyncElement for AudioConvert {
 
 /// `AudioConvert`'s settable properties (M107).
 static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("format", PropKind::Str, "output sample format: s16le | f32le | aac | opus"),
+    PropertySpec::new("format", PropKind::Str, "output sample format: S16LE | F32LE | AAC | OPUS"),
     PropertySpec::new("channels", PropKind::Uint, "output channel count"),
 ];
 
 /// Parse an audio-format property string to an [`AudioFormat`]. Shared with the
-/// `gst-launch` DSL.
+/// `gst-launch` DSL. GStreamer names raw sample formats uppercase (S16LE,
+/// F32LE); accept any case and the historical lowercase spellings as aliases.
 pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
-    match s {
+    match s.to_ascii_lowercase().as_str() {
         "s16le" => Some(AudioFormat::PcmS16Le),
         "f32le" => Some(AudioFormat::PcmF32Le),
         "aac" => Some(AudioFormat::Aac),
@@ -255,13 +256,13 @@ pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
     }
 }
 
-/// The property string for an [`AudioFormat`].
+/// The canonical (GStreamer) property string for an [`AudioFormat`].
 pub(crate) fn audio_format_to_str(f: AudioFormat) -> &'static str {
     match f {
-        AudioFormat::PcmS16Le => "s16le",
-        AudioFormat::PcmF32Le => "f32le",
-        AudioFormat::Aac => "aac",
-        AudioFormat::Opus => "opus",
+        AudioFormat::PcmS16Le => "S16LE",
+        AudioFormat::PcmF32Le => "F32LE",
+        AudioFormat::Aac => "AAC",
+        AudioFormat::Opus => "OPUS",
     }
 }
 

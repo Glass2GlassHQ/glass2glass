@@ -73,8 +73,9 @@ fn make_by_name_then_set_property() {
     assert_eq!(src.get_property("num-buffers"), Some(PropValue::Int(3)));
 
     let mut flip = reg.make_element("videoflip").expect("element built");
-    flip.set_property("method", PropValue::Str("rotate-90cw".into())).unwrap();
-    assert_eq!(flip.get_property("method"), Some(PropValue::Str("rotate-90cw".into())));
+    // gst nickname canonical; old g2g `rotate-90cw` still accepted as an alias.
+    flip.set_property("method", PropValue::Str("clockwise".into())).unwrap();
+    assert_eq!(flip.get_property("method"), Some(PropValue::Str("clockwise".into())));
 
     assert!(reg.make_source("videoflip").is_none(), "videoflip is not a source");
     assert!(reg.make_element("videotestsrc").is_none(), "videotestsrc is not a launch element");

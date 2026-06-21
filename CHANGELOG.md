@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M182: harmonize the gst-launch DSL vocabulary with GStreamer
+
+Pre-release, so the human-facing DSL spellings are aligned to GStreamer's so a
+`gst-launch` line ports to `g2g-launch` with minimal edits. The typed core is
+untouched, only the string<->enum boundary changes; the historical g2g spellings
+stay valid as aliases so nothing breaks.
+
+- **Pixel/sample formats are uppercase** (gst caps convention): `NV12 I420 RGBA
+  BGRA YUY2`, `S16LE F32LE`. Parsing is case-insensitive and accepts the old
+  lowercase + the `yuyv`/`yuy2` pair; `get_property` / inspect report the
+  canonical uppercase. (`videoconvert`, `audioconvert`, `capsfilter`.)
+- **`videoflip method`** uses gst nicknames: `none clockwise rotate-180
+  counterclockwise horizontal-flip vertical-flip`. Added `FlipMethod::Identity`
+  (gst `none`, a zero-copy pass-through) and made it the default, matching `gst
+  videoflip`. Old g2g names (`rotate-90cw`, `horizontal-mirror`, ...) remain
+  aliases; gst's diagonal/`automatic` methods have no g2g equivalent and error
+  cleanly.
+- **`videotestsrc pattern`**: `moving-bar` -> `bar`, `checker` -> `checkers-8`
+  (gst names; old names aliased). The rest already matched.
+
+Verified: `m182_gst_porting` (gst method/format/pattern spellings parse + run;
+old spellings still accepted), existing `m104`/`m105`/`m107` round-trips updated
+to assert the canonical gst spelling. Full `g2g-core` (216) + `g2g-plugins`
+suites pass.
+
+Known gst-porting gaps surfaced (tracked in DESIGN_TODO, not naming issues):
+format-less geometry caps `video/x-raw,width=160,height=120` don't parse
+(`Caps::RawVideo` format is a concrete enum, not "any"), and caps-driven
+transform operation (`videoscale ! video/x-raw,...,width=160` resizing from the
+negotiated downstream caps) isn't wired, the convenience `width=`/`height=`
+properties are the supported route.
+
 ### M180: strided `TensorView` substrate + zero-copy `VideoFlip`
 
 First step of the tensor-as-substrate direction: a strided tensor *view* so a

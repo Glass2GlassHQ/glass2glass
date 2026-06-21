@@ -150,7 +150,7 @@ pub fn default_registry() -> Registry {
         Box::new(VideoCrop::new(0, 0, 0, 0))
     }));
     reg.register_launch(LaunchFactory::of::<VideoFlip>("videoflip", || {
-        Box::new(VideoFlip::new(FlipMethod::HorizontalMirror))
+        Box::new(VideoFlip::new(FlipMethod::Identity))
     }));
     reg.register_launch(LaunchFactory::of::<VideoBalance>("videobalance", || {
         Box::new(VideoBalance::new())

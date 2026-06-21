@@ -96,14 +96,16 @@ fn new_elements_property_round_trip_by_name() {
     assert_eq!(scale.get_property("width"), Some(PropValue::Uint(640)));
     assert_eq!(scale.get_property("height"), Some(PropValue::Uint(360)));
 
+    // Lowercase format accepted as an alias; normalized to the gst-canonical
+    // uppercase name on read (M182).
     let mut conv = reg.make_element("videoconvert").unwrap();
     conv.set_property("format", PropValue::Str("i420".into())).unwrap();
-    assert_eq!(conv.get_property("format"), Some(PropValue::Str("i420".into())));
+    assert_eq!(conv.get_property("format"), Some(PropValue::Str("I420".into())));
 
     let mut ac = reg.make_element("audioconvert").unwrap();
     ac.set_property("format", PropValue::Str("f32le".into())).unwrap();
     ac.set_property("channels", PropValue::Uint(2)).unwrap();
-    assert_eq!(ac.get_property("format"), Some(PropValue::Str("f32le".into())));
+    assert_eq!(ac.get_property("format"), Some(PropValue::Str("F32LE".into())));
 
     let mut sink = reg.make_element("filesink").unwrap();
     sink.set_property("location", PropValue::Str("/tmp/out.bin".into())).unwrap();

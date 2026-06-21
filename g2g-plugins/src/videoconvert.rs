@@ -251,30 +251,33 @@ impl AsyncElement for VideoConvert {
 static VIDEOCONVERT_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "format",
     PropKind::Str,
-    "output pixel format: nv12 | i420 | rgba | bgra | yuyv",
+    "output pixel format: NV12 | I420 | RGBA | BGRA | YUY2",
 )];
 
 /// Parse a pixel-format property string to a [`RawVideoFormat`]. Shared name set
-/// for the `gst-launch` DSL.
+/// for the `gst-launch` DSL. GStreamer caps name formats uppercase (NV12, RGBA,
+/// YUY2); accept any case and the historical lowercase spellings as aliases so
+/// both port.
 pub(crate) fn raw_format_from_str(s: &str) -> Option<RawVideoFormat> {
-    match s {
+    match s.to_ascii_lowercase().as_str() {
         "nv12" => Some(RawVideoFormat::Nv12),
         "i420" => Some(RawVideoFormat::I420),
         "rgba" => Some(RawVideoFormat::Rgba8),
         "bgra" => Some(RawVideoFormat::Bgra8),
-        "yuyv" => Some(RawVideoFormat::Yuyv),
+        // `yuyv` is GStreamer's `YUY2` fourcc; accept both names.
+        "yuy2" | "yuyv" => Some(RawVideoFormat::Yuyv),
         _ => None,
     }
 }
 
-/// The property string for a [`RawVideoFormat`].
+/// The canonical (GStreamer) property string for a [`RawVideoFormat`].
 pub(crate) fn raw_format_to_str(f: RawVideoFormat) -> &'static str {
     match f {
-        RawVideoFormat::Nv12 => "nv12",
-        RawVideoFormat::I420 => "i420",
-        RawVideoFormat::Rgba8 => "rgba",
-        RawVideoFormat::Bgra8 => "bgra",
-        RawVideoFormat::Yuyv => "yuyv",
+        RawVideoFormat::Nv12 => "NV12",
+        RawVideoFormat::I420 => "I420",
+        RawVideoFormat::Rgba8 => "RGBA",
+        RawVideoFormat::Bgra8 => "BGRA",
+        RawVideoFormat::Yuyv => "YUY2",
     }
 }
 

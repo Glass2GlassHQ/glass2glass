@@ -364,7 +364,7 @@ impl SourceLoop for VideoTestSrc {
 /// `VideoTestSrc`'s settable properties (M104).
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
-        .with_enum_values("gradient | snow | moving-bar | smpte | checker | ball | zone-plate")
+        .with_enum_values("gradient | snow | bar | smpte | checkers-8 | ball | zone-plate")
         .with_default("smpte"),
     PropertySpec::new("num-buffers", PropKind::Int, "frames to emit then EOS (-1 = forever)")
         .with_range("-1", "9223372036854775807")
@@ -375,28 +375,31 @@ static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
         .with_default("30/1"),
 ];
 
-/// Parse a `pattern` property string to a [`Pattern`].
+/// Parse a `pattern` property string to a [`Pattern`]. Canonical names match
+/// GStreamer's `videotestsrc` nicknames (`bar`, `checkers-8`); the historical
+/// g2g spellings are accepted as aliases so both port. g2g's `checkers-8` is a
+/// width-relative checkerboard, not gst's fixed 8px squares (nearest match).
 fn pattern_from_str(s: &str) -> Option<Pattern> {
     match s {
         "gradient" => Some(Pattern::Gradient),
         "snow" => Some(Pattern::Snow),
-        "moving-bar" => Some(Pattern::MovingBar),
+        "bar" | "moving-bar" => Some(Pattern::MovingBar),
         "smpte" => Some(Pattern::SmpteBars),
-        "checker" => Some(Pattern::Checkerboard),
+        "checkers-8" | "checker" => Some(Pattern::Checkerboard),
         "ball" => Some(Pattern::Ball),
         "zone-plate" => Some(Pattern::ZonePlate),
         _ => None,
     }
 }
 
-/// The `pattern` property string for a [`Pattern`].
+/// The canonical (GStreamer) `pattern` property string for a [`Pattern`].
 fn pattern_to_str(p: Pattern) -> &'static str {
     match p {
         Pattern::Gradient => "gradient",
         Pattern::Snow => "snow",
-        Pattern::MovingBar => "moving-bar",
+        Pattern::MovingBar => "bar",
         Pattern::SmpteBars => "smpte",
-        Pattern::Checkerboard => "checker",
+        Pattern::Checkerboard => "checkers-8",
         Pattern::Ball => "ball",
         Pattern::ZonePlate => "zone-plate",
     }

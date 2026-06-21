@@ -43,6 +43,43 @@ Compositor, HLS/DASH, RTMP/SRT, VP8/VP9/AV1/Opus, MKV/TS. Architectural cost is
 low (each is "add an element"); sequence against whatever product target
 matters. Detail for these lives in the sections below.
 
+## gst-launch DSL harmonization (M182+)
+
+The `parse_launch` DSL is a GStreamer-compatibility surface; its human-facing
+vocabulary is being aligned to gst so a `gst-launch` line ports with minimal
+edits (the typed core is unaffected, only the string<->enum boundary).
+
+- **M182 (done).** Format names uppercase (`NV12`/`RGBA`/`YUY2`/`S16LE`,
+  case-insensitive parse + old lowercase aliases); `videoflip method` uses gst
+  nicknames (`clockwise`/`counterclockwise`/`horizontal-flip`/`vertical-flip`/
+  `none`) with `FlipMethod::Identity` default; `videotestsrc pattern`
+  `bar`/`checkers-8`. Old g2g spellings remain aliases.
+
+- **Remaining gst-porting gaps (uncovered by M182, both real, both > naming):**
+  - **Format-less / partial geometry caps.** `video/x-raw,width=160,height=120`
+    (no `format`) fails to parse: `Caps::RawVideo`'s format field is a concrete
+    `RawVideoFormat` enum, not an "any". gst caps are field-sets where a
+    capsfilter may fix a subset. Needs a partial/`CapsSet`-backed capsfilter that
+    can express "any format at fixed geometry" (the M16 `CapsSet` machinery is
+    the lever).
+  - **Caps-driven transform operation.** `videoscale ! video/x-raw,...,width=160`
+    does not resize; `videoscale`/`videoconvert`/`audioresample` key off their
+    convenience properties, not the negotiated downstream caps. gst drives these
+    purely from a downstream capsfilter. Wiring each transform's `configure` to
+    take its target from the fixated output caps would make the gst-idiomatic
+    form work (the convenience properties stay as the g2g extension). Pairs with
+    the partial-caps item.
+  - Decided **pragmatic** (keep convenience props as extensions + make the caps
+    route work) over strict gst-only; the two items above are what "make the caps
+    route work" actually requires.
+
+- **M183 (next): videocrop / videobox property-model alignment.** gst `videocrop`
+  uses per-edge insets `top/bottom/left/right`; g2g uses a rect `x/y/width/height`
+  (a behavior change, not a rename). gst `videobox` uses signed
+  `top/bottom/left/right` (negative = add border) + `fill`; g2g uses unsigned
+  `border-*` + `fill`. Rename + convert the model, with tests; kept separate from
+  M182 because it changes behavior, not just spelling.
+
 ## Tensor substrate / zero-copy layout transforms (M180+)
 
 Direction: make a strided tensor *view* the substrate for raw numeric media, so
