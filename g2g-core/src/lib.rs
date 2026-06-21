@@ -20,6 +20,7 @@ pub mod error;
 pub mod frame;
 pub mod graph;
 pub mod link;
+pub mod log;
 pub mod memory;
 pub mod meta;
 pub mod metrics;
