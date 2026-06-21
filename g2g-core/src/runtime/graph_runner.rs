@@ -807,6 +807,11 @@ async fn transform_arm<'a>(
     bus: Option<BusHandle>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    // M175: relay a downstream QoS report (seen on this transform's output link)
+    // onto its input link, so it reaches the source/decoder one hop at a time
+    // through any number of generic transforms, not just the sink's direct
+    // upstream. The element's `process` is unaffected.
+    adapter.relay_qos_to(in_rx.qos_slot());
     let mut control_open = true;
     loop {
         let packet = if control_open {
@@ -971,6 +976,13 @@ async fn sink_arm<'a>(
                     consumed += 1;
                 }
                 elem.process(packet, &mut null).await?;
+                // M175 upstream QoS: a sink that dropped a late frame asks to
+                // shed load; store its report on this sink's input link, where
+                // the upstream transform relays it one hop further (or the source
+                // observes it directly as `PushOutcome::Qos`).
+                if let Some(qos) = elem.take_qos() {
+                    in_rx.request_qos(qos);
+                }
                 // M78: the first buffer in non-live `Paused` is this sink's
                 // preroll frame; mark this arm prerolled so the gate flips to a
                 // hold, and report it so the pipeline preroll aggregates toward

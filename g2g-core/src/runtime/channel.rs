@@ -317,6 +317,14 @@ impl LinkReceiver {
     pub fn request_qos(&self, q: QosMessage) {
         self.qos.store(q);
     }
+
+    /// A clone of this link's reverse QoS slot (M175). A transform arm hands it
+    /// to its *output* [`SenderSink`] as a relay target, so a QoS report seen on
+    /// the downstream link is forwarded onto this (upstream) link toward the
+    /// source instead of being dropped at the transform.
+    pub(crate) fn qos_slot(&self) -> QosSlot {
+        self.qos.clone()
+    }
 }
 
 /// Build a bidirectional inter-element link with `capacity` forward
@@ -411,11 +419,18 @@ impl ProbeSlot {
 pub struct SenderSink {
     link: LinkSender,
     probe: ProbeSlot,
+    /// Relay target for a downstream QoS report (M175). `None` on a source's
+    /// output adapter: a QoS seen on the link surfaces as [`PushOutcome::Qos`]
+    /// so the source element acts on it. `Some` on a transform's output adapter:
+    /// the report is stored into this (the transform's *input* link) reverse
+    /// slot instead, forwarding it one hop toward the source. A generic
+    /// transform thus relays QoS without having to observe it in `process`.
+    upstream_qos: Option<QosSlot>,
 }
 
 impl SenderSink {
     pub fn new(link: LinkSender) -> Self {
-        Self { link, probe: ProbeSlot::default() }
+        Self { link, probe: ProbeSlot::default(), upstream_qos: None }
     }
 
     /// A handle to this link's probe slot, for installing/removing a
@@ -424,14 +439,29 @@ impl SenderSink {
         self.probe.clone()
     }
 
+    /// Make this adapter relay any downstream QoS report onto `upstream` (the
+    /// owning transform's input link) rather than surfacing it (M175). The
+    /// runner wires this so QoS propagates source-ward through a transform.
+    pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot) {
+        self.upstream_qos = Some(upstream);
+    }
+
     /// Outcome to report once a packet has been enqueued: a pending reverse
     /// signal (reconfigure first, then QoS), else `Accepted`. Reconfigure takes
-    /// priority because it is negotiation-critical; QoS is advisory.
+    /// priority because it is negotiation-critical; QoS is advisory. When a
+    /// relay target is set (a transform adapter), an observed QoS is forwarded
+    /// upstream and the outcome stays `Accepted` rather than surfacing `Qos`.
     fn post_send_outcome(&self) -> PushOutcome {
         if let Some(r) = self.link.reconfigure.take() {
             PushOutcome::Reconfigure(r)
         } else if let Some(q) = self.link.qos.take() {
-            PushOutcome::Qos(q)
+            match &self.upstream_qos {
+                Some(upstream) => {
+                    upstream.store(q);
+                    PushOutcome::Accepted
+                }
+                None => PushOutcome::Qos(q),
+            }
         } else {
             PushOutcome::Accepted
         }

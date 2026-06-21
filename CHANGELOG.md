@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M175: relay QoS through a transform (multi-element pipelines shed at the source)
+
+Closes the gap M174 left: a QoS report now reaches the source *through* interior
+transforms, so a multi-element pipeline (e.g. `videotestsrc ! overlay ! convert !
+waylandsink`) sheds generation load at the source, not just one hop up. A transform
+sees the downstream QoS as a `PushOutcome::Qos` inside `process`, but a generic
+transform discards that outcome and the runner (not the element) owns the reverse
+slots, so the relay is runner-mediated, the same shape as the reverse `Reconfigure`
+path.
+
+- **`SenderSink::relay_qos_to(QosSlot)`**: an optional relay target on a transform's
+  *output* adapter. When set, a downstream QoS observed on the output link is stored
+  onto the transform's *input* link instead of surfacing as `PushOutcome::Qos`, so
+  the upstream neighbour observes it on its next push. Across N transforms the report
+  walks one hop at a time back to the source. A source's output adapter leaves it
+  unset and still surfaces `Qos` for the source element to act on.
+- **`LinkReceiver::qos_slot()`**: hands the runner a clone of the input link's reverse
+  slot to wire as the relay target.
+- **Wired in `run_source_transform_sink`** (the transform arm wires the relay; the
+  sink arm originates QoS onto its input link via `take_qos`) **and in the DAG runner**
+  (`graph_runner`: `transform_arm` wires the relay, `sink_arm` originates), so
+  `run_graph` / `run_linear_chain` (which the `WaylandSink` demo uses) now relays too.
+- The element's `process` is unaffected; a QoS-aware transform that acts on the report
+  itself (e.g. a decoder dropping non-reference frames) is a later refinement.
+
+Verified by `m175_qos_relay_through_transform`: an `IdentityTransform` between
+`VideoTestSrc` and a behind-the-clock sink, asserting the source skips frames through
+both the bespoke runner and the DAG runner. `no_std` baseline (the QoS plumbing is
+core).
+
+Also fixes a latent M174 break: `m8_negotiation` had a non-exhaustive `match` on
+`PushOutcome` (missing the `Qos` arm M174 added), so that test would not compile;
+adds the arm (unreachable in that test).
+
 ### M174: upstream QoS propagation (source sheds load on a behind sink)
 
 QoS now travels *upstream*, closing the gap M173 left: a sink that drops late
@@ -30,8 +64,7 @@ as `Reconfigure`.
 
 Scope: source→sink (`run_simple_pipeline`). Forwarding QoS *through* a transform
 (`run_source_transform_sink`) and in the DAG runner (`run_graph`, which the
-`WaylandSink` demo uses) is the next step — the transform must relay the signal
-from its downstream link to its upstream one, owed (DESIGN_TODO).
+`WaylandSink` demo uses) lands next in M175.
 
 ### M173: QoS late-drop in `WaylandSink`
 

@@ -436,6 +436,7 @@ impl SourceLoop for ReconfigurableTestSrc {
             let agreed = match outcome {
                 PushOutcome::Reconfigure(r) => self.reconfigure(r)?,
                 PushOutcome::Accepted => panic!("expected Reconfigure on push N+1"),
+                PushOutcome::Qos(_) => panic!("no QoS signalled in this test"),
             };
             out.push(PipelinePacket::CapsChanged(agreed.clone())).await?;
 

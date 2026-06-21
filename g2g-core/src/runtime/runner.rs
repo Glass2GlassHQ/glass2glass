@@ -1075,6 +1075,11 @@ where
     let transform_fut = async move {
         let ctrl_rx = transform_ctrl_rx;
         let mut adapter = SenderSink::new(link2_tx);
+        // M175: relay a QoS report from the sink (seen on the transform's output
+        // link) onto the transform's input link, so the source observes it as
+        // `PushOutcome::Qos` and sheds load. Without this the report dies at the
+        // transform (its `process` push outcome is discarded).
+        adapter.relay_qos_to(link1_rx.qos_slot());
         // β: while the coordinator is alive, race the data link against the
         // re-cascade control channel so a directive is applied promptly. Once
         // control closes (coordinator gone) we degrade to data-only so the
@@ -1239,6 +1244,12 @@ where
                         consumed += 1;
                     }
                     sink.process(packet, &mut null).await?;
+                    // M175 upstream QoS: a late sink stores its report on the
+                    // link feeding it; the transform's output adapter relays it
+                    // one hop further upstream (see `relay_qos_to` above).
+                    if let Some(qos) = sink.take_qos() {
+                        link2_rx.request_qos(qos);
+                    }
                 }
                 None => return Ok(consumed),
             }

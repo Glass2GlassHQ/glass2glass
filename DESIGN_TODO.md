@@ -216,14 +216,16 @@ Production-shape needs that block specific real-world use cases.
   posts a `Qos` report, matching `SyncSink` (M85). Upstream QoS propagation DONE
   for the source→sink runner (M174, DESIGN.md §4.4): a sink's `take_qos` rides the
   per-link reverse `QosSlot` to the producer as `PushOutcome::Qos`; `SyncSink`
-  originates it and `VideoTestSrc` skips frames in response. **Remaining:** relay
-  QoS *through* a transform (`run_source_transform_sink`) and in the DAG runner
-  (`run_graph`, which the `WaylandSink` demo uses) so multi-element pipelines shed
-  load at the source/decoder, not just one hop up; this needs runner mediation
-  because a transform sees the downstream `PushOutcome` inside `process` but holds
-  neither reverse slot (the reconfigure path solves the same problem). Also:
-  anchoring at the `Playing` transition (`base_time_ns`) once preroll integration
-  lands, rather than on the first frame; KMS vblank reconciliation
+  originates it and `VideoTestSrc` skips frames in response. Relay *through* a
+  transform DONE (M175, DESIGN.md §4.4): the runner wires a transform's output
+  `SenderSink` with a relay handle (`relay_qos_to`) to its input link's reverse
+  `QosSlot`, so a downstream QoS report walks one hop at a time back to the source
+  across any number of generic transforms; wired in both `run_source_transform_sink`
+  and the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink`
+  demo uses). **Remaining:** a QoS-aware transform that acts on the report itself
+  (a decoder dropping non-reference frames) rather than only relaying; anchoring
+  at the `Playing` transition (`base_time_ns`) once preroll integration lands,
+  rather than on the first frame; KMS vblank reconciliation
   (pick-frame-for-next-flip) and Wayland frame-callback co-scheduling; and A/V
   clock slaving (electing an audio device clock as master so video follows audio).
 
