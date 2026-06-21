@@ -20,7 +20,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::runtime::{LaunchFactory, MuxerFactory, Registry, SourceFactory};
+use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
@@ -238,8 +238,40 @@ pub fn default_registry() -> Registry {
 
     register_feature_gated(&mut reg);
     register_aliases(&mut reg);
+    register_autoplug_candidates(&mut reg);
 
     reg
+}
+
+/// Register the parsers and decoders as auto-plug [`ElementFactory`] candidates
+/// (M193), so the decode-chain search (`Registry::autoplug` / the `decodebin`
+/// parser node / `build_playbin`) has elements to compose. These are the same
+/// element types already registered for the text parser via `register_launch`;
+/// here they additionally carry their pad templates into the search. Parsers
+/// bridge a byte / elementary stream to a fixed compressed codec; decoders bridge
+/// a compressed codec to raw. The build closures ignore the chosen output caps
+/// (these elements take their format from negotiation), matching the
+/// parameterless launch constructors. Decoders mirror their feature gates, so the
+/// search only routes through a decoder when its backend is compiled in.
+fn register_autoplug_candidates(reg: &mut Registry) {
+    // Parsers (baseline): elementary-stream framing, no external deps.
+    reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| Box::new(H264Parse::new())));
+    reg.register(ElementFactory::of::<H265Parse>("h265parse", |_| Box::new(H265Parse::new())));
+    reg.register(ElementFactory::of::<AacParse>("aacparse", |_| Box::new(AacParse::new())));
+    reg.register(ElementFactory::of::<OpusParse>("opusparse", |_| Box::new(OpusParse::new())));
+    reg.register(ElementFactory::of::<Vp8Parse>("vp8parse", |_| Box::new(Vp8Parse::new())));
+    reg.register(ElementFactory::of::<Vp9Parse>("vp9parse", |_| Box::new(Vp9Parse::new())));
+    reg.register(ElementFactory::of::<Av1Parse>("av1parse", |_| Box::new(Av1Parse::new())));
+
+    // Decoders (feature- + platform-gated, same gate as the launch registration).
+    #[cfg(feature = "opus")]
+    reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| Box::new(OpusDec::new())));
+    #[cfg(feature = "mjpeg")]
+    reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| Box::new(MjpegDec::new())));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |_| Box::new(FfmpegH264Dec::new())));
+    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    reg.register(ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using

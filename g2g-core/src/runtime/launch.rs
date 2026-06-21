@@ -39,11 +39,12 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::caps::Caps;
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
 use crate::property::PropValue;
-use crate::runtime::autoplug::Registry;
+use crate::runtime::autoplug::{is_raw_audio, is_raw_video, Registry};
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
 /// Why [`parse_launch`] could not build a graph.
@@ -83,6 +84,15 @@ pub enum ParseError {
     /// element in g2g (it collapses into the edge's backpressure policy), so it
     /// cannot be a source, a sink, or a fan-out / fan-in node.
     QueueRole(String),
+    /// A `decodebin` has no upstream element to take its input caps from (it was
+    /// the first element, or followed a bare `name.` reference). decodebin
+    /// auto-plugs from its predecessor's declared caps, so it needs one.
+    DecodebinNoUpstream,
+    /// `decodebin` found no chain of registered decoders / parsers from its input
+    /// caps to raw video or audio (the input caps are quoted). Either no decoder
+    /// feature is compiled in, or the input is a container that needs a demuxer
+    /// (auto-plugging through fan-out demuxers is not yet supported).
+    NoDecodeChain(String),
     /// Linking two nodes into the graph failed.
     Graph(GraphError),
 }
@@ -123,6 +133,12 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::QueueRole(n) => {
                 write!(f, "{n}: a queue must sit between two elements (1-in/1-out); it maps to an edge policy, not a source/sink/branch")
+            }
+            ParseError::DecodebinNoUpstream => {
+                write!(f, "decodebin has no upstream element to decode; it must follow a source or element with declared caps")
+            }
+            ParseError::NoDecodeChain(caps) => {
+                write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
             }
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
         }
@@ -337,7 +353,71 @@ fn apply_element_props(
 /// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
 /// `t.` references into directed links, derive each element's role (and any tee's
 /// fan-out width) from its link degree, then construct and wire the nodes.
+/// `decodebin` / `decodebin3`: not an element, but a macro that expands, at
+/// parse time, into the chain of decoders / parsers the auto-plug search finds
+/// from its upstream caps down to raw video or audio (M193).
+fn is_decodebin(name: &str) -> bool {
+    matches!(name, "decodebin" | "decodebin3")
+}
+
+/// Depth bound for the decodebin auto-plug search: a parse + decode (+ a spare
+/// hop) is 2-3, so this leaves headroom without letting an unsatisfiable target
+/// wander.
+const DECODEBIN_MAX_DEPTH: usize = 6;
+
+/// Expand every `decodebin` node into the decoder chain the registry auto-plugs
+/// from its predecessor's declared caps down to raw (video or audio). An empty
+/// chain (the input is already raw) drops the node entirely, so its predecessor
+/// links straight to its consumer. The predecessor is the element immediately
+/// before the `decodebin` in the same chain; a `decodebin` with no upstream
+/// element (chain head, or after a bare `name.` reference) is a loud error,
+/// since it has nothing to take its input caps from.
+fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let mut new_chain: Chain = Vec::with_capacity(chain.len());
+        // The name whose declared caps feed the next decodebin: the most recent
+        // real element. A `Ref` clears it (its caps live in another chain).
+        let mut upstream: Option<String> = None;
+        for item in chain {
+            match item {
+                Item::Element(spec) if is_decodebin(&spec.name) => {
+                    let pred = upstream.as_deref().ok_or(ParseError::DecodebinNoUpstream)?;
+                    let caps =
+                        registry.declared_output_caps(pred).ok_or(ParseError::DecodebinNoUpstream)?;
+                    let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+                    let names = registry
+                        .autoplug_names(&caps, &target, DECODEBIN_MAX_DEPTH)
+                        .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+                    for name in names {
+                        new_chain.push(Item::Element(ElementSpec {
+                            name: name.to_string(),
+                            props: Vec::new(),
+                            instance: None,
+                        }));
+                        upstream = Some(name.to_string());
+                    }
+                }
+                Item::Element(spec) => {
+                    upstream = Some(spec.name.clone());
+                    new_chain.push(Item::Element(spec));
+                }
+                Item::Ref(name) => {
+                    upstream = None;
+                    new_chain.push(Item::Ref(name));
+                }
+            }
+        }
+        out.push(new_chain);
+    }
+    Ok(out)
+}
+
 fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {
+    // Expand decodebin macros into concrete decoder chains before the structural
+    // build, so the rest of the builder sees only real elements.
+    let chains = expand_decodebin(registry, chains)?;
+
     // A chain endpoint after flattening: a concrete element index, or a still
     // unresolved reference by name.
     enum Endpoint {

@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M193: `decodebin` in gst-launch lines (auto-plug a decode chain)
+
+`decodebin` / `decodebin3` now parse in a `parse_launch` pipeline. They are not
+elements; the parser expands a `decodebin` node, at parse time, into the chain of
+decoders / parsers the M83 auto-plug search finds from its upstream caps down to
+raw video or audio. An already-raw input expands to nothing, so decodebin becomes
+a pass-through (`videotestsrc ! decodebin ! sink` just runs).
+
+- Auto-plug candidates are now registered: `default_registry` registers the
+  parsers (baseline) and decoders (`ffmpegdec` / `vaapidec` / `mjpegdec` /
+  `opusdec`, each behind its feature) as `ElementFactory`s, so the search has
+  elements to compose. Previously the `factories` list was empty, so
+  `Registry::autoplug` / `build_playbin` found nothing in the default registry.
+- `expand_decodebin` (a parse-time macro pass, like the M190 queue contraction)
+  resolves each decodebin from its predecessor's declared caps via
+  `Registry::autoplug_names` and splices the named decoder chain inline. The
+  predecessor is the element immediately upstream in the same chain.
+- New: `Registry::declared_output_caps(name)` (a source's declared output, or a
+  transform's first fixed source-pad template) and `is_raw_audio`.
+- Loud failures: `DecodebinNoUpstream` (decodebin first / after a bare `name.`
+  ref, with no upstream caps), `NoDecodeChain(caps)` (no decoder reaches raw, the
+  input caps quoted).
+- Known limits (documented, deferred): containers that need a fan-out demuxer
+  (MPEG-TS / MP4) are not auto-plugged (the search composes 1-in/1-out elements);
+  instance properties that re-type a source's output (a `filesrc`'s
+  `bytestream-format`) are not reflected in the auto-plug input yet;
+  `uridecodebin` / `playbin` (source + decodebin) remain a follow-up.
+
+Verified: `m193_decodebin` (raw passthrough runs; a registered decoder candidate
+expands into the graph; no-upstream fails loud; baseline has no H.264->raw route;
+under `ffmpeg`, `ffmpegdec` routes H.264->raw). Auto-plug (m83) + launch
+(m106/m118/m122) + core (216) green; no_std + clippy clean.
+
 ### M192: gst-canonical-name element aliases
 
 Pasted `gst-launch` lines that use GStreamer's element names now resolve to the

@@ -39,7 +39,7 @@ pub use runner::{
     run_source_transform_sink, run_source_transform_sink_with_bus, LatencyProfile, LinkCapacity,
     RunStats, SourceLoop,
 };
-pub use autoplug::{find_chain, is_raw_video, ChainLink, ElementDesc};
+pub use autoplug::{find_chain, is_raw_audio, is_raw_video, ChainLink, ElementDesc};
 pub use seek::SeekController;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;

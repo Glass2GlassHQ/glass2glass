@@ -92,6 +92,12 @@ pub fn is_raw_video(caps: &Caps) -> bool {
     matches!(caps, Caps::RawVideo { .. })
 }
 
+/// Shape predicate: the caps are raw (decoded) audio. The audio half of the
+/// `decodebin` target, "walk down to raw audio."
+pub fn is_raw_audio(caps: &Caps) -> bool {
+    matches!(caps, Caps::Audio { .. })
+}
+
 /// One element on an auto-plugged chain: which registered [`ElementDesc`] it is
 /// (`index` into the searched slice) and the output caps the search chose for it
 /// (the source-pad alternative it was matched to produce). The caps pin the
@@ -565,6 +571,27 @@ mod factory {
         pub fn make_element(&self, name: &str) -> Option<Box<dyn DynAsyncElement>> {
             let name = self.resolve_alias(name);
             self.launch.iter().find(|f| f.name == name).map(|f| (f.build)())
+        }
+
+        /// The caps a registered element is known to produce on its source pad,
+        /// without constructing or negotiating it: a source's declared output, or
+        /// a transform / sink's first fixed source-pad template alternative.
+        /// `None` for an unregistered name or one whose source pad is wildcard.
+        /// The `decodebin` parser uses this to learn its upstream caps (the input
+        /// to the auto-plug search). Reads the factory-declared media type; it does
+        /// not reflect instance properties that re-type the output (e.g. a
+        /// `filesrc`'s `bytestream-format`).
+        pub fn declared_output_caps(&self, name: &str) -> Option<Caps> {
+            let name = self.resolve_alias(name);
+            if let Some(s) = self.sources.iter().find(|s| s.name == name) {
+                return Some(s.output.clone());
+            }
+            let f = self.launch.iter().find(|f| f.name == name)?;
+            let t = f.templates.iter().find(|t| t.direction == PadDirection::Source)?;
+            match &t.caps {
+                PadCaps::Fixed(set) => set.alternatives().first().cloned(),
+                PadCaps::Any => None,
+            }
         }
 
         /// Construct a registered fan-in muxer by name with `inputs` input pads
