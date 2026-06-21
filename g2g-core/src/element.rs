@@ -4,7 +4,7 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use crate::caps::Caps;
-use crate::clock::ClockCandidate;
+use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
 use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
 use crate::frame::PipelinePacket;
@@ -113,6 +113,14 @@ pub trait AsyncElement: ElementBound {
     fn provide_clock(&self) -> Option<ClockCandidate> {
         None
     }
+
+    /// Receive the pipeline's elected clock + base time after election, so a
+    /// sink can present each frame at its running-time deadline (PTS mapped
+    /// through the active `Segment`) — the "use PTS to decide when to display"
+    /// path. The runner calls this once before streaming, only when a clock was
+    /// elected. Default: ignore (present as fast as backpressure allows, the
+    /// pre-sync behaviour). See [`ClockSync`].
+    fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
     /// Declares that this element changes the caps "domain" between its
     /// input and output: a decoder turns compressed bitstream into raw
@@ -248,6 +256,10 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::set_clock_sync`], so an erased sink
+    /// receives the elected clock + base time. Defaults to ignore.
+    fn set_clock_sync(&mut self, _sync: ClockSync) {}
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -318,6 +330,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::provide_clock(self)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        AsyncElement::set_clock_sync(self, sync)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -379,6 +395,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
         (**self).provide_clock()
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        (**self).set_clock_sync(sync)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

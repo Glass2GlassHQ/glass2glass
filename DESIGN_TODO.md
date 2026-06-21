@@ -197,7 +197,20 @@ Production-shape needs that block specific real-world use cases.
   VorbisComment). Still missing, each gated on a subsystem we don't have yet:
   `segment-done` (segment seeks), `stream-status` (thread pool), `clock-lost`
   (clock re-election). Smaller follow-ups: buffering on interior links; periodic
-  QoS; QoS from the display sinks once they sync to the clock.
+  QoS; QoS from the display sinks (the display sinks now *can* sync to the clock,
+  see "Clock-synchronised presentation" below; the QoS late-drop + `Qos` post
+  from them is the next step).
+
+- **Clock-synchronised presentation (present each frame at its PTS).** First step
+  DONE (M169, DESIGN.md §4.4): `ClockSync` (elected clock + base time) +
+  `AsyncElement::set_clock_sync` (default no-op, dyn-mirrored), delivered by the
+  runner after clock election; `WaylandSink` holds each frame until its
+  running-time deadline (Segment-mapped, first-frame-anchored, re-anchors on
+  Flush). **Remaining:** QoS late-drop + `BusMessage::Qos` from the display sinks
+  when behind; anchoring at the `Playing` transition (`base_time_ns`) once preroll
+  integration lands, rather than on the first frame; KMS vblank reconciliation
+  (pick-frame-for-next-flip) and Wayland frame-callback co-scheduling; and A/V
+  clock slaving (electing an audio device clock as master so video follows audio).
 
 - **Compositor GPU companion + depth.** The CPU `Compositor` (RGBA8 pixel
   mixer: position / z-order / per-pad alpha, input-0-driven cadence, plus per-pad

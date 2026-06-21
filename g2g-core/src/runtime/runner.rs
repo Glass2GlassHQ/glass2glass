@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 
 use crate::bus::BusHandle;
 use crate::caps::Caps;
-use crate::clock::{elect_clock, ClockCandidate, ClockPriority, PipelineClock};
+use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
@@ -460,6 +460,13 @@ where
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),
     };
+
+    // Hand the elected clock + base time to the sink so it can present each
+    // frame at its running-time deadline (PTS pacing). Only when a clock was
+    // elected; without one the sink presents as fast as backpressure allows.
+    if let Some(c) = &elected {
+        AsyncElement::set_clock_sync(sink, ClockSync::new(c.clock.clone(), base_time_ns));
+    }
 
     let (link_tx, link_rx) = link(link_capacity);
 
@@ -1022,6 +1029,13 @@ where
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),
     };
+
+    // Hand the elected clock + base time to the sink so it can present each
+    // frame at its running-time deadline (PTS pacing). Only when a clock was
+    // elected; without one the sink presents as fast as backpressure allows.
+    if let Some(c) = &elected {
+        AsyncElement::set_clock_sync(sink, ClockSync::new(c.clock.clone(), base_time_ns));
+    }
 
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);

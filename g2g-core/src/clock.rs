@@ -67,6 +67,49 @@ impl core::fmt::Debug for ClockCandidate {
     }
 }
 
+/// The pipeline's elected clock plus its base time, handed to a sink so it can
+/// present each frame at the right wall-clock moment (the "use PTS to decide
+/// when to display" path).
+///
+/// A frame's presentation deadline on `clock` is `base_time_ns + running_time`,
+/// where running time is the frame's `pts_ns` mapped through the active
+/// [`Segment`](crate::segment::Segment) (or the PTS directly when no segment is
+/// set). `clock` is the [`elected`](elect_clock) pipeline clock; `base_time_ns`
+/// is its `now_ns()` sampled when streaming began (running-time zero).
+///
+/// The runner calls [`set_clock_sync`](crate::AsyncElement::set_clock_sync) on
+/// each element once, after clock election. A sink that wants to synchronise
+/// reads `clock.now_ns()` and waits until it reaches the deadline; a sink that
+/// ignores it presents as fast as backpressure allows (the pre-sync behaviour).
+#[derive(Clone)]
+pub struct ClockSync {
+    /// The elected pipeline clock; shared because every synchronising element
+    /// reads the same timeline.
+    pub clock: Arc<dyn PipelineClock + Send + Sync>,
+    /// `clock.now_ns()` at running-time zero (streaming start / `Playing`).
+    pub base_time_ns: u64,
+}
+
+impl ClockSync {
+    pub fn new(clock: Arc<dyn PipelineClock + Send + Sync>, base_time_ns: u64) -> Self {
+        Self { clock, base_time_ns }
+    }
+
+    /// Current time on the elected clock.
+    pub fn now_ns(&self) -> u64 {
+        self.clock.now_ns()
+    }
+}
+
+impl core::fmt::Debug for ClockSync {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ClockSync")
+            .field("base_time_ns", &self.base_time_ns)
+            .field("now_ns", &self.clock.now_ns())
+            .finish()
+    }
+}
+
 /// Elect the pipeline clock from a set of candidates (most upstream first):
 /// the highest-priority candidate wins, ties resolve to the earliest (most
 /// upstream) one. `None` means no element offered a clock, so the caller's

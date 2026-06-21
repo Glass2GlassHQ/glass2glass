@@ -99,9 +99,9 @@ use smithay_client_toolkit::{
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    Dim, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ClockSync,
+    ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat, Segment, VideoCodec,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -160,6 +160,21 @@ pub struct WaylandSink {
     latency: Arc<LatencyHistogram>,
     frames_dropped: Arc<AtomicU64>,
     pacing: PacingPolicy,
+    /// Elected clock + base time from the runner (M-sync). `Some` enables PTS
+    /// pacing: each frame is held until its running-time deadline on the clock.
+    /// `None` (no clock elected) keeps the pre-sync "present ASAP" behaviour.
+    clock_sync: Option<ClockSync>,
+    /// Active playback segment, from `PipelinePacket::Segment`, used to map a
+    /// frame's PTS to running time (correct across a seek). `None` before any
+    /// segment arrives, where PTS is the running time directly.
+    segment: Option<Segment>,
+    /// Clock time latched against the first frame's running time:
+    /// `clock.now_ns() - running_time(first)`. Subsequent deadlines are
+    /// `anchor + running_time(frame)`, so the stream paces by PTS deltas
+    /// regardless of how long the source took to produce the first frame
+    /// (the robust startup/live anchor; the `ClockSync::base_time_ns` anchor
+    /// at `Playing` is the preroll-integrated refinement).
+    anchor_ns: Option<u64>,
 }
 
 impl core::fmt::Debug for WaylandSink {
@@ -196,6 +211,19 @@ impl WaylandSink {
             latency: Arc::new(LatencyHistogram::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
+            clock_sync: None,
+            segment: None,
+            anchor_ns: None,
+        }
+    }
+
+    /// Running-time presentation deadline for a frame PTS, mapped through the
+    /// active segment (PTS directly when none). `None` means the frame is
+    /// outside the segment and should be clipped (accurate-seek pre-target).
+    fn running_time(&self, pts_ns: u64) -> Option<u64> {
+        match &self.segment {
+            Some(seg) => seg.to_running_time(pts_ns),
+            None => Some(pts_ns),
         }
     }
 
@@ -276,6 +304,13 @@ impl AsyncElement for WaylandSink {
             ClockPriority::Provider,
             alloc::sync::Arc::new(WaylandClock),
         ))
+    }
+
+    /// Adopt the elected clock + base time so frames present at their PTS
+    /// deadline. When the elected clock is our own `WaylandClock` (the common
+    /// audio-less case) its `now_ns()` shares the monotonic domain we sleep on.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -385,6 +420,27 @@ impl AsyncElement for WaylandSink {
                     let MemoryDomain::System(slice) = domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+
+                    // PTS pacing: hold the frame until its running-time deadline
+                    // on the elected clock. The deadline is anchored against the
+                    // first frame (`now - running_time`), so a slow source start
+                    // doesn't dump the backlog and the stream then paces by PTS
+                    // deltas. Without a clock_sync, present immediately (pre-sync).
+                    if let Some(sync) = self.clock_sync.clone() {
+                        let rt = match self.running_time(timing.pts_ns) {
+                            Some(rt) => rt,
+                            // Outside the segment: clip (accurate-seek pre-target).
+                            None => return Ok(()),
+                        };
+                        let anchor =
+                            *self.anchor_ns.get_or_insert(sync.now_ns().saturating_sub(rt));
+                        let deadline = anchor.saturating_add(rt);
+                        let now = sync.now_ns();
+                        if deadline > now {
+                            tokio::time::sleep(Duration::from_nanos(deadline - now)).await;
+                        }
+                    }
+
                     let xrgb = nv12_to_xrgb8888(slice.as_slice(), self.width, self.height)?;
                     let tx = self
                         .cmd_tx
@@ -417,9 +473,19 @@ impl AsyncElement for WaylandSink {
                     }
                     Ok(())
                 }
-                PipelinePacket::CapsChanged(_)
-                | PipelinePacket::Flush
-                | PipelinePacket::Segment(_) => Ok(()),
+                PipelinePacket::Segment(seg) => {
+                    // Track the playback segment so PTS maps to running time
+                    // (correct across a seek).
+                    self.segment = Some(seg);
+                    Ok(())
+                }
+                PipelinePacket::Flush => {
+                    // Seek flush: re-anchor presentation to the post-seek
+                    // timeline; the following Segment installs the new mapping.
+                    self.anchor_ns = None;
+                    Ok(())
+                }
+                PipelinePacket::CapsChanged(_) => Ok(()),
                 PipelinePacket::Eos => {
                     self.shutdown();
                     Ok(())
@@ -882,6 +948,39 @@ mod tests {
         // is a real error (e.g. an undecoded display chain), not a no-op.
         assert_eq!(sink.configure_pipeline(&h264).err(), Some(G2gError::CapsMismatch));
         assert!(sink.worker.is_none(), "no worker should be spawned on rejected caps");
+    }
+
+    #[test]
+    fn set_clock_sync_enables_pts_pacing() {
+        // Without a clock the sink presents ASAP (pre-sync); after the runner
+        // hands it the elected clock, PTS pacing engages.
+        let mut sink = WaylandSink::new();
+        assert!(sink.clock_sync.is_none());
+        let sync = ClockSync::new(Arc::new(WaylandClock), 0);
+        AsyncElement::set_clock_sync(&mut sink, sync);
+        assert!(sink.clock_sync.is_some(), "clock sync stored, PTS pacing on");
+    }
+
+    #[test]
+    fn running_time_uses_pts_without_segment() {
+        // No segment: PTS is the running time directly.
+        let sink = WaylandSink::new();
+        assert_eq!(sink.running_time(50_000_000), Some(50_000_000));
+    }
+
+    #[test]
+    fn running_time_maps_through_segment_and_clips() {
+        // Accurate seek to 70 ms: a frame before the target is clipped (None);
+        // an at/after-target frame maps to running time. Mirrors SyncSink (M149).
+        let mut sink = WaylandSink::new();
+        let seg = Segment::for_flush_seek(&g2g_core::Seek::flush_to(70_000_000), None);
+        sink.segment = Some(seg);
+        assert_eq!(sink.running_time(66_000_000), None, "pre-target frame clips");
+        assert_eq!(
+            sink.running_time(70_000_000),
+            Some(0),
+            "the target frame is running-time zero after a flushing seek"
+        );
     }
 
     #[test]

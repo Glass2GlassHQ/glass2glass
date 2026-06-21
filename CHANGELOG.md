@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M169: clock-synchronised presentation (present each frame at its PTS)
+
+First step of the "use PTS to decide when to display" track (DESIGN.md §4.4,
+DESIGN_TODO §High "QoS from the display sinks once they sync to the clock"):
+plumb the elected pipeline clock + base time into sinks so a display sink holds
+each frame until its running-time deadline instead of presenting as fast as
+backpressure allows.
+
+- **`ClockSync`** (`g2g-core::clock`): the elected `Arc<dyn PipelineClock>` +
+  `base_time_ns` (the clock's `now_ns()` at running-time zero). A frame's
+  presentation deadline is `base_time_ns + running_time`, where running time is
+  the PTS mapped through the active `Segment`.
+- **`AsyncElement::set_clock_sync`** (default no-op, mirrored on
+  `DynAsyncElement`): the runner calls it once after clock election, only when a
+  clock was elected, so every existing element is unaffected.
+- **Runner delivery:** `run_simple_pipeline_with_bus` and
+  `run_source_transform_sink_with_bus` hand the elected clock + base time to the
+  sink after election (the other linear runners delegate to these).
+- **`WaylandSink` presents at PTS:** holds each frame until its running-time
+  deadline on the elected clock, tracking the `Segment` (clipping pre-target
+  frames after an accurate seek) and re-anchoring on `Flush`. The deadline is
+  anchored against the first frame (`now - running_time`), so a slow source
+  start doesn't dump the backlog; the stream then paces by PTS deltas. Without an
+  elected clock the sink keeps the prior present-ASAP behaviour. The timing logic
+  mirrors the already-tested `SyncSink`.
+- 3 new unit tests (segment mapping/clip, PTS-without-segment, sync-enable).
+
+**Remaining on this track:** QoS late-drop + `BusMessage::Qos` from the display
+sinks when behind; anchoring at the `Playing` transition (`base_time_ns`) once
+preroll integration lands, rather than on the first frame; KMS vblank
+reconciliation (pick-frame-for-next-flip); and A/V clock slaving (electing an
+audio device clock as master).
+
 ### M168: Linux audio sinks + modern capture (alsa/pulse/pipewire, mfvideosrc)
 
 Closes the "Linux audio output + modern capture" parity gap (DESIGN.md §4.12a,

@@ -381,11 +381,7 @@
             font-size: 0.72rem; letter-spacing: 0.08em; font-weight: 700;
         }
         .roadmap-table tr:last-child td { border-bottom: none; }
-        .roadmap-table td:first-child {
-            font-family: 'JetBrains Mono', monospace;
-            color: var(--accent); font-weight: 600;
-            width: 80px;
-        }
+        .roadmap-table td:first-child { color: var(--text-primary); }
         .roadmap-table td.status { width: 130px; }
         .roadmap-table .pill {
             display: inline-block; padding: 3px 10px;
@@ -486,7 +482,7 @@
     <div class="hero-content">
         <div class="hero-badge">
             <div class="badge-dot"></div>
-            Pre-release &middot; <span>0.1.0 &middot; 167 milestones in</span>
+            <span>Pre-release &middot; 0.1.0</span>
         </div>
         <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
         <p class="hero-sub">
@@ -521,7 +517,7 @@
         </div>
 
         <div class="stats-row">
-            <div class="stat-cell"><h3>167</h3><p>Milestones</p></div>
+            <div class="stat-cell"><h3>~80%</h3><p>GStreamer parity</p></div>
             <div class="stat-cell"><h3>120+</h3><p>Elements</p></div>
             <div class="stat-cell"><h3>5</h3><p>Target Profiles</p></div>
             <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
@@ -616,7 +612,7 @@
             <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
                 <div class="crate-name" style="color: var(--text-primary);">designed for replacement</div>
                 <div class="crate-tag">vs GStreamer</div>
-                <p>Statically-typed graphs replace runtime string-keyed plugin factories. CSP caps negotiation with structured failures. Per-link memory-domain policies. ~95% feature parity with GStreamer's core runtime &mdash; with the latency edge.</p>
+                <p>Statically-typed graphs replace runtime string-keyed plugin factories. CSP caps negotiation with structured failures. Per-link memory-domain policies. The core runtime meets or beats GStreamer &mdash; with the latency edge.</p>
             </div>
         </div>
     </div>
@@ -761,7 +757,7 @@
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128293;</span>
-                <h3>CUDA zero-copy track (C3)</h3>
+                <h3>CUDA zero-copy track</h3>
                 <p><code>MemoryDomain::Cuda</code> in core, <code>Backend::NvdecCuda</code> keeps NV12 in device memory, <code>CudaDownload</code> + <code>CudaGlSink</code> via CUDA&harr;GL interop (not dmabuf &mdash; doesn't work on NVIDIA).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
@@ -793,7 +789,7 @@
             <div class="target-card">
                 <div class="t-icon">&#129707;</div>
                 <h3>Bare-metal / RTOS</h3>
-                <p>Embassy executor (single-threaded, cooperative). Stack channels (<code>embassy-sync</code>). DMA-ring capture (M48, planned). No-alloc strict variant via <code>StaticBufferPool</code>.</p>
+                <p>Embassy executor (single-threaded, cooperative). Stack channels (<code>embassy-sync</code>). DMA-ring capture (planned). No-alloc strict variant via <code>StaticBufferPool</code>.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>
@@ -921,39 +917,25 @@ wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async
         <span class="section-label">Roadmap</span>
         <h2 class="section-title">Where we are. Where we're going.</h2>
         <p class="section-desc">
-            The full milestone-by-milestone log is in <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/CHANGELOG.md" style="color: var(--accent);">CHANGELOG.md</a>.
-            What's headline-worthy:
+            The full changelog is in <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/CHANGELOG.md" style="color: var(--accent);">CHANGELOG.md</a>.
+            What's headline-worthy, by capability area:
         </p>
 
         <table class="roadmap-table">
-            <thead><tr><th>ID</th><th>Track</th><th class="status">Status</th></tr></thead>
+            <thead><tr><th>Track</th><th class="status">Status</th></tr></thead>
             <tbody>
-                <tr><td>M5</td><td>RTSP source (retina, std + tokio)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M8-12</td><td>Negotiation, fan-out / fan-in, bus, allocation + clock + latency queries</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M13</td><td>Hardware decode: ffmpeg / Media Foundation / VAAPI</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M14</td><td>Linux display: WaylandSink + KmsSink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M16-18</td><td>CSP caps negotiation + GStreamer parity push (~95%)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M19-24</td><td>MF encode, file I/O, ORT, batcher, VideoConvert, Mp4Sink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M25-38</td><td>Audio track: WASAPI, AAC, fMP4, loopback</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M39-42</td><td>Browser / Wasm: WasmClock, WebSocket / WebRTC, WebCodecs, Canvas</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M43-45</td><td>Embassy / RTOS: StaticBufferPool, EmbassyClock, PacketChannel</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M46-47</td><td>Sans-IO RTP packetizer + UDP egress</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M50-51</td><td>WgpuPreprocess + pure-Rust BurnInference</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M52-54</td><td>H264Parse AVCC + VUI, CUDA EP for ORT, YUV444 input</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M76-87</td><td>Lifecycle spine: state machine + preroll, seek + SEGMENT, auto-plug / decodebin / playbin, buffering</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M90-92</td><td>V4L2 capture, UDP/RTP ingest, uridecodebin URI front door</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M93</td><td>Compositor: software RGBA8 pixel mixer (PiP / grids)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M94-96</td><td>RTP receive resilience: jitter buffer, RTCP, NACK retransmission</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M97-103</td><td>Per-frame metadata (FrameMeta / AnalyticsMeta), detection postproc, CPU + Vello GPU analytics overlay, WgpuSink</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M104-107</td><td>Property system + introspection + the <code>gst-launch</code> text DSL (parse_launch / gst-inspect / registry)</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M108-122</td><td>Containers: MPEG-TS, Matroska/WebM, FLV, Ogg demux + mux; multi-codec ffmpeg decode; caps-filter / tee / funnel DSL</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M123-132</td><td>Transform + test-pattern coverage (videobalance / videobox / alpha / volume / audiomixer); native caps_constraint</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M133-145</td><td>Codec parsers (opus / vp8 / vp9 / av1) + the tag system across all containers</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M146-154</td><td>Seek depth (Mp4Src seek, accurate clip), MP4 tags, AV1 / VP8-9 / MJPEG encode</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>M155-167</td><td>Adaptive streaming: HttpSrc, HLS (TS + CMAF, live, AES / SAMPLE-AES), DASH (live), RTMP ingest</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
-                <tr><td>C3</td><td>CUDA zero-copy: NVDEC &rarr; CudaGlSink (Linux+NVIDIA)</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
-                <tr><td>M48</td><td>Fixed DMA-ring capture source for Embassy</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
-                <tr><td>&mdash;</td><td>RTP RTX + FEC, RTMP/SRT egress, RTSP ANNOUNCE/RECORD, macOS / Android platforms</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
+                <tr><td>Graph runtime: CSP caps negotiation, fan-out / fan-in, the DAG runner, bus + queries</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Lifecycle: state machine + preroll, seek + SEGMENT, auto-plug / decodebin / playbin</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Ingest: RTSP, RTP / UDP (jitter buffer + RTCP + NACK), HTTP, HLS / DASH, RTMP, V4L2 / PipeWire capture</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Containers: MP4, MPEG-TS, Matroska / WebM, FLV, Ogg demux + mux, with the tag system</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Codecs: ffmpeg decode (H.264/265, VP8/9, AV1) + AV1 / VP8-9 / MJPEG encode + bitstream parsers</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Display + audio out: Wayland / KMS / D3D11 / wgpu sinks, ALSA / PulseAudio / PipeWire / WASAPI audio</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>ML on the graph: WgpuPreprocess, ORT + Burn inference, per-frame metadata + analytics overlay</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Tooling: property system + introspection + the <code>gst-launch</code> text DSL</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>Browser / Wasm + Embassy / RTOS targets</td><td class="status"><span class="pill pill-done">Done</span></td></tr>
+                <tr><td>CUDA zero-copy: NVDEC &rarr; CudaGlSink (Linux + NVIDIA)</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
+                <tr><td>Clock-synchronised display, QoS from the display sinks, A/V sync</td><td class="status"><span class="pill pill-wip">In progress</span></td></tr>
+                <tr><td>RTP RTX + FEC, RTMP / SRT egress, RTSP server, macOS / Android platforms</td><td class="status"><span class="pill pill-plan">Planned</span></td></tr>
             </tbody>
         </table>
     </div>

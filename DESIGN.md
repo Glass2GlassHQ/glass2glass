@@ -321,6 +321,12 @@ Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and 
 
 A free-running source feeding a sync sink is paced automatically by upstream backpressure (§4.5): the sink only consumes after `sleep_until_ns(pts)` resolves, which throttles the channel, which throttles the source. No explicit source-side pacing is required for sync playback.
 
+#### Clock distribution to sinks
+
+A pipeline runs against one elected clock (`elect_clock`: a live source's hardware clock outranks an audio sink's clock, which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
+
+`WaylandSink` is the first display sink to use it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. To stay robust against a slow source start (and the live case), it anchors the deadline against the first frame (`now - running_time`) rather than the startup base time, so the stream paces by PTS deltas without dumping a startup backlog. QoS late-drop from the display sinks, anchoring at the `Playing` transition, KMS vblank reconciliation, and slaving video to an audio device clock are the remaining steps (DESIGN_TODO).
+
 ### 4.5 Backpressure & Scheduling
 Every link between elements has an explicit `LinkPolicy`, configured at graph construction time. The choice is per-link because a single pipeline may have lossy preview branches and lossless recording branches sharing an upstream source.
 

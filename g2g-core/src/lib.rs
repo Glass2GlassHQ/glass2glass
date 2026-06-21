@@ -50,7 +50,9 @@ pub use caps::{
     AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout,
     TensorShape, VideoCodec, RawVideoFormat,
 };
-pub use clock::{elect_clock, AsyncClock, ClockCandidate, ClockPriority, PipelineClock};
+pub use clock::{
+    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock,
+};
 pub use element::{
     AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
