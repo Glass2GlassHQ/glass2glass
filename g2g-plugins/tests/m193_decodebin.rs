@@ -31,6 +31,18 @@ fn h264_any() -> Caps {
     }
 }
 
+/// VP9 has no in-tree decoder, so a stub decoder for it never competes with the
+/// real (H.264-only) `ffmpegdec` / `vaapidec` when those features are on, keeping
+/// the expansion test deterministic across feature combinations.
+fn vp9_any() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::Vp9,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
+}
+
 fn nv12_any() -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
@@ -67,15 +79,15 @@ async fn decodebin_passthrough_with_downstream_runs() {
 async fn decodebin_expands_a_decoder_chain() {
     // A source declaring compressed H.264 plus a decoder candidate (H.264 -> raw
     // NV12). decodebin auto-plugs the decoder between them, so the parsed graph
-    // is h264src -> decoder -> fakesink (two edges). The decoder body is an
+    // is vp9src -> decoder -> fakesink (two edges). The decoder body is an
     // IdentityTransform stand-in (templates drive the search; we assert the parse
     // structure, not a decode run).
     let mut reg = default_registry();
-    reg.register_source(SourceFactory::new("h264src", h264_any(), || {
+    reg.register_source(SourceFactory::new("vp9src", vp9_any(), || {
         Box::new(VideoTestSrc::new(8, 8, 30, 2))
     }));
     let templates = Vec::from([
-        PadTemplate::sink(CapsSet::one(h264_any())),
+        PadTemplate::sink(CapsSet::one(vp9_any())),
         PadTemplate::source(CapsSet::one(nv12_any())),
     ]);
     reg.register(ElementFactory::new("fakedec", templates, |_| Box::new(IdentityTransform::new())));
@@ -86,13 +98,13 @@ async fn decodebin_expands_a_decoder_chain() {
         || Box::new(IdentityTransform::new()),
     ));
 
-    // Sanity: the search itself routes H.264 to raw through the decoder.
-    assert_eq!(
-        reg.autoplug_names(&h264_any(), &is_raw_video, 4).expect("a decoder reaches raw"),
-        Vec::from(["fakedec"]),
-    );
+    // Sanity: the search routes the compressed stream to raw in a single decoder
+    // hop. (We assert the shape, not the decoder name: with a real decoder feature
+    // on, its candidate may be chosen over the stub, but it is still one hop.)
+    let chain = reg.autoplug_names(&vp9_any(), &is_raw_video, 4).expect("a decoder reaches raw");
+    assert_eq!(chain.len(), 1, "one decoder hop to raw, got {chain:?}");
 
-    let line = "h264src ! decodebin ! fakesink";
+    let line = "vp9src ! decodebin ! fakesink";
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} parse: {e}"));
     assert_eq!(graph.edges().len(), 2, "decodebin expanded to one decoder node");
 }
@@ -105,6 +117,9 @@ async fn decodebin_without_upstream_fails_loud() {
     assert!(matches!(err, ParseError::DecodebinNoUpstream), "got {err:?}");
 }
 
+// Only meaningful without an H.264 decoder compiled in; `ffmpegdec` / `vaapidec`
+// would (correctly) provide the route this asserts is absent.
+#[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
 #[test]
 fn baseline_registry_has_no_route_from_h264_to_raw() {
     // The baseline build registers parsers as auto-plug candidates but no decoder

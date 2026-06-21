@@ -263,6 +263,19 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<Vp9Parse>("vp9parse", |_| Box::new(Vp9Parse::new())));
     reg.register(ElementFactory::of::<Av1Parse>("av1parse", |_| Box::new(Av1Parse::new())));
 
+    // Demuxers (baseline, M194): a container byte stream in, one selected
+    // elementary stream out. They are 1-in/1-out (an instance forwards one stream,
+    // chosen by codec), so the chain search composes them like any other element:
+    // ByteStream{container} -> tsdemux/... -> CompressedVideo|Audio -> decoder ->
+    // raw. Built parameterless = the default (video) stream, which matches both
+    // the search's first-alternative choice and the decodebin macro's by-name
+    // build, so the two decode paths stay consistent.
+    reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| Box::new(TsDemux::new())));
+    reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| Box::new(MkvDemux::new())));
+    reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| Box::new(Fmp4Demux::new())));
+    reg.register(ElementFactory::of::<OggDemux>("oggdemux", |_| Box::new(OggDemux::new())));
+    reg.register(ElementFactory::of::<FlvDemux>("flvdemux", |_| Box::new(FlvDemux::new())));
+
     // Decoders (feature- + platform-gated, same gate as the launch registration).
     #[cfg(feature = "opus")]
     reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| Box::new(OpusDec::new())));

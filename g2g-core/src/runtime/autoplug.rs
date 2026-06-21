@@ -30,7 +30,7 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::{Caps, CapsSet};
+use crate::caps::{AudioFormat, Caps, CapsSet};
 use crate::pad_template::{pad_link, PadCaps, PadDirection, PadTemplate};
 use crate::runtime::solver::NegotiationFailure;
 
@@ -92,10 +92,12 @@ pub fn is_raw_video(caps: &Caps) -> bool {
     matches!(caps, Caps::RawVideo { .. })
 }
 
-/// Shape predicate: the caps are raw (decoded) audio. The audio half of the
-/// `decodebin` target, "walk down to raw audio."
+/// Shape predicate: the caps are raw (decoded) PCM audio. The audio half of the
+/// `decodebin` target, "walk down to raw audio." [`Caps::Audio`] is overloaded:
+/// it also carries compressed AAC / Opus (the demuxer / parser output), so this
+/// matches only the PCM formats, not a compressed stream still labelled `Audio`.
 pub fn is_raw_audio(caps: &Caps) -> bool {
-    matches!(caps, Caps::Audio { .. })
+    matches!(caps, Caps::Audio { format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le, .. })
 }
 
 /// One element on an auto-plugged chain: which registered [`ElementDesc`] it is

@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M194: container-demux auto-plug
+
+`decodebin` (and `Registry::autoplug` / `build_playbin`) now route a container
+byte stream all the way to raw, not just an elementary stream. g2g demuxers are
+1-in/1-out, an instance forwards one selected elementary stream (by codec), so
+the M83 chain search composes them like any other element:
+`ByteStream{container}` -> demuxer -> `CompressedVideo` -> decoder -> raw.
+
+- Registered the five demuxers (`tsdemux`, `matroskademux`, `fmp4demux`,
+  `oggdemux`, `flvdemux`) as auto-plug `ElementFactory` candidates. Built
+  parameterless = the default (video) stream, which matches both the search's
+  first-alternative choice and the `decodebin` macro's by-name build, so the two
+  decode paths stay consistent. So `filesrc ! decodebin ! ...` on an MPEG-TS
+  stream auto-plugs `tsdemux ! <decoder>` when a decoder feature is compiled in.
+- Fixed `is_raw_audio`: `Caps::Audio` is overloaded (it also carries compressed
+  AAC / Opus emitted by a demuxer / parser), so the predicate now matches only
+  the PCM formats. Without this a `decodebin` stopped at the demuxer's compressed
+  AAC output, mistaking it for decoded audio.
+- Known limits (deferred): a container that needs the demuxer's *non-default*
+  stream (audio out of a muxed A/V file) is not auto-selected, decodebin takes
+  the default (video) stream; selecting a container other than `filesrc`'s
+  default still needs the `bytestream-format` property reflected into the
+  auto-plug input (the M193 property limit); `uridecodebin` / `playbin` remain a
+  follow-up.
+
+Verified: `m194_container_demux` (each video container's demuxer is the one-hop
+route to a compressed stream in the baseline build; demux + decode is a two-hop
+chain; under `ffmpeg`, MPEG-TS decodes to raw and `filesrc ! decodebin` expands
+to demux + decode). M193 decodebin tests hardened to be deterministic across
+feature combinations (assert chain shape, not decoder name; gate the no-decoder
+assertions off when a decoder feature is on). Core (216) + plugins (140 blocks)
+green under both `std` and `std,ffmpeg`; no_std + clippy clean.
+
 ### M193: `decodebin` in gst-launch lines (auto-plug a decode chain)
 
 `decodebin` / `decodebin3` now parse in a `parse_launch` pipeline. They are not
