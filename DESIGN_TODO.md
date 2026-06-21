@@ -228,11 +228,26 @@ Production-shape needs that block specific real-world use cases.
   `clock.now_ns()` at the play edge (cleared on the way down), so a sink anchors to
   when streaming began rather than to startup / the preroll frame consumed during
   `Paused`. `WaylandSink` re-bases a provisional preroll anchor onto the play edge
-  and forces a first-frame re-anchor after a seek `Flush`. **Remaining:** a
-  QoS-aware transform that acts on the report itself (a decoder dropping
-  non-reference frames) rather than only relaying; KMS vblank reconciliation
-  (pick-frame-for-next-flip) and Wayland frame-callback co-scheduling; and A/V
-  clock slaving (electing an audio device clock as master so video follows audio).
+  and forces a first-frame re-anchor after a seek `Flush`.
+
+  **Remaining (deferred, the two below are platform/hardware-bound and not
+  CI-testable on the dev host, so parked behind testable tracks):**
+  - **KMS vblank reconciliation** (pick-frame-for-next-flip) + Wayland
+    frame-callback co-scheduling. Needs a DRM/KMS presentation sink: `WaylandSink`
+    is SHM software present, with no flip timing to reconcile against, and no KMS
+    sink exists yet. The sink would pick the frame whose deadline is closest to the
+    next predicted vblank rather than sleeping to an absolute deadline. Validate on
+    a real display (like `wayland_smoke`), not in CI.
+  - **A/V clock slaving** (elect an audio device clock as master so video follows
+    audio). Needs an audio sink that *provides* a clock tracking buffer consumption
+    (`provide_clock` returning a `ClockCandidate` whose `now_ns` advances with
+    samples played), plus election preferring it over a live-source clock. Drift
+    correction (skew between the audio clock and the video source) is the hard part.
+    Validate against a real audio device.
+  - **A QoS-aware transform** that acts on a relayed report itself (a decoder
+    dropping non-reference frames) rather than only forwarding it (M175). This one
+    *is* CI-testable; deferred only until a decoder that can cheaply drop frames is
+    the bottleneck.
 
 - **Compositor GPU companion + depth.** The CPU `Compositor` (RGBA8 pixel
   mixer: position / z-order / per-pad alpha, input-0-driven cadence, plus per-pad
