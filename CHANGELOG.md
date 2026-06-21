@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M189: mid-stream re-cascade re-resolves caps-driven transform output
+
+`configure_output` (M185, how a caps-driven `videoscale` / `videoconvert` /
+`audioresample` takes its target from the solve) now also fires on a mid-stream
+`CapsChanged`, not only at startup. So when the upstream caps shift live, an auto
+transform retargets instead of staying pinned to its startup resolution.
+
+- Both transform-arm re-cascade paths now call `configure_output(&forward_caps)`
+  immediately after `configure_pipeline` accepts the new input caps: the linear
+  coordinator arm (`runner.rs`) and the DAG `transform_arm` (`graph_runner.rs`).
+  No-op for property-driven / passthrough elements (the default impl), so only
+  caps-driven elements observe a change.
+- The other runners that did not deliver it (`run_simple_pipeline`,
+  `run_source_fanout`, `run_fanin_sink`) carry no caps-driven-transform slot with
+  a downstream link (source->sink, source->tee->sinks, sources->merger->sink), so
+  there is nothing to resolve in them; every transform-bearing runner routes
+  through the coordinator or the DAG runner, both of which deliver it.
+
+Verified: `m189_recascade_configure_output` (linear-coordinator and graph paths
+each record [startup, mid-stream] targets across a scripted source's caps switch;
+a no-change control records exactly one configure, proving the second entry is
+the re-cascade). Re-cascade + negotiation suites (m18_beta_recascade /
+m70_dag_recascade / m16_workaround3 / m185-m188) stay green. Core (216) + plugins
+(136 blocks) pass; no_std + clippy clean.
+
 ### M188: forward-resolve walk (stacked auto transforms)
 
 Two caps-driven (auto) transforms stacked before a single far capsfilter now

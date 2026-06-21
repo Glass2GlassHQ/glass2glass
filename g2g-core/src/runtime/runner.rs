@@ -1170,6 +1170,12 @@ where
                     };
                     match transform.configure_pipeline(&new_caps)? {
                         ConfigureOutcome::Accepted => {
+                            // M188: a caps-driven transform re-resolves its output
+                            // target on the mid-stream change too, not just at
+                            // startup, so a videoscale/videoconvert fed by a
+                            // downstream capsfilter retargets when caps shift.
+                            // No-op for property-driven / passthrough elements.
+                            AsyncElement::configure_output(transform, &forward_caps)?;
                             // M18 α: element-local re-allocation under the
                             // re-fixated output caps before forwarding.
                             realloc_local(transform, &forward_caps);

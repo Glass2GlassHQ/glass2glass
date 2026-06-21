@@ -89,11 +89,21 @@ edits (the typed core is unaffected, only the string<->enum boundary).
       that needs field-level bidirectional coupling, a larger redesign deferred
       past M188. `backward_feasible()` likewise still returns `None` for
       `DerivedOutput`, so mid-stream re-solve back-prop is separate and deferred.
-    - Wire `configure_output` into the remaining runners (run_simple_pipeline /
-      fanout / fanin) and the mid-stream re-cascade (only graph +
-      linear-coordinator paths deliver it today).
+    - **Mid-stream re-cascade `configure_output` DONE, M189.** A caps-driven
+      transform now re-resolves its output target on a mid-stream `CapsChanged`,
+      not only at startup: both transform-arm re-cascade paths (the linear
+      coordinator arm in `runner.rs` and the DAG `transform_arm` in
+      `graph_runner.rs`) call `configure_output(&forward_caps)` after
+      `configure_pipeline` accepts. (Startup already delivered it on both paths,
+      M185.) The remaining runners that lacked it (`run_simple_pipeline`,
+      `run_source_fanout`, `run_fanin_sink`) carry no caps-driven-transform slot
+      with a downstream link, source->sink, source->tee->sinks, and
+      sources->merger->sink respectively, so there is nothing to resolve there;
+      the transform-bearing runners (`run_source_transform_sink`,
+      `run_linear_chain`, `run_muxer_sink`) all route through the coordinator or
+      the DAG runner, which deliver it.
   - Decided **pragmatic** (keep convenience props as extensions + make the caps
-    route work) over strict gst-only; the two items above are what "make the caps
+    route work) over strict gst-only; the items above are what "make the caps
     route work" actually requires.
 
 - **M183 (done): videocrop / videobox property-model alignment.** `videocrop`

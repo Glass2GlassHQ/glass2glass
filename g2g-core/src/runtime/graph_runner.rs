@@ -932,6 +932,11 @@ async fn transform_arm<'a>(
                 };
                 match elem.configure_pipeline(&new_caps)? {
                     ConfigureOutcome::Accepted => {
+                        // M188: re-resolve a caps-driven transform's output target
+                        // on the mid-stream change too (matches startup, line ~421
+                        // / the linear coordinator arm). No-op for property-driven
+                        // or passthrough elements.
+                        elem.configure_output(&forward_caps)?;
                         realloc_local_dyn(&mut *elem, &forward_caps);
                         out_caps = forward_caps.clone();
                         elem.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
