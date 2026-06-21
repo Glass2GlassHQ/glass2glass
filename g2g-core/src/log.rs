@@ -112,6 +112,18 @@ impl LogLevel {
     }
 }
 
+/// The short type name of `T` (the last `::` segment of
+/// [`core::any::type_name`]), used as the default log category for an element so
+/// every element type gets a filtering key for free (e.g. `"OpusEnc"`). Still a
+/// `&'static str` (a slice into the static type name).
+pub fn short_type_name<T: ?Sized>() -> &'static str {
+    let full = core::any::type_name::<T>();
+    match full.rsplit("::").next() {
+        Some(s) if !s.is_empty() => s,
+        _ => full,
+    }
+}
+
 /// A thing that can be logged about: its [`category`](Self::log_category) (type)
 /// and optional [`instance`](Self::log_instance) name. Elements implement this so
 /// the logging macros pick up both from `self`; the runner uses [`Target`].
@@ -151,6 +163,27 @@ impl LogSource for Target<'_> {
     }
     fn log_instance(&self) -> Option<&str> {
         self.instance
+    }
+}
+
+// Forward through references so the logging macros accept `self` (a `&Self` or
+// `&mut Self` inside a method) and `&target` uniformly: the macro passes `&$src`
+// and type inference picks the right blanket.
+impl<T: LogSource + ?Sized> LogSource for &T {
+    fn log_category(&self) -> &'static str {
+        (**self).log_category()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        (**self).log_instance()
+    }
+}
+
+impl<T: LogSource + ?Sized> LogSource for &mut T {
+    fn log_category(&self) -> &'static str {
+        (**self).log_category()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        (**self).log_instance()
     }
 }
 
@@ -353,22 +386,25 @@ impl LogSink for StderrSink {
     }
 }
 
+/// Implementation hook for the logging macros: check the category threshold and,
+/// when enabled, format and emit. Generic over `&S` so the macro can pass `&$src`
+/// whether `$src` is `self` (a `&`/`&mut Self`) or a [`Target`] value (the
+/// reference forwarding impls cover the extra indirection). Not called directly.
+#[doc(hidden)]
+pub fn __log<S: LogSource + ?Sized>(src: &S, level: LogLevel, args: core::fmt::Arguments<'_>) {
+    let category = src.log_category();
+    if enabled(category, level) {
+        emit(category, src.log_instance(), level, args);
+    }
+}
+
 /// Log at `level` about a [`LogSource`], checking the category threshold before
 /// formatting the message. Prefer the level-specific macros.
 #[macro_export]
 macro_rules! g2g_log_at {
-    ($level:expr, $src:expr, $($arg:tt)+) => {{
-        let __src = &$src;
-        let __cat = $crate::log::LogSource::log_category(__src);
-        if $crate::log::enabled(__cat, $level) {
-            $crate::log::emit(
-                __cat,
-                $crate::log::LogSource::log_instance(__src),
-                $level,
-                ::core::format_args!($($arg)+),
-            );
-        }
-    }};
+    ($level:expr, $src:expr, $($arg:tt)+) => {
+        $crate::log::__log(&$src, $level, ::core::format_args!($($arg)+))
+    };
 }
 
 /// `ERROR`-level log about a [`LogSource`].

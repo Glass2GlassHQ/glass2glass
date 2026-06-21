@@ -5,6 +5,43 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M179: element-granular logging framework (`GST_DEBUG` analog) + instance names
+
+A hand-rolled `no_std` logging layer in `g2g-core` (`g2g-core::log`), pulling no
+external logging crate, with element-level filtering and GStreamer-style instance
+names.
+
+The facade:
+- `LogLevel` (Off/Error/Warn/Fixme/Info/Debug/Log/Trace), discriminants matching
+  GStreamer's numeric debug levels.
+- `LogConfig`: a default threshold + per-category overrides (pure, unit-testable);
+  `parse_spec` applies a `GST_DEBUG`-style `*:warning,VideoFlip:debug` spec. The
+  process-global config is mirrored into atomics so a disabled `g2g_trace!` in a
+  hot loop costs one atomic load (no lock) on the common no-override path.
+- `LogSink` trait + global install; `LogRecord` carries `format_args!` so a
+  dropped record pays no formatting cost. The `std` feature adds `StderrSink` +
+  `init_from_env` (reads `G2G_DEBUG`, installs stderr, applies the spec).
+- `LogSource` (category = element type, instance = element name, with `&T` / `&mut
+  T` forwarding impls) and a standalone `Target`. Macros `g2g_error!` ..
+  `g2g_trace!` check the category threshold before formatting.
+
+Instance names + wiring:
+- `set_instance_name` on `AsyncElement` / `SourceLoop` (+ dyn mirrors) and
+  `log_category` on the dyn traits (default: short type name via
+  `core::any::type_name`). `run_graph` assigns each element a `<category>N` name
+  (the `videotestsrc0` convention) before negotiation, hands it to the element,
+  and logs its addition at INFO.
+- `VideoFlip` is the worked example: stores its name, implements `LogSource`, logs
+  `configure` at INFO and each frame at TRACE. `g2g-launch` calls `init_from_env`,
+  so `G2G_DEBUG='*:info,VideoFlip:trace' g2g-launch '...'` prints instance-named,
+  per-category log lines.
+
+Verified: `log` unit tests (level parsing, category/default filtering, spec
+parsing, macro -> filter -> sink) and `m179_logging` end-to-end (instance names on
+addition + element self-logs, then category filtering suppressing other elements
+and above-threshold levels). `no_std` baseline unaffected (the stderr sink + env
+reader are std-gated).
+
 ### M178: rich `gst-inspect` introspection (element metadata + detailed properties)
 
 `inspect(name)` (and the `g2g-inspect` binary) previously dumped only the role,

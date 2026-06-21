@@ -204,6 +204,20 @@ Production-shape needs that block specific real-world use cases.
   see "Clock-synchronised presentation" below; the QoS late-drop + `Qos` post
   from them is the next step).
 
+- **Logging framework (`g2g-core::log`) follow-ups.** The `GST_DEBUG`-analog
+  facade is done (M179, DESIGN.md §4.15): levels, per-category thresholds,
+  `LogSink`, the `g2g_*!` macros, a `std` stderr sink + `G2G_DEBUG` env, and
+  `run_graph` instance-naming (`<category>N`) + per-element addition logs, with
+  `VideoFlip` as the self-logging worked example. **Remaining:** roll instance
+  naming + lifecycle logging into the bespoke linear runners
+  (`run_simple_pipeline`, `run_source_transform_sink`) and the muxer path, not
+  just `run_graph`; add `set_instance_name` self-logging to more elements (only
+  `VideoFlip` does so far; the rest get named + runner-logged but emit nothing of
+  their own); explicit names from the `gst-launch` `name=` syntax (currently
+  auto-generated only); glob category matching (`*sink*:5`, currently exact + a
+  single `*` default); a structured-fields / timestamped record format and a
+  ring-buffer sink; and a custom (non-type-name) category override per element.
+
 - **Clock-synchronised presentation (present each frame at its PTS).** First step
   DONE (M169, DESIGN.md §4.4): `ClockSync` (elected clock + base time) +
   `AsyncElement::set_clock_sync` (default no-op, dyn-mirrored), delivered by the

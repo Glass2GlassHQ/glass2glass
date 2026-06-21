@@ -81,6 +81,15 @@ pub trait DynSourceLoop: ElementBound {
         ElementMetadata::default()
     }
 
+    /// The log category for this erased source (M179): its short type name by
+    /// default (the blanket impl fills it), so the runner can name and log it.
+    fn log_category(&self) -> &'static str {
+        "source"
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::set_instance_name`].
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
     /// Dyn-safe mirror of [`SourceLoop::set_property`]. Defaults to "no
     /// properties"; the blanket `impl<T: SourceLoop>` overrides it to forward.
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
@@ -143,6 +152,14 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::metadata(self)
     }
 
+    fn log_category(&self) -> &'static str {
+        crate::log::short_type_name::<T>()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        SourceLoop::set_instance_name(self, name)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         SourceLoop::set_property(self, name, value)
     }
@@ -194,6 +211,14 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn metadata(&self) -> ElementMetadata {
         (**self).metadata()
+    }
+
+    fn log_category(&self) -> &'static str {
+        (**self).log_category()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

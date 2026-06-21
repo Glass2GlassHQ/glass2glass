@@ -17,11 +17,14 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
+use g2g_core::{g2g_info, g2g_trace};
+use alloc::string::String;
 
 const FORMATS: [RawVideoFormat; 4] = [
     RawVideoFormat::Rgba8,
@@ -56,6 +59,8 @@ pub struct VideoFlip {
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// Instance name assigned by the runner (M179), for this element's log lines.
+    instance_name: Option<String>,
 }
 
 impl VideoFlip {
@@ -66,6 +71,7 @@ impl VideoFlip {
             configured: false,
             last_caps: None,
             emitted: 0,
+            instance_name: None,
         }
     }
 
@@ -151,7 +157,12 @@ impl AsyncElement for VideoFlip {
         let (format, w, h, rate) = self.accept_input(absolute_caps)?;
         self.input = Some((format, w, h, rate));
         self.configured = true;
+        g2g_info!(self, "configured {:?} {}x{} {:?}", format, w, h, self.method);
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.instance_name = Some(name);
     }
 
     fn process<'a>(
@@ -184,6 +195,7 @@ impl AsyncElement for VideoFlip {
                     );
 
                     let (out_w, out_h) = self.output_dims(in_w, in_h);
+                    g2g_trace!(self, "flip frame #{} {}x{} -> {}x{}", self.emitted, in_w, in_h, out_w, out_h);
                     let new_caps = Caps::RawVideo {
                         format,
                         width: Dim::Fixed(out_w),
@@ -297,6 +309,18 @@ impl PadTemplates for VideoFlip {
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
+    }
+}
+
+/// M179: log identity. Category is the short type name (matching what the runner
+/// derives, so `G2G_DEBUG=VideoFlip:debug` filters both); instance is the
+/// runner-assigned name.
+impl LogSource for VideoFlip {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.instance_name.as_deref()
     }
 }
 

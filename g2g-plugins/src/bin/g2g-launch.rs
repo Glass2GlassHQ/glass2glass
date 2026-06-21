@@ -22,6 +22,10 @@ use g2g_plugins::registry::default_registry;
 const LINK_CAPACITY: usize = 4;
 
 fn main() {
+    // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
+    // apply the category thresholds before the pipeline runs.
+    g2g_core::log::init_from_env();
+
     let pipeline = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     if pipeline.trim().is_empty() {
         eprintln!("usage: g2g-launch <element> [key=value ...] ! <element> ! ...");

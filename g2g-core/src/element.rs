@@ -229,6 +229,12 @@ pub trait AsyncElement: ElementBound {
         ElementMetadata::default()
     }
 
+    /// Receive this instance's log name (M179), assigned by the runner as
+    /// `<category>N`. Default: ignore. An element that logs about itself stores
+    /// it and returns it from its [`LogSource`](crate::log::LogSource) so its log
+    /// lines carry the instance name.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
     /// Set a property by name (M104). Default: every name is
     /// [`PropError::Unknown`] (no properties). An overriding element validates
     /// the value kind against its [`properties`](Self::properties) spec and
@@ -317,6 +323,17 @@ pub trait DynAsyncElement: ElementBound {
         ElementMetadata::default()
     }
 
+    /// The log category for this erased element (M179): its short type name by
+    /// default (the blanket impl fills it from `core::any::type_name`), so the
+    /// runner can name (`<category>N`) and log about any element. Filtering key.
+    fn log_category(&self) -> &'static str {
+        "element"
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::set_instance_name`], so the runner can
+    /// name an erased element instance for logging.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
     /// Dyn-safe mirror of [`AsyncElement::set_property`]. Defaults to "no
     /// properties" so a hand-written `DynAsyncElement` need not implement it; the
     /// blanket `impl<T: AsyncElement>` overrides it to forward to the element.
@@ -397,6 +414,14 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::metadata(self)
     }
 
+    fn log_category(&self) -> &'static str {
+        crate::log::short_type_name::<T>()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        AsyncElement::set_instance_name(self, name)
+    }
+
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         AsyncElement::set_property(self, name, value)
     }
@@ -470,6 +495,14 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn metadata(&self) -> ElementMetadata {
         (**self).metadata()
+    }
+
+    fn log_category(&self) -> &'static str {
+        (**self).log_category()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        (**self).set_instance_name(name)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {

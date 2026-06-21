@@ -158,6 +158,10 @@ pub trait SourceLoop: ElementBound {
         ElementMetadata::default()
     }
 
+    /// Receive this source instance's log name (M179), assigned by the runner.
+    /// Default: ignore.
+    fn set_instance_name(&mut self, _name: alloc::string::String) {}
+
     /// Set a property by name (M104). Default: [`PropError::Unknown`].
     fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
         Err(PropError::Unknown)

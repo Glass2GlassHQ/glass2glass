@@ -289,6 +289,40 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         sc.expect_prerolls(sinks);
     }
 
+    // M179: give each source / element instance a `<category>N` log name (per
+    // category, the GStreamer `videotestsrc0` convention) and log its addition.
+    // Done before negotiation so an element's own log lines (e.g. at
+    // `configure_pipeline`) already carry the instance name. Naming runs whether
+    // or not a sink is installed (it is cheap; the `g2g_info!` is threshold-gated).
+    {
+        let mut counts: Vec<(&'static str, u32)> = Vec::new();
+        for &node in &topo {
+            let category = match vg.element_mut(node) {
+                Some(GraphNodeRef::Source(src)) => src.log_category(),
+                Some(GraphNodeRef::Element(elem)) => elem.log_category(),
+                _ => continue, // muxer / tee: not named for v1
+            };
+            let n = match counts.iter_mut().find(|(c, _)| *c == category) {
+                Some(e) => {
+                    let v = e.1;
+                    e.1 += 1;
+                    v
+                }
+                None => {
+                    counts.push((category, 1));
+                    0
+                }
+            };
+            let name = alloc::format!("{category}{n}");
+            match vg.element_mut(node) {
+                Some(GraphNodeRef::Source(src)) => src.set_instance_name(name.clone()),
+                Some(GraphNodeRef::Element(elem)) => elem.set_instance_name(name.clone()),
+                _ => {}
+            }
+            crate::g2g_info!(crate::log::Target::named(category, &name), "added to pipeline");
+        }
+    }
+
     // Phase 1: probe each source's caps (async) into an owned map, releasing
     // the mutable borrow before the constraint phase borrows every node.
     let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();

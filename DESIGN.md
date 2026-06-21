@@ -1091,6 +1091,26 @@ application reacts to:
 Posting is non-blocking (`try_post`): a control message never stalls the data
 path; a full bus drops the report rather than applying backpressure.
 
+**Element-granular logging (`g2g-core::log`, M179)** is the complementary
+diagnostic channel, the `GST_DEBUG` analog, for developer tracing rather than
+application-facing events. A record carries a `category` (the element *type*,
+e.g. `"VideoFlip"`, the filtering key) and an optional `instance` name (the
+element *instance*, e.g. `"VideoFlip0"`). `LogLevel` runs `Error` (most severe)
+through `Trace`, matching GStreamer's numeric levels; a per-category threshold
+table (a default plus overrides) decides what is emitted, mirrored into an atomic
+so a disabled `g2g_trace!` in a hot loop costs one atomic load. The macros
+(`g2g_error!` .. `g2g_trace!`) take a `LogSource` (an element via `self`, or a
+`Target` for logging about a named element) then a `format_args!` message,
+checked against the threshold before formatting. Records route to an installed
+`LogSink`; the `std` feature provides a stderr sink and `init_from_env`, which
+reads `G2G_DEBUG` (a `GST_DEBUG`-style `*:warning,VideoFlip:trace` spec). The DAG
+runner assigns each element a `<category>N` instance name before negotiation (the
+`videotestsrc0` convention) via `set_instance_name`, logs each element's
+addition, and an element that logs about itself (it implements `LogSource` with a
+stored name) carries that name in its lines. Pulls no external logging crate, so
+it holds on the `no_std` baseline; the sink is the RTOS plug-in point (UART /
+RTT).
+
 ### 4.16 Properties, Introspection, and the `gst-launch` DSL
 
 The typed `with_*` builders are the zero-cost construction path and the only one
