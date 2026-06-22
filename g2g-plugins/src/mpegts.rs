@@ -280,47 +280,91 @@ fn decode_timestamp(b: &[u8]) -> u64 {
 const MUX_PMT_PID: u16 = 0x1000;
 const MUX_ES_PID: u16 = 0x0100;
 
-/// MPEG-TS multiplexer for a single elementary stream (M114): wraps access units
-/// in PES packets and 188-byte TS packets, emitting PAT + PMT once up front. The
-/// inverse of [`TsDemuxer`]; the [`crate::tsmux::TsMux`] element wraps it.
-///
-/// Scope (v1): one program, one stream, fixed PID layout, no PCR (a PCR in the
-/// adaptation field is a follow-up; lenient decoders and the demuxer here do not
-/// need it). The PSI carries a real MPEG-2 CRC-32, so the output is a valid TS.
+/// One elementary stream in a [`TsMuxer`]: its PMT stream type, the TS PID it is
+/// carried on, its PES `stream_id`, and its running continuity counter.
 #[derive(Debug)]
-pub struct TsMuxer {
+struct MuxStream {
     stream_type: u8,
+    pid: u16,
     stream_id: u8,
     es_cc: u8,
+}
+
+/// MPEG-TS multiplexer (M114, multi-stream since M207): wraps access units in PES
+/// packets and 188-byte TS packets, emitting PAT + PMT once up front. The inverse
+/// of [`TsDemuxer`]; the [`crate::tsmux::TsMux`] element wraps it. One program
+/// carrying one or more elementary streams (e.g. H.264 video + AAC audio), each
+/// on its own PID, named together in a single PMT.
+///
+/// Scope: one program, no PCR (a PCR in the adaptation field is a follow-up;
+/// lenient decoders and the demuxer here do not need it; the caller is expected
+/// to interleave access units in timestamp order, which [`crate::tsmux::TsMux`]
+/// does). The PSI carries a real MPEG-2 CRC-32, so the output is a valid TS.
+#[derive(Debug)]
+pub struct TsMuxer {
+    streams: Vec<MuxStream>,
     pat_cc: u8,
     pmt_cc: u8,
     tables_written: bool,
 }
 
 impl TsMuxer {
-    /// `stream_type` is the PMT value (e.g. [`STREAM_TYPE_H264`]); the PES
-    /// `stream_id` is derived from it (audio vs video range).
+    /// A single-stream muxer for `stream_type` (e.g. [`STREAM_TYPE_H264`]).
     pub fn new(stream_type: u8) -> Self {
-        let stream_id = if stream_type == STREAM_TYPE_AAC { 0xC0 } else { 0xE0 };
-        Self { stream_type, stream_id, es_cc: 0, pat_cc: 0, pmt_cc: 0, tables_written: false }
+        Self::with_streams(&[stream_type])
     }
 
-    /// Mux one access unit into TS bytes, preceded by PAT + PMT on the first call.
-    /// `pts_90khz`, when present, is written into the PES header.
+    /// A multi-stream muxer: one elementary stream per entry of `stream_types`,
+    /// in input order. Stream `i` is carried on PID `MUX_ES_PID + i`; the PES
+    /// `stream_id` is assigned per media kind (video `0xE0..`, audio `0xC0..`),
+    /// distinct within each kind so several video or audio streams stay
+    /// addressable. [`push_au_on`](Self::push_au_on) selects the stream by index.
+    pub fn with_streams(stream_types: &[u8]) -> Self {
+        let mut video_n = 0u8;
+        let mut audio_n = 0u8;
+        let streams = stream_types
+            .iter()
+            .enumerate()
+            .map(|(i, &stream_type)| {
+                let stream_id = if stream_type == STREAM_TYPE_AAC {
+                    let id = 0xC0 + audio_n;
+                    audio_n += 1;
+                    id
+                } else {
+                    let id = 0xE0 + video_n;
+                    video_n += 1;
+                    id
+                };
+                MuxStream { stream_type, pid: MUX_ES_PID + i as u16, stream_id, es_cc: 0 }
+            })
+            .collect();
+        Self { streams, pat_cc: 0, pmt_cc: 0, tables_written: false }
+    }
+
+    /// Mux one access unit of stream 0 (the single-stream convenience). See
+    /// [`push_au_on`](Self::push_au_on).
     pub fn push_au(&mut self, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
+        self.push_au_on(0, au, pts_90khz)
+    }
+
+    /// Mux one access unit of elementary stream `stream_index` into TS bytes,
+    /// preceded by PAT + PMT on the very first call (any stream). `pts_90khz`,
+    /// when present, is written into the PES header.
+    pub fn push_au_on(&mut self, stream_index: usize, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.tables_written {
             self.pat_packet(&mut out);
             self.pmt_packet(&mut out);
             self.tables_written = true;
         }
-        let pes = build_pes(self.stream_id, au, pts_90khz);
+        let s = &mut self.streams[stream_index];
+        let pes = build_pes(s.stream_id, au, pts_90khz);
         let mut off = 0;
         let mut pusi = true;
         while off < pes.len() {
             let take = (pes.len() - off).min(TS_PACKET_LEN - 4);
-            ts_packet(MUX_ES_PID, pusi, self.es_cc, &pes[off..off + take], &mut out);
-            self.es_cc = (self.es_cc + 1) & 0x0F;
+            ts_packet(s.pid, pusi, s.es_cc, &pes[off..off + take], &mut out);
+            s.es_cc = (s.es_cc + 1) & 0x0F;
             pusi = false;
             off += take;
         }
@@ -340,15 +384,25 @@ impl TsMuxer {
     }
 
     fn pmt_packet(&mut self, out: &mut Vec<u8>) {
-        let body = [
+        // PCR_PID = the first stream's PID (no separate PCR stream).
+        let pcr_pid = self.streams[0].pid;
+        let mut body = Vec::with_capacity(9 + self.streams.len() * 5);
+        body.extend_from_slice(&[
             0x00, 0x01, // program_number
             0xC1, 0x00, 0x00, // version, section/last
-            0xE0 | (MUX_ES_PID >> 8) as u8 & 0x1F, MUX_ES_PID as u8, // PCR_PID (= ES)
+            0xE0 | (pcr_pid >> 8) as u8 & 0x1F, pcr_pid as u8, // PCR_PID
             0xF0, 0x00, // program_info_length = 0
-            self.stream_type,
-            0xE0 | (MUX_ES_PID >> 8) as u8 & 0x1F, MUX_ES_PID as u8, // elementary_PID
-            0xF0, 0x00, // ES_info_length = 0
-        ];
+        ]);
+        // One ES loop entry per stream: stream_type, elementary_PID, ES_info_len.
+        for s in &self.streams {
+            body.extend_from_slice(&[
+                s.stream_type,
+                0xE0 | (s.pid >> 8) as u8 & 0x1F,
+                s.pid as u8,
+                0xF0,
+                0x00, // ES_info_length = 0
+            ]);
+        }
         let cc = self.pmt_cc;
         self.pmt_cc = (self.pmt_cc + 1) & 0x0F;
         psi_packet(MUX_PMT_PID, 0x02, &body, cc, out);

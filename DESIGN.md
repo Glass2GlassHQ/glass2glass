@@ -1260,10 +1260,15 @@ geometry is unknown until the bitstream parser reads the SPS, so the demuxer
 advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
 (the `RtspSrc` pattern, §4.13); AAC advertises the sentinel channels/rate that
 `aacparse` refines from the ADTS header. The decode-side container precedent is
-`Mp4Src` / `Mp4Sink`. The TS muxer (`mpegtsmux`: `g2g-plugins::mpegts::TsMuxer` +
-the `TsMux` element) is the inverse path (M114), wrapping one elementary stream
-back into PES + 188-byte packets with a real PSI CRC; multi-stream muxing,
-multi-program selection, and PCR-based timing are follow-ups.
+`Mp4Src` / `Mp4Sink`. The TS muxer (`g2g-plugins::mpegts::TsMuxer`) is the
+inverse path (M114), wrapping access units back into PES + 188-byte packets with
+a real PSI CRC. It is multi-stream (M207): `with_streams` builds one program
+carrying N elementary streams, each on its own PID and named in one PMT. The
+single-input `tsmux::TsMux` element wraps a one-stream muxer (`! mpegtsmux !`);
+the multi-input `tsmuxn::TsMux` (a `MultiInputElement`) muxes A+V, interleaving
+access units across inputs by PTS via the M204 `take_earliest_by` merge so the
+multiplex is decode-ordered. Multi-program selection, PCR-based timing, and the
+`gst-launch` fan-in wiring of the multi-input muxer are follow-ups.
 
 The Matroska / WebM demuxer (M110) is the second, the same parser + element split
 keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is

@@ -27,6 +27,7 @@ pub mod h265parse;
 pub mod identity;
 pub mod mux;
 pub mod streamdemux;
+pub mod tsmuxn;
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
 // Analytics overlay (M101): draws AnalyticsMeta detection boxes onto RGBA8.

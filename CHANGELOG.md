@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M207: multi-stream MPEG-TS muxing (A+V into one TS)
+
+Muxing audio + video into a single MPEG-TS program now works, the everyday
+live-streaming container case. Previously `TsMuxer` was single-stream (one
+elementary stream per TS), so an A+V multiplex was impossible.
+
+- **`mpegts::TsMuxer`** generalized to N elementary streams: `with_streams(&[…])`
+  builds a muxer whose PMT names every stream, each on its own PID
+  (`MUX_ES_PID + i`) with a per-kind PES `stream_id` (video `0xE0..`, audio
+  `0xC0..`). `push_au_on(stream, …)` selects the stream; `new`/`push_au` stay as
+  the single-stream convenience. (The demuxer already parsed multi-PID PMTs.)
+- **`tsmuxn::TsMux`** (new): a `MultiInputElement` muxing N elementary streams
+  (H.264/H.265 video, AAC audio) into one TS, interleaving access units by PTS
+  via the M204 `InputAggregator::take_earliest_by` merge so the multiplex is
+  time-ordered across streams. The PMT is built once all inputs are configured.
+- Test (`m207_ts_av_mux`): a video and an audio source are muxed into one TS,
+  then each elementary stream is recovered by demuxing it back out with the
+  existing single-output `TsDemux` — A+V round-trip through a single multiplex.
+- Follow-up: wiring the multi-input muxer into the `gst-launch` fan-in syntax
+  and a no-PCR → PCR upgrade remain staged.
+
 ### M206: bus breadth (`StreamStart`, `Info`)
 
 Two GStreamer-common bus messages every player app expects, rounding out the
