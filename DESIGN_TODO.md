@@ -98,6 +98,18 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 
+## Aggregation helper adoption (M199+)
+
+`g2g-core::InputAggregator<T>` (M199) is the shared per-input collector for
+N-in-1-out `MultiInputElement`s. `PyAggregator` is its first consumer. The four
+pre-existing hand-rolled collectors should adopt it incrementally to delete the
+duplicated `Vec<VecDeque<_>>` + `ended` + contributor bookkeeping: the enterprise
+`batcher` (closest fit, the API was modeled on its `contributors`/`drain` rule),
+then `mux`, `audiomixer`, and `compositor` (compositor wants a latest-wins
+snapshot policy rather than consume-one-per-round, so it needs a second
+`SyncPolicy` variant first, `T: Clone` or a borrowing `peek_round`). Refactors
+are behaviour-preserving and each guarded by that element's existing tests.
+
 ## gst-launch DSL harmonization (M182+)
 
 The `parse_launch` DSL is a GStreamer-compatibility surface; its human-facing

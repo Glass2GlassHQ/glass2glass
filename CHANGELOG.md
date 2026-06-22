@@ -5,6 +5,27 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M199: `InputAggregator`, a shared per-input collector for muxers
+
+`g2g-core::aggregator::InputAggregator<T>` factors out the per-input frame
+collection every N-in-1-out `MultiInputElement` was hand-rolling. Five elements
+(compositor, mux, audiomixer, the enterprise tensor batcher, and the new
+`PyAggregator`) carried their own `Vec<VecDeque<_>>` + `ended` tracking; the
+trait and the fan-in runner (per-input negotiation + EOS aggregation) existed,
+but the middle "buffer per pad, release a synchronized round" layer did not.
+
+`InputAggregator` is the composable, typed analog of GStreamer's `GstAggregator`
+pad collection (a helper an element owns, not a base class it inherits): generic
+over the queued item `T`, free of the trait's caps/async surface. `push(input,
+item)`, `mark_ended(input)`, and `take_round()` -> `Option<Vec<(input, item)>>`
+which pops one item from every still-contributing input once all have one. The
+release rule matches the enterprise batcher's: an ended input keeps contributing
+while its queue drains, then drops out so the round shrinks as sources end.
+`with_max_depth` adds a leaky per-input skew bound. Unit-tested (zip ordering,
+multi-round drain, ended-shrink, drop-oldest, empty). Pure `alloc` (no_std
+baseline). The five existing duplicators can adopt it incrementally
+(`DESIGN_TODO.md`); `PyAggregator` (M198 step 4b) is the first consumer.
+
 ### M198 (skeleton): host gst-python-ml elements as first-class g2g elements
 
 New crate `g2g-python` plus a `python` feature: the g2g host that

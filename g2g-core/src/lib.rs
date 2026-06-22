@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod aggregator;
 pub mod caps;
 pub mod format_element;
 pub mod clock;
@@ -48,6 +49,7 @@ pub mod pad_template;
 #[cfg(feature = "dyn-slot")]
 pub mod slot;
 
+pub use aggregator::InputAggregator;
 pub use caps::{
     AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Rate, TensorDType, TensorLayout,
     TensorShape, VideoCodec, RawVideoFormat, ANY_SAMPLE_RATE,
