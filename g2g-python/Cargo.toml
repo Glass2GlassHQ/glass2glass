@@ -19,6 +19,12 @@ std = ["g2g-core/std", "g2g-core/runtime"]
 # default build negotiates caps but cannot run frames (the per-frame Python
 # call lives behind this feature).
 python = ["std", "dep:pyo3"]
+# Route the hosted element's detections into the frame's typed metadata graph.
+# A `g2g.MetaSink` passed to `g2g_process` collects add_object / add_classification
+# calls (the `AnalyticsBackend` mirror); the host materializes them into
+# `Frame::meta` as an `AnalyticsMeta`. Pulls g2g-core's `metadata` feature (so
+# `FrameMetaSet` is the real typed container, not the ZST) and implies `python`.
+analytics = ["python", "g2g-core/metadata"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }

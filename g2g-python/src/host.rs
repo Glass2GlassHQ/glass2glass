@@ -27,8 +27,12 @@
 //! GIL work; [`PyWorker::run`] hands it the owned [`Frame`] over a std channel
 //! and awaits the reply over g2g-core's Waker-based channel, so the executor
 //! thread is free to poll other arms while Python runs. Multiple hosted elements
-//! still serialize on the one GIL (expected); per-element sub-interpreters are a
-//! later option (see `DESIGN_TODO.md`).
+//! still serialize on the one GIL (expected) on a standard build. This
+//! one-thread-per-element shape is deliberately the free-threaded (PEP 703,
+//! `python3.x` `--disable-gil`) unit: on a free-threaded interpreter the workers
+//! run truly in parallel with no code change (the `Python::attach` API is the
+//! no-GIL model, not "acquire the GIL"). Per-interpreter-GIL sub-interpreters
+//! were rejected: numpy / torch / cv2 are not reliably sub-interpreter-safe.
 
 use std::os::raw::c_int;
 use std::sync::mpsc;
@@ -108,14 +112,48 @@ impl FrameBuffer {
     }
 }
 
-/// Native `g2g` module visible to the embedded interpreter. The FrameIO /
-/// AnalyticsBackend surface (M198 step 3) hangs off here; empty for now so the
-/// `import g2g` in a `backend/g2g` package resolves.
+/// One staged analytics result collected from the Python side during a frame.
+/// Materialized into an [`g2g_core::AnalyticsMeta`] after the call (under the
+/// `analytics` feature); the fields are read only there.
+#[cfg_attr(not(feature = "analytics"), allow(dead_code))]
+#[derive(Debug, Clone)]
+enum Staged {
+    Object { label: u32, x: f32, y: f32, w: f32, h: f32, score: f32 },
+    Classification { label: u32, score: f32 },
+}
+
+/// The analytics sink handed to `g2g_process` as `meta`: the `AnalyticsBackend`
+/// mirror. The Python side (a `backend/g2g` element) calls `add_object` /
+/// `add_classification`; the host drains the collected results into the frame's
+/// metadata after the call. Labels are interned ids (`u32`), as g2g's
+/// `ObjectDetection` stores; the Python side maps string classes to ids (the
+/// `quark` step) before calling.
+#[pyclass(unsendable)]
+#[derive(Debug, Default)]
+struct MetaSink {
+    staged: core::cell::RefCell<Vec<Staged>>,
+}
+
+#[pymethods]
+impl MetaSink {
+    /// Add an object-detection box: class `label` id, pixel `(x, y, w, h)`,
+    /// confidence `score` in `[0, 1]`.
+    fn add_object(&self, label: u32, x: f32, y: f32, w: f32, h: f32, score: f32) {
+        self.staged.borrow_mut().push(Staged::Object { label, x, y, w, h, score });
+    }
+
+    /// Add a whole-frame classification: class `label` id and `score`.
+    fn add_classification(&self, label: u32, score: f32) {
+        self.staged.borrow_mut().push(Staged::Classification { label, score });
+    }
+}
+
+/// Native `g2g` module visible to the embedded interpreter, so the `import g2g`
+/// in a `backend/g2g` package resolves. Exposes the analytics sink type; the
+/// FrameIO read/write helpers (M198 step 4) hang off here later.
 #[pymodule]
-fn g2g(_py: Python<'_>, _m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // TODO(M198 step 3): expose FrameIO (read_frame / write_frame /
-    // append_blob) and AnalyticsBackend (add_object / add_classification /
-    // ...) backed by the live Rust Frame and FrameMetaSet.
+fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<MetaSink>()?;
     Ok(())
 }
 
@@ -270,22 +308,64 @@ fn process_frame(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
         (bytes.as_mut_ptr(), bytes.len())
     };
 
+    let sink = match Py::new(py, MetaSink::default()) {
+        Ok(s) => s,
+        Err(e) => return Err(py_fail(py, e)),
+    };
+
     let result = (|| -> PyResult<()> {
         let buffer = Py::new(py, FrameBuffer { ptr, len })?;
-        let _blobs = instance.bind(py).call_method1(
+        instance.bind(py).call_method1(
             "g2g_process",
-            (buffer, job.width, job.height, format_to_py(job.fmt)),
+            (buffer, job.width, job.height, format_to_py(job.fmt), sink.clone_ref(py)),
         )?;
-        // TODO(M198 step 3): route `_blobs` (the metadata list) into
-        // `job.frame.meta` (FrameMetaSet).
         Ok(())
     })();
 
+    // Drain the staged analytics regardless (so the field is always read);
+    // materialize into the frame's metadata only under the `analytics` feature.
+    let staged = core::mem::take(&mut *sink.borrow(py).staged.borrow_mut());
+
     match result {
-        Ok(()) => Ok(job.frame),
+        Ok(()) => {
+            attach_metadata(&mut job.frame, staged);
+            Ok(job.frame)
+        }
         Err(e) => Err(py_fail(py, e)),
     }
 }
+
+/// Materialize staged analytics into the frame's [`g2g_core::AnalyticsMeta`].
+#[cfg(feature = "analytics")]
+fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>) {
+    use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, Classification, ObjectDetection};
+
+    if staged.is_empty() {
+        return;
+    }
+    let mut analytics = AnalyticsMeta::new();
+    for s in staged {
+        match s {
+            Staged::Object { label, x, y, w, h, score } => {
+                analytics.add_detection(ObjectDetection {
+                    bbox: BBox { x, y, w, h },
+                    label,
+                    confidence: score,
+                });
+            }
+            Staged::Classification { label, score } => {
+                analytics
+                    .push(AnalyticsNode::Classification(Classification { label, confidence: score }));
+            }
+        }
+    }
+    frame.meta.attach(analytics);
+}
+
+/// Without the `analytics` feature `FrameMetaSet` is the ZST, so staged results
+/// are dropped.
+#[cfg(not(feature = "analytics"))]
+fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>) {}
 
 /// Pull the fixed `(width, height, format)` out of negotiated raw-video caps.
 fn raw_video_dims(caps: &Caps) -> Result<(u32, u32, RawVideoFormat), G2gError> {

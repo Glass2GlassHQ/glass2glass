@@ -49,9 +49,25 @@ to a documented contract.
   `configure_pipeline` (the spawn blocks on a readiness ack); the thread is
   joined on drop. Multiple hosted elements still serialize on the one GIL
   (expected); per-element sub-interpreters remain a later option.
-- Deferred: the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata
-  build); the launch-registry factory and aggregator / source / GPU variants
-  (step 4).
+- **Step 3 (done): analytics metadata into the frame.** New `analytics` feature
+  (pulls `g2g-core/metadata`, implies `python`). `g2g_process` now receives a
+  `meta` argument: a native `g2g.MetaSink` (`#[pyclass]`, the `AnalyticsBackend`
+  mirror) on which the Python element calls `add_object(label, x, y, w, h,
+  score)` / `add_classification(label, score)`. The host drains the staged
+  results after the call and materializes them into `Frame::meta` as an
+  `AnalyticsMeta` (the same `ObjectDetection` / relation-graph the g2g-ml
+  `detect` element produces, so the M88 metadata graph is reused, not rebuilt).
+  Labels are interned ids (`u32`); the Python side does the string->id `quark`
+  step. Without `analytics`, `MetaSink` still collects but the ZST `FrameMetaSet`
+  drops it. Verified live (`m198_analytics`): a fixture `add_object` call is read
+  back as a typed detection on the downstream frame.
+- GIL strategy: the one-thread-per-element shape is the free-threaded (PEP 703)
+  unit, so workers parallelize unchanged on a `--disable-gil` interpreter
+  (`Python::attach` is the no-GIL API). Per-interpreter-GIL sub-interpreters
+  were rejected (numpy / torch / cv2 are not reliably sub-interpreter-safe).
+- Deferred (step 4): the native `g2g` FrameIO read/write helpers, an opaque-blob
+  header registry, a launch-registry factory, and aggregator / source / GPU
+  variants.
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

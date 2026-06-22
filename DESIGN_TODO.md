@@ -69,20 +69,27 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   reply over g2g-core's Waker-based `runtime::channel`, freeing the single
   executor thread to poll other arms while Python runs. `Frame: Send` means no
   cross-thread pointer; the buffer-protocol pointer stays on the worker thread.
-  Open: hosted elements still share one GIL (one interpreter); per-element
-  sub-interpreters (3.12+) and the resulting `link_capacity` guidance remain a
-  later option if GIL contention across many Python elements bites.
-- **Step 3: analytics metadata.** `AnalyticsBackend` impl on the native `g2g`
-  module writing into `FrameMetaSet` -- this is the "first detection element"
-  that the M88 full `FrameMeta` build (trait body + relation graph) was deferred
-  to. Route the `g2g_process` blob list into typed metadata; define the header
-  registry for opaque blobs.
-- **Step 4: breadth.** Launch-registry factory (`pyelement module=... class=...`
-  + autoplug) and property parsing; `PyAggregator` (the `BaseAggregator`
-  batching shape -> muxer / `g2g-enterprise`) and `PySource`; GPU zero-copy
-  (DLPack / `__cuda_array_interface__`) so torch/onnx consume device memory
-  without the download tax. GIL contention across multiple hosted elements
-  (one interpreter vs sub-interpreters) decided here.
+  GIL strategy decided: the one-thread-per-element shape IS the free-threaded
+  (PEP 703, `--disable-gil`) unit, so workers parallelize unchanged on a
+  free-threaded interpreter (`Python::attach` is the no-GIL API, not "acquire the
+  GIL"). Per-interpreter-GIL sub-interpreters rejected: numpy / torch / cv2 are
+  not reliably sub-interpreter-safe. Remaining: verify on a free-threaded build
+  (none installed yet) + a `link_capacity` note for the GIL-serialized case.
+- **Step 3 (done): analytics metadata.** `analytics` feature pulls
+  `g2g-core/metadata`. `g2g_process` receives a `meta` arg, a native
+  `g2g.MetaSink` (`#[pyclass]`, the `AnalyticsBackend` mirror); Python calls
+  `add_object` / `add_classification`, the host materializes the staged results
+  into `Frame::meta` as an `AnalyticsMeta` (reusing the existing
+  `ObjectDetection` / relation graph the g2g-ml `detect` element built, NOT a new
+  M88 build). Labels are interned `u32` ids (Python does the string->id step).
+  Verified live (`m198_analytics`).
+- **Step 4: breadth.** Native `g2g` FrameIO read/write helpers + an opaque-blob
+  header registry (for serialized side-data like the embedding float32 blobs);
+  launch-registry factory (`pyelement module=... class=...` + autoplug) and
+  property parsing; `PyAggregator` (the `BaseAggregator` batching shape -> muxer
+  / `g2g-enterprise`) and `PySource`; GPU zero-copy (DLPack /
+  `__cuda_array_interface__`) so torch/onnx consume device memory without the
+  download tax.
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 

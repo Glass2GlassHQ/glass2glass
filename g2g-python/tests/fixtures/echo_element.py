@@ -7,12 +7,12 @@
 class EchoTransform:
     """Bumps the first byte in place and echoes geometry/format as a blob."""
 
-    def g2g_process(self, buf, width, height, fmt):
+    def g2g_process(self, buf, width, height, fmt, meta):
         mv = memoryview(buf)
         assert not mv.readonly, "frame buffer must be writable"
         assert mv.nbytes == width * height * 4, "expected RGBA geometry"
         # In-place mutation: this write lands directly in the Rust frame buffer.
         mv[0] = (mv[0] + 1) % 256
-        # draw_label was set by the host at instantiate time.
-        flag = b"1" if getattr(self, "draw_label", False) else b"0"
-        return [b"echo:" + fmt.encode() + b":" + flag]
+        # Attach an analytics result through the sink (the AnalyticsBackend
+        # mirror): label id 7, a box, and a confidence.
+        meta.add_object(7, 1.0, 2.0, 3.0, 4.0, 0.9)
