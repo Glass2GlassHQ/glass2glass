@@ -1,0 +1,39 @@
+[package]
+name = "g2g-python"
+description = "Host gst-python-ml elements as first-class glass2glass elements (embedded CPython via pyo3)."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+# `runtime` pulls the async runner + `spin` (g2g-core's `log` module needs it);
+# hosting an element in a graph wants it anyway.
+std = ["g2g-core/std", "g2g-core/runtime"]
+# Embed CPython and host gst-python-ml element shells in-process via pyo3
+# (DESIGN.md, the Python-element track). OS-coupled: needs libpython at build
+# and run time, so it is off the no_std / RTOS baseline and implies std. The
+# default build negotiates caps but cannot run frames (the per-frame Python
+# call lives behind this feature).
+python = ["std", "dep:pyo3", "dep:numpy"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+# Embedded CPython bridge (python feature). `auto-initialize` starts the
+# interpreter on first GIL acquisition. 0.23 supports CPython <= 3.13; on a
+# 3.14+ host either build with PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 or bump
+# pyo3 (the host.rs API surface tracks the 0.23 line).
+pyo3 = { version = "0.23", optional = true, features = ["auto-initialize"] }
+# Zero-copy numpy <-> Rust slice views over System-memory frames (python
+# feature). The buffer-protocol path that avoids a per-frame copy lands in
+# step 2; pulled in now so the dependency surface is fixed.
+numpy = { version = "0.23", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

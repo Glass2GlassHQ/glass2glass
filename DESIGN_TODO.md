@@ -43,6 +43,39 @@ Compositor, HLS/DASH, RTMP/SRT, VP8/VP9/AV1/Opus, MKV/TS. Architectural cost is
 low (each is "add an element"); sequence against whatever product target
 matters. Detail for these lives in the sections below.
 
+## Python-element host (M198+)
+
+Host gst-python-ml elements as first-class g2g elements. gst-python-ml factored
+its ML logic away from GStreamer behind `GSTML_BACKEND`-selected seams
+(`FrameIO`, `AnalyticsBackend`, the element base classes); the `g2g-python`
+crate + `python` feature is the g2g host those seams target, via embedded
+CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
+
+- **M198 (done): skeleton.** Crate + `python` feature + interpreter bootstrap;
+  `PyTransform` (`AsyncElement`) negotiating `Caps::RawVideo` + bridging
+  properties; the `RawVideoFormat` <-> Python format-string table; the native
+  `g2g` module stub + the `g2g_process(buf, w, h, fmt) -> (bytes|None, [blobs])`
+  per-frame contract. Negotiation half builds on the no-libpython profile; the
+  Python call is inline + a `bytes` copy.
+- **Step 2: real per-frame path, zero-copy.** Replace the `bytes` copy with a
+  numpy view over the System slice via the buffer protocol; run the call on a
+  Python-affine blocking thread (`spawn_blocking` / dedicated OS thread, the
+  `MfDecode` single-thread contract), not inline; carry the Python traceback
+  into the error. End-to-end run of `ActionTask` / embedding on system memory.
+- **Step 3: analytics metadata.** `AnalyticsBackend` impl on the native `g2g`
+  module writing into `FrameMetaSet` -- this is the "first detection element"
+  that the M88 full `FrameMeta` build (trait body + relation graph) was deferred
+  to. Route the `g2g_process` blob list into typed metadata; define the header
+  registry for opaque blobs.
+- **Step 4: breadth.** Launch-registry factory (`pyelement module=... class=...`
+  + autoplug) and property parsing; `PyAggregator` (the `BaseAggregator`
+  batching shape -> muxer / `g2g-enterprise`) and `PySource`; GPU zero-copy
+  (DLPack / `__cuda_array_interface__`) so torch/onnx consume device memory
+  without the download tax. GIL contention across multiple hosted elements
+  (one interpreter vs sub-interpreters) decided here.
+- **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
+  mirroring `backend/gst/` -- thin once the native `g2g` module exists.
+
 ## gst-launch DSL harmonization (M182+)
 
 The `parse_launch` DSL is a GStreamer-compatibility surface; its human-facing

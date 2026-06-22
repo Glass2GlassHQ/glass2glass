@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M198 (skeleton): host gst-python-ml elements as first-class g2g elements
+
+New crate `g2g-python` plus a `python` feature: the g2g host that
+gst-python-ml's framework-agnostic backend seams (`FrameIO`, `AnalyticsBackend`,
+the element base classes, selected by `GSTML_BACKEND`) target. gst-python-ml
+factored its ML logic away from GStreamer; this is the start of a `g2g` backend
+for it. This milestone lands the skeleton; the per-frame Python path is stubbed
+to a documented contract.
+
+- `PyTransform` is an `AsyncElement` that hosts a gst-python-ml element shell:
+  it negotiates `Caps::RawVideo` on its pads (default RGBA / any geometry,
+  `with_accept` to host another format), captures the fixed caps at configure
+  time, and bridges `module` / `class` / `draw-label` through the M104 property
+  system. The negotiation + property + lifecycle surface is pure Rust and builds
+  on the default (no-libpython) profile.
+- `format` maps g2g `RawVideoFormat` <-> the GStreamer-style format strings the
+  Python `FrameIO` / `frame_format` code speaks, the single source of truth for
+  the format half of the boundary contract (`YUYV` aliases `YUY2`).
+- `python` feature (pyo3 + numpy, implies std, off the no_std baseline): embeds
+  CPython, registers a native `g2g` module a `backend/g2g` package imports, and
+  defines the per-frame contract `g2g_process(buf, w, h, fmt) -> (bytes|None,
+  [blobs])` (the `backend/gst` shape on a Rust `Frame`). The interpreter call is
+  inline + a `bytes` copy in the skeleton; zero-copy numpy over System memory
+  (step 2), the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata
+  build), a launch-registry factory and aggregator / source / GPU variants
+  (step 4) follow.
+- Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
+  (concrete-from-Any, format rejection, `with_accept`), configure, the property
+  bag, and the lifecycle guard. The `python` build is verified to compile under
+  the pyo3 0.23 API (CPython 3.13; 3.14 needs the forward-compat flag); the
+  live per-frame path needs libpython + a `backend/g2g` package to exercise.
+
 ### M197 (coverage): branching decode pipelines
 
 Locks in the "decode once, fan out" shape end to end: `decodebin ! tee` with

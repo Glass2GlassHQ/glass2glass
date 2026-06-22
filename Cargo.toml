@@ -6,6 +6,7 @@ members = [
     "g2g-ml",
     "g2g-bridge",
     "g2g-enterprise",
+    "g2g-python",
 ]
 
 [workspace.package]
