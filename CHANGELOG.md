@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M211: non-flushing (accumulating) seek
+
+The non-flushing seek path, the gapless / segment-seek / loop case. Unlike a
+flushing seek (M82), it does not reset the running-time clock or flush the
+pipeline: playback continues seamlessly on the running-time timeline.
+
+- **`Segment::accumulate_seek(&self, seek, duration)`**: builds the post-seek
+  segment whose `base` is the running time playback has already reached in `self`
+  (`self.to_running_time(self.position)`), instead of `0`. So the first
+  post-seek frame maps to the same running time the stream had reached, and the
+  running-time line stays monotonic across the seek. `for_flush_seek` (base 0)
+  and `accumulate_seek` now share a private `from_seek` edge-resolution helper.
+- A seek-aware source distinguishes the two: a flushing seek emits `Flush` + a
+  reset segment; a non-flushing seek emits only the accumulating segment, no
+  flush. No runner change (the data plane already forwards `Segment`).
+- Tests: `segment.rs` units (base accumulates the running time reached; a
+  loop-back keeps running time monotonic across a segment boundary) and
+  `m211_accumulate_seek` (end to end: a mid-stream non-flushing seek produces a
+  second segment with `base > 0` and **no** flush downstream, vs M82's flush +
+  base 0).
+- Remaining seek depth: reverse / trick-mode frame handling at the sink.
+
 ### M210: demux node in `run_graph` + `gst-launch` fan-out wiring
 
 A content-routing demultiplexer is now a first-class DAG node, the symmetric

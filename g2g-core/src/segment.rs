@@ -236,9 +236,33 @@ impl Segment {
     /// a stream of total `duration` ns (used to resolve `SeekType::End`). The
     /// flushing case resets `base` to `0` (running time restarts after a
     /// flush). `SeekType::None` leaves that edge at its default (`start`
-    /// unchanged from `0`, `stop` open). The non-flushing (accumulating) seek,
-    /// which advances `base` by the elapsed running time, is a follow-up.
+    /// unchanged from `0`, `stop` open). For the non-flushing (accumulating)
+    /// seek, which keeps the running-time clock advancing, see
+    /// [`accumulate_seek`](Self::accumulate_seek).
     pub fn for_flush_seek(seek: &Seek, duration: Option<u64>) -> Segment {
+        // A flushing seek restarts the running-time clock: base = 0.
+        Segment::from_seek(seek, duration, 0)
+    }
+
+    /// Build the segment produced by a **non-flushing (accumulating)** seek
+    /// applied to `self` (the segment in effect when the seek arrives). Unlike a
+    /// flushing seek, the running-time clock is NOT reset: the new segment's
+    /// `base` is the running time playback has already reached in `self` (its
+    /// `base` plus the time elapsed to `self.position`), so downstream running
+    /// time stays monotonic across the seek. This is the gapless / segment-seek
+    /// case (looping, playlists), the `gst_segment_do_seek` non-flush path. If
+    /// `self.position` is somehow outside `self`, `base` falls back to `self.base`
+    /// (no negative jump).
+    pub fn accumulate_seek(&self, seek: &Seek, duration: Option<u64>) -> Segment {
+        let base = self.to_running_time(self.position).unwrap_or(self.base);
+        Segment::from_seek(seek, duration, base)
+    }
+
+    /// Shared construction for [`for_flush_seek`](Self::for_flush_seek) and
+    /// [`accumulate_seek`](Self::accumulate_seek): resolve the seek's edges
+    /// (`End` relative to `duration`, `None` leaving the default) and place the
+    /// segment at running-time `base`.
+    fn from_seek(seek: &Seek, duration: Option<u64>, base: u64) -> Segment {
         let start = match seek.start_type {
             SeekType::None => 0,
             SeekType::Set => seek.start,
@@ -249,15 +273,7 @@ impl Segment {
             SeekType::Set => Some(seek.stop),
             SeekType::End => Some(duration.unwrap_or(0).saturating_sub(seek.stop)),
         };
-        Segment {
-            rate: seek.rate,
-            applied_rate: 1.0,
-            base: 0,
-            start,
-            stop,
-            time: start,
-            position: start,
-        }
+        Segment { rate: seek.rate, applied_rate: 1.0, base, start, stop, time: start, position: start }
     }
 }
 
@@ -410,5 +426,50 @@ mod tests {
         };
         let seg = Segment::for_flush_seek(&to_end, Some(100_000));
         assert_eq!(seg.start, 90_000);
+    }
+
+    #[test]
+    fn accumulate_seek_advances_base_by_running_time_reached() {
+        // An open-ended normal-rate segment that has played up to position 3_000
+        // (running time 3_000, since base=0, start=0, rate=1).
+        let current = Segment { position: 3_000, ..Segment::new() };
+        assert_eq!(current.to_running_time(current.position), Some(3_000));
+
+        // A non-flushing seek to 8_000: running time must NOT reset.
+        let seek = Seek {
+            rate: 1.0,
+            flags: SeekFlags::NONE,
+            start_type: SeekType::Set,
+            start: 8_000,
+            stop_type: SeekType::None,
+            stop: 0,
+        };
+        let seg = current.accumulate_seek(&seek, None);
+        assert_eq!(seg.start, 8_000, "repositioned to the target");
+        assert_eq!(seg.base, 3_000, "base accumulates the running time already played");
+        // The first post-seek frame (pts == target) continues at running time
+        // 3_000, monotonic with the pre-seek timeline (gapless).
+        assert_eq!(seg.to_running_time(8_000), Some(3_000));
+    }
+
+    #[test]
+    fn accumulate_seek_keeps_running_time_monotonic_across_a_segment() {
+        // Play [0, 5_000), reach the end (position 5_000, running time 5_000),
+        // then a non-flushing segment seek loops back to 0.
+        let current = Segment { start: 0, stop: Some(5_000), position: 5_000, ..Segment::new() };
+        let loop_back = Seek {
+            rate: 1.0,
+            flags: SeekFlags::NONE,
+            start_type: SeekType::Set,
+            start: 0,
+            stop_type: SeekType::Set,
+            stop: 5_000,
+        };
+        let seg = current.accumulate_seek(&loop_back, None);
+        assert_eq!(seg.base, 5_000, "the second loop iteration starts at running time 5_000");
+        // Frame at stream-time 0 in the new iteration maps to running time 5_000,
+        // and stream-time 2_500 to 7_500: the running-time line never goes back.
+        assert_eq!(seg.to_running_time(0), Some(5_000));
+        assert_eq!(seg.to_running_time(2_500), Some(7_500));
     }
 }

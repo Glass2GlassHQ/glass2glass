@@ -1105,8 +1105,11 @@ The lifecycle is opt-in via `run_simple_pipeline_stateful` and
 **Seek + SEGMENT + running time.** `g2g-core::segment` is a pure-core (ungated)
 model: `Seek` / `SeekType` / `SeekFlags` describe the request, and `Segment`
 carries the rate/direction-aware running-time ↔ stream-time ↔ base-time math
-(`GstSegment`-equivalent), with `clip` and `for_flush_seek` (which resets `base`
-so running time restarts after a flush). `PipelinePacket::Segment` is the
+(`GstSegment`-equivalent), with `clip`, `for_flush_seek` (which resets `base`
+so running time restarts after a flush), and `accumulate_seek` (M211, the
+non-flushing seek: `base` advances to the running time playback has already
+reached, so the running-time line stays monotonic across the seek, the gapless /
+segment-seek / loop case). `PipelinePacket::Segment` is the
 carrier: the runner emits an opening SEGMENT and every element forwards it
 (transforms/decoders forward, sinks consume), the same way `Flush` already
 flows. A `SeekController` (runtime) is a cloneable handle the application holds;
@@ -1116,9 +1119,10 @@ resumes, so a seek reaches the source GStreamer-style (upstream) without a
 back-reference. `Mp4Src` is the first real repositioning source (M148: flushing
 seek, keyframe `SNAP_BEFORE`, re-prepended parameter sets), and `SyncSink` maps PTS
 to running time through the `Segment` and clips pre-target frames so accurate seek
-presents the exact requested frame (M149). Non-flushing/accumulating seeks,
-reverse/trick-mode sink handling, and making the other sources seek-aware are open
-(DESIGN_TODO).
+presents the exact requested frame (M149). A non-flushing seek (M211) emits only
+the accumulating `Segment` (no `Flush`), so the source keeps producing on a
+continuous running-time line. Reverse/trick-mode sink handling and making the
+other in-tree sources seek-aware are open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 
