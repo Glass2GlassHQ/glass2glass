@@ -5,6 +5,26 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M202: `tracing` bridge for the logging facade
+
+An optional bridge from the M179 logging facade into the `tracing` ecosystem, so
+a host on `tracing-subscriber` (fmt / journald / OTLP / Jaeger / tokio-console)
+receives g2g's logs in its existing observability pipeline.
+
+- **`g2g-core` `tracing` feature** (implies `std`, optional `tracing` dep): a
+  `TracingSink: LogSink` forwarding each `LogRecord` to `tracing::event!` under
+  the `g2g` target, with `category` / `instance` carried as fields and the
+  message forwarded lazily (formatted only if the subscriber enables the event).
+- **Level mapping** preserves information: `tracing`'s five levels collapse g2g's
+  `Fixme`->`WARN` and `Log`->`TRACE`, but the original level is kept verbatim in
+  a `g2g_level` field.
+- **`log::init_tracing()`** installs the sink and raises g2g's default threshold
+  to `Trace`, handing verbosity control to the `tracing` subscriber (e.g.
+  `RUST_LOG=g2g=debug`).
+- The `no_std` baseline and the per-frame hot path are untouched: the bridge is a
+  `LogSink` like the existing `StderrSink`, gated behind the feature. Tested with
+  a capturing subscriber (category / instance / message / level-collapse).
+
 ### M201: dynamic plugin loading via cargo (`dlopen` a `cdylib`)
 
 A third party can now build a native element with plain `cargo` against the

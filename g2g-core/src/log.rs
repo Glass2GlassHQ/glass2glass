@@ -386,6 +386,75 @@ impl LogSink for StderrSink {
     }
 }
 
+/// A [`LogSink`] that forwards each record to the [`tracing`] crate, so a host
+/// running a `tracing` subscriber (fmt, journald, OTLP / Jaeger, tokio-console)
+/// receives g2g's logs in its existing observability pipeline. The g2g element
+/// *category* and *instance* are emitted as `tracing` fields under a fixed
+/// `g2g` target, and the message is forwarded lazily (it is only formatted if
+/// the subscriber enables the event).
+///
+/// **Level mapping.** `tracing` has five levels to g2g's seven, so two pairs
+/// collapse: `Fixme` maps to `WARN` and `Log` maps to `TRACE`. The original g2g
+/// level is preserved verbatim in the `g2g_level` field, so nothing is lost,
+/// the subscriber can still distinguish `FIXME` from `WARN`.
+///
+/// **Filtering.** With this sink installed, let the `tracing` subscriber own
+/// filtering (e.g. `RUST_LOG=g2g=debug`) rather than g2g's per-category
+/// thresholds, by raising g2g's default to pass everything through.
+/// [`init_tracing`] does exactly that.
+#[cfg(feature = "tracing")]
+#[derive(Debug, Default)]
+pub struct TracingSink;
+
+#[cfg(feature = "tracing")]
+impl LogSink for TracingSink {
+    fn emit(&self, r: &LogRecord<'_>) {
+        let category = r.category;
+        let instance = r.instance.unwrap_or("");
+        let g2g_level = r.level.as_str();
+        let message = r.message;
+        // `tracing::event!` needs a const level and target, so dispatch per
+        // level. The message is passed as `format_args!`, so tracing formats it
+        // only when the event is enabled by the subscriber.
+        match r.level {
+            LogLevel::Error => tracing::event!(
+                target: "g2g", tracing::Level::ERROR,
+                category, instance, g2g_level, "{message}"
+            ),
+            LogLevel::Warn | LogLevel::Fixme => tracing::event!(
+                target: "g2g", tracing::Level::WARN,
+                category, instance, g2g_level, "{message}"
+            ),
+            LogLevel::Info => tracing::event!(
+                target: "g2g", tracing::Level::INFO,
+                category, instance, g2g_level, "{message}"
+            ),
+            LogLevel::Debug => tracing::event!(
+                target: "g2g", tracing::Level::DEBUG,
+                category, instance, g2g_level, "{message}"
+            ),
+            LogLevel::Log | LogLevel::Trace => tracing::event!(
+                target: "g2g", tracing::Level::TRACE,
+                category, instance, g2g_level, "{message}"
+            ),
+            // `emit` is only reached for an enabled (non-`Off`) record.
+            LogLevel::Off => {}
+        }
+    }
+}
+
+/// Route g2g's logging into the `tracing` ecosystem: install [`TracingSink`] and
+/// raise the g2g default threshold to `Trace` so g2g stops filtering and the
+/// installed `tracing` subscriber owns verbosity (e.g. `RUST_LOG=g2g=debug`).
+/// Call once at startup, after setting up your subscriber. Records flow to
+/// `tracing` under the `g2g` target with `category` / `instance` / `g2g_level`
+/// fields.
+#[cfg(feature = "tracing")]
+pub fn init_tracing() {
+    set_sink(Box::new(TracingSink));
+    set_default_level(LogLevel::Trace);
+}
+
 /// Implementation hook for the logging macros: check the category threshold and,
 /// when enabled, format and emit. Generic over `&S` so the macro can pass `&$src`
 /// whether `$src` is `self` (a `&`/`&mut Self`) or a [`Target`] value (the
@@ -543,6 +612,74 @@ mod tests {
         configure("*:trace");
         // No sink installed: emitting must be a harmless no-op.
         g2g_error!(Target::category("x"), "no sink, {}", "dropped");
+        reset();
+    }
+
+    /// The `tracing` bridge forwards g2g records to the active `tracing`
+    /// subscriber, carrying category / instance / original level as fields, with
+    /// `Fixme` collapsing to `WARN` but preserved verbatim in `g2g_level`.
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn tracing_sink_forwards_records_to_subscriber() {
+        use core::fmt::Write;
+        use tracing::field::{Field, Visit};
+
+        // A subscriber that captures each event as a flat "level target k=v ..." line.
+        #[derive(Default)]
+        struct Capture {
+            events: Mutex<Vec<String>>,
+        }
+        struct Recorder<'a>(&'a mut String);
+        impl Visit for Recorder<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn core::fmt::Debug) {
+                let _ = write!(self.0, "{}={:?} ", field.name(), value);
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                let _ = write!(self.0, "{}={} ", field.name(), value);
+            }
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let meta = event.metadata();
+                let mut line = String::new();
+                let _ = write!(line, "{} {} ", meta.level(), meta.target());
+                event.record(&mut Recorder(&mut line));
+                self.events.lock().push(line);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        init_tracing();
+
+        let capture = Arc::new(Capture::default());
+        tracing::subscriber::with_default(capture.clone(), || {
+            let enc = Target::named("opusenc", "opusenc0");
+            g2g_info!(enc, "encoded {} bytes", 42);
+            g2g_fixme!(Target::category("videoscale"), "todo: odd dims");
+        });
+
+        let events = capture.events.lock();
+        assert_eq!(events.len(), 2, "got: {events:?}");
+        // INFO event carries category, instance, and the forwarded message.
+        assert!(events[0].contains("INFO"), "{}", events[0]);
+        assert!(events[0].contains("category=opusenc"), "{}", events[0]);
+        assert!(events[0].contains("instance=opusenc0"), "{}", events[0]);
+        assert!(events[0].contains("encoded 42 bytes"), "{}", events[0]);
+        // FIXME collapses to WARN at the tracing level but is kept in g2g_level.
+        assert!(events[1].contains("WARN"), "{}", events[1]);
+        assert!(events[1].contains("g2g_level=FIXME"), "{}", events[1]);
+        drop(events);
         reset();
     }
 }

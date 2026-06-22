@@ -2838,6 +2838,7 @@ dependencies = [
  "arc-swap",
  "portable-atomic",
  "spin 0.9.8",
+ "tracing",
 ]
 
 [[package]]

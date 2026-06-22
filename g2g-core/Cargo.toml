@@ -26,10 +26,19 @@ dyn-slot = ["std", "multi-thread", "runtime", "dep:arc-swap"]
 # 64-bit atomics work on targets without native 64-bit atomics (Cortex-M,
 # RISC-V32). The embedded app provides the critical-section impl.
 critical-section = ["portable-atomic/critical-section"]
+# Bridge the (M179) logging facade to the `tracing` ecosystem: a `TracingSink`
+# that forwards each g2g `LogRecord` to `tracing::event!`, so a host on
+# `tracing-subscriber` (fmt / journald / OTLP / Jaeger / tokio-console) receives
+# g2g's logs. std-only (the tracing global dispatcher is); the no_std baseline
+# keeps its own sinks. Does not touch the hot path.
+tracing = ["std", "dep:tracing"]
 
 [dependencies]
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
 arc-swap = { version = "1", optional = true }
+# The `tracing` facade (tracing feature). default-features off keeps it to the
+# event! macro + the std global dispatcher (no proc-macro attributes pulled).
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
 # 64-bit atomics for the metrics histogram on targets without native AtomicU64
 # (Cortex-M, RISC-V32). Native where available (x86_64, aarch64); the default
 # `fallback` provides a lock-based AtomicU64 elsewhere, which the
