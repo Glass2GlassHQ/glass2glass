@@ -171,16 +171,74 @@ custom elements, third-party registration, gaps). Infra landed in M200:
 - `examples/third_party_element.rs` — the register-a-third-party-element path,
   end to end.
 
-**Dynamic plugin loading (not started).** Today third-party native elements are
-added at build time (a crate + `Registry::register_*`; see PORTING.md §7) and a
-packaged binary extends only via the Python host (`pyelement`/`pysrc`/
-`pyaggregator`, no recompile) or a package rebuild. A GStreamer-style dynamic
-loader would `dlopen` a `cdylib` exporting a stable `g2g_plugin_register` entry
-point, discovered via a `G2G_PLUGIN_PATH`. The hard part is Rust's unstable ABI:
-options are a C-ABI shim (elements coded against a C surface), version+toolchain-
-locked `extern "Rust"` plugins (fragile across compilers), or a stable-ABI crate
-(`abi_stable` / `stabby`). Decide the ABI strategy before building; until then the
-Python host is the no-recompile story.
+### Dynamic plugin loading via cargo (HANDOFF, not started)
+
+Goal: a third party builds a plugin with **plain cargo** against a published
+`g2g-core` (the Rust equivalent of a `g2g-devel` package) and drops the
+resulting `.so` next to a system-installed `g2g-launch`, no recompile of g2g.
+Today native third-party elements are build-time only (a crate +
+`Registry::register_*`, PORTING.md §7); a packaged binary extends only via the
+Python host or a package rebuild. This is the missing piece.
+
+**Author workflow (target):**
+```toml
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+g2g-core   = "0.x"   # the "g2g-devel" equivalent
+g2g-plugin = "0.x"   # SDK: the declare_plugin! macro + ABI tag
+```
+```rust
+g2g_plugin::declare_plugin! { elements: [ ("myfilter", || Box::new(MyFilter::new())) ] }
+```
+`cargo build --release` -> `libg2g_plugin_myfilter.so` -> `$G2G_PLUGIN_PATH`;
+`g2g-launch ... ! myfilter ! ...` scans, `dlopen`s, registers.
+
+**ABI decision (chosen for v1): version+toolchain lock, guarded by a loud tag.**
+Rust has no stable ABI, so plugin and host must share the same g2g-core version,
+the same rustc, AND the same layout-affecting features. The loader reads an ABI
+tag from the plugin and refuses a mismatch with a clear error rather than risking
+UB. `abi_stable`/`stabby` (a stable-ABI facade over the element traits) is the
+later upgrade for cross-toolchain binary plugins; a pure C-ABI shim is rejected
+(loses the ergonomic Rust trait). Rationale: the version-lock path gives the
+cargo-native experience now and is fully verifiable; cross-toolchain robustness
+is a separate, larger effort.
+
+**Components to build:**
+1. `g2g-core::ABI_VERSION: &str` — `CARGO_PKG_VERSION` + rustc version (via a
+   build script: `RUSTC_VERSION`) + a hash of layout-affecting feature flags.
+   **This is the subtle part**: `metadata` changes `FrameMetaSet`/`Frame` size and
+   `multi-thread` changes `ElementBound` (Send bound on trait objects) — a plugin
+   built with a different feature set passing `Frame`/`Box<dyn ...>` across the
+   boundary is UB. The tag MUST fold in these features.
+2. `g2g-plugin` SDK crate (new): a `declare_plugin!` macro (macro_rules, no
+   proc-macro) emitting `#[no_mangle] pub extern "C" fn g2g_plugin_register(reg:
+   &mut Registry)` and `#[no_mangle] pub extern "C" fn g2g_plugin_abi() -> *const
+   c_char` (returns `g2g_core::ABI_VERSION` as a C string). The entry body MUST
+   wrap registration in `std::panic::catch_unwind` (unwinding across `extern "C"`
+   is UB) and translate a panic into a no-op/abort.
+3. Loader in `g2g-plugins` behind a `plugin-loader` feature (`dep:libloading`):
+   `load_plugin(path, &mut Registry) -> Result<(), PluginError>` and
+   `load_plugin_dir(dir, &mut Registry)`. Steps: `dlopen`; read `g2g_plugin_abi`;
+   compare to the host's `g2g_core::ABI_VERSION`; on mismatch return
+   `PluginError::AbiMismatch { plugin, host }`; else call `g2g_plugin_register`.
+   **Keep-alive**: the `libloading::Library` must outlive every element it
+   registered (dropping it unmaps the code -> use-after-free in `process`). Store
+   the `Library` handles in a process-lifetime list (leak via `Box::leak` or a
+   `static`/`OnceLock<Mutex<Vec<Library>>>`), since elements hold no back-pointer.
+4. `g2g-launch`: `--plugin <path>` (repeatable) + scan `$G2G_PLUGIN_PATH` (`:`-sep
+   dirs) before parsing; register all, then parse/run. `g2g-inspect` likewise so
+   loaded elements show up.
+5. Out-of-tree example plugin crate (its own `Cargo.toml`, `crate-type=cdylib`,
+   path-dep on g2g-core + g2g-plugin) + an integration test that builds it
+   (`cargo build` in a temp/`OUT_DIR` or a committed fixture crate), `dlopen`s the
+   `.so`, registers into a `Registry`, and runs a pipeline through the loaded
+   element. Fully verifiable on this host (libloading + dlopen work locally).
+
+**Open questions / future:** `abi_stable` upgrade for cross-toolchain plugins;
+whether the distro ships g2g-core in a local cargo registry for offline plugin
+builds; plugin signing / capability gating; whether to also expose the loader as
+a C-FFI entry so non-cargo build systems can produce plugins.
 
 ## gst-launch DSL harmonization (M182+)
 
