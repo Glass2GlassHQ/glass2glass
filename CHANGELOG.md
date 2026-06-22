@@ -5,6 +5,25 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M214: zero-copy GPU fan-out validated on a real GPU
+
+Real-hardware proof of M213: the canonical keep-on-GPU graph
+`source -> VelloAnalyticsOverlay -> tee -> {WgpuSink, WgpuSink}` runs through
+`run_graph` on an actual wgpu device (the RTX 3060 dev host, headless offscreen
+sinks). The overlay renders into a `MemoryDomain::WgpuTexture`; the tee fans that
+texture out to both sinks via `MemoryDomain::share` (an `Arc` refcount bump on
+the keep-alive), so both branches blit the **same** GPU texture on the shared
+device with no GPU->CPU copy. Before M213 the tee returned `UnsupportedDomain`
+on a GPU frame.
+
+- Test (`m214_gpu_fanout`, gated `vello-overlay` + `wgpu-sink`): asserts the one
+  overlay-rendered texture reaches both sinks (`frames_consumed == 2`), i.e. the
+  tee broadcast a real wgpu texture and both blits succeeded on the shared
+  device. Skips cleanly if no wgpu adapter is present (CI without a GPU).
+- No production change: M213 was correct on real hardware (the mock matched). The
+  one fix was the test source advertising fixatable caps (`Rate::Fixed`), per the
+  runner's fixate rule.
+
 ### M213: zero-copy GPU frame fan-out
 
 A GPU-resident frame can now fan out through a `tee` to several consumers (the

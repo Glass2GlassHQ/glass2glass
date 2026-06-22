@@ -388,5 +388,11 @@ required-features = ["std"]
 name = "plugin_loader_dlopen"
 required-features = ["plugin-loader"]
 
+# M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu
+# device. Needs the overlay producer and the wgpu present sink.
+[[test]]
+name = "m214_gpu_fanout"
+required-features = ["vello-overlay", "wgpu-sink"]
+
 [lints]
 workspace = true
