@@ -99,12 +99,17 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   `FrameIO.append_blob` mirror) routes into it on the anchor frame. Verified
   `m198_analytics`. A header *registry* (decoding known headers into typed
   structures) is a later refinement; opaque carry is the foundation.
-- **Step 4 remainder: breadth.** `PySource` (the `SourceLoop` variant: a Python
-  source producing frames); a property surface on `MultiInputElement` (none
-  today) so `pyaggregator` can be a `gst-launch` element like `pyelement`; GPU
-  zero-copy (DLPack / `__cuda_array_interface__`) so torch/onnx consume device
-  memory without the download tax (needs a GPU host + free-threaded-capable
-  torch to verify).
+- **Step 4d (done): `PySource`.** A `SourceLoop` handing Python a blank writable
+  buffer per tick via `g2g_produce(buf, w, h, fmt, meta) -> bool` (False = EOS);
+  property-fixed output caps. New `Produce` `JobKind` on the worker (now
+  transform / batch / produce). Registered as launch source `pysrc`. Verified
+  `m198_source`.
+- **Step 4 remainder: breadth.** A property surface on `MultiInputElement` (none
+  today) so `pyaggregator` can be a `gst-launch` element like `pyelement` /
+  `pysrc`; a blob header registry (decode known `BlobMeta` headers into typed
+  structures); GPU zero-copy (DLPack / `__cuda_array_interface__`) so torch/onnx
+  consume device memory without the download tax (needs a GPU host +
+  free-threaded-capable torch to verify).
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 

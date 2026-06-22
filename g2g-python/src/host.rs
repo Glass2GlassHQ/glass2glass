@@ -51,19 +51,29 @@ use crate::format::format_to_py;
 static INIT: Once = Once::new();
 
 /// A frame plus its negotiated geometry, sent to the worker thread.
+/// Which Python entry point a job invokes.
+enum JobKind {
+    /// `g2g_process(buf, w, h, fmt, meta)` — one frame, mutated in place.
+    Transform,
+    /// `g2g_process_batch([buf, ...], w, h, fmt, meta)` — N frames.
+    Batch,
+    /// `g2g_produce(buf, w, h, fmt, meta) -> bool` — fill a blank frame; a
+    /// `False` return signals end of stream.
+    Produce,
+}
+
 struct Job {
-    /// One frame for a transform; one per contributing input for an aggregator
-    /// batch. Frame 0 is the anchor that carries any aggregate metadata.
+    /// One frame for a transform / produce; one per contributing input for an
+    /// aggregator batch. Frame 0 is the anchor that carries any metadata.
     frames: Vec<Frame>,
     width: u32,
     height: u32,
     fmt: RawVideoFormat,
-    /// `false` calls `g2g_process(buf, ...)` (single); `true` calls
-    /// `g2g_process_batch([buf, ...], ...)`.
-    batch: bool,
+    kind: JobKind,
 }
 
-/// Worker -> element reply: the (possibly mutated) frames, or an error.
+/// Worker -> element reply: the (possibly mutated) frames, or an error. An empty
+/// vec from a `Produce` job means the Python source signalled EOS.
 type Reply = Result<Vec<Frame>, G2gError>;
 
 /// Zero-copy writable view over a frame's System-memory bytes, handed to the
@@ -236,7 +246,9 @@ impl PyWorker {
     /// the worker's `try_send`, freeing the executor thread meanwhile.
     pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Frame, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
-        let mut out = self.dispatch(Job { frames: vec![frame], width, height, fmt, batch: false }).await?;
+        let mut out = self
+            .dispatch(Job { frames: vec![frame], width, height, fmt, kind: JobKind::Transform })
+            .await?;
         out.pop().ok_or(G2gError::Shutdown)
     }
 
@@ -249,7 +261,21 @@ impl PyWorker {
         caps: &Caps,
     ) -> Result<Vec<Frame>, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
-        self.dispatch(Job { frames, width, height, fmt, batch: true }).await
+        self.dispatch(Job { frames, width, height, fmt, kind: JobKind::Batch }).await
+    }
+
+    /// Hand a blank frame to the Python source to fill. Returns the produced
+    /// frame, or `None` when the source signalled EOS. Used by `PySource`.
+    pub(crate) async fn run_produce(
+        &self,
+        frame: Frame,
+        caps: &Caps,
+    ) -> Result<Option<Frame>, G2gError> {
+        let (width, height, fmt) = raw_video_dims(caps)?;
+        let mut out = self
+            .dispatch(Job { frames: vec![frame], width, height, fmt, kind: JobKind::Produce })
+            .await?;
+        Ok(out.pop())
     }
 
     async fn dispatch(&self, job: Job) -> Result<Vec<Frame>, G2gError> {
@@ -345,34 +371,48 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
         Err(e) => return Err(py_fail(py, e)),
     };
 
-    let result = (|| -> PyResult<()> {
+    // Returns whether a frame was produced: always true for transform / batch;
+    // a `Produce` job returns the Python source's bool (false = EOS).
+    let produced = (|| -> PyResult<bool> {
         let buffers: Vec<Py<FrameBuffer>> = spans
             .iter()
             .map(|&(ptr, len)| Py::new(py, FrameBuffer { ptr, len }))
             .collect::<PyResult<_>>()?;
         let bound = instance.bind(py);
         let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
-        if job.batch {
-            let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
-            bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
-        } else {
-            let buffer = buffers.into_iter().next().expect("single job has one frame");
-            bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+        match job.kind {
+            JobKind::Batch => {
+                let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
+                bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
+                Ok(true)
+            }
+            JobKind::Transform => {
+                let buffer = buffers.into_iter().next().expect("single job has one frame");
+                bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                Ok(true)
+            }
+            JobKind::Produce => {
+                let buffer = buffers.into_iter().next().expect("produce job has one frame");
+                let ret =
+                    bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                ret.extract::<bool>()
+            }
         }
-        Ok(())
     })();
 
-    // Drain the staged analytics regardless (so the field is always read);
+    // Drain the staged results regardless (so the field is always read);
     // materialize onto the anchor frame (frame 0) only under `analytics`.
     let staged = core::mem::take(&mut *sink.borrow(py).staged.borrow_mut());
 
-    match result {
-        Ok(()) => {
+    match produced {
+        Ok(true) => {
             if let Some(anchor) = job.frames.first_mut() {
                 attach_metadata(anchor, staged);
             }
             Ok(job.frames)
         }
+        // Produce EOS: drop the blank frame, signal end with an empty reply.
+        Ok(false) => Ok(Vec::new()),
         Err(e) => Err(py_fail(py, e)),
     }
 }

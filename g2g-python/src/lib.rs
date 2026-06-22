@@ -35,21 +35,42 @@ pub mod format;
 
 mod aggregator;
 mod element;
+mod source;
 pub use aggregator::PyAggregator;
 pub use element::PyTransform;
+pub use source::PySource;
 
-/// Register `pyelement` as a `gst-launch` / autoplug factory on `registry`, so
-/// a hosted Python element is instantiable by name like any built-in:
-/// `... ! pyelement module=action class=ActionTransform draw-label=true ! ...`.
-/// The parser default-constructs it and applies `module=` / `class=` /
-/// `draw-label=` via the property system, then negotiation + `configure_pipeline`
-/// spawn the worker. Call after [`g2g_plugins::default_registry`] (or any
-/// `Registry`). Building the per-frame path still needs the `python` feature.
+/// Register the hosted Python elements as `gst-launch` / autoplug factories on
+/// `registry`, so they are instantiable by name like any built-in:
+/// - `pyelement module=... class=... draw-label=...` — a transform;
+/// - `pysrc module=... class=... format=... width=... height=... framerate=...
+///   num-buffers=...` — a source.
+///
+/// The parser default-constructs each and applies its `key=value` properties via
+/// the property system, then negotiation + `configure_pipeline` spawn the worker.
+/// Call after [`g2g_plugins::default_registry`] (or any `Registry`). Building the
+/// per-frame path still needs the `python` feature. (`pyaggregator` is not
+/// registered: `MultiInputElement` has no property surface yet, so a muxer
+/// cannot take `module=`/`class=` from a launch line.)
 #[cfg(feature = "std")]
 pub fn register(registry: &mut g2g_core::runtime::Registry) {
-    use g2g_core::runtime::LaunchFactory;
+    use g2g_core::runtime::{LaunchFactory, SourceFactory};
+    use g2g_core::{Caps, Dim, Rate, RawVideoFormat};
+
     registry.register_launch(LaunchFactory::of::<PyTransform>("pyelement", || {
         Box::new(PyTransform::new("", ""))
+    }));
+
+    // The declared caps are the default; `format=`/`width=`/... properties
+    // refine them, and `intercept_caps` returns the refined set at negotiation.
+    let default_caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(320),
+        height: Dim::Fixed(240),
+        framerate: Rate::Fixed(30),
+    };
+    registry.register_source(SourceFactory::new("pysrc", default_caps, || {
+        Box::new(PySource::new("", ""))
     }));
 }
 

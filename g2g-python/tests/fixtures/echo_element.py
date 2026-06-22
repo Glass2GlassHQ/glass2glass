@@ -29,3 +29,17 @@ class EchoTransform:
             total = (total + memoryview(b)[0]) % 256
         memoryview(buffers[0])[0] = total
         meta.add_object(len(buffers), 0.0, 0.0, 1.0, 1.0, 1.0)
+
+
+class CounterSource:
+    """A source: writes its frame index into byte 0, ends after three frames."""
+
+    def __init__(self):
+        self.n = 0
+
+    def g2g_produce(self, buf, width, height, fmt, meta):
+        if self.n >= 3:
+            return False  # end of stream
+        memoryview(buf)[0] = self.n
+        self.n += 1
+        return True

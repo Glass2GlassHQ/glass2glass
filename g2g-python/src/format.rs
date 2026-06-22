@@ -37,6 +37,18 @@ pub fn format_from_py(s: &str) -> Option<RawVideoFormat> {
     })
 }
 
+/// Bytes one `width` x `height` frame of `fmt` occupies, for allocating a blank
+/// source buffer. Packed formats are exact; planar 4:2:0 (`Nv12` / `I420`) is
+/// the standard `w*h*3/2`.
+pub fn frame_bytes(fmt: RawVideoFormat, width: u32, height: u32) -> usize {
+    let (w, h) = (width as usize, height as usize);
+    match fmt {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
+        RawVideoFormat::Yuyv => w * h * 2,
+        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +75,12 @@ mod tests {
     #[test]
     fn unmodeled_format_is_none() {
         assert_eq!(format_from_py("GRAY8"), None);
+    }
+
+    #[test]
+    fn frame_bytes_per_format() {
+        assert_eq!(frame_bytes(RawVideoFormat::Rgba8, 4, 2), 32);
+        assert_eq!(frame_bytes(RawVideoFormat::Yuyv, 4, 2), 16);
+        assert_eq!(frame_bytes(RawVideoFormat::Nv12, 4, 2), 12);
     }
 }

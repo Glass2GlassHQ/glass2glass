@@ -119,9 +119,18 @@ to a documented contract.
   detections into `AnalyticsMeta`, as before). `BlobMeta` keeps through every
   transform (opaque results aren't pixel-bound). Verified live (`m198_analytics`):
   a fixture `add_blob("embedding", ...)` is read back as a typed `BlobMeta`.
-- Deferred (step 4 remainder): `PySource`; GPU zero-copy (DLPack /
+- **Step 4d (done): `PySource`, Python frame sources.** A `SourceLoop` that
+  hands the Python element a blank writable buffer-protocol frame per tick via
+  `g2g_produce(buf, w, h, fmt, meta) -> bool` (a `False` return ends the
+  stream); output caps are property-fixed so negotiation is synchronous. Reuses
+  the worker (new `Produce` `JobKind`; the worker now spans transform / batch /
+  produce). Registered as a launch source `pysrc module=… class=… format=…
+  width=… height=… framerate=… num-buffers=…` (sources have a property surface,
+  unlike muxers). Verified live (`m198_source`): `CounterSource` yields three
+  frames (byte 0 = 0,1,2) then EOS; properties drive the caps; the line parses.
+- Deferred (step 4 remainder): GPU zero-copy (DLPack /
   `__cuda_array_interface__`); a property surface on `MultiInputElement` so
-  `pyaggregator` can be a launch element too.
+  `pyaggregator` can be a launch element too; a blob header registry.
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`
