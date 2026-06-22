@@ -79,3 +79,43 @@ fn python_writes_into_frame_memory_in_place() {
     };
     assert_eq!(slice.as_slice()[0], 11, "in-place write did not reach Rust");
 }
+
+#[test]
+fn worker_is_reused_across_frames() {
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
+
+    let mut el = PyTransform::new("echo_element", "EchoTransform");
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(2),
+        height: Dim::Fixed(1),
+        framerate: Rate::Fixed(30),
+    };
+    el.configure_pipeline(&caps).unwrap();
+
+    let mut sink = CollectSink::default();
+    let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    // Three frames through the one persistent worker thread (the reply channel
+    // is capacity-1 and reused, so this also exercises that it cycles cleanly).
+    for first in [10u8, 20, 30] {
+        rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba(first)), &mut sink))
+            .unwrap();
+    }
+
+    let got: Vec<u8> = sink
+        .packets
+        .iter()
+        .map(|p| match p {
+            PipelinePacket::DataFrame(f) => match &f.domain {
+                MemoryDomain::System(s) => s.as_slice()[0],
+                _ => panic!("expected System memory"),
+            },
+            _ => panic!("expected DataFrames"),
+        })
+        .collect();
+    assert_eq!(got, vec![11, 21, 31], "each frame should be incremented in place");
+    assert_eq!(el.emitted_count(), 3);
+}

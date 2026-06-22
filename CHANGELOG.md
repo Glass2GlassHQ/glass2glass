@@ -36,17 +36,28 @@ to a documented contract.
   consumes the buffer. Verified live on the Fedora 43 system CPython 3.14: a
   stdlib-only fixture element writes into the frame and the mutation is
   observed on the frame that flows downstream.
-- Deferred: the GIL offload to a dedicated thread (step 2b: g2g's runtime is a
-  custom non-tokio executor, so the inline call blocks the arm and
-  `spawn_blocking` is unavailable; the right offload + the one-interpreter vs
-  sub-interpreter GIL-contention choice are documented in `DESIGN_TODO.md`);
-  the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata build);
-  the launch-registry factory and aggregator / source / GPU variants (step 4).
+- **Step 2b (done): GIL offload to a dedicated worker thread.** g2g's runtime
+  polls every node arm on one thread (`runtime::join`, not tokio), so an inline
+  `Python::attach` would stall the whole graph. Each `PyWorker` now owns a
+  GIL-holding OS thread that holds the instance and does all Python work;
+  `PyWorker::run` hands it the owned `Frame` over a std channel and awaits the
+  reply over g2g-core's Waker-based `runtime::channel` (`try_send` wakes the
+  parked receiver), so the executor thread is free to poll other arms while
+  Python runs. `Frame: Send`, so the frame moves to the worker and back with no
+  cross-thread pointer; the buffer-protocol pointer only ever lives on the
+  worker thread. Construction failures surface synchronously from
+  `configure_pipeline` (the spawn blocks on a readiness ack); the thread is
+  joined on drop. Multiple hosted elements still serialize on the one GIL
+  (expected); per-element sub-interpreters remain a later option.
+- Deferred: the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata
+  build); the launch-registry factory and aggregator / source / GPU variants
+  (step 4).
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`
   (`python` feature) drives a fixture element through the live interpreter and
-  asserts the in-place write reaches Rust.
+  asserts the in-place write reaches Rust, and that the worker thread is reused
+  across frames.
 
 ### M197 (coverage): branching decode pipelines
 

@@ -41,10 +41,10 @@ pub struct PyTransform {
     /// `process` knows the concrete geometry / format to hand Python.
     fixed: Option<Caps>,
     emitted: u64,
-    /// The live Python element instance, created at configure time under the
-    /// GIL. Present only in the `python` build.
+    /// The hosted Python element on its own GIL-owning worker thread, spawned
+    /// at configure time. Present only in the `python` build.
     #[cfg(feature = "python")]
-    instance: Option<pyo3::Py<pyo3::PyAny>>,
+    worker: Option<crate::host::PyWorker>,
 }
 
 impl PyTransform {
@@ -66,7 +66,7 @@ impl PyTransform {
             fixed: None,
             emitted: 0,
             #[cfg(feature = "python")]
-            instance: None,
+            worker: None,
         }
     }
 
@@ -90,14 +90,14 @@ impl PyTransform {
     }
 
     #[cfg(feature = "python")]
-    fn run(&mut self, frame: Frame) -> Result<Frame, G2gError> {
-        let instance = self.instance.as_ref().ok_or(G2gError::NotConfigured)?;
+    async fn run(&self, frame: Frame) -> Result<Frame, G2gError> {
+        let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
         let caps = self.fixed.as_ref().ok_or(G2gError::NotConfigured)?;
-        crate::host::run_transform(instance, frame, caps)
+        worker.run(frame, caps).await
     }
 
     #[cfg(not(feature = "python"))]
-    fn run(&mut self, _frame: Frame) -> Result<Frame, G2gError> {
+    async fn run(&self, _frame: Frame) -> Result<Frame, G2gError> {
         // The per-frame Python call embeds CPython via pyo3 and lives behind
         // the `python` feature. The default build negotiates caps but cannot
         // run frames; build with `--features python`.
@@ -119,8 +119,8 @@ impl AsyncElement for PyTransform {
         self.fixed = Some(absolute_caps.clone());
         #[cfg(feature = "python")]
         {
-            self.instance =
-                Some(crate::host::instantiate(&self.module, &self.class, self.draw_label)?);
+            self.worker =
+                Some(crate::host::PyWorker::spawn(&self.module, &self.class, self.draw_label)?);
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -137,7 +137,7 @@ impl AsyncElement for PyTransform {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let output = self.run(frame)?;
+                    let output = self.run(frame).await?;
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(output)).await?;
                 }

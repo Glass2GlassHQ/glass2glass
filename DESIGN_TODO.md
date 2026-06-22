@@ -64,13 +64,14 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   0.26 for CPython 3.14. Verified live on the system 3.14 (stdlib fixture writes
   into the frame, mutation observed downstream). Python traceback is surfaced to
   stderr via `PyErr::print` (a richer error needs a `G2gError` string payload).
-- **Step 2b: GIL offload.** The call is still inline under `Python::attach`,
-  which blocks the runner arm. g2g's runtime is a custom cooperative executor
-  (`runtime::join`, not tokio), so `spawn_blocking` is out: offload to a
-  dedicated Python-affine OS thread reached over a runtime-agnostic async
-  channel (the `MfDecode` single-thread-affinity model). Decide here whether all
-  hosted elements share one interpreter thread (GIL serializes them anyway) or
-  use per-element sub-interpreters; document the resulting `link_capacity`.
+- **Step 2b (done): GIL offload.** Each `PyWorker` owns a GIL-holding OS thread;
+  `PyWorker::run` hands it the owned `Frame` over a std channel and awaits the
+  reply over g2g-core's Waker-based `runtime::channel`, freeing the single
+  executor thread to poll other arms while Python runs. `Frame: Send` means no
+  cross-thread pointer; the buffer-protocol pointer stays on the worker thread.
+  Open: hosted elements still share one GIL (one interpreter); per-element
+  sub-interpreters (3.12+) and the resulting `link_capacity` guidance remain a
+  later option if GIL contention across many Python elements bites.
 - **Step 3: analytics metadata.** `AnalyticsBackend` impl on the native `g2g`
   module writing into `FrameMetaSet` -- this is the "first detection element"
   that the M88 full `FrameMeta` build (trait body + relation graph) was deferred
