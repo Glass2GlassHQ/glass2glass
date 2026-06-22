@@ -935,6 +935,20 @@ function of an input change. `MultiInputElement` exposes
 `caps_constraint_as_input(idx)` and `caps_constraint_for_output()` for the
 solver to consult per-input.
 
+A fan-in muxer interleaves its inputs by **presentation timestamp** (M204), not
+arrival order: `InterleaveMux` buffers frames per input in an `InputAggregator`
+and releases the globally earliest-PTS frame only once every still-contributing
+input has one queued (`InputAggregator::take_earliest_by`), the `GstAggregator`
+collect-and-pick-earliest rule. Because each input's PTS is monotonic, holding
+output until every contributor has a head guarantees the released frame is
+globally earliest, so a slow input never delivers a frame that should have
+preceded an already-emitted one; an input that ends drops out of the merge (its
+buffered tail flushed in order). Frames carry their own caps, so reordering is
+format-safe. Ordering is by PTS; a container muxer needing decode-order (DTS)
+interleaving keys on that instead. This is distinct from the synchronized-*round*
+collection (`take_earliest_by`'s sibling `take_round`) a compositor / audio mixer
+uses, where every input contributes one item per output.
+
 Over the DAG, a node-keyed `GraphCoordinator` walks a sink's re-derived
 allocation proposal upstream through tees via `in_edges` (sources and muxers
 terminate the walk), and a per-edge `graph_downstream_feasibility` snapshot

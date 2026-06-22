@@ -106,6 +106,37 @@ impl<T> InputAggregator<T> {
         )
     }
 
+    /// Pop the single earliest item across inputs, keyed by `key` (e.g. a
+    /// frame's PTS), iff every still-contributing input has one queued. This is
+    /// the time-ordered interleave a muxer needs: with each input's items
+    /// monotonic in `key`, holding output until every contributor has a head
+    /// guarantees the popped item is globally earliest, so no later input can
+    /// still deliver something that should have preceded it. Ties go to the
+    /// lowest input index (a stable, deterministic merge). Returns `None` while
+    /// any contributor is still waiting (back-pressure: wait for it), or once
+    /// fully drained. Call in a loop to flush every item currently safe to emit.
+    ///
+    /// Contrast [`take_round`](Self::take_round), which releases one item from
+    /// *every* input per call (synchronized rounds, for a compositor / mixer);
+    /// this releases *one* item per call (a merge, for a muxer).
+    pub fn take_earliest_by<K, F>(&mut self, key: F) -> Option<(usize, T)>
+    where
+        K: Ord,
+        F: Fn(&T) -> K,
+    {
+        let contributors = self.contributors();
+        if contributors.is_empty() || contributors.iter().any(|&i| self.queues[i].is_empty()) {
+            return None;
+        }
+        // Every contributor has a head; pick the one with the smallest key.
+        // `min_by_key` keeps the first on ties, so the lowest input index wins.
+        let winner = contributors
+            .iter()
+            .copied()
+            .min_by_key(|&i| key(self.queues[i].front().expect("checked non-empty")))?;
+        Some((winner, self.queues[winner].pop_front().expect("checked non-empty")))
+    }
+
     /// True once every input has ended and all queues have drained: no further
     /// rounds will ever be produced.
     pub fn is_drained(&self) -> bool {
@@ -180,5 +211,48 @@ mod tests {
         let mut agg: InputAggregator<i32> = InputAggregator::new(0);
         assert!(agg.take_round().is_none());
         assert!(agg.is_drained());
+    }
+
+    #[test]
+    fn earliest_merges_by_key_across_inputs() {
+        // Items are (pts, tag). Two interleaved streams emit in global PTS order.
+        let mut agg = InputAggregator::new(2);
+        agg.push(0, (10u64, "a10"));
+        agg.push(0, (30, "a30"));
+        agg.push(1, (20, "b20"));
+        // Both inputs have a head: 10 < 20 wins.
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((0, (10, "a10"))));
+        // Now input 0 head is 30, input 1 head is 20: 20 wins.
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((1, (20, "b20"))));
+        // Input 1 empty (not ended): must wait, even though input 0 has 30.
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), None);
+        // Input 1 delivers a later one; 30 < 40, so input 0's 30 goes next.
+        agg.push(1, (40, "b40"));
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((0, (30, "a30"))));
+    }
+
+    #[test]
+    fn earliest_flushes_remaining_once_inputs_end() {
+        let mut agg = InputAggregator::new(2);
+        agg.push(0, (10u64, "a10"));
+        agg.push(1, (20, "b20"));
+        agg.push(1, (30, "b30"));
+        agg.mark_ended(0);
+        agg.mark_ended(1);
+        // Both ended: drain in global order, input 0 dropping out once empty.
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((0, (10, "a10"))));
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((1, (20, "b20"))));
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((1, (30, "b30"))));
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), None);
+        assert!(agg.is_drained());
+    }
+
+    #[test]
+    fn earliest_breaks_ties_by_lowest_input() {
+        let mut agg = InputAggregator::new(2);
+        agg.push(0, (5u64, "a"));
+        agg.push(1, (5, "b"));
+        // Equal keys: the lower input index wins (stable, deterministic).
+        assert_eq!(agg.take_earliest_by(|&(p, _)| p), Some((0, (5, "a"))));
     }
 }

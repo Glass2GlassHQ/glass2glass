@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M204: PTS-ordered muxer fan-in
+
+A fan-in muxer now interleaves its inputs by presentation timestamp instead of
+arrival order, fixing a correctness gap in the A+V mux path: two time-skewed
+inputs previously merged in whatever order packets happened to arrive.
+
+- **`InputAggregator::take_earliest_by(key)`** (g2g-core): releases the single
+  globally earliest item across inputs, keyed by e.g. PTS, but only once every
+  still-contributing input has one queued, the `GstAggregator`
+  collect-and-pick-earliest rule. Because each input is monotonic in the key,
+  this guarantees no later input can still deliver something that should have
+  preceded the released item. Ties break to the lowest input index (a stable
+  merge). Complements the existing `take_round` (synchronized rounds, for a
+  compositor / mixer); this releases one item per call (a merge, for a muxer).
+- **`InterleaveMux`** (g2g-plugins) now buffers frames per input and emits in
+  PTS order via the above, flushing each input's tail when it ends. Frames carry
+  their own caps, so reordering is format-safe; control packets pass straight
+  through. Ordering is by PTS (a DTS-keyed container interleave is separate).
+- Tests: `m204_mux_pts_order` (two PTS-skewed inputs emerge globally sorted; an
+  input ending early lets the other drain) plus `InputAggregator` unit tests for
+  the merge, the end-flush, and tie-breaking. `m10_muxer` (order-independent)
+  still passes unchanged.
+
 ### M203: application query system (position + duration)
 
 The runtime now answers the two queries every media-player UI needs, the

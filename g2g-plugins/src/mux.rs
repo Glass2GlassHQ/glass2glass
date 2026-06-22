@@ -1,7 +1,16 @@
-//! Interleaving muxer (M10). Combines N input streams into one output by
-//! forwarding every input's frames straight through (each frame already
-//! carries its own `caps`). Negotiation is per-input: each pad accepts and
-//! records its own caps; the merged output caps are fixed at construction.
+//! Interleaving muxer (M10). Combines N input streams into one output, ordering
+//! every input's frames by presentation timestamp (M204). Negotiation is
+//! per-input: each pad accepts and records its own caps; the merged output caps
+//! are fixed at construction.
+//!
+//! Time-ordering (M204): frames are buffered per input in an [`InputAggregator`]
+//! and released by smallest `pts_ns` only once every still-contributing input
+//! has one queued, so the merged stream is globally PTS-ordered (the
+//! `GstAggregator` collect-and-pick-earliest rule). A frame carries its own
+//! caps, so reordering is format-safe. Earlier this forwarded frames in arrival
+//! order; that interleaved two time-skewed inputs incorrectly. Ordering is by
+//! PTS; container muxers that need decode-order (DTS) interleaving key on that
+//! instead, a separate concern from this generic interleaver.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -11,8 +20,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MultiInputElement, OutputSink,
-    PipelinePacket,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Frame, G2gError, InputAggregator,
+    MultiInputElement, OutputSink, PipelinePacket,
 };
 
 #[derive(Debug)]
@@ -20,12 +29,20 @@ pub struct InterleaveMux {
     inputs: usize,
     output: Caps,
     configured: Vec<Option<Caps>>,
+    /// Per-input frame buffer; releases the globally earliest-PTS frame once
+    /// every contributor has one queued (M204).
+    agg: InputAggregator<Frame>,
 }
 
 impl InterleaveMux {
     pub fn new(inputs: usize, output: Caps) -> Self {
         assert!(inputs > 0, "InterleaveMux needs at least one input");
-        Self { inputs, output, configured: vec![None; inputs] }
+        Self {
+            inputs,
+            output,
+            configured: vec![None; inputs],
+            agg: InputAggregator::new(inputs),
+        }
     }
 
     /// The caps input pad `input` was configured with, i.e. the result of
@@ -84,17 +101,30 @@ impl MultiInputElement for InterleaveMux {
 
     fn process<'a>(
         &'a mut self,
-        _input: usize,
+        input: usize,
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            // M22: a per-input Eos is informational; the runner aggregates
-            // ends and emits the single merged Eos downstream.
-            if matches!(packet, PipelinePacket::Eos) {
-                return Ok(());
+            match packet {
+                // M204: buffer the frame; release any now globally-earliest
+                // frames (every contributor has a head) in PTS order.
+                PipelinePacket::DataFrame(frame) => self.agg.push(input, frame),
+                // M22: a per-input Eos is informational (the runner aggregates
+                // ends and emits the single merged Eos). M204: mark the input
+                // ended so the merge can release frames held waiting on it, and
+                // flush everything once the last input ends.
+                PipelinePacket::Eos => self.agg.mark_ended(input),
+                // Control packets (Segment, Flush, ...) carry no frame to order;
+                // forward straight through.
+                other => {
+                    out.push(other).await?;
+                    return Ok(());
+                }
             }
-            out.push(packet).await?;
+            while let Some((_, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
             Ok(())
         })
     }
