@@ -141,8 +141,17 @@ to a documented contract.
   class=… ! fakesink` parses, an unknown muxer property is rejected; the existing
   muxers (compositor / audiomixer / mux / batcher) are unaffected by the
   default-bearing trait change (229 g2g-core + 327 g2g-plugins tests green).
-- Deferred (step 4 remainder): GPU zero-copy (DLPack /
-  `__cuda_array_interface__`); a blob header registry.
+- **Step 4f (designed, not implemented): GPU zero-copy.** Full design committed
+  to `DESIGN_TODO.md`: `MemoryDomain::Cuda` is an NV12 two-plane decoder output,
+  so the plan exposes two `__cuda_array_interface__` (v3) objects (luma + the
+  half-res interleaved UV plane) via a `g2g.CudaPlane` pyclass and a
+  `g2g_process_cuda(luma, chroma, w, h, meta)` contract, with the CUDA-context
+  caveat documented. Not implemented: the CAI strides / chroma layout / typestr
+  can only be confirmed against `cupy` / `torch` on the RTX 3060 host (3.14 GPU
+  wheels may not exist yet; verify via `python3.13`), and shipping a guessed
+  layout would read as done while being subtly wrong. Deferred to that host.
+- Deferred (smaller): a blob header registry (decode known `BlobMeta` headers
+  into typed structures).
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

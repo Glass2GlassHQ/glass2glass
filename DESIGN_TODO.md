@@ -110,10 +110,40 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   (`apply_muxer_props`). `pyaggregator` registered and launch-parsable. A general
   g2g-core gain (any muxer can now take launch properties). Verified
   `m198_registry`.
-- **Step 4 remainder: breadth.** A blob header registry (decode known `BlobMeta`
-  headers into typed structures); GPU zero-copy (DLPack /
-  `__cuda_array_interface__`) so torch/onnx consume device memory without the
-  download tax (needs a GPU host + free-threaded-capable torch to verify).
+- **Step 4f: GPU zero-copy (designed, not implemented).** Hand a GPU-resident
+  frame to Python without the PCIe round-trip, so torch / cupy consume device
+  memory directly. Design (deferred to a GPU host with installable cupy/torch):
+  - `MemoryDomain::Cuda` is concretely an **NV12 two-plane decoder output**
+    (`OwnedCudaBuffer { luma_ptr, chroma_ptr, luma_pitch, chroma_pitch, width,
+    height, context }`), not one contiguous tensor. So expose **two**
+    `__cuda_array_interface__` (CAI v3) objects, not one:
+    - luma: `shape (height, width)`, `typestr "|u1"`, `strides (luma_pitch, 1)`,
+      `data (luma_ptr, read_only=false)`;
+    - chroma (interleaved UV @ half res): `shape (height/2, width/2, 2)`,
+      `strides (chroma_pitch, 2, 1)`.
+  - A new contract method (the byte-buffer path does not apply): `g2g_process_cuda
+    (luma, chroma, width, height, meta)` where the args are `g2g.CudaPlane`
+    pyclasses whose only job is to carry the CAI dict. Building the dict is *safe*
+    Rust (integers in a dict); the consumer (`cupy.asarray` / `torch.as_tensor`)
+    does the unsafe part.
+  - Caveat: CAI carries no CUDA context; the consumer must `cuCtxPushCurrent`
+    `OwnedCudaBuffer.context` (or run in a matching context) before touching the
+    memory. Document loudly. A `stream` field (CAI v3) should reflect the
+    decoder's stream once g2g threads one through.
+  - DLPack (`__dlpack__` / `from_dlpack`) is the cross-framework alternative;
+    it carries device type/id but is more capsule machinery. Start with CAI
+    (simpler, cupy/torch/numba all read it), add DLPack if a consumer needs it.
+  - Non-zero-copy fallback: a `download` path (cuMemcpyDtoH into a System frame)
+    for elements that only do CPU work; this is the [[project_nvdec_system_memory_floor]]
+    tax made explicit and opt-in.
+  - **Verify on the RTX 3060 host**: install cupy/torch (likely via `python3.13`,
+    pointing `PYO3_PYTHON` at it — 3.14 GPU wheels may not exist yet), assert a
+    `cupy` array aliases the decoder's device pointer (no copy) and a kernel sees
+    the NV12 planes correctly. Until that runtime check passes, the layout
+    (strides / chroma shape / typestr) is unverified and must not be presented as
+    working.
+- **Step 4 remainder: smaller items.** A blob header registry (decode known
+  `BlobMeta` headers into typed structures).
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 
