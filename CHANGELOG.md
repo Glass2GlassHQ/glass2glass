@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M209: flattening bins + ghost pads
+
+Reusable named subgraphs with ghost pads, the top structural GStreamer-parity
+gap. A `Bin` is encapsulation at **construction time**: its interior is flattened
+into the host graph before validation, so the solver and runner see one flat DAG
+and need no awareness bins exist (no new `NodeKind`, none of the ~22 exhaustive
+`NodeKind` match sites touched).
+
+- **`Graph::merge(inner) -> NodeIdOffset`** (g2g-core, `no_std`): append another
+  graph's nodes/edges, re-basing its `NodeId`s by the host's node count. A pure
+  index shift, since nodes are a flat `Vec` and edges carry only pad indices.
+  `NodeIdOffset::apply` / `apply_pad` translate ids into the merged space. This is
+  the one composition primitive.
+- **`Bin` / `BinInstance` / `Graph::add_bin`**: build a subgraph with the usual
+  `add_*` / `link` calls, expose interior boundary pads via `ghost_input` /
+  `ghost_output` (1:1 with one internal pad, as GStreamer ghost pads), then
+  `add_bin` flattens it and returns a `BinInstance` whose `input(i)` / `output(i)`
+  are host-graph pad ids to link like any pad. A bin is validated only once
+  flattened into a host (its ghost pads are intentionally unlinked until then).
+- **`GraphError::DuplicateGhostPad`**: exposing the same interior pad as a ghost
+  twice is rejected at designation time.
+- Tests: `graph.rs` units (merge offset/remap, flatten with ghost pads, ghosting
+  an interior tee pad, duplicate / out-of-range ghost rejection) and
+  `m209_bins` (a flattened `src -> [flip -> crop] -> sink` bin, and a bin whose
+  two ghost outputs come off an interior tee, both run end to end through
+  `run_graph`).
+- Scope: this is Option A (flattening). Runtime nested bins (a `NodeKind::Bin`
+  with recursive solve/run, per-bin state transitions, message bubbling) are a
+  later milestone if hierarchy management is ever needed. The existing decode
+  splices (`Registry::decodebin`, the `uridecodebin` / `decodebin` launch macros,
+  `Registry::autoplug`) are left as-is: they operate at the element-vector /
+  parse-item layer, not the `Graph` layer, so routing them through `Bin` would be
+  churn without simplification.
+
 ### M208: `gst-launch` fan-in for the multi-stream TS muxer
 
 The M207 multi-input `tsmuxn::TsMux` is now reachable from the `gst-launch` text

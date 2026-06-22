@@ -88,7 +88,8 @@ pub use meta::{
     Propagation, Relation, RelationKind, Tracking, Transform,
 };
 pub use graph::{
-    Edge, Graph, GraphError, Muxer, NodeId, NodeKind, PadDir, PadId, Tee, ValidatedGraph,
+    Bin, BinInstance, Edge, Graph, GraphError, Muxer, NodeId, NodeIdOffset, NodeKind, PadDir, PadId,
+    Tee, ValidatedGraph,
 };
 pub use link::LinkPolicy;
 pub use memory::{

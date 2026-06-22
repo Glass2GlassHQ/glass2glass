@@ -74,6 +74,26 @@ pub enum PadDir {
     Out,
 }
 
+/// The `NodeId` shift applied when one graph is merged into another
+/// ([`Graph::merge`]). Translates a node id, and the pad ids on it, from the
+/// merged-in graph's local id space into the host graph's. The shift is the
+/// host's node count at merge time, because nodes are a flat `Vec` indexed by
+/// `NodeId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeIdOffset(u32);
+
+impl NodeIdOffset {
+    /// Translate a node id from the merged-in graph into the host graph.
+    pub fn apply(self, node: NodeId) -> NodeId {
+        NodeId(node.0 + self.0)
+    }
+
+    /// Translate a pad (re-base its node id; the pad index is unchanged).
+    pub fn apply_pad(self, pad: PadId) -> PadId {
+        PadId { node: self.apply(pad.node), index: pad.index }
+    }
+}
+
 /// A directed link from an output pad (`src`) to an input pad (`dst`), with
 /// its backpressure policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +151,10 @@ pub enum GraphError {
     OrphanNode(NodeId),
     /// The graph has a cycle; the listed nodes are the unresolved set.
     Cycle { nodes: Vec<NodeId> },
+    /// The same interior pad was exposed as a ghost pad twice on a [`Bin`]. A
+    /// ghost pad peers 1:1 with one internal pad (as in GStreamer), so a pad can
+    /// back at most one ghost.
+    DuplicateGhostPad { node: NodeId, index: u8, direction: PadDir },
 }
 
 struct Node<E> {
@@ -213,6 +237,41 @@ impl<E> Graph<E> {
         &self.edges
     }
 
+    /// Append every node and edge of `inner` into this graph, returning the
+    /// [`NodeIdOffset`] that maps `inner`'s ids into this graph's id space.
+    /// Composition is a pure index shift: nodes are a flat `Vec` and edges carry
+    /// only pad indices, so re-basing `inner`'s ids by the current node count is
+    /// all it takes. The union is not re-validated here; the host's `finish()`
+    /// validates the whole. This is the one primitive under bin flattening
+    /// ([`add_bin`](Self::add_bin)) and the decodebin / uridecodebin / autoplug
+    /// splices.
+    pub fn merge(&mut self, inner: Graph<E>) -> NodeIdOffset {
+        let offset = NodeIdOffset(self.nodes.len() as u32);
+        self.nodes.extend(inner.nodes);
+        for e in inner.edges {
+            self.edges.push(Edge {
+                src: offset.apply_pad(e.src),
+                dst: offset.apply_pad(e.dst),
+                policy: e.policy,
+            });
+        }
+        offset
+    }
+
+    /// Flatten `bin` into this graph, returning a [`BinInstance`] whose ghost pads
+    /// are this graph's pad ids: link them like any other pad
+    /// (`graph.link(src, inst.input(0))`, `graph.link(inst.output(0), dst)`).
+    /// Construction-time only, no new node kind, so the solver and runner see the
+    /// flattened union with no awareness the bin ever existed.
+    pub fn add_bin(&mut self, bin: Bin<E>) -> BinInstance {
+        let Bin { graph, ghost_in, ghost_out } = bin;
+        let offset = self.merge(graph);
+        BinInstance {
+            ghost_in: ghost_in.into_iter().map(|p| offset.apply_pad(p)).collect(),
+            ghost_out: ghost_out.into_iter().map(|p| offset.apply_pad(p)).collect(),
+        }
+    }
+
     fn kind_of(&self, node: NodeId) -> Result<NodeKind, GraphError> {
         self.nodes
             .get(node.0 as usize)
@@ -273,6 +332,143 @@ impl<E> core::fmt::Debug for Graph<E> {
             .field("nodes", &kinds)
             .field("edges", &self.edges)
             .finish()
+    }
+}
+
+/// A reusable subgraph with designated ghost pads, flattened into a host graph
+/// by [`Graph::add_bin`]. Build its interior with the same `add_*` / `link` calls
+/// as a [`Graph`], then expose interior boundary pads as ghost pads (the bin's
+/// external pads, in designation order).
+///
+/// A bin is never validated on its own: its ghost pads are intentionally
+/// unlinked inside the bin and get their peer only when the host graph links the
+/// returned [`BinInstance`], so the host's `finish()` is what validates. This is
+/// pure construction-time encapsulation, no new [`NodeKind`]: the bin's nodes
+/// become first-class host nodes on flattening (DESIGN.md the bins section).
+pub struct Bin<E> {
+    graph: Graph<E>,
+    ghost_in: Vec<PadId>,
+    ghost_out: Vec<PadId>,
+}
+
+impl<E> Default for Bin<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E> Bin<E> {
+    pub fn new() -> Self {
+        Self { graph: Graph::new(), ghost_in: Vec::new(), ghost_out: Vec::new() }
+    }
+
+    pub fn add_source(&mut self, element: E) -> NodeId {
+        self.graph.add_source(element)
+    }
+
+    pub fn add_transform(&mut self, element: E) -> NodeId {
+        self.graph.add_transform(element)
+    }
+
+    pub fn add_sink(&mut self, element: E) -> NodeId {
+        self.graph.add_sink(element)
+    }
+
+    pub fn add_tee(&mut self, outputs: u8) -> Tee {
+        self.graph.add_tee(outputs)
+    }
+
+    pub fn add_muxer(&mut self, element: E, inputs: u8) -> Muxer {
+        self.graph.add_muxer(element, inputs)
+    }
+
+    pub fn link(
+        &mut self,
+        from: impl Into<PadId>,
+        to: impl Into<PadId>,
+    ) -> Result<(), GraphError> {
+        self.graph.link(from, to)
+    }
+
+    pub fn link_with(
+        &mut self,
+        from: impl Into<PadId>,
+        to: impl Into<PadId>,
+        policy: LinkPolicy,
+    ) -> Result<(), GraphError> {
+        self.graph.link_with(from, to, policy)
+    }
+
+    /// Expose an interior input pad as the bin's next ghost input pad. The pad
+    /// must be a real input pad on a node in this bin, and not already a ghost.
+    pub fn ghost_input(&mut self, interior: impl Into<PadId>) -> Result<(), GraphError> {
+        let pad = interior.into();
+        self.graph.check_pad(pad, PadDir::In)?;
+        if self.ghost_in.contains(&pad) {
+            return Err(GraphError::DuplicateGhostPad {
+                node: pad.node,
+                index: pad.index,
+                direction: PadDir::In,
+            });
+        }
+        self.ghost_in.push(pad);
+        Ok(())
+    }
+
+    /// Expose an interior output pad as the bin's next ghost output pad. The pad
+    /// must be a real output pad on a node in this bin, and not already a ghost.
+    pub fn ghost_output(&mut self, interior: impl Into<PadId>) -> Result<(), GraphError> {
+        let pad = interior.into();
+        self.graph.check_pad(pad, PadDir::Out)?;
+        if self.ghost_out.contains(&pad) {
+            return Err(GraphError::DuplicateGhostPad {
+                node: pad.node,
+                index: pad.index,
+                direction: PadDir::Out,
+            });
+        }
+        self.ghost_out.push(pad);
+        Ok(())
+    }
+}
+
+impl<E> core::fmt::Debug for Bin<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Bin")
+            .field("graph", &self.graph)
+            .field("ghost_in", &self.ghost_in)
+            .field("ghost_out", &self.ghost_out)
+            .finish()
+    }
+}
+
+/// A [`Bin`] flattened into a host graph: its ghost pads, as host-graph pad ids.
+/// Link these like any pad to wire the bin into the surrounding graph.
+#[derive(Debug, Clone)]
+pub struct BinInstance {
+    ghost_in: Vec<PadId>,
+    ghost_out: Vec<PadId>,
+}
+
+impl BinInstance {
+    /// The bin's `i`th ghost input pad, in host-graph space.
+    pub fn input(&self, i: usize) -> PadId {
+        self.ghost_in[i]
+    }
+
+    /// The bin's `i`th ghost output pad, in host-graph space.
+    pub fn output(&self, i: usize) -> PadId {
+        self.ghost_out[i]
+    }
+
+    /// Number of ghost input pads the bin exposes.
+    pub fn input_count(&self) -> usize {
+        self.ghost_in.len()
+    }
+
+    /// Number of ghost output pads the bin exposes.
+    pub fn output_count(&self) -> usize {
+        self.ghost_out.len()
     }
 }
 
@@ -569,5 +765,108 @@ mod tests {
         let mut v = g.finish().unwrap();
         assert_eq!(v.take_element(src), Some("src"));
         assert_eq!(v.take_element(src), None, "payload taken only once");
+    }
+
+    #[test]
+    fn merge_offsets_node_ids_and_edges() {
+        // Host already has one node; merging a 2-node linked graph must re-base
+        // the merged ids past it and carry the interior edge across.
+        let mut host = G::new();
+        let h0 = host.add_source("h0");
+        assert_eq!(h0, NodeId(0));
+
+        let mut inner = G::new();
+        let i0 = inner.add_transform("i0");
+        let i1 = inner.add_sink("i1");
+        inner.link(i0, i1).unwrap();
+
+        let off = host.merge(inner);
+        // The first inner node lands right after the host's nodes.
+        assert_eq!(off.apply(i0), NodeId(1));
+        assert_eq!(off.apply(i1), NodeId(2));
+        // Link host source into the merged transform; the interior edge survived.
+        host.link(h0, off.apply(i0)).unwrap();
+        let v = host.finish().expect("merged graph validates");
+        assert_eq!(v.node_count(), 3);
+        assert_eq!(v.topo(), &[NodeId(0), NodeId(1), NodeId(2)]);
+        // The merged transform's element payload moved across intact.
+        assert_eq!(v.element(NodeId(1)), Some(&"i0"));
+    }
+
+    #[test]
+    fn add_bin_flattens_with_ghost_pads() {
+        // A bin wrapping transform -> transform, exposing the first's input and
+        // the second's output as ghost pads, flattens into source -> bin -> sink.
+        let mut bin: Bin<&'static str> = Bin::new();
+        let a = bin.add_transform("a");
+        let b = bin.add_transform("b");
+        bin.link(a, b).unwrap();
+        bin.ghost_input(a).unwrap();
+        bin.ghost_output(b).unwrap();
+
+        let mut g = G::new();
+        let src = g.add_source("src");
+        let sink = g.add_sink("sink");
+        let inst = g.add_bin(bin);
+        assert_eq!(inst.input_count(), 1);
+        assert_eq!(inst.output_count(), 1);
+        g.link(src, inst.input(0)).unwrap();
+        g.link(inst.output(0), sink).unwrap();
+
+        let v = g.finish().expect("flattened bin validates");
+        // The bin's two interior nodes are now first-class host nodes.
+        assert_eq!(v.node_count(), 4);
+        let pos = |n: NodeId| v.topo().iter().position(|&x| x == n).unwrap();
+        assert!(pos(src) < pos(inst.input(0).node));
+        assert!(pos(inst.output(0).node) < pos(sink));
+    }
+
+    #[test]
+    fn bin_ghosts_an_interior_tee_output() {
+        // Ghost pads can expose a specific pad index, e.g. one branch of a tee.
+        let mut bin: Bin<&'static str> = Bin::new();
+        let tx = bin.add_transform("tx");
+        let tee = bin.add_tee(2);
+        bin.link(tx, tee.input()).unwrap();
+        bin.ghost_input(tx).unwrap();
+        bin.ghost_output(tee.out(0)).unwrap();
+        bin.ghost_output(tee.out(1)).unwrap();
+
+        let mut g = G::new();
+        let src = g.add_source("src");
+        let a = g.add_sink("a");
+        let b = g.add_sink("b");
+        let inst = g.add_bin(bin);
+        g.link(src, inst.input(0)).unwrap();
+        g.link(inst.output(0), a).unwrap();
+        g.link(inst.output(1), b).unwrap();
+        let v = g.finish().expect("bin with a ghosted tee validates");
+        // Both ghost outputs map onto the same interior tee node, distinct pads.
+        assert_eq!(inst.output(0).node, inst.output(1).node);
+        assert_ne!(inst.output(0).index, inst.output(1).index);
+        assert_eq!(v.out_edges(inst.output(0).node).len(), 2);
+    }
+
+    #[test]
+    fn duplicate_ghost_pad_is_rejected() {
+        let mut bin: Bin<&'static str> = Bin::new();
+        let a = bin.add_transform("a");
+        bin.ghost_output(a).unwrap();
+        assert_eq!(
+            bin.ghost_output(a),
+            Err(GraphError::DuplicateGhostPad { node: a, index: 0, direction: PadDir::Out }),
+            "the same interior pad cannot back two ghosts",
+        );
+    }
+
+    #[test]
+    fn ghost_pad_out_of_range_is_rejected() {
+        let mut bin: Bin<&'static str> = Bin::new();
+        let a = bin.add_transform("a");
+        // A transform has one output pad (index 0); index 1 is out of range.
+        assert!(matches!(
+            bin.ghost_output(PadId { node: a, index: 1 }),
+            Err(GraphError::PadOutOfRange { .. }),
+        ));
     }
 }

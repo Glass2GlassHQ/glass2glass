@@ -978,6 +978,42 @@ input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed canvas). A pad
 may also scale its input as it composites (`CompositorPad::with_size`, integer
 bilinear), so a downscaled camera inset needs no upstream `VideoScale`.
 
+#### 4.13.6a Bins and ghost pads (flattening)
+
+GStreamer's `GstBin` is a runtime container: a node in the pipeline that holds
+child elements, manages their state, and exposes interior pads as *ghost pads*.
+g2g implements the same user-facing capability (reusable named subgraphs +
+ghost pads) but as **construction-time flattening**, not a runtime container.
+The reason is the same one in §4.9.3: g2g composes typed graphs ahead of the
+run, so grouping for reuse and pad exposure can happen before validation, and
+the runtime never needs a hierarchy to manage.
+
+The whole mechanism is one primitive: `Graph::merge(inner) -> NodeIdOffset`
+appends another graph's nodes and edges, re-basing the merged-in `NodeId`s by
+the host's current node count. Because nodes are a flat `Vec` indexed by
+`NodeId` and edges carry only pad indices, the merge is a pure index shift; the
+returned `NodeIdOffset` translates the inner graph's ids (`apply` / `apply_pad`)
+into the host's space. A `Bin<E>` is a `Graph<E>` plus a list of interior pads
+designated as ghost inputs / outputs (1:1 with one internal pad, as in
+GStreamer). `Graph::add_bin` merges the bin and returns a `BinInstance` whose
+`input(i)` / `output(i)` are host-graph pad ids, linked like any other pad. A
+bin is never validated alone: its ghost pads are intentionally unlinked inside
+the bin and acquire their peer when the host links the `BinInstance`, so the
+host's `finish()` is the single validation point.
+
+Crucially this adds **no `NodeKind` variant**: a bin's interior nodes become
+first-class host nodes on flattening, so the solver (§4.13.2) and runner
+(§4.13.3) drive them with zero awareness bins ever existed, and none of the
+exhaustive `NodeKind` match sites change. The decode-chain splices
+(`Registry::decodebin`, the `uridecodebin` / `decodebin` launch macros) already
+flatten subgraphs ad hoc at the element-vector / parse-item layer; they predate
+this primitive and are left as-is rather than rerouted through it.
+
+Out of scope (a later milestone, only if needed): a runtime `NodeKind::Bin` with
+recursive solve/run, per-bin state transitions, and bus-message bubbling, i.e.
+GStreamer's full hierarchical `GstBin`. None of that is required for reuse,
+ghost pads, or a nestable decodebin.
+
 #### 4.13.7 Pad templates
 
 Static metadata for tools that need to query pad compatibility without
