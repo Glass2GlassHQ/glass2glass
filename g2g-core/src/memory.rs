@@ -81,6 +81,37 @@ impl MemoryDomain {
             MemoryDomain::WgpuTexture(_) => MemoryDomainKind::WgpuTexture,
         }
     }
+
+    /// Produce a second handle to this frame's memory for a fan-out branch
+    /// (M213). For the GPU domains and the shared-CPU [`SystemView`] this is a
+    /// **zero-copy** reference-count bump: both branches read the same device
+    /// memory / texture / allocation. For owned-CPU [`System`](Self::System)
+    /// bytes there is nothing to refcount, so it deep-copies (the one domain a
+    /// tee cannot share for free); a stride-aware producer can use `SystemView`
+    /// to avoid even that.
+    ///
+    /// Read-only fan-out: branches must treat the shared memory as immutable. A
+    /// branch that needs to mutate copies first (as the per-frame metadata does
+    /// copy-on-write), so the shares never alias a mutation.
+    pub fn share(&self) -> MemoryDomain {
+        match self {
+            // Owned CPU bytes: deep-copy (nothing to refcount).
+            MemoryDomain::System(s) => {
+                MemoryDomain::System(SystemSlice::from_boxed(s.as_slice().to_vec().into_boxed_slice()))
+            }
+            // Everything else is refcounted/handle-shared: clone is cheap.
+            MemoryDomain::SystemView(v) => MemoryDomain::SystemView(v.clone()),
+            MemoryDomain::DmaBuf(d) => MemoryDomain::DmaBuf(d.clone()),
+            MemoryDomain::VulkanTexture(t) => MemoryDomain::VulkanTexture(t.clone()),
+            MemoryDomain::WebGPUBuffer(b) => MemoryDomain::WebGPUBuffer(b.clone()),
+            MemoryDomain::Cuda(c) => MemoryDomain::Cuda(c.clone()),
+            MemoryDomain::D3D11Texture(t) => MemoryDomain::D3D11Texture(t.clone()),
+            MemoryDomain::WebGPUExternalTexture(t) => {
+                MemoryDomain::WebGPUExternalTexture(t.clone())
+            }
+            MemoryDomain::WgpuTexture(t) => MemoryDomain::WgpuTexture(t.clone()),
+        }
+    }
 }
 
 /// CPU-memory slice. The backing buffer may be a freshly-allocated `Box<[u8]>`
@@ -165,27 +196,23 @@ impl SystemView {
     }
 }
 
-#[derive(Debug)]
+/// `Clone` is a refcount bump on the shared fd (M213): a tee branch references
+/// the same DMABUF, and the fd is closed once when the last share drops.
+#[derive(Debug, Clone)]
 pub struct OwnedDmaBuf {
-    fd: i32,
+    /// The fd's owner is reference-counted, so the buffer fans out through a tee
+    /// without dup-ing the descriptor; the last drop closes it.
+    fd: Arc<DmaBufFd>,
     pub stride: u32,
     pub offset: u32,
 }
 
-impl OwnedDmaBuf {
-    /// # Safety
-    /// `fd` must be a valid DMABUF descriptor with no other owner; the caller
-    /// transfers ownership to this struct.
-    pub unsafe fn from_raw(fd: i32, stride: u32, offset: u32) -> Self {
-        Self { fd, stride, offset }
-    }
+/// Sole owner of a DMABUF descriptor; closes it on drop. Held behind an `Arc` in
+/// [`OwnedDmaBuf`] so the descriptor is shared, not duplicated, across a tee.
+#[derive(Debug)]
+struct DmaBufFd(i32);
 
-    pub fn as_raw(&self) -> i32 {
-        self.fd
-    }
-}
-
-impl Drop for OwnedDmaBuf {
+impl Drop for DmaBufFd {
     fn drop(&mut self) {
         // DMABUF is Linux-only. On std+linux, close the fd. On other targets
         // (Wasm, RTOS without libc) we leak; a custom close hook registered
@@ -195,22 +222,39 @@ impl Drop for OwnedDmaBuf {
             extern "C" {
                 fn close(fd: i32) -> i32;
             }
-            // SAFETY: `from_raw` is the only constructor and is `unsafe`,
-            // requiring callers to certify sole ownership of the fd.
+            // SAFETY: `OwnedDmaBuf::from_raw` is the only constructor and is
+            // `unsafe`, requiring callers to certify sole ownership of the fd;
+            // the `Arc` ensures this runs exactly once, on the last share.
             unsafe {
-                close(self.fd);
+                close(self.0);
             }
         }
     }
 }
 
-#[derive(Debug)]
+impl OwnedDmaBuf {
+    /// # Safety
+    /// `fd` must be a valid DMABUF descriptor with no other owner; the caller
+    /// transfers ownership to this struct.
+    pub unsafe fn from_raw(fd: i32, stride: u32, offset: u32) -> Self {
+        Self { fd: Arc::new(DmaBufFd(fd)), stride, offset }
+    }
+
+    pub fn as_raw(&self) -> i32 {
+        self.fd.0
+    }
+}
+
+/// `Clone` shares the handle (it is an opaque id the producer owns); a tee
+/// branch references the same texture (M213).
+#[derive(Debug, Clone)]
 pub struct OwnedVulkanTexture {
     pub handle: u64,
     pub allocation_id: u64,
 }
 
-#[derive(Debug)]
+/// `Clone` shares the buffer id (M213).
+#[derive(Debug, Clone)]
 pub struct OwnedWebGPUBuffer {
     pub buffer_id: u64,
 }
@@ -226,7 +270,10 @@ pub struct OwnedWebGPUBuffer {
 /// a [`CudaKeepAlive`]; dropping this buffer drops that box, releasing the
 /// frame back to its hwframe pool. The pointers stay valid for exactly the
 /// lifetime of the keep-alive.
-#[derive(Debug)]
+/// `Clone` is a zero-copy refcount bump (the device memory is shared, not
+/// copied), so the frame can fan out through a tee to several GPU consumers
+/// (M213); see [`MemoryDomain::share`].
+#[derive(Debug, Clone)]
 pub struct OwnedCudaBuffer {
     /// `CUdeviceptr` (as `u64`) of the luma (Y) plane.
     pub luma_ptr: u64,
@@ -243,12 +290,14 @@ pub struct OwnedCudaBuffer {
     /// this context (`cuCtxPushCurrent`) before touching the memory.
     pub context: u64,
     /// Pins the backing allocation (eg the decoder's `AVFrame`) for the life
-    /// of the pointers. Dropping it releases the allocation.
-    keep_alive: Box<dyn CudaKeepAlive>,
+    /// of the pointers. Reference-counted (`Arc`), so a tee branch shares the
+    /// allocation rather than copying it; the last drop releases it.
+    keep_alive: Arc<dyn CudaKeepAlive>,
 }
 
 impl OwnedCudaBuffer {
-    /// Wrap CUDA device pointers with the owner that keeps them valid.
+    /// Wrap CUDA device pointers with the owner that keeps them valid. The owner
+    /// is `Arc`-held so the frame is cheaply shareable across a tee (M213).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         luma_ptr: u64,
@@ -258,7 +307,7 @@ impl OwnedCudaBuffer {
         width: u32,
         height: u32,
         context: u64,
-        keep_alive: Box<dyn CudaKeepAlive>,
+        keep_alive: Arc<dyn CudaKeepAlive>,
     ) -> Self {
         Self {
             luma_ptr,
@@ -283,9 +332,12 @@ impl OwnedCudaBuffer {
 /// CUDA memory is owned by the producing element (typically an ffmpeg
 /// `AVFrame` from a `CUDA` hwframe pool); `g2g-core` cannot link CUDA, so the
 /// element boxes its owning handle as this trait object. Dropping the box
-/// releases the backing allocation. `Send` so a frame can cross the runner's
-/// worker-thread boundaries like every other domain.
-pub trait CudaKeepAlive: core::fmt::Debug + Send {}
+/// releases the backing allocation. `Send + Sync` so a frame can cross the
+/// runner's worker-thread boundaries and, after a tee, be read concurrently by
+/// several GPU consumer branches (M213); the producing element certifies the
+/// device memory is safe for concurrent read-only access (immutable decoded
+/// surface), the same contract under which the owners assert `Send`.
+pub trait CudaKeepAlive: core::fmt::Debug + Send + Sync {}
 
 /// A decoded picture left in a Direct3D 11 texture (Windows GPU memory). Holds
 /// the `ID3D11Texture2D` pointer, the subresource index of this frame within
@@ -300,7 +352,9 @@ pub trait CudaKeepAlive: core::fmt::Debug + Send {}
 /// a [`D3D11KeepAlive`] trait object; dropping this buffer drops the box and
 /// releases the sample back to the decoder. The pointer stays valid for
 /// exactly the keep-alive's lifetime. The Windows analog of [`OwnedCudaBuffer`].
-#[derive(Debug)]
+/// `Clone` is a zero-copy refcount bump (the texture is shared, not copied), so
+/// the frame can fan out through a tee (M213); see [`MemoryDomain::share`].
+#[derive(Debug, Clone)]
 pub struct OwnedD3D11Texture {
     /// `ID3D11Texture2D` (as `u64`) backing this frame.
     pub texture: u64,
@@ -316,12 +370,14 @@ pub struct OwnedD3D11Texture {
     /// this device (or one sharing its adapter) to read the texture.
     pub device: u64,
     /// Pins the backing texture (eg the decoder's `IMFSample`) for the life of
-    /// the pointer. Dropping it releases the allocation.
-    keep_alive: Box<dyn D3D11KeepAlive>,
+    /// the pointer. Reference-counted (`Arc`), so a tee branch shares the
+    /// texture rather than copying it; the last drop releases it.
+    keep_alive: Arc<dyn D3D11KeepAlive>,
 }
 
 impl OwnedD3D11Texture {
-    /// Wrap a D3D11 texture pointer with the owner that keeps it valid.
+    /// Wrap a D3D11 texture pointer with the owner that keeps it valid. The owner
+    /// is `Arc`-held so the frame is cheaply shareable across a tee (M213).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         texture: u64,
@@ -330,7 +386,7 @@ impl OwnedD3D11Texture {
         height: u32,
         dxgi_format: u32,
         device: u64,
-        keep_alive: Box<dyn D3D11KeepAlive>,
+        keep_alive: Arc<dyn D3D11KeepAlive>,
     ) -> Self {
         Self {
             texture,
@@ -354,9 +410,12 @@ impl OwnedD3D11Texture {
 /// texture is owned by the producing element (typically a Media Foundation
 /// `IMFSample` / `IMFDXGIBuffer` from a DXVA decoder); `g2g-core` cannot link
 /// the `windows` crate, so the element boxes its owning handle as this trait
-/// object. Dropping the box releases the texture. `Send` so a frame can cross
-/// the runner's worker-thread boundaries like every other domain.
-pub trait D3D11KeepAlive: core::fmt::Debug + Send {}
+/// object. Dropping the box releases the texture. `Send + Sync` so a frame can
+/// cross the runner's worker-thread boundaries and, after a tee, be read
+/// concurrently by several GPU consumer branches (M213); the producing element
+/// certifies the texture is safe for concurrent read-only access, the same
+/// contract under which the owners assert `Send`.
+pub trait D3D11KeepAlive: core::fmt::Debug + Send + Sync {}
 
 /// A decoded picture left as a browser `VideoFrame`, to be imported into
 /// WebGPU as a `GPUExternalTexture` (`device.importExternalTexture`) and
@@ -372,20 +431,24 @@ pub trait D3D11KeepAlive: core::fmt::Debug + Send {}
 /// payload here lives inside the owner, so a consumer recovers it by
 /// downcasting [`WebGPUKeepAlive::as_any`]. The browser analog of
 /// [`OwnedD3D11Texture`] / [`OwnedCudaBuffer`].
-#[derive(Debug)]
+/// `Clone` is a zero-copy refcount bump (the `VideoFrame` is shared, not
+/// copied), so the frame can fan out through a tee (M213); see
+/// [`MemoryDomain::share`].
+#[derive(Debug, Clone)]
 pub struct OwnedWebGPUExternalTexture {
     /// Visible picture dimensions in pixels.
     pub width: u32,
     pub height: u32,
     /// Owns the backing `VideoFrame` for the life of the imported texture;
-    /// dropping it closes the frame and frees the decoder's output slot.
-    keep_alive: Box<dyn WebGPUKeepAlive>,
+    /// reference-counted (`Arc`), so a tee branch shares the frame rather than
+    /// closing it early; the last drop closes it and frees the decoder slot.
+    keep_alive: Arc<dyn WebGPUKeepAlive>,
 }
 
 impl OwnedWebGPUExternalTexture {
     /// Wrap a decoded frame's dimensions with the owner that keeps the
-    /// backing `VideoFrame` alive.
-    pub fn new(width: u32, height: u32, keep_alive: Box<dyn WebGPUKeepAlive>) -> Self {
+    /// backing `VideoFrame` alive. `Arc`-held so the frame is shareable (M213).
+    pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WebGPUKeepAlive>) -> Self {
         Self { width, height, keep_alive }
     }
 
@@ -405,8 +468,9 @@ impl OwnedWebGPUExternalTexture {
 /// runner's worker boundaries like every other domain; on the single-threaded
 /// wasm target the concrete owner asserts `Send` under that contract (the
 /// frame never actually crosses a thread), as the `D3D11KeepAlive` owners do
-/// for their COM handles.
-pub trait WebGPUKeepAlive: core::fmt::Debug + Send {
+/// for their COM handles. `Sync` too, so a tee branch can read it concurrently
+/// (M213), under the same single-threaded-wasm / documented-contract rationale.
+pub trait WebGPUKeepAlive: core::fmt::Debug + Send + Sync {
     /// Recover the concrete owner so a consumer can extract the `VideoFrame`.
     /// Mirrors the raw-pointer access the CUDA / D3D11 domains expose
     /// directly; here the payload lives in the owner, so downcast is the route.
@@ -418,19 +482,23 @@ pub trait WebGPUKeepAlive: core::fmt::Debug + Send {
 /// `wgpu::Texture` itself lives inside the [`WgpuKeepAlive`] owner because
 /// `g2g-core` never links wgpu. The desktop render-side analog of
 /// [`OwnedWebGPUExternalTexture`] (which is the browser/import side).
-#[derive(Debug)]
+/// `Clone` is a zero-copy refcount bump (the `wgpu::Texture` is shared, not
+/// copied), so the rendered frame can fan out through a tee (M213); see
+/// [`MemoryDomain::share`].
+#[derive(Debug, Clone)]
 pub struct OwnedWgpuTexture {
     /// Visible picture dimensions in pixels.
     pub width: u32,
     pub height: u32,
-    /// Owns the backing `wgpu::Texture` for as long as the frame is referenced.
-    keep_alive: Box<dyn WgpuKeepAlive>,
+    /// Owns the backing `wgpu::Texture` for as long as the frame is referenced;
+    /// reference-counted (`Arc`) so a tee branch shares it rather than copying.
+    keep_alive: Arc<dyn WgpuKeepAlive>,
 }
 
 impl OwnedWgpuTexture {
     /// Wrap a rendered texture's dimensions with the owner that keeps the
-    /// backing `wgpu::Texture` alive.
-    pub fn new(width: u32, height: u32, keep_alive: Box<dyn WgpuKeepAlive>) -> Self {
+    /// backing `wgpu::Texture` alive. `Arc`-held so the frame is shareable (M213).
+    pub fn new(width: u32, height: u32, keep_alive: Arc<dyn WgpuKeepAlive>) -> Self {
         Self { width, height, keep_alive }
     }
 
@@ -488,7 +556,7 @@ mod tests {
             1920,
             1080,
             0xC0FFEE,
-            Box::new(FlagOnDrop(dropped.clone())),
+            Arc::new(FlagOnDrop(dropped.clone())),
         );
         let domain = MemoryDomain::Cuda(buf);
         assert_eq!(domain.kind(), MemoryDomainKind::Cuda);
@@ -505,7 +573,7 @@ mod tests {
             1920,
             1080,
             0xC0FFEE,
-            Box::new(FlagOnDrop(dropped.clone())),
+            Arc::new(FlagOnDrop(dropped.clone())),
         );
         assert!(!dropped.load(Ordering::SeqCst), "owner alive while buffer held");
         assert_eq!(buf.luma_ptr, 0x1000);
@@ -527,7 +595,7 @@ mod tests {
             1080,
             103, // DXGI_FORMAT_NV12
             0xD3D1CE,
-            Box::new(FlagOnDrop(dropped.clone())),
+            Arc::new(FlagOnDrop(dropped.clone())),
         );
         let domain = MemoryDomain::D3D11Texture(tex);
         assert_eq!(domain.kind(), MemoryDomainKind::D3D11Texture);
@@ -543,7 +611,7 @@ mod tests {
             1080,
             103,
             0xD3D1CE,
-            Box::new(FlagOnDrop(dropped.clone())),
+            Arc::new(FlagOnDrop(dropped.clone())),
         );
         assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
         assert_eq!(tex.texture, 0xDEAD_BEEF);
@@ -558,7 +626,7 @@ mod tests {
     #[test]
     fn webgpu_external_texture_reports_kind() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let tex = OwnedWebGPUExternalTexture::new(640, 480, Box::new(FlagOnDrop(dropped)));
+        let tex = OwnedWebGPUExternalTexture::new(640, 480, Arc::new(FlagOnDrop(dropped)));
         assert_eq!(tex.width, 640);
         assert_eq!(tex.height, 480);
         let domain = MemoryDomain::WebGPUExternalTexture(tex);
@@ -568,7 +636,7 @@ mod tests {
     #[test]
     fn dropping_webgpu_external_texture_closes_frame() {
         let dropped = Arc::new(AtomicBool::new(false));
-        let tex = OwnedWebGPUExternalTexture::new(1280, 720, Box::new(FlagOnDrop(dropped.clone())));
+        let tex = OwnedWebGPUExternalTexture::new(1280, 720, Arc::new(FlagOnDrop(dropped.clone())));
         assert!(!dropped.load(Ordering::SeqCst), "owner alive while texture held");
         drop(tex);
         assert!(
@@ -578,11 +646,38 @@ mod tests {
     }
 
     #[test]
+    fn sharing_a_gpu_domain_is_a_refcount_bump_not_a_copy() {
+        // M213: share() on a GPU domain hands a second branch the SAME backing
+        // allocation (refcount bump), so the keep-alive releases exactly once,
+        // only after BOTH shares drop, never twice (which a copy would imply).
+        let dropped = Arc::new(AtomicBool::new(false));
+        let buf = OwnedCudaBuffer::new(
+            0x1000, 0x2000, 2048, 2048, 1920, 1080, 0xC0FFEE,
+            Arc::new(FlagOnDrop(dropped.clone())),
+        );
+        let original = MemoryDomain::Cuda(buf);
+        let branch = original.share();
+        // Both shares point at the same pointers: zero device-memory copy.
+        match (&original, &branch) {
+            (MemoryDomain::Cuda(a), MemoryDomain::Cuda(b)) => {
+                assert_eq!(a.luma_ptr, b.luma_ptr);
+                assert_eq!(a.chroma_ptr, b.chroma_ptr);
+            }
+            _ => panic!("share preserved the domain"),
+        }
+        assert!(!dropped.load(Ordering::SeqCst), "keep-alive held by both shares");
+        drop(branch);
+        assert!(!dropped.load(Ordering::SeqCst), "still held by the original");
+        drop(original);
+        assert!(dropped.load(Ordering::SeqCst), "released once the last share drops");
+    }
+
+    #[test]
     fn webgpu_keep_alive_downcasts_to_concrete_owner() {
         // a consumer that can link web-sys recovers the concrete VideoFrame
         // owner through as_any to call importExternalTexture.
         let dropped = Arc::new(AtomicBool::new(false));
-        let tex = OwnedWebGPUExternalTexture::new(16, 16, Box::new(FlagOnDrop(dropped)));
+        let tex = OwnedWebGPUExternalTexture::new(16, 16, Arc::new(FlagOnDrop(dropped)));
         assert!(tex.keep_alive().as_any().downcast_ref::<FlagOnDrop>().is_some());
     }
 }

@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M213: zero-copy GPU frame fan-out
+
+A GPU-resident frame can now fan out through a `tee` to several consumers (the
+canonical decode-on-GPU -> {inference, display} graph) with no device-to-host
+copy. Previously the tee deep-copied `System` frames and failed loud
+(`UnsupportedDomain`) on any GPU domain, because the keep-alive handles were
+exclusively owned (`Box<dyn KeepAlive>`).
+
+- **GPU owned-types are now reference-counted and shareable.** The keep-alive
+  handles became `Arc<dyn KeepAlive>` (from `Box`), so `OwnedCudaBuffer` /
+  `OwnedD3D11Texture` / `OwnedWebGPUExternalTexture` / `OwnedWgpuTexture` (and the
+  plain-handle `OwnedVulkanTexture` / `OwnedWebGPUBuffer`, and `OwnedDmaBuf` via
+  an `Arc`-shared fd) are `Clone` — a clone is a refcount bump, not a copy.
+- **`MemoryDomain::share()`**: produces a second handle for a fan-out branch.
+  Zero-copy for the GPU domains and the shared-CPU `SystemView` (refcount bump);
+  a deep copy only for owned-CPU `System` bytes (nothing to refcount). Read-only
+  fan-out: a branch that mutates copies first (as the per-frame metadata does).
+- The `CudaKeepAlive` / `D3D11KeepAlive` / `WebGPUKeepAlive` traits gained
+  `+ Sync` (so an `Arc`-held handle is `Send` and a tee branch may read it
+  concurrently); the concrete owners (`CudaFrameOwner`, `SampleOwner`,
+  `VideoFrameOwner`) gained a justified `unsafe impl Sync` mirroring their
+  existing `unsafe impl Send`. `WgpuKeepAlive` was already `Send + Sync`.
+- `try_clone_packet` (the tee broadcast) now shares instead of failing on GPU.
+- Tests: `memory.rs` (sharing a CUDA domain is a refcount bump, releasing the
+  backing allocation exactly once after both shares drop) and `m213_gpu_tee` (a
+  CUDA-domain frame fans out through a `tee` to two branches via `run_graph`,
+  each branch sees it still on the GPU, and the mock `AVFrame` is released once,
+  not per branch).
+- Built/verified here: core + `cuda` + `wgpu-sink` + `ffmpeg+cuda` +
+  `vello-overlay`. The `mf-decode` (Windows) and `web-codecs` (wasm) owners got
+  the same `unsafe impl Sync` + `Arc` call-site change but compile only on their
+  targets.
+
 ### M212: reverse playback at the sink
 
 Reverse playback (`rate < 0`): a stream played from `stop` down to `start`. The

@@ -866,7 +866,9 @@ fn extract_texture(
         let subresource = dxgi.GetSubresourceIndex().map_err(mf_err)?;
         (ptr, subresource)
     };
-    let keep_alive = Box::new(SampleOwner(sample));
+    // Arc, not Box: shareable so a tee can fan the D3D11 texture out to several
+    // consumers zero-copy (M213).
+    let keep_alive = alloc::sync::Arc::new(SampleOwner(sample));
     Ok(OwnedD3D11Texture::new(
         texture_ptr,
         subresource,
@@ -889,6 +891,12 @@ struct SampleOwner(#[allow(dead_code)] IMFSample);
 // (free-threaded) and the sample is owned and moved, never aliased across
 // threads.
 unsafe impl Send for SampleOwner {}
+
+// SAFETY: `Sync` (M213) lets a tee share the keep-alive across branches that
+// read the D3D11 texture concurrently. Sound because the owner is inert (it only
+// pins the `IMFSample`, no interior mutability), COM is MTA / free-threaded, the
+// decoded texture is read-only, and the final release is serialized by the `Arc`.
+unsafe impl Sync for SampleOwner {}
 
 impl core::fmt::Debug for SampleOwner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

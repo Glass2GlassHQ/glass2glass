@@ -1041,7 +1041,9 @@ unsafe fn cuda_buffer_from_frame(
         // hand a downstream CUDA consumer a host or null pointer.
         return Err(G2gError::Hardware(HardwareError::Other));
     }
-    let keep_alive = Box::new(CudaFrameOwner(frame));
+    // Arc, not Box: the keep-alive is shareable so a tee can fan the GPU frame
+    // out to several consumers zero-copy (M213).
+    let keep_alive = alloc::sync::Arc::new(CudaFrameOwner(frame));
     Ok(OwnedCudaBuffer::new(
         luma_ptr,
         chroma_ptr,
@@ -1065,6 +1067,13 @@ struct CudaFrameOwner(FfVideo);
 // between worker tasks but never shares it, so the frame is owned and moved,
 // never aliased, the same contract as the decoder itself.
 unsafe impl Send for CudaFrameOwner {}
+
+// SAFETY: `Sync` (M213) lets a tee share the keep-alive across branches that
+// read the decoded surface concurrently. Sound because the owner is inert: it
+// pins the `AVFrame` and exposes no interior mutability; the device memory is an
+// immutable decoded surface safe for concurrent read, and the final drop is
+// serialized by the `Arc` refcount. Same contract as `Send` above.
+unsafe impl Sync for CudaFrameOwner {}
 
 impl core::fmt::Debug for CudaFrameOwner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

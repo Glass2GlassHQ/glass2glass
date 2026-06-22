@@ -6,10 +6,11 @@
 //! linear + fan-out runner shapes into one entry point.
 //!
 //! Scope: source / transform / sink / tee (fan-out) + muxer (fan-in). A tee
-//! broadcasts each packet to all its branches; since [`PipelinePacket`] is not
-//! `Clone` (a GPU-resident frame owns a non-copyable handle), the broadcast
-//! deep-copies `System` frames and fails loud on a GPU domain (a refcounted
-//! shareable frame for the zero-copy / GPU tee is a follow-up). A muxer node
+//! broadcasts each packet to all its branches via [`MemoryDomain::share`]
+//! (M213): a zero-copy refcount bump for the GPU domains and the shared-CPU
+//! `SystemView`, a deep copy only for owned-CPU `System` bytes. So a GPU-decoded
+//! frame fans out to several consumers (inference + display) with no
+//! device-to-host copy. A muxer node
 //! runs a [`DynMultiInputElement`]: per-input forwarder arms tag each packet
 //! with its pad and feed one muxer arm that combines them, emitting a single
 //! `Eos` after every input ends (the `run_muxer_sink` shape).
@@ -42,7 +43,6 @@ use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, Mult
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
-use crate::memory::{MemoryDomain, SystemSlice};
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
@@ -1432,10 +1432,12 @@ async fn muxer_arm<'a>(
     }
 }
 
-/// Clone a packet for a tee branch. Control packets clone trivially; a
-/// `System` data frame deep-copies its bytes. A GPU-resident frame owns a
-/// non-copyable handle, so it fails loud (a refcounted shareable frame is the
-/// zero-copy follow-up).
+/// Clone a packet for a tee branch (M213). Control packets clone trivially; a
+/// data frame's memory is shared via [`MemoryDomain::share`]: a zero-copy
+/// refcount bump for the GPU domains and the shared-CPU `SystemView`, a deep
+/// copy only for owned-CPU `System` bytes. So a GPU-decoded frame now fans out
+/// to several consumers (eg inference + display) with no device-to-host copy,
+/// where it previously failed loud.
 fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError> {
     Ok(match packet {
         PipelinePacket::CapsChanged(caps) => PipelinePacket::CapsChanged(caps.clone()),
@@ -1443,10 +1445,6 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
         PipelinePacket::Flush => PipelinePacket::Flush,
         PipelinePacket::Segment(seg) => PipelinePacket::Segment(*seg),
         PipelinePacket::DataFrame(frame) => {
-            let MemoryDomain::System(slice) = &frame.domain else {
-                return Err(G2gError::UnsupportedDomain);
-            };
-            let bytes = slice.as_slice().to_vec().into_boxed_slice();
             // Tee clone: per-frame metadata is shared with the original by Arc
             // refcount (cheap), so a detector branch and a video branch both carry
             // the same AnalyticsMeta. A branch that mutates it pays a copy-on-write
@@ -1456,7 +1454,7 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
             #[allow(clippy::clone_on_copy)]
             let meta = frame.meta.clone();
             PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
+                domain: frame.domain.share(),
                 timing: frame.timing,
                 sequence: frame.sequence,
                 meta,
@@ -1469,6 +1467,7 @@ fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError>
 mod tests {
     use super::*;
     use crate::frame::FrameTiming;
+    use crate::memory::{MemoryDomain, SystemSlice};
 
     fn system_frame(bytes: &[u8], seq: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame {

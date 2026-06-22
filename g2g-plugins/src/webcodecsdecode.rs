@@ -196,7 +196,9 @@ impl WebCodecsDecode {
         let domain = MemoryDomain::WebGPUExternalTexture(OwnedWebGPUExternalTexture::new(
             w,
             h,
-            Box::new(VideoFrameOwner::new(frame)),
+            // Arc, not Box: shareable so a tee can fan the VideoFrame out to
+            // several consumers zero-copy (M213).
+            alloc::sync::Arc::new(VideoFrameOwner::new(frame)),
         ));
         let out_frame = Frame {
             domain,
@@ -467,3 +469,9 @@ impl WebGPUKeepAlive for VideoFrameOwner {
 // the VideoFrame never crosses a thread. Asserting Send satisfies the
 // WebGPUKeepAlive contract, matching the D3D11KeepAlive / MfDecode precedent.
 unsafe impl Send for VideoFrameOwner {}
+
+// SAFETY: `Sync` (M213) lets a tee share the keep-alive across fan-out branches.
+// Sound on the same single-threaded-wasm grounds as `Send` above: the frame
+// never actually crosses or is concurrently accessed across a thread, and the
+// owner is inert (it only pins the `VideoFrame`), so &-sharing is benign.
+unsafe impl Sync for VideoFrameOwner {}

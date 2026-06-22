@@ -311,7 +311,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
                         self.height,
-                        Box::new(WgpuTextureKeepAlive(texture)),
+                        alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
                     ));
                     let mut out_frame = Frame::new(domain, frame.timing, frame.sequence);
                     // Carry the analytics forward so a downstream stage still sees

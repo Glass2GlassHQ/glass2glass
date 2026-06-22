@@ -448,7 +448,7 @@ mod tests {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 w,
                 h,
-                Box::new(WgpuTextureKeepAlive(texture)),
+                alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
             )),
             FrameTiming::default(),
             0,

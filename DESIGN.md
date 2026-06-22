@@ -86,7 +86,7 @@ property for mid-stream format changes (§4.13.4).
 See §4.4 for the definition of `FrameTiming` and the pipeline clock model.
 
 ### 3.2 Memory Domains
-`g2g` treats system RAM as a fallback. Buffers track hardware descriptors to allow cross-process and cross-hardware zero-copy manipulation. Every hardware handle is owned: dropping the `MemoryDomain` releases the underlying file descriptor or GPU allocation.
+`g2g` treats system RAM as a fallback. Buffers track hardware descriptors to allow cross-process and cross-hardware zero-copy manipulation. Every hardware handle is reference-counted (an `Arc`-held keep-alive owner, or an `Arc`-shared fd for DMABUF): the underlying file descriptor or GPU allocation is released on the *last* drop. `MemoryDomain::share()` (M213) produces a second handle for a fan-out branch, a zero-copy refcount bump for the GPU domains and the shared-CPU `SystemView`, a deep copy only for owned-CPU `System` bytes. So a tee broadcasts a GPU-resident frame to several consumers (decode-on-GPU -> {inference, display}) with no device-to-host copy; branches treat the shared memory as read-only (a mutating branch copies first, as the per-frame metadata does copy-on-write).
 
 ```rust
 pub enum MemoryDomain {
