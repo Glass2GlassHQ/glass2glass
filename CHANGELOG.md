@@ -97,9 +97,23 @@ to a documented contract.
   (RGBA / any geometry on both pads) for `gst-inspect` + autoplug. Verified
   (`m198_registry`, default build): the line parses, an unknown property and a
   bad bool value are both rejected (proving properties route to the element).
-- Deferred (step 4 remainder): the native `g2g` FrameIO read/write helpers + an
-  opaque-blob header registry (embedding-style float32 side-data); `PySource` /
-  `PyAggregator`; GPU zero-copy (DLPack / `__cuda_array_interface__`).
+- **Step 4b (done): `PyAggregator`, batched Python elements.** A
+  `MultiInputElement` (N-in/1-out) built on the M199 `InputAggregator`: it
+  collects one frame per contributing input, runs one Python batch call
+  (`g2g_process_batch(buffers, w, h, fmt, meta)` with a list of writable
+  buffer-protocol views), and emits a single anchor frame carrying the
+  aggregate `AnalyticsMeta` (the `BaseAggregator` multi-pad batched-inference
+  shape). The worker was generalized to a frame batch (`Job.frames` + `batch`
+  flag; transform = batch of 1, unchanged contract). Because N-in/1-out only
+  emits one frame, per-stream results need a future demux; v1 assumes a shared
+  input geometry. Constructed programmatically (`MultiInputElement` has no
+  property surface, so no launch-registry `pyaggregator` yet). Verified live
+  (`m198_aggregator`, analytics): two inputs (byte 10, 20) batch into one anchor
+  (byte 30) with a detection labeled with the batch size.
+- Deferred (step 4 remainder): native `g2g` FrameIO read/write helpers + an
+  opaque-blob header registry (embedding-style float32 side-data); `PySource`;
+  GPU zero-copy (DLPack / `__cuda_array_interface__`); a property surface on
+  `MultiInputElement` so `pyaggregator` can be a launch element too.
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

@@ -88,13 +88,20 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   (RGBA / any geometry). `... ! pyelement module=... class=... draw-label=... !
   ...` parses, with properties applied via M104; `configure_pipeline` errors on
   empty module/class. Verified `m198_registry`.
+- **Step 4b (done): `PyAggregator`.** `MultiInputElement` on the M199
+  `InputAggregator`: collects one frame per contributing input, one Python
+  `g2g_process_batch(buffers, w, h, fmt, meta)` call, emits the anchor frame with
+  aggregate `AnalyticsMeta`. The worker was generalized to a frame batch
+  (transform = batch of 1). N-in/1-out emits one frame, so per-stream results
+  need a demux; v1 assumes shared input geometry. Verified `m198_aggregator`.
 - **Step 4 remainder: breadth.** Native `g2g` FrameIO read/write helpers + an
   opaque-blob header registry (serialized side-data like the embedding float32
-  blobs); `PyAggregator` (the `BaseAggregator` batching shape -> muxer /
-  `g2g-enterprise`) and `PySource` (the `SourceLoop` variant: a Python source
-  producing frames); GPU zero-copy (DLPack / `__cuda_array_interface__`) so
-  torch/onnx consume device memory without the download tax (needs a GPU host +
-  free-threaded-capable torch to verify).
+  blobs); `PySource` (the `SourceLoop` variant: a Python source producing
+  frames); a property surface on `MultiInputElement` (none today) so
+  `pyaggregator` can be a `gst-launch` element like `pyelement`; GPU zero-copy
+  (DLPack / `__cuda_array_interface__`) so torch/onnx consume device memory
+  without the download tax (needs a GPU host + free-threaded-capable torch to
+  verify).
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 

@@ -52,14 +52,19 @@ static INIT: Once = Once::new();
 
 /// A frame plus its negotiated geometry, sent to the worker thread.
 struct Job {
-    frame: Frame,
+    /// One frame for a transform; one per contributing input for an aggregator
+    /// batch. Frame 0 is the anchor that carries any aggregate metadata.
+    frames: Vec<Frame>,
     width: u32,
     height: u32,
     fmt: RawVideoFormat,
+    /// `false` calls `g2g_process(buf, ...)` (single); `true` calls
+    /// `g2g_process_batch([buf, ...], ...)`.
+    batch: bool,
 }
 
-/// Worker -> element reply: the (possibly mutated) frame, or an error.
-type Reply = Result<Frame, G2gError>;
+/// Worker -> element reply: the (possibly mutated) frames, or an error.
+type Reply = Result<Vec<Frame>, G2gError>;
 
 /// Zero-copy writable view over a frame's System-memory bytes, handed to the
 /// hosted element through the Python buffer protocol. Holds a raw pointer into
@@ -223,10 +228,27 @@ impl PyWorker {
     /// the worker's `try_send`, freeing the executor thread meanwhile.
     pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Frame, G2gError> {
         let (width, height, fmt) = raw_video_dims(caps)?;
+        let mut out = self.dispatch(Job { frames: vec![frame], width, height, fmt, batch: false }).await?;
+        out.pop().ok_or(G2gError::Shutdown)
+    }
+
+    /// Hand a batch (one frame per contributing input) to the worker and await
+    /// the frames back. Frame 0 is the anchor; it carries any metadata the
+    /// batch produced. Used by `PyAggregator`.
+    pub(crate) async fn run_batch(
+        &self,
+        frames: Vec<Frame>,
+        caps: &Caps,
+    ) -> Result<Vec<Frame>, G2gError> {
+        let (width, height, fmt) = raw_video_dims(caps)?;
+        self.dispatch(Job { frames, width, height, fmt, batch: true }).await
+    }
+
+    async fn dispatch(&self, job: Job) -> Result<Vec<Frame>, G2gError> {
         self.job_tx
             .as_ref()
             .ok_or(G2gError::Shutdown)?
-            .send(Job { frame, width, height, fmt })
+            .send(job)
             .map_err(|_| G2gError::Shutdown)?;
         self.result_rx.recv().await.unwrap_or(Err(G2gError::Shutdown))
     }
@@ -265,7 +287,7 @@ fn worker_main(
     };
 
     while let Ok(job) = jobs.recv() {
-        let reply = Python::attach(|py| process_frame(py, &instance, job));
+        let reply = Python::attach(|py| process_job(py, &instance, job));
         // Capacity-1, and the element awaits each reply before sending the next
         // job, so this never blocks; an error means the element (receiver) is
         // gone, so stop.
@@ -294,19 +316,21 @@ fn instantiate(
     .map_err(|e| py_fail(py, e))
 }
 
-/// Run one frame through the hosted element. Python reads / overwrites the
-/// frame's System memory in place via the buffer protocol; the same frame flows
-/// back, timing and sequence preserved.
-fn process_frame(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
-    let (ptr, len) = {
-        let MemoryDomain::System(slice) = &mut job.frame.domain else {
-            // GPU / DMABUF domains need the download (step 4) before Python
-            // sees them; the host requires System memory.
+/// Run a job (one frame for a transform, a batch for an aggregator) through the
+/// hosted element. Python reads / overwrites each frame's System memory in place
+/// via the buffer protocol; the frames flow back, timing and sequence preserved.
+fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
+    // Gather a raw pointer into every frame's System slice first, so the `&mut`
+    // borrows end before the frames are moved into the reply. System memory
+    // only; GPU / DMABUF domains need the download (step 4) before Python.
+    let mut spans = Vec::with_capacity(job.frames.len());
+    for frame in &mut job.frames {
+        let MemoryDomain::System(slice) = &mut frame.domain else {
             return Err(G2gError::UnsupportedDomain);
         };
         let bytes = slice.as_mut_slice();
-        (bytes.as_mut_ptr(), bytes.len())
-    };
+        spans.push((bytes.as_mut_ptr(), bytes.len()));
+    }
 
     let sink = match Py::new(py, MetaSink::default()) {
         Ok(s) => s,
@@ -314,22 +338,32 @@ fn process_frame(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     };
 
     let result = (|| -> PyResult<()> {
-        let buffer = Py::new(py, FrameBuffer { ptr, len })?;
-        instance.bind(py).call_method1(
-            "g2g_process",
-            (buffer, job.width, job.height, format_to_py(job.fmt), sink.clone_ref(py)),
-        )?;
+        let buffers: Vec<Py<FrameBuffer>> = spans
+            .iter()
+            .map(|&(ptr, len)| Py::new(py, FrameBuffer { ptr, len }))
+            .collect::<PyResult<_>>()?;
+        let bound = instance.bind(py);
+        let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
+        if job.batch {
+            let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
+            bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
+        } else {
+            let buffer = buffers.into_iter().next().expect("single job has one frame");
+            bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+        }
         Ok(())
     })();
 
     // Drain the staged analytics regardless (so the field is always read);
-    // materialize into the frame's metadata only under the `analytics` feature.
+    // materialize onto the anchor frame (frame 0) only under `analytics`.
     let staged = core::mem::take(&mut *sink.borrow(py).staged.borrow_mut());
 
     match result {
         Ok(()) => {
-            attach_metadata(&mut job.frame, staged);
-            Ok(job.frame)
+            if let Some(anchor) = job.frames.first_mut() {
+                attach_metadata(anchor, staged);
+            }
+            Ok(job.frames)
         }
         Err(e) => Err(py_fail(py, e)),
     }

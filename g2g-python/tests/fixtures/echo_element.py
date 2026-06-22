@@ -16,3 +16,13 @@ class EchoTransform:
         # Attach an analytics result through the sink (the AnalyticsBackend
         # mirror): label id 7, a box, and a confidence.
         meta.add_object(7, 1.0, 2.0, 3.0, 4.0, 0.9)
+
+    def g2g_process_batch(self, buffers, width, height, fmt, meta):
+        # Stand-in for batched inference: sum the batch's first bytes into the
+        # anchor (buffers[0]), and attach one detection whose label is the
+        # batch size, proving N inputs reached one Python call.
+        total = 0
+        for b in buffers:
+            total = (total + memoryview(b)[0]) % 256
+        memoryview(buffers[0])[0] = total
+        meta.add_object(len(buffers), 0.0, 0.0, 1.0, 1.0, 1.0)

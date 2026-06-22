@@ -33,7 +33,9 @@
 
 pub mod format;
 
+mod aggregator;
 mod element;
+pub use aggregator::PyAggregator;
 pub use element::PyTransform;
 
 /// Register `pyelement` as a `gst-launch` / autoplug factory on `registry`, so
