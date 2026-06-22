@@ -116,6 +116,18 @@ pub trait SourceLoop: ElementBound {
         LatencyReport::ZERO
     }
 
+    /// The total stream duration in nanoseconds, the source's answer to the
+    /// application `DURATION` query (M203). A source that knows the total length
+    /// (a file / container source after reading its header, e.g. `Mp4Src`)
+    /// overrides this; the runner publishes it on the
+    /// [`PipelineProgress`](crate::runtime::PipelineProgress) handle and posts a
+    /// [`DurationChanged`](crate::BusMessage::DurationChanged). The default
+    /// `None` is "unknown" (a live / open-ended source, or one whose length is
+    /// not yet parsed). Polled by the runner just before [`run`](Self::run).
+    fn query_duration(&self) -> Option<u64> {
+        None
+    }
+
     /// Receive the downstream peer's allocation proposal (M12) so the source
     /// can allocate its output `BufferPool` from compatible parameters
     /// (size, count, alignment, domain). Default: ignore and allocate the
@@ -943,7 +955,7 @@ where
     let snk = g.add_sink(GraphNodeRef::element_ref(sink));
     g.link(prev, snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None).await
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.

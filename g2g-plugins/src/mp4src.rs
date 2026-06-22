@@ -118,6 +118,13 @@ impl SourceLoop for Mp4Src {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// The movie duration parsed from `mdhd` (M203), known after the header
+    /// probe at negotiation. `None` for a file whose box reports `0`. The runner
+    /// publishes it on the progress handle and posts `DurationChanged`.
+    fn query_duration(&self) -> Option<u64> {
+        self.header.as_ref().and_then(|h| h.duration_ns)
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {

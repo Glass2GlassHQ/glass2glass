@@ -5,6 +5,34 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M203: application query system (position + duration)
+
+The runtime now answers the two queries every media-player UI needs, the
+GStreamer `POSITION` / `DURATION` analog. g2g pushes forward and composes paths
+statically, so rather than a query object travelling upstream, the runner
+*publishes* into a shared handle the application holds and polls.
+
+- **`runtime::PipelineProgress`** (cloneable `Arc` handle): the app calls
+  `position()` / `duration()` (ns, `Option`); the runner publishes. Inverts the
+  `SeekController` idiom (there the app writes and the source reads; here the
+  runner writes and the app reads).
+- **Position** is published by the DAG runner's sink arm: each consumed buffer's
+  PTS mapped through the active segment to stream time (the sink is the position
+  authority, as in GStreamer). No element changes.
+- **Duration** comes from `SourceLoop::query_duration() -> Option<u64>` (default
+  `None`; dyn-mirrored on `DynSourceLoop`), polled by the source arm before
+  producing. `Mp4Src` implements it from the `mdhd` box (a non-fragmented file
+  reports its length; a fragmented init segment reports `None`). The `Header`
+  gained a `duration_ns`.
+- **`BusMessage::DurationChanged { duration_ns }`** is posted by the source arm
+  when a source first reports a duration, the push-notification of the change.
+- **`run_graph_with_progress`** is the new entry point; `run_graph_with_bus`
+  now also reaches the source arm so it posts `DurationChanged`. Both thread
+  through the shared `run_graph_inner`.
+- Tests: synthetic source -> sink asserts position advances to the last buffer's
+  stream time and duration is reported (`m203_query`); `DurationChanged` posted
+  exactly once; `Mp4Src` reads back a patched `mdhd` duration (`m28_mp4src`).
+
 ### M202: `tracing` bridge for the logging facade
 
 An optional bridge from the M179 logging facade into the `tracing` ecosystem, so

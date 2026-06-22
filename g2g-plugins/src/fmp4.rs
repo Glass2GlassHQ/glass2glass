@@ -20,6 +20,10 @@ pub(crate) struct Header {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) timescale: u32,
+    /// Total track duration in nanoseconds from `mdhd`, or `None` when the box
+    /// reports `0` (a fragmented / live init segment whose length is unknown
+    /// until the fragments arrive). Feeds the M203 `DURATION` query.
+    pub(crate) duration_ns: Option<u64>,
     /// Parameter-set NALUs in container order (SPS,PPS for H.264; VPS,SPS,PPS
     /// for H.265), prepended to the first sample if it carries none in-band.
     pub(crate) param_sets: Vec<Vec<u8>>,
@@ -88,6 +92,12 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
     if timescale == 0 {
         return Err(G2gError::CapsMismatch);
     }
+    // mdhd v0 duration at payload offset 16, in timescale units. `0` means the
+    // length is not yet known (a fragmented init segment), so report `None`.
+    let duration_ns = match be32(mdhd, 16)? {
+        0 => None,
+        units => Some((units as u128 * 1_000_000_000 / timescale as u128) as u64),
+    };
 
     // stsd's first entry is the visual sample entry: avc1/avcC (H.264) or
     // hvc1/hev1 with hvcC (H.265). Its config record carries the parameter sets.
@@ -127,7 +137,7 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
         return Err(G2gError::CapsMismatch);
     };
 
-    Ok(Header { codec, width, height, timescale, param_sets, cenc })
+    Ok(Header { codec, width, height, timescale, duration_ns, param_sets, cenc })
 }
 
 /// Read the `cbcs` defaults out of a `sinf`: the `schm` scheme must be `cbcs`,

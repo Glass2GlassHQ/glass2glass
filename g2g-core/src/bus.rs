@@ -79,6 +79,17 @@ pub enum BusMessage {
     /// demuxer with a tag source (e.g. `oggdemux` parsing VorbisComment) posts
     /// it once the metadata header is parsed.
     Tag(TagList),
+    /// The total stream duration became known or changed (the GStreamer
+    /// `GST_MESSAGE_DURATION_CHANGED` analog, M203). Posted by the runner's
+    /// source arm when a source first reports a duration
+    /// ([`SourceLoop::query_duration`](crate::runtime::SourceLoop::query_duration)),
+    /// so an application can refresh a seek bar's length. The value is also
+    /// readable any time from the [`PipelineProgress`](crate::runtime::PipelineProgress)
+    /// handle; this message is the push notification of the change.
+    DurationChanged {
+        /// The new total duration in nanoseconds.
+        duration_ns: u64,
+    },
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

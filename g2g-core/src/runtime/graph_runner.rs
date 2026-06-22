@@ -48,6 +48,7 @@ use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver,
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::join::{join_all, select2, Either};
+use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
@@ -222,20 +223,37 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, None).await
+    run_graph_inner(graph, clock, link_capacity, None, None, None).await
 }
 
 /// As [`run_graph`], but posts pipeline [`BusMessage`](crate::BusMessage)s to
-/// `bus`: a startup `NegotiationFailed`, and per sink a `Buffering` level report
-/// each time the sink's input link crosses a fill quartile (M87), so the app can
-/// show a buffering indicator or wait for a full buffer.
+/// `bus`: a startup `NegotiationFailed`, per sink a `Buffering` level report
+/// each time the sink's input link crosses a fill quartile (M87), and a
+/// `DurationChanged` when a source first reports its duration (M203), so the app
+/// can show a buffering indicator, wait for a full buffer, or size a seek bar.
 pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: &BusHandle,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, Some(bus), None).await
+    run_graph_inner(graph, clock, link_capacity, Some(bus), None, None).await
+}
+
+/// As [`run_graph`], but publishes playback progress into `progress` (M203): the
+/// sink arm publishes the stream-time [`position`](PipelineProgress::position) of
+/// every buffer it consumes, and the source arm publishes the
+/// [`duration`](PipelineProgress::duration) its source reports
+/// ([`SourceLoop::query_duration`]). The application polls the handle while the
+/// pipeline runs, the `POSITION` / `DURATION` query analog. Pair with
+/// [`run_graph_with_bus`] for the matching `DurationChanged` push notification.
+pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    progress: &PipelineProgress,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(graph, clock, link_capacity, None, None, Some(progress)).await
 }
 
 /// Coarsen a link fill percent into a 0..=4 quartile band, so a sink posts a
@@ -256,7 +274,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     state: &StateController,
 ) -> Result<RunStats, G2gError> {
-    run_graph_inner(graph, clock, link_capacity, None, Some(state.clone())).await
+    run_graph_inner(graph, clock, link_capacity, None, Some(state.clone()), None).await
 }
 
 /// As [`run_graph`], but posts a structured
@@ -270,6 +288,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
     state: Option<StateController>,
+    progress: Option<&PipelineProgress>,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
@@ -644,7 +663,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let out_tx = out_txs.pop().expect("source output edge");
-                Box::pin(source_arm(src, out_tx))
+                Box::pin(source_arm(src, out_tx, bus.cloned(), progress.cloned()))
             }
             NodeKind::Transform => {
                 let Some(GraphNodeRef::Element(elem)) = element else {
@@ -682,6 +701,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     behind_tee(&vg, node),
                     bus.cloned(),
                     state.clone(),
+                    progress.cloned(),
                 ))
             }
             NodeKind::Tee(_) => {
@@ -833,7 +853,21 @@ fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError
 async fn source_arm<'a>(
     mut src: Box<dyn DynSourceLoop + 'a>,
     out_tx: LinkSender,
+    bus: Option<BusHandle>,
+    progress: Option<PipelineProgress>,
 ) -> Result<u64, G2gError> {
+    // M203: publish the source's duration (if it knows one) before producing,
+    // so a `DURATION` query is answerable from the first poll, and push-notify a
+    // change on the bus. Polled once here; a source that discovers its length
+    // mid-stream is a follow-up (it would publish through the handle directly).
+    if let Some(duration_ns) = src.query_duration() {
+        let changed = progress.as_ref().map(|p| p.publish_duration(duration_ns)).unwrap_or(true);
+        if changed {
+            if let Some(b) = &bus {
+                b.try_post(BusMessage::DurationChanged { duration_ns });
+            }
+        }
+    }
     let mut adapter = SenderSink::new(out_tx);
     // M81: open the stream with a SEGMENT ahead of the source's data, so every
     // downstream branch maps timestamps to running time from the first frame.
@@ -959,6 +993,7 @@ async fn transform_arm<'a>(
 /// its declared constraint; on accept it re-derives its own pool and reports the
 /// proposal so the β cascade walks one hop upstream. A re-solve failure surfaces
 /// loud as a reverse reconfigure into the boundary that emitted the change.
+#[allow(clippy::too_many_arguments)]
 async fn sink_arm<'a>(
     mut elem: Box<dyn DynAsyncElement + 'a>,
     in_rx: LinkReceiver,
@@ -967,11 +1002,14 @@ async fn sink_arm<'a>(
     strict: bool,
     bus: Option<BusHandle>,
     state: Option<StateController>,
+    progress: Option<PipelineProgress>,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
     let mut last_buffer_bucket: Option<u8> = None;
+    // M203: the segment in force, so a buffer's PTS maps to stream-time position.
+    let mut current_segment: Option<Segment> = None;
     loop {
         // M78 flow gate: below `Playing` the sink parks here, so it stops
         // draining its edge and backpressure stalls the DAG upstream. Non-live
@@ -1032,6 +1070,24 @@ async fn sink_arm<'a>(
                 }
             }
             Some(packet) => {
+                // M203: follow the segment and publish each buffer's stream-time
+                // position, so an application POSITION poll is answerable. The
+                // sink is the position authority, as in GStreamer (segment + last
+                // buffer). Inspect before `process` moves the packet.
+                match &packet {
+                    PipelinePacket::Segment(seg) => current_segment = Some(*seg),
+                    PipelinePacket::DataFrame(frame) => {
+                        if let Some(p) = &progress {
+                            let pts = frame.timing.pts_ns;
+                            let pos = current_segment
+                                .as_ref()
+                                .and_then(|s| s.to_stream_time(pts))
+                                .unwrap_or(pts);
+                            p.set_position(pos);
+                        }
+                    }
+                    _ => {}
+                }
                 let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
                 if is_buffer {
                     consumed += 1;

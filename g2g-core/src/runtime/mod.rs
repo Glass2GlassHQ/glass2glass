@@ -14,6 +14,7 @@ mod autoplug;
 mod channel;
 mod coordinator;
 mod join;
+mod progress;
 mod runner;
 mod seek;
 pub mod solver;
@@ -40,6 +41,7 @@ pub use runner::{
     RunStats, SourceLoop,
 };
 pub use autoplug::{find_chain, is_raw_audio, is_raw_video, ChainLink, ElementDesc};
+pub use progress::PipelineProgress;
 pub use seek::SeekController;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;
@@ -56,7 +58,8 @@ pub use fanin::{
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    run_graph, run_graph_stateful, run_graph_with_bus, GraphNode, GraphNodeRef,
+    run_graph, run_graph_stateful, run_graph_with_bus, run_graph_with_progress, GraphNode,
+    GraphNodeRef,
 };
 
 #[cfg(feature = "std")]

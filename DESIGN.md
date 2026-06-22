@@ -1109,7 +1109,30 @@ runner assigns each element a `<category>N` instance name before negotiation (th
 addition, and an element that logs about itself (it implements `LogSource` with a
 stored name) carries that name in its lines. Pulls no external logging crate, so
 it holds on the `no_std` baseline; the sink is the RTOS plug-in point (UART /
-RTT).
+RTT). The `tracing` feature (M202) adds a `LogSink` that forwards records to the
+`tracing` crate (the `g2g` target, `category` / `instance` as fields), so a host
+on `tracing-subscriber` / OTLP / tokio-console receives g2g's logs in its
+existing pipeline; `log::init_tracing()` installs it and defers filtering to the
+subscriber.
+
+**Application queries: position and duration (M203).** A media-player UI needs to
+poll *where* playback is and *how long* the stream is, GStreamer's `POSITION` /
+`DURATION` queries. GStreamer sends a query object upstream along the pads; g2g
+pushes forward and composes paths statically (as with the latency fold, §4.13's
+`LatencyReport`), so instead the runner *publishes* into a shared
+`runtime::PipelineProgress` handle the application holds and polls
+(`position()` / `duration()`, ns). This inverts the `SeekController` idiom: there
+the app writes a pending seek and the source reads it; here the runner writes and
+the app reads. **Position** is published by the DAG runner's sink arm, mapping
+each consumed buffer's PTS through the active segment to stream time (the sink is
+the position authority, exactly as a GStreamer sink answers from its segment plus
+last buffer), so it needs no element cooperation. **Duration** is the source's
+answer: `SourceLoop::query_duration() -> Option<u64>` (default `None`, so a live
+source stays "unknown"), polled by the source arm before producing; `Mp4Src`
+reports it from the `mdhd` box. A first duration also posts
+`BusMessage::DurationChanged` as a push notification. `run_graph_with_progress`
+wires the handle in; the handle is plain atomics behind an `Arc`, so reading it
+from the app thread while the pipeline runs needs no lock.
 
 ### 4.16 Properties, Introspection, and the `gst-launch` DSL
 

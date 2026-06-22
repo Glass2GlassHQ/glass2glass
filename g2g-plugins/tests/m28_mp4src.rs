@@ -491,3 +491,41 @@ async fn encode_mux_demux_decode_full_circle() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// M203: `Mp4Src::query_duration` reads the `mdhd` movie duration. The fragmented
+/// writer leaves it `0` (unknown until fragments), so a recorded file reports
+/// `None`; patching a known `mdhd` duration in is read back as nanoseconds.
+#[tokio::test]
+async fn query_duration_reads_mdhd_duration() {
+    let path = temp_path("duration");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr_au: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xAA]].concat();
+    let p_au = |fill: u8| [&[0, 0, 0, 1][..], &[0x41, fill]].concat();
+    let aus = vec![idr_au, p_au(1), p_au(2)];
+    record(&path, &aus, 64, 48).await;
+
+    // As recorded: fragmented init segment, mdhd duration 0 -> unknown.
+    let mut src0 = Mp4Src::new(&path);
+    let _ = src0.intercept_caps().await.expect("probe");
+    assert_eq!(src0.query_duration(), None, "fragmented file: duration unknown");
+
+    // Patch a known mdhd duration (2 s at the file's own timescale) and read back.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let m = bytes.windows(4).position(|w| w == b"mdhd").expect("mdhd present");
+    let ts_off = m + 4 + 12; // payload starts after the 4cc; timescale at +12
+    let dur_off = m + 4 + 16; // duration at +16 (mdhd v0)
+    let timescale = u32::from_be_bytes(bytes[ts_off..ts_off + 4].try_into().unwrap());
+    let units = timescale * 2; // two seconds
+    bytes[dur_off..dur_off + 4].copy_from_slice(&units.to_be_bytes());
+    let patched = temp_path("duration_patched");
+    std::fs::write(&patched, &bytes).unwrap();
+
+    let mut src = Mp4Src::new(&patched);
+    let _ = src.intercept_caps().await.expect("probe patched");
+    assert_eq!(src.query_duration(), Some(2_000_000_000), "2 s read back as ns");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&patched);
+}

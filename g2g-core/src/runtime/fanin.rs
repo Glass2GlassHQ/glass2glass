@@ -61,6 +61,12 @@ pub trait DynSourceLoop: ElementBound {
     /// source's latency contribution like the linear runner does.
     fn latency(&self) -> LatencyReport;
 
+    /// Dyn-safe mirror of [`SourceLoop::query_duration`] (M203), so the DAG
+    /// runner can publish an erased source's duration on the progress handle.
+    fn query_duration(&self) -> Option<u64> {
+        None
+    }
+
     /// Dyn-safe mirror of [`SourceLoop::provide_clock`], for the runner's clock
     /// election.
     fn provide_clock(&self) -> Option<ClockCandidate>;
@@ -142,6 +148,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::latency(self)
     }
 
+    fn query_duration(&self) -> Option<u64> {
+        SourceLoop::query_duration(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         SourceLoop::provide_clock(self)
     }
@@ -205,6 +215,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn query_duration(&self) -> Option<u64> {
+        (**self).query_duration()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -595,5 +609,5 @@ where
     }
     g.link(mux_node.output(), snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None).await
 }
