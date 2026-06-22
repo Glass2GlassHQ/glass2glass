@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M215: GPU-resident tensor output for `WgpuPreprocess`
+
+`WgpuPreprocess` can now keep its output tensor on the GPU instead of reading it
+back to system memory every frame, removing one of the two GPU<->CPU copies that
+bracketed the inference branch (the upload of NV12 in, the tensor read-back out).
+The code's named follow-up to the "system-memory variant".
+
+- **`MemoryDomain::WgpuBuffer(OwnedWgpuBuffer)`** (g2g-core): a GPU-resident
+  linear buffer, the buffer analog of `WgpuTexture`. Owned by a
+  `WgpuBufferKeepAlive` (g2g-core never links wgpu; a consumer downcasts
+  `as_any`), reference-counted so it fans out through a tee zero-copy (M213).
+- **`WgpuPreprocess::with_gpu_output()`**: emits the f32 NCHW tensor as a
+  `WgpuBuffer` instead of `System`. The compute output is copied into a fresh
+  per-frame `wgpu::Buffer` on-device (a GPU->GPU copy), with no map / poll /
+  read-back in the element. A downstream GPU consumer binds the buffer directly;
+  a CPU consumer pays the deferred read-back via `WgpuBufferOwner::read_back`.
+  Per-frame buffer (not the shared `out_buf`) so the next frame's compute can't
+  clobber a buffer still in flight. Default mode (System read-back) unchanged.
+- Test (`wgpu_preprocess`, real RTX 3060): GPU-output mode emits a `WgpuBuffer`
+  (not `System`), and reading it back yields the same values as the system-memory
+  variant (matches the BT.601 CPU reference). Skips with no wgpu adapter.
+- Remaining for a full keep-on-GPU pipeline: a GPU-tensor *consumer* (GPU
+  inference that binds the buffer), and CUDA<->wgpu interop to join the NVDEC
+  decode side. This is the producer half.
+
 ### M214: zero-copy GPU fan-out validated on a real GPU
 
 Real-hardware proof of M213: the canonical keep-on-GPU graph

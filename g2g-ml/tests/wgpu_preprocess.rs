@@ -13,7 +13,7 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
-use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuPreprocess};
+use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess};
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
     Caps::RawVideo {
@@ -142,4 +142,60 @@ async fn gpu_nv12_to_rgb_tensor_matches_cpu_reference() {
     assert_eq!(frames[0].timing.pts_ns, 4242);
     assert_eq!(frames[1].timing.pts_ns, 9001);
     assert_eq!(element.emitted(), 2);
+}
+
+/// M215: in GPU-output mode the tensor stays GPU-resident
+/// (`MemoryDomain::WgpuBuffer`, no read-back in the element), and reading it back
+/// off-element yields the same values as the system-memory variant.
+#[tokio::test]
+async fn gpu_output_keeps_tensor_on_device_and_matches_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let (w, h) = (4usize, 2usize);
+    let y_plane = [16u8, 81, 145, 235, 41, 100, 200, 128];
+    let uv_plane = [128u8, 128, 90, 200];
+    let nv12: Vec<u8> = y_plane.iter().chain(&uv_plane).copied().collect();
+
+    let mut element = WgpuPreprocess::new().with_gpu_output();
+    element.configure_pipeline(&nv12_caps(w as u32, h as u32)).expect("configure NV12");
+
+    let mut out = Collect::default();
+    element
+        .process(PipelinePacket::DataFrame(nv12_frame(nv12.clone(), 4242, 7)), &mut out)
+        .await
+        .expect("gpu-output preprocess");
+
+    let frame = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a tensor frame");
+
+    // The tensor is GPU-resident: NOT a System read-back.
+    let MemoryDomain::WgpuBuffer(owned) = &frame.domain else {
+        panic!("gpu-output mode must emit MemoryDomain::WgpuBuffer, got {:?}", frame.domain.kind());
+    };
+    assert_eq!(owned.len, 3 * w * h * 4, "buffer holds the f32 NCHW tensor");
+
+    // Recover the owner and read the buffer back: the deferred GPU->CPU copy a
+    // CPU consumer pays, which the element no longer pays per frame.
+    let owner = owned
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuBufferOwner>()
+        .expect("recover the wgpu buffer owner");
+    let bytes = owner.read_back().expect("read tensor back");
+    let got: Vec<f32> =
+        bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+
+    let expected = nv12_to_rgb_tensor(&nv12, w, h);
+    assert_eq!(got.len(), 3 * w * h, "NCHW RGB tensor length");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-3, "element {i}: gpu-resident {g} vs cpu reference {e}");
+    }
 }

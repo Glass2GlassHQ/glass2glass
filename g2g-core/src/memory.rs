@@ -47,6 +47,14 @@ pub enum MemoryDomain {
     /// links wgpu recovers it via [`WgpuKeepAlive::as_any`]. See
     /// [`OwnedWgpuTexture`].
     WgpuTexture(OwnedWgpuTexture),
+    /// A GPU-resident tensor (or other linear data) in a native wgpu storage
+    /// buffer (M215). The buffer analog of [`WgpuTexture`](Self::WgpuTexture): a
+    /// GPU element (eg `WgpuPreprocess` in GPU-output mode) leaves a compute
+    /// shader's output in a `wgpu::Buffer` rather than reading it back to the
+    /// CPU, so a downstream GPU consumer reads it with no GPU->CPU copy. Owned by
+    /// a [`WgpuBufferKeepAlive`] (g2g-core never links wgpu); a consumer recovers
+    /// it via [`WgpuBufferKeepAlive::as_any`]. See [`OwnedWgpuBuffer`].
+    WgpuBuffer(OwnedWgpuBuffer),
 }
 
 /// The memory domain of a [`MemoryDomain`] without its payload. Used by the
@@ -64,6 +72,7 @@ pub enum MemoryDomainKind {
     D3D11Texture,
     WebGPUExternalTexture,
     WgpuTexture,
+    WgpuBuffer,
 }
 
 impl MemoryDomain {
@@ -79,6 +88,7 @@ impl MemoryDomain {
             MemoryDomain::D3D11Texture(_) => MemoryDomainKind::D3D11Texture,
             MemoryDomain::WebGPUExternalTexture(_) => MemoryDomainKind::WebGPUExternalTexture,
             MemoryDomain::WgpuTexture(_) => MemoryDomainKind::WgpuTexture,
+            MemoryDomain::WgpuBuffer(_) => MemoryDomainKind::WgpuBuffer,
         }
     }
 
@@ -110,6 +120,7 @@ impl MemoryDomain {
                 MemoryDomain::WebGPUExternalTexture(t.clone())
             }
             MemoryDomain::WgpuTexture(t) => MemoryDomain::WgpuTexture(t.clone()),
+            MemoryDomain::WgpuBuffer(b) => MemoryDomain::WgpuBuffer(b.clone()),
         }
     }
 }
@@ -518,6 +529,49 @@ impl OwnedWgpuTexture {
 /// crosses the multi-thread runner's worker boundaries like every other domain.
 pub trait WgpuKeepAlive: core::fmt::Debug + Send + Sync {
     /// Recover the concrete owner so a consumer can extract the `wgpu::Texture`.
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
+/// A GPU-resident linear buffer (the payload of [`MemoryDomain::WgpuBuffer`],
+/// M215): a `wgpu::Buffer` holding a tensor or other linear data a compute
+/// shader produced. Carries the valid payload length in bytes; the
+/// `wgpu::Buffer` itself lives inside the [`WgpuBufferKeepAlive`] owner because
+/// `g2g-core` never links wgpu. The buffer analog of [`OwnedWgpuTexture`].
+/// `Clone` is a zero-copy refcount bump (M213).
+#[derive(Debug, Clone)]
+pub struct OwnedWgpuBuffer {
+    /// Valid payload length in bytes (the buffer may be padded larger).
+    pub len: usize,
+    /// Owns the backing `wgpu::Buffer` (and the device needed to read it) for as
+    /// long as the frame is referenced; reference-counted so a tee branch shares
+    /// it rather than copying.
+    keep_alive: Arc<dyn WgpuBufferKeepAlive>,
+}
+
+impl OwnedWgpuBuffer {
+    /// Wrap a GPU buffer's payload length with the owner that keeps the backing
+    /// `wgpu::Buffer` alive. `Arc`-held so the frame is shareable (M213).
+    pub fn new(len: usize, keep_alive: Arc<dyn WgpuBufferKeepAlive>) -> Self {
+        Self { len, keep_alive }
+    }
+
+    /// The keep-alive owner, for a consumer that links wgpu to downcast via
+    /// [`WgpuBufferKeepAlive::as_any`] and recover the `wgpu::Buffer` for further
+    /// GPU work, or to read it back to the CPU.
+    pub fn keep_alive(&self) -> &dyn WgpuBufferKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedWgpuBuffer`]. Owns the backing
+/// `wgpu::Buffer` (and typically the device needed to map it); the producing
+/// element boxes its handle as this trait object and a consumer that links wgpu
+/// downcasts via [`as_any`](Self::as_any) to recover the buffer for further GPU
+/// work or a read-back. Dropping the last reference releases the buffer.
+/// `Send + Sync` because `wgpu::Buffer` is, so the frame crosses the multi-thread
+/// runner's worker boundaries and fans out through a tee like every other domain.
+pub trait WgpuBufferKeepAlive: core::fmt::Debug + Send + Sync {
+    /// Recover the concrete owner so a consumer can extract the `wgpu::Buffer`.
     fn as_any(&self) -> &dyn core::any::Any;
 }
 

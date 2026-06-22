@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, TensorDType, TensorLayout,
-    TensorShape,
+    MemoryDomain, OutputSink, OwnedWgpuBuffer, PipelinePacket, Rate, RawVideoFormat, TensorDType,
+    TensorLayout, TensorShape, WgpuBufferKeepAlive,
 };
 
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
@@ -124,6 +124,10 @@ pub struct WgpuPreprocess {
     gpu: Option<Gpu>,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
+    /// (no GPU->CPU read-back) instead of `MemoryDomain::System` (M215). Lets a
+    /// downstream GPU consumer read the tensor on-device.
+    gpu_output: bool,
 }
 
 impl Default for WgpuPreprocess {
@@ -141,7 +145,18 @@ impl WgpuPreprocess {
             gpu: None,
             last_caps: None,
             emitted: 0,
+            gpu_output: false,
         }
+    }
+
+    /// Emit the tensor GPU-resident (`MemoryDomain::WgpuBuffer`) rather than
+    /// reading it back to system memory (M215): the compute output stays in a
+    /// `wgpu::Buffer`, so a downstream GPU consumer reads it with no
+    /// GPU->CPU copy. A CPU consumer recovers the bytes via the buffer owner's
+    /// `read_back`. Default off (the system-memory variant).
+    pub fn with_gpu_output(mut self) -> Self {
+        self.gpu_output = true;
+        self
     }
 
     /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
@@ -223,6 +238,114 @@ impl WgpuPreprocess {
         gpu.staging.unmap();
         Ok(bytes)
     }
+
+    /// GPU-output variant of [`dispatch`](Self::dispatch) (M215): run the same
+    /// compute, then copy the result into a fresh per-frame `wgpu::Buffer` (a
+    /// GPU->GPU copy, on-device) and hand it downstream, with NO map / poll /
+    /// read-back. The fresh buffer is `STORAGE | COPY_SRC` so a downstream GPU
+    /// consumer can bind it, or read it back via the owner. A per-frame buffer
+    /// (not the shared `out_buf`) so the next frame's compute does not clobber a
+    /// buffer still in flight downstream.
+    fn dispatch_gpu(&self, nv12: &[u8]) -> Result<OwnedWgpuBuffer, G2gError> {
+        let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
+        if nv12.len() < gpu.nv12_len {
+            return Err(G2gError::CapsMismatch);
+        }
+        let mut padded = vec![0u8; gpu.nv12_padded];
+        padded[..gpu.nv12_len].copy_from_slice(&nv12[..gpu.nv12_len]);
+        gpu.queue.write_buffer(&gpu.nv12_buf, 0, &padded);
+
+        let frame_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preprocess-tensor"),
+            size: gpu.out_bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("nv12->rgb"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_bind_group(0, &gpu.bind_group, &[]);
+            let gx = self.width.div_ceil(WORKGROUP);
+            let gy = self.height.div_ceil(WORKGROUP);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+        // On-device copy into the per-frame buffer; no read-back to the CPU.
+        encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &frame_buf, 0, gpu.out_bytes as u64);
+        gpu.queue.submit([encoder.finish()]);
+
+        let owner = WgpuBufferOwner {
+            device: gpu.device.clone(),
+            queue: gpu.queue.clone(),
+            buffer: frame_buf,
+            len: gpu.out_bytes,
+        };
+        Ok(OwnedWgpuBuffer::new(gpu.out_bytes, std::sync::Arc::new(owner)))
+    }
+}
+
+/// Owns a GPU-resident tensor buffer produced by [`WgpuPreprocess`] in GPU-output
+/// mode (M215): the `wgpu::Buffer` holding the f32 NCHW tensor, plus the device /
+/// queue needed to read it back. Boxed as the [`WgpuBufferKeepAlive`] of a
+/// [`MemoryDomain::WgpuBuffer`]; a downstream GPU consumer downcasts to bind the
+/// buffer directly, or calls [`read_back`](Self::read_back) for the CPU bytes.
+#[derive(Debug)]
+pub struct WgpuBufferOwner {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    buffer: wgpu::Buffer,
+    len: usize,
+}
+
+impl WgpuBufferOwner {
+    /// The backing GPU buffer, for a downstream GPU consumer to bind directly.
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Copy the tensor back to the CPU (the deferred read-back a CPU consumer
+    /// pays, instead of the element paying it for every frame): copy into a
+    /// `MAP_READ` staging buffer, map, and return the little-endian f32 bytes.
+    pub fn read_back(&self) -> Result<Vec<u8>, G2gError> {
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preprocess-readback"),
+            size: self.len as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder =
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, self.len as u64);
+        self.queue.submit([encoder.finish()]);
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        rx.recv()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let bytes = slice.get_mapped_range().to_vec();
+        staging.unmap();
+        Ok(bytes)
+    }
+}
+
+impl WgpuBufferKeepAlive for WgpuBufferOwner {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 impl AsyncElement for WgpuPreprocess {
@@ -285,14 +408,20 @@ impl AsyncElement for WgpuPreprocess {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.ensure_gpu().await?;
-                    let bytes = self.dispatch(slice.as_slice())?;
+                    // GPU-output mode keeps the tensor on the device (M215);
+                    // otherwise read it back to system memory as before.
+                    let domain = if self.gpu_output {
+                        MemoryDomain::WgpuBuffer(self.dispatch_gpu(slice.as_slice())?)
+                    } else {
+                        MemoryDomain::System(SystemSlice::from_boxed(self.dispatch(slice.as_slice())?))
+                    };
                     let new_caps = self.tensor_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                         self.last_caps = Some(new_caps);
                     }
                     let tensor = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
+                        domain,
                         // preprocessing is per-frame: the tensor inherits the
                         // source timing so glass-to-glass latency stays traceable.
                         timing: frame.timing,
