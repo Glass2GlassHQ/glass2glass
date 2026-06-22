@@ -12,6 +12,18 @@
 
 extern crate alloc;
 
+/// The ABI compatibility tag for dynamically loaded (`dlopen`ed) plugins.
+///
+/// Rust has no stable ABI, so a third-party `.so` built against this crate and
+/// the host that loads it must share the same `g2g-core` version, the same
+/// `rustc`, and the same layout-affecting features (`metadata` resizes
+/// [`Frame`], `multi-thread` changes the `Send` bound on the element trait
+/// objects). This string folds all three together; the plugin loader compares
+/// the plugin's embedded copy against the host's and refuses a mismatch rather
+/// than risk undefined behavior. Computed by `build.rs`. See `g2g-plugin`
+/// (`declare_plugin!`) and `g2g_plugins::plugin_loader`.
+pub const ABI_VERSION: &str = env!("G2G_ABI_VERSION");
+
 pub mod aggregator;
 pub mod caps;
 pub mod format_element;

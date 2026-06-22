@@ -22,7 +22,7 @@ GStreamer to **g2g**. It assumes familiarity with GStreamer (`gst-launch-1.0`,
 | Pads / caps | `GstPad`, `GstCaps` strings | typed `Caps` enum + `intercept_caps`/negotiation |
 | Pipeline object | `GstPipeline` | `Graph` + `run_graph` |
 | Bus | `GstBus` messages | `Bus` / `BusMessage` |
-| Plugins | scanned `.so` from a plugin path | Rust crates that call `Registry::register_*` (build time) |
+| Plugins | scanned `.so` from a plugin path | Rust crates that call `Registry::register_*` (build time), or dynamic `.so` via `declare_plugin!` + `--plugin` / `$G2G_PLUGIN_PATH` (§7c) |
 | Threading | streaming threads per element | cooperative async tasks on one runner |
 
 The runtime core (`g2g-core`) is `no_std + alloc`; OS-coupled elements live
@@ -205,16 +205,43 @@ module on the path and reference it by name —
 `pyaggregator`). This is the gst-python analog and needs no Rust build. It
 requires a g2g built with the `python` feature.
 
-### c) Native Rust plugins in a packaged binary — not yet (designed)
+### c) Native Rust plugins in a packaged binary (dynamic `.so`, M201)
 
-Loading third-party **native** elements into a packaged binary needs a dynamic
-plugin ABI (`dlopen` a `cdylib` exporting a `g2g_plugin_register` entry point,
-discovered via a `G2G_PLUGIN_PATH`). g2g does not have this yet; Rust's unstable
-ABI makes it non-trivial (a C-ABI shim, or version/toolchain-locked plugins, or
-a stable-ABI crate). Until it lands, native third-party elements use regime (a)
-— including the **package-rebuild** path, where a distro/vendor compiles extra
-element crates into the g2g binary it ships (like building GStreamer with extra
-plugins). Tracked in `DESIGN_TODO.md` ("Dynamic plugin loading").
+Build a plugin with plain `cargo` against the published `g2g-core` + `g2g-plugin`
+(the `g2g-devel` equivalent), drop the resulting `.so` where the installed
+`g2g-launch` scans, no recompile of g2g:
+
+```toml
+# my-plugin/Cargo.toml
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+g2g-core   = "0.x"   # element traits
+g2g-plugin = "0.x"   # the declare_plugin! macro
+```
+```rust
+// my-plugin/src/lib.rs: implement AsyncElement + PadTemplates for MyFilter, then:
+g2g_plugin::declare_plugin! {
+    elements: [ ("myfilter", MyFilter, || Box::new(MyFilter::default())) ]
+}
+```
+
+`cargo build --release` produces `libmy_plugin.so`. A `g2g-launch` built with the
+`plugin-loader` feature loads it via `--plugin <path>` (repeatable) or by
+directory from `$G2G_PLUGIN_PATH` (`:`-separated), then resolves the element by
+name: `g2g-launch --plugin libmy_plugin.so ... ! myfilter ! ...`. `g2g-inspect`
+loads plugins the same way so their elements list. A complete, buildable example
+is `g2g-plugins/tests/fixtures/example-plugin`.
+
+**ABI lock.** Rust has no stable ABI, so a plugin and the host must share the
+same `g2g-core` version, the same `rustc`, and the same layout-affecting features
+(`metadata`, `multi-thread`). The plugin embeds an ABI tag
+(`g2g_core::ABI_VERSION`) that folds all three together; the loader compares it
+and refuses a mismatch with a clear error rather than risk UB. (A future
+`abi_stable` facade would relax the same-toolchain requirement; a C-ABI shim was
+rejected as it loses the ergonomic Rust trait.) Regime (a) — including the
+**package-rebuild** path, where a vendor compiles extra element crates into the
+g2g binary it ships — remains available and needs no ABI match.
 
 ---
 
@@ -222,7 +249,9 @@ plugins). Tracked in `DESIGN_TODO.md` ("Dynamic plugin loading").
 
 - No quoted property values with spaces in the launch DSL (v1).
 - No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
-- No native dynamic-plugin loading (§7c) — use a library build or the Python host.
+- Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
+  and host must share the same `g2g-core` version, `rustc`, and layout features.
+  Cross-toolchain binary plugins (an `abi_stable` facade) are future work.
 - `g2g-bridge` (embed a g2g sub-graph inside a GStreamer pipeline for incremental
   migration) is designed but not implemented (DESIGN.md §7).
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.

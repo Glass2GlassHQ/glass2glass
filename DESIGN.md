@@ -1156,6 +1156,37 @@ the last (M104-M106):
   broadcasting to every branch; roles follow connectivity. Text muxer fan-in is
   the remaining `gst-launch` gap.
 
+**Dynamic plugin loading (M201).** Beyond build-time registration (a crate that
+calls `Registry::register_*`, the primary extension path), a third party can ship
+a native element as a dynamically loaded `.so`, the analog of GStreamer's scanned
+plugin path. They build a `cdylib` against the published `g2g-core` plus the
+`g2g-plugin` SDK and use its `declare_plugin! { elements: [ (name, Type, build) ] }`
+macro, which emits two C-ABI entry points: `g2g_plugin_abi` (returns the ABI tag)
+and `g2g_plugin_register(&mut Registry)` (registers the elements, body in
+`catch_unwind` because unwinding across `extern "C"` is UB). A host built with the
+`plugin-loader` feature (`g2g_plugins::plugin_loader`, over `libloading`)
+`dlopen`s the object, reads its tag, and registers it only on an exact match;
+`g2g-launch` / `g2g-inspect` expose this via `--plugin <path>` and
+`$G2G_PLUGIN_PATH`.
+
+The hard constraint is that Rust has no stable ABI, so a plugin and host must
+share the same `g2g-core` version, the same `rustc`, and the same
+layout-affecting features. Two features change in-memory layout across the
+boundary: `metadata` resizes `Frame` (the `FrameMetaSet` side-channel) and
+`multi-thread` changes the `Send` bound on the boxed element trait objects.
+`g2g_core::ABI_VERSION` (a `build.rs`-computed string folding version + `rustc` +
+those features) is embedded in each plugin and checked by the loader, which
+refuses a mismatch with a clear `AbiMismatch` error rather than risk passing a
+differently-laid-out `Frame` or trait object across the boundary (undefined
+behavior). Each loaded `libloading::Library` is held for the life of the process:
+the registered factories are `fn` pointers into its mapped code, so dropping it
+would be a use-after-free with no back-pointer to catch it. This version+toolchain
+lock is the v1 design; an `abi_stable`/`stabby` facade over the element traits is
+the later upgrade for cross-toolchain binary plugins, and a pure C-ABI shim was
+rejected (it loses the ergonomic Rust trait). The whole path is exercised
+out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
+`tests/plugin_loader_dlopen.rs`.
+
 ### 4.17 Containers and Byte Streams
 
 A container demuxer splits one stored / transported byte stream into the typed

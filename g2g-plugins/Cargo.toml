@@ -12,6 +12,12 @@ repository.workspace = true
 default = []
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
+# Dynamic plugin loader (M201): `dlopen`s third-party `cdylib` plugins built
+# with the `g2g-plugin` SDK and registers their elements into a `Registry`.
+# Pulls `libloading`; implies std (the Registry is std-only). A packaged
+# `g2g-launch` / `g2g-inspect` is built with this so `--plugin` / $G2G_PLUGIN_PATH
+# extend it without a rebuild.
+plugin-loader = ["std", "dep:libloading"]
 # RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
 rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
@@ -210,6 +216,10 @@ mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
+# Dynamic plugin loader (plugin-loader feature): cross-platform `dlopen`/`dlsym`
+# over the loaded `cdylib`. The host keeps each `Library` alive for the process
+# lifetime (dropping it unmaps the code the registered elements run from).
+libloading = { version = "0.8", optional = true }
 # Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
 # encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
@@ -371,6 +381,12 @@ required-features = ["std"]
 [[example]]
 name = "third_party_element"
 required-features = ["std"]
+
+# M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
+# loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
+[[test]]
+name = "plugin_loader_dlopen"
+required-features = ["plugin-loader"]
 
 [lints]
 workspace = true

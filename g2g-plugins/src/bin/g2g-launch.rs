@@ -14,9 +14,16 @@
 //! Options (the common `gst-launch-1.0` set):
 //!   -v, --verbose       print the parsed pipeline (elements + link policies)
 //!   -q, --quiet         suppress the PLAYING / Done progress lines
+//!   --plugin <path>     load a third-party plugin `.so` before parsing
+//!                       (repeatable; needs the `plugin-loader` build feature)
 //!   -h, --help          print this help and exit
 //!   -e, --eos-on-shutdown, -m, --messages, -f, --no-fault, -t, --tags
 //!                       accepted for compatibility (see notes below)
+//!
+//! Dynamic plugins: with the `plugin-loader` feature, every directory in
+//! `$G2G_PLUGIN_PATH` plus each `--plugin <path>` is `dlopen`ed and its elements
+//! registered before the pipeline parses, so a packaged binary extends without a
+//! rebuild (M201). The plugin's ABI tag must match this build's.
 //!
 //! Compatibility notes: g2g sources run to their natural EOS (e.g.
 //! `num-buffers`) or until the process is killed; there is no run-time
@@ -34,7 +41,7 @@ use g2g_plugins::registry::default_registry;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
@@ -43,6 +50,8 @@ struct Opts {
     verbose: bool,
     quiet: bool,
     help: bool,
+    /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
+    plugins: Vec<String>,
 }
 
 /// Split leading `gst-launch`-style flags off the front of the args, returning
@@ -55,16 +64,26 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
     let mut opts = Opts::default();
     let mut rest: Vec<String> = Vec::new();
     let mut in_pipeline = false;
-    for arg in args {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
         if in_pipeline || !arg.starts_with('-') || arg == "-" {
             in_pipeline = true;
             rest.push(arg);
+            continue;
+        }
+        // `--plugin <path>` and `--plugin=<path>` both supply a value.
+        if let Some(path) = arg.strip_prefix("--plugin=") {
+            opts.plugins.push(path.to_string());
             continue;
         }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
             "-h" | "--help" => opts.help = true,
+            "--plugin" => match args.next() {
+                Some(path) => opts.plugins.push(path),
+                None => eprintln!("g2g-launch: --plugin needs a path argument"),
+            },
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
             // a run-time channel for. Recognized and ignored so the line runs.
@@ -74,6 +93,44 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
         }
     }
     (opts, rest)
+}
+
+/// Load dynamic plugins (`$G2G_PLUGIN_PATH` directories + each `--plugin` path)
+/// into `reg` before parsing, so their elements resolve by name. A load failure
+/// is fatal: a pipeline naming a plugin element would otherwise fail later with
+/// a more confusing "unknown element". Compiled out without `plugin-loader`,
+/// where a `--plugin` request is reported rather than silently ignored.
+#[cfg(feature = "plugin-loader")]
+fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+    use g2g_plugins::plugin_loader;
+    match plugin_loader::load_from_env(reg) {
+        Ok(loaded) => {
+            for p in loaded {
+                eprintln!("g2g-launch: loaded plugin {}", p.display());
+            }
+        }
+        Err(err) => {
+            eprintln!("g2g-launch: {err}");
+            process::exit(1);
+        }
+    }
+    for path in plugins {
+        if let Err(err) = plugin_loader::load_plugin(path, reg) {
+            eprintln!("g2g-launch: {err}");
+            process::exit(1);
+        }
+        eprintln!("g2g-launch: loaded plugin {path}");
+    }
+}
+
+#[cfg(not(feature = "plugin-loader"))]
+fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+    if !plugins.is_empty() || std::env::var_os("G2G_PLUGIN_PATH").is_some() {
+        eprintln!(
+            "g2g-launch: built without the `plugin-loader` feature; \
+             --plugin / $G2G_PLUGIN_PATH ignored"
+        );
+    }
 }
 
 fn main() {
@@ -92,7 +149,8 @@ fn main() {
         process::exit(2);
     }
 
-    let reg = default_registry();
+    let mut reg = default_registry();
+    load_plugins(&mut reg, &opts.plugins);
     let graph = match parse_launch(&reg, &pipeline) {
         Ok(graph) => graph,
         Err(err) => {

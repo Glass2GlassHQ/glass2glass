@@ -2,12 +2,18 @@
 resolver = "2"
 members = [
     "g2g-core",
+    "g2g-plugin",
     "g2g-plugins",
     "g2g-ml",
     "g2g-bridge",
     "g2g-enterprise",
     "g2g-python",
 ]
+# Out-of-tree dynamic-plugin example (M201): built by the plugin_loader_dlopen
+# integration test as a standalone cdylib, exactly as a third party would. Not a
+# workspace member, so it builds against g2g-core/g2g-plugin as path "packages"
+# with its own target dir and feature resolution.
+exclude = ["g2g-plugins/tests/fixtures/example-plugin"]
 
 [workspace.package]
 version = "0.1.0"

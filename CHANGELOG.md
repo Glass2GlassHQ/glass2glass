@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M201: dynamic plugin loading via cargo (`dlopen` a `cdylib`)
+
+A third party can now build a native element with plain `cargo` against the
+published `g2g-core` + `g2g-plugin` (the `g2g-devel` equivalent) and drop the
+resulting `.so` next to a packaged `g2g-launch`, no recompile of g2g. Closes the
+last extension gap (PORTING.md §7c, previously "designed, not built").
+
+- **`g2g-core::ABI_VERSION`** + a `build.rs`: the plugin/host compatibility tag,
+  folding the `g2g-core` version, the `rustc` version, and the layout-affecting
+  features (`metadata` resizes `Frame`; `multi-thread` changes the `Send` bound
+  on the element trait objects). Rust has no stable ABI, so a tag mismatch is a
+  hard refusal, not a warning, to avoid UB across the boundary.
+- **`g2g-plugin`** (new crate): the SDK a plugin author depends on. Its
+  `declare_plugin! { elements: [ (name, Type, build) ] }` macro emits the C-ABI
+  entry points `g2g_plugin_abi` (returns the ABI tag) and `g2g_plugin_register`
+  (adds the elements to the host `Registry`, body wrapped in `catch_unwind` since
+  unwinding across `extern "C"` is UB).
+- **`g2g_plugins::plugin_loader`** (behind the `plugin-loader` feature, pulls
+  `libloading`): `load_plugin` / `load_plugin_dir` / `load_from_env`. Reads the
+  plugin's ABI tag, refuses a mismatch with `PluginError::AbiMismatch` reporting
+  both tags, else registers. Each loaded `Library` is kept resident for the life
+  of the process (the registered factories are `fn` pointers into its code;
+  dropping it would be a use-after-free).
+- **`g2g-launch` / `g2g-inspect`**: `--plugin <path>` (repeatable) and
+  `$G2G_PLUGIN_PATH` (`:`-separated dirs), loaded before parsing / listing so
+  plugin elements resolve by name and show in `gst-inspect`. Cleanly reported as
+  ignored when built without `plugin-loader`.
+- **Out-of-tree example** `g2g-plugins/tests/fixtures/example-plugin` (its own
+  `cdylib` crate) + `tests/plugin_loader_dlopen.rs`: builds it as a third party
+  would, `dlopen`s it, registers, and runs `videotestsrc ! examplefilter !
+  fakesink` through the loaded element. A second test builds it with a mismatched
+  feature set and asserts the loader refuses it. Run:
+  `cargo test -p g2g-plugins --features plugin-loader --test plugin_loader_dlopen`.
+
 ### M200: GStreamer porting story (guide + infra)
 
 A porting guide plus the infra it leans on, to make moving from GStreamer to g2g

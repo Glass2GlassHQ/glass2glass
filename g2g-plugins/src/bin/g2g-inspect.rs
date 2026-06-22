@@ -2,23 +2,76 @@
 //! registry (the same one the text-launch parser uses).
 //!
 //! Usage:
-//!   g2g-inspect              # list every registerable element
-//!   g2g-inspect <element>    # dump one element's role, properties, pad templates
-//!   g2g-inspect --all        # dump every element in full (the index, in detail)
-//!   g2g-inspect --gst <name> # what a GStreamer element name maps to in g2g
+//!   g2g-inspect                  # list every registerable element
+//!   g2g-inspect <element>        # dump one element's role, properties, pads
+//!   g2g-inspect --all            # dump every element in full
+//!   g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
+//!   g2g-inspect --plugin <path>  # load a plugin first, so its elements list
 //!
 //! Backed by [`g2g_plugins::registry::default_registry`] and
 //! [`g2g_core::runtime::Registry::inspect`] (M105/M107). Requires the `std`
-//! feature (the registry is std-only).
+//! feature (the registry is std-only). With the `plugin-loader` feature, plugins
+//! from `$G2G_PLUGIN_PATH` and `--plugin <path>` are loaded first so their
+//! elements appear in the listing and dumps (M201).
 
 use std::process;
 
 use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
 use g2g_plugins::registry::default_registry;
 
+/// Pull every `--plugin <path>` / `--plugin=<path>` out of `raw`, returning the
+/// plugin paths and the remaining arguments (the element name / mode flags).
+fn split_plugin_args(raw: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut plugins = Vec::new();
+    let mut rest = Vec::new();
+    let mut iter = raw.into_iter();
+    while let Some(arg) = iter.next() {
+        if let Some(path) = arg.strip_prefix("--plugin=") {
+            plugins.push(path.to_string());
+        } else if arg == "--plugin" {
+            match iter.next() {
+                Some(path) => plugins.push(path),
+                None => eprintln!("g2g-inspect: --plugin needs a path argument"),
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    (plugins, rest)
+}
+
+/// Load `$G2G_PLUGIN_PATH` + each `--plugin` path into `reg` so plugin elements
+/// are introspectable. Compiled out without `plugin-loader`.
+#[cfg(feature = "plugin-loader")]
+fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+    use g2g_plugins::plugin_loader;
+    if let Err(err) = plugin_loader::load_from_env(reg) {
+        eprintln!("g2g-inspect: {err}");
+        process::exit(1);
+    }
+    for path in plugins {
+        if let Err(err) = plugin_loader::load_plugin(path, reg) {
+            eprintln!("g2g-inspect: {err}");
+            process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(feature = "plugin-loader"))]
+fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+    if !plugins.is_empty() || std::env::var_os("G2G_PLUGIN_PATH").is_some() {
+        eprintln!(
+            "g2g-inspect: built without the `plugin-loader` feature; \
+             --plugin / $G2G_PLUGIN_PATH ignored"
+        );
+    }
+}
+
 fn main() {
-    let reg = default_registry();
-    let mut args = std::env::args().skip(1);
+    let (plugins, rest) = split_plugin_args(std::env::args().skip(1).collect());
+    let mut reg = default_registry();
+    load_plugins(&mut reg, &plugins);
+    let mut args = rest.into_iter();
     match args.next() {
         // No element named: list them all, `name: Long-name` per line, the
         // `gst-inspect` index.

@@ -82,6 +82,11 @@ pub mod registry;
 // (uses the Registry + parse_launch).
 #[cfg(feature = "std")]
 pub mod gst_compat;
+// Dynamic (`dlopen`) plugin loader for third-party `cdylib` plugins built with
+// the `g2g-plugin` SDK (M201). Behind `plugin-loader` (pulls `libloading`); the
+// loaded elements register into a `Registry` the parser then uses by name.
+#[cfg(feature = "plugin-loader")]
+pub mod plugin_loader;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.

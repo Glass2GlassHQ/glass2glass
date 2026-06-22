@@ -2863,6 +2863,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "g2g-plugin"
+version = "0.1.0"
+dependencies = [
+ "g2g-core",
+]
+
+[[package]]
 name = "g2g-plugins"
 version = "0.1.0"
 dependencies = [
@@ -2885,6 +2892,7 @@ dependencies = [
  "jpeg-encoder",
  "js-sys",
  "khronos-egl",
+ "libloading 0.8.9",
  "libpulse-binding",
  "libpulse-simple-binding",
  "pipewire",
