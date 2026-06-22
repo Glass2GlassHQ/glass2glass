@@ -44,21 +44,25 @@ pub use source::PySource;
 /// `registry`, so they are instantiable by name like any built-in:
 /// - `pyelement module=... class=... draw-label=...` — a transform;
 /// - `pysrc module=... class=... format=... width=... height=... framerate=...
-///   num-buffers=...` — a source.
+///   num-buffers=...` — a source;
+/// - `pyaggregator module=... class=... draw-label=...` — an N-in/1-out batching
+///   muxer (its input count comes from link degree).
 ///
 /// The parser default-constructs each and applies its `key=value` properties via
 /// the property system, then negotiation + `configure_pipeline` spawn the worker.
 /// Call after [`g2g_plugins::default_registry`] (or any `Registry`). Building the
-/// per-frame path still needs the `python` feature. (`pyaggregator` is not
-/// registered: `MultiInputElement` has no property surface yet, so a muxer
-/// cannot take `module=`/`class=` from a launch line.)
+/// per-frame path still needs the `python` feature.
 #[cfg(feature = "std")]
 pub fn register(registry: &mut g2g_core::runtime::Registry) {
-    use g2g_core::runtime::{LaunchFactory, SourceFactory};
+    use g2g_core::runtime::{LaunchFactory, MuxerFactory, SourceFactory};
     use g2g_core::{Caps, Dim, Rate, RawVideoFormat};
 
     registry.register_launch(LaunchFactory::of::<PyTransform>("pyelement", || {
         Box::new(PyTransform::new("", ""))
+    }));
+
+    registry.register_muxer(MuxerFactory::new("pyaggregator", |inputs| {
+        Box::new(PyAggregator::new("", "", inputs))
     }));
 
     // The declared caps are the default; `format=`/`width=`/... properties

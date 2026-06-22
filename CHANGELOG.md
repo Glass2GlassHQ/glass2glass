@@ -128,9 +128,21 @@ to a documented contract.
   width=… height=… framerate=… num-buffers=…` (sources have a property surface,
   unlike muxers). Verified live (`m198_source`): `CounterSource` yields three
   frames (byte 0 = 0,1,2) then EOS; properties drive the caps; the line parses.
+- **Step 4e (done): `MultiInputElement` property surface + `pyaggregator` as a
+  launch muxer.** `MultiInputElement` gains `properties()` / `set_property()` /
+  `get_property()` (defaults: none), mirroring `AsyncElement` and threaded
+  through `DynMultiInputElement`; the `gst-launch` parser now applies `key=value`
+  to muxer nodes (`apply_muxer_props`) — previously dropped ("the in-tree muxers
+  have none"). This is a general g2g-core gain (any muxer can take launch
+  properties). `PyAggregator` implements the surface (`module` / `class` /
+  `draw-label`) and is registered as `pyaggregator`, so all three hosted element
+  kinds (`pyelement`, `pysrc`, `pyaggregator`) are first-class launch elements.
+  Verified (`m198_registry`): `... ! m. ... ! m. pyaggregator name=m module=…
+  class=… ! fakesink` parses, an unknown muxer property is rejected; the existing
+  muxers (compositor / audiomixer / mux / batcher) are unaffected by the
+  default-bearing trait change (229 g2g-core + 327 g2g-plugins tests green).
 - Deferred (step 4 remainder): GPU zero-copy (DLPack /
-  `__cuda_array_interface__`); a property surface on `MultiInputElement` so
-  `pyaggregator` can be a launch element too; a blob header registry.
+  `__cuda_array_interface__`); a blob header registry.
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

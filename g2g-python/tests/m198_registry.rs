@@ -39,3 +39,24 @@ fn pyelement_bad_bool_value_is_rejected() {
     // draw-label is a Bool; a non-bool text fails parsing/validation.
     assert!(parse_launch(&reg, line).is_err(), "a bad draw-label value should be rejected");
 }
+
+#[test]
+fn pyaggregator_parses_as_a_launch_muxer() {
+    let reg = registry();
+    // Two sources converge on the muxer (the `m.` fan-in syntax); its module /
+    // class properties route through the new MultiInputElement property surface.
+    let line = "videotestsrc num-buffers=1 ! m. \
+                videotestsrc num-buffers=1 ! m. \
+                pyaggregator name=m module=batch class=BatchInfer ! fakesink";
+    let graph = parse_launch(&reg, line);
+    assert!(graph.is_ok(), "pyaggregator should parse as a muxer: {:?}", graph.err());
+}
+
+#[test]
+fn pyaggregator_unknown_property_is_rejected() {
+    let reg = registry();
+    let line = "videotestsrc num-buffers=1 ! m. \
+                videotestsrc num-buffers=1 ! m. \
+                pyaggregator name=m module=batch class=BatchInfer bogus=1 ! fakesink";
+    assert!(parse_launch(&reg, line).is_err(), "unknown muxer property should be rejected");
+}

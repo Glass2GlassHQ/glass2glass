@@ -19,7 +19,7 @@ use core::pin::Pin;
 
 use g2g_core::{
     Caps, ConfigureOutcome, Dim, Frame, G2gError, InputAggregator, MultiInputElement, OutputSink,
-    PipelinePacket, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// A gst-python-ml batched element hosted as a first-class g2g aggregator.
@@ -180,4 +180,44 @@ impl MultiInputElement for PyAggregator {
             Ok(())
         })
     }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PYAGGREGATOR_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "module" => {
+                self.module = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "class" => {
+                self.class = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "draw-label" => {
+                self.draw_label = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "module" => Some(PropValue::Str(self.module.clone())),
+            "class" => Some(PropValue::Str(self.class.clone())),
+            "draw-label" => Some(PropValue::Bool(self.draw_label)),
+            _ => None,
+        }
+    }
 }
+
+/// `PyAggregator`'s settable properties (the runtime / `gst-launch` face). The
+/// input count comes from link degree (the muxer factory), not a property.
+static PYAGGREGATOR_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("module", PropKind::Str, "Python module to import (the aggregator element)"),
+    PropertySpec::new("class", PropKind::Str, "class within the module to instantiate"),
+    PropertySpec::new("draw-label", PropKind::Bool, "overlay the inferred label on the anchor frame")
+        .with_default("false"),
+];

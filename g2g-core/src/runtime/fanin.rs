@@ -265,6 +265,9 @@ pub trait DynMultiInputElement: ElementBound {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> BoxFuture<'a, Result<(), G2gError>>;
+    fn properties(&self) -> &'static [PropertySpec];
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
+    fn get_property(&self, name: &str) -> Option<PropValue>;
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -295,6 +298,18 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
         out: &'a mut dyn OutputSink,
     ) -> BoxFuture<'a, Result<(), G2gError>> {
         Box::pin(MultiInputElement::process(self, input, packet, out))
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        MultiInputElement::properties(self)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        MultiInputElement::set_property(self, name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        MultiInputElement::get_property(self, name)
     }
 }
 
@@ -330,6 +345,18 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
         out: &'a mut dyn OutputSink,
     ) -> BoxFuture<'a, Result<(), G2gError>> {
         (**self).process(input, packet, out)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        (**self).properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        (**self).set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (**self).get_property(name)
     }
 }
 

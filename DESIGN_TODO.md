@@ -104,12 +104,16 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   property-fixed output caps. New `Produce` `JobKind` on the worker (now
   transform / batch / produce). Registered as launch source `pysrc`. Verified
   `m198_source`.
-- **Step 4 remainder: breadth.** A property surface on `MultiInputElement` (none
-  today) so `pyaggregator` can be a `gst-launch` element like `pyelement` /
-  `pysrc`; a blob header registry (decode known `BlobMeta` headers into typed
-  structures); GPU zero-copy (DLPack / `__cuda_array_interface__`) so torch/onnx
-  consume device memory without the download tax (needs a GPU host +
-  free-threaded-capable torch to verify).
+- **Step 4e (done): `MultiInputElement` property surface.** `properties()` /
+  `set_property()` / `get_property()` (defaults: none) on `MultiInputElement` +
+  `DynMultiInputElement`; the launch parser applies `key=value` to muxers
+  (`apply_muxer_props`). `pyaggregator` registered and launch-parsable. A general
+  g2g-core gain (any muxer can now take launch properties). Verified
+  `m198_registry`.
+- **Step 4 remainder: breadth.** A blob header registry (decode known `BlobMeta`
+  headers into typed structures); GPU zero-copy (DLPack /
+  `__cuda_array_interface__`) so torch/onnx consume device memory without the
+  download tax (needs a GPU host + free-threaded-capable torch to verify).
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 

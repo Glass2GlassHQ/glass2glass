@@ -374,6 +374,36 @@ fn apply_element_props(
     Ok(())
 }
 
+/// Apply `key=value` properties to a muxer node, the same as
+/// [`apply_element_props`] but over the [`DynMultiInputElement`] surface (M199:
+/// muxers gained a property surface, so `pyaggregator module=... class=...` and
+/// the like parse). `name=` is already consumed as the node handle.
+fn apply_muxer_props(
+    mux: &mut Box<dyn crate::runtime::DynMultiInputElement>,
+    name: &str,
+    props: &[(String, String)],
+) -> Result<(), ParseError> {
+    for (key, value) in props {
+        let kind = mux
+            .properties()
+            .iter()
+            .find(|s| s.name == key)
+            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .kind;
+        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
+            element: name.into(),
+            key: key.clone(),
+            value: value.clone(),
+        })?;
+        mux.set_property(key, parsed).map_err(|_| ParseError::BadValue {
+            element: name.into(),
+            key: key.clone(),
+            value: value.clone(),
+        })?;
+    }
+    Ok(())
+}
+
 /// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
 /// `t.` references into directed links, derive each element's role (and any tee's
 /// fan-out width) from its link degree, then construct and wire the nodes.
@@ -711,9 +741,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             apply_source_props(&mut src, &spec.name, &spec.props)?;
             graph.add_source(GraphNodeRef::Source(src))
         } else if is_muxer(ei) {
-            let mux = registry
+            let mut mux = registry
                 .make_muxer(&spec.name, in_deg[ei])
                 .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
+            apply_muxer_props(&mut mux, &spec.name, &spec.props)?;
             graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
         } else if out_deg[ei] == 0 {
             let mut el = registry
