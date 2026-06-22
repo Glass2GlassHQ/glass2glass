@@ -110,10 +110,18 @@ to a documented contract.
   property surface, so no launch-registry `pyaggregator` yet). Verified live
   (`m198_aggregator`, analytics): two inputs (byte 10, 20) batch into one anchor
   (byte 30) with a detection labeled with the batch size.
-- Deferred (step 4 remainder): native `g2g` FrameIO read/write helpers + an
-  opaque-blob header registry (embedding-style float32 side-data); `PySource`;
-  GPU zero-copy (DLPack / `__cuda_array_interface__`); a property surface on
-  `MultiInputElement` so `pyaggregator` can be a launch element too.
+- **Step 4c (done): opaque blob side-data (`append_blob`).** New
+  `g2g-core::BlobMeta` (a `FrameMeta`): tagged opaque side-data carried with a
+  frame (the GstMeta custom-blob analog), for serialized results that aren't
+  overlays or detections, e.g. an embedding's f32 bytes or a JSON record. The
+  `g2g.MetaSink` gains `add_blob(header, payload)` (the `FrameIO.append_blob`
+  mirror); the host routes blobs into a `BlobMeta` on the anchor frame (and
+  detections into `AnalyticsMeta`, as before). `BlobMeta` keeps through every
+  transform (opaque results aren't pixel-bound). Verified live (`m198_analytics`):
+  a fixture `add_blob("embedding", ...)` is read back as a typed `BlobMeta`.
+- Deferred (step 4 remainder): `PySource`; GPU zero-copy (DLPack /
+  `__cuda_array_interface__`); a property surface on `MultiInputElement` so
+  `pyaggregator` can be a launch element too.
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

@@ -16,6 +16,9 @@ class EchoTransform:
         # Attach an analytics result through the sink (the AnalyticsBackend
         # mirror): label id 7, a box, and a confidence.
         meta.add_object(7, 1.0, 2.0, 3.0, 4.0, 0.9)
+        # Attach opaque tagged side-data (the FrameIO.append_blob mirror), e.g.
+        # an embedding's serialized bytes.
+        meta.add_blob("embedding", bytes([1, 2, 3, 4]))
 
     def g2g_process_batch(self, buffers, width, height, fmt, meta):
         # Stand-in for batched inference: sum the batch's first bytes into the

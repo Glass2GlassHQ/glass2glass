@@ -11,8 +11,8 @@ use core::pin::Pin;
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    AnalyticsMeta, AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
+    OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_python::PyTransform;
 
@@ -74,4 +74,11 @@ fn detection_from_python_lands_in_frame_metadata() {
     assert_eq!(dets[0].bbox.x, 1.0);
     assert_eq!(dets[0].bbox.h, 4.0);
     assert!((dets[0].confidence - 0.9).abs() < 1e-6);
+
+    // The opaque blob (FrameIO.append_blob mirror) rode along as a BlobMeta.
+    let blobs = frame.meta.get::<BlobMeta>().expect("add_blob should attach a BlobMeta");
+    assert_eq!(blobs.len(), 1);
+    let blob = blobs.iter().next().unwrap();
+    assert_eq!(blob.header, "embedding");
+    assert_eq!(blob.payload, vec![1, 2, 3, 4]);
 }

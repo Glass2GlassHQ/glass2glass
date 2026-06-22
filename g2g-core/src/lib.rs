@@ -72,8 +72,8 @@ pub use property::{
 };
 #[cfg(feature = "metadata")]
 pub use meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, Classification, FrameMeta, ObjectDetection, Propagation,
-    Relation, RelationKind, Tracking, Transform,
+    AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
+    Propagation, Relation, RelationKind, Tracking, Transform,
 };
 pub use graph::{
     Edge, Graph, GraphError, Muxer, NodeId, NodeKind, PadDir, PadId, Tee, ValidatedGraph,

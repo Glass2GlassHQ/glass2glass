@@ -125,6 +125,7 @@ impl FrameBuffer {
 enum Staged {
     Object { label: u32, x: f32, y: f32, w: f32, h: f32, score: f32 },
     Classification { label: u32, score: f32 },
+    Blob { header: String, payload: Vec<u8> },
 }
 
 /// The analytics sink handed to `g2g_process` as `meta`: the `AnalyticsBackend`
@@ -150,6 +151,13 @@ impl MetaSink {
     /// Add a whole-frame classification: class `label` id and `score`.
     fn add_classification(&self, label: u32, score: f32) {
         self.staged.borrow_mut().push(Staged::Classification { label, score });
+    }
+
+    /// Append an opaque tagged blob (the `FrameIO.append_blob` mirror): a
+    /// `header` tag and serialized `payload` bytes, e.g. an embedding's f32
+    /// bytes or a JSON record. Carried on the frame as a `BlobMeta`.
+    fn add_blob(&self, header: String, payload: Vec<u8>) {
+        self.staged.borrow_mut().push(Staged::Blob { header, payload });
     }
 }
 
@@ -369,15 +377,17 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     }
 }
 
-/// Materialize staged analytics into the frame's [`g2g_core::AnalyticsMeta`].
+/// Materialize staged results onto the frame: detections / classifications into
+/// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
 #[cfg(feature = "analytics")]
 fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>) {
-    use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, Classification, ObjectDetection};
+    use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection};
 
     if staged.is_empty() {
         return;
     }
     let mut analytics = AnalyticsMeta::new();
+    let mut blobs = BlobMeta::new();
     for s in staged {
         match s {
             Staged::Object { label, x, y, w, h, score } => {
@@ -391,9 +401,15 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>) {
                 analytics
                     .push(AnalyticsNode::Classification(Classification { label, confidence: score }));
             }
+            Staged::Blob { header, payload } => blobs.push(header, payload),
         }
     }
-    frame.meta.attach(analytics);
+    if !analytics.nodes.is_empty() {
+        frame.meta.attach(analytics);
+    }
+    if !blobs.is_empty() {
+        frame.meta.attach(blobs);
+    }
 }
 
 /// Without the `analytics` feature `FrameMetaSet` is the ZST, so staged results

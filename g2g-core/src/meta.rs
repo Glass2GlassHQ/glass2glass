@@ -40,6 +40,7 @@ pub use on::*;
 #[cfg(feature = "metadata")]
 mod on {
     use alloc::boxed::Box;
+    use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
     use core::any::Any;
@@ -287,6 +288,65 @@ mod on {
                 Transform::Encode => Propagation::Drop,
                 _ => Propagation::Keep,
             }
+        }
+    }
+
+    /// One opaque tagged blob: a `header` tag plus a serialized `payload`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Blob {
+        pub header: String,
+        pub payload: Vec<u8>,
+    }
+
+    /// Opaque tagged side-data carried with a frame (the GstMeta custom-blob
+    /// analog): serialized results a producer attaches and a specific consumer
+    /// decodes by `header`, e.g. an ML embedding's little-endian f32 bytes or a
+    /// JSON record. A single `BlobMeta` holds every blob on a frame, since a
+    /// [`FrameMetaSet`] keys by concrete type.
+    #[derive(Debug, Default, Clone, PartialEq, Eq)]
+    pub struct BlobMeta {
+        pub blobs: Vec<Blob>,
+    }
+
+    impl BlobMeta {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Append a tagged blob.
+        pub fn push(&mut self, header: impl Into<String>, payload: Vec<u8>) {
+            self.blobs.push(Blob { header: header.into(), payload });
+        }
+
+        /// Iterate the carried blobs in attach order.
+        pub fn iter(&self) -> impl Iterator<Item = &Blob> {
+            self.blobs.iter()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.blobs.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.blobs.len()
+        }
+    }
+
+    impl FrameMeta for BlobMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        // Opaque serialized results are not pixel-coordinate bound, so they
+        // survive every transform (including a re-encode); the default `Keep`
+        // is correct, stated here for intent.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
         }
     }
 }
