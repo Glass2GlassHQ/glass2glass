@@ -2912,6 +2912,7 @@ name = "g2g-python"
 version = "0.1.0"
 dependencies = [
  "g2g-core",
+ "g2g-plugins",
  "pyo3",
  "tokio",
 ]

@@ -36,6 +36,21 @@ pub mod format;
 mod element;
 pub use element::PyTransform;
 
+/// Register `pyelement` as a `gst-launch` / autoplug factory on `registry`, so
+/// a hosted Python element is instantiable by name like any built-in:
+/// `... ! pyelement module=action class=ActionTransform draw-label=true ! ...`.
+/// The parser default-constructs it and applies `module=` / `class=` /
+/// `draw-label=` via the property system, then negotiation + `configure_pipeline`
+/// spawn the worker. Call after [`g2g_plugins::default_registry`] (or any
+/// `Registry`). Building the per-frame path still needs the `python` feature.
+#[cfg(feature = "std")]
+pub fn register(registry: &mut g2g_core::runtime::Registry) {
+    use g2g_core::runtime::LaunchFactory;
+    registry.register_launch(LaunchFactory::of::<PyTransform>("pyelement", || {
+        Box::new(PyTransform::new("", ""))
+    }));
+}
+
 #[cfg(feature = "python")]
 mod host;
 #[cfg(feature = "python")]

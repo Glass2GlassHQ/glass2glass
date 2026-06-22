@@ -65,9 +65,20 @@ to a documented contract.
   unit, so workers parallelize unchanged on a `--disable-gil` interpreter
   (`Python::attach` is the no-GIL API). Per-interpreter-GIL sub-interpreters
   were rejected (numpy / torch / cv2 are not reliably sub-interpreter-safe).
-- Deferred (step 4): the native `g2g` FrameIO read/write helpers, an opaque-blob
-  header registry, a launch-registry factory, and aggregator / source / GPU
-  variants.
+- **Step 4a (done): `pyelement` is a first-class launch element.**
+  `g2g_python::register(&mut Registry)` adds a `pyelement` `LaunchFactory`, so a
+  hosted Python element is instantiable by name like any built-in:
+  `... ! videoconvert ! pyelement module=action class=ActionTransform
+  draw-label=true ! ...`. The parser default-constructs it (empty module/class)
+  and applies `module=` / `class=` / `draw-label=` through the M104 property
+  system; `configure_pipeline` then spawns the worker (and fails clearly if
+  module/class are still empty). `PyTransform` implements `PadTemplates`
+  (RGBA / any geometry on both pads) for `gst-inspect` + autoplug. Verified
+  (`m198_registry`, default build): the line parses, an unknown property and a
+  bad bool value are both rejected (proving properties route to the element).
+- Deferred (step 4 remainder): the native `g2g` FrameIO read/write helpers + an
+  opaque-blob header registry (embedding-style float32 side-data); `PySource` /
+  `PyAggregator`; GPU zero-copy (DLPack / `__cuda_array_interface__`).
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
   bag, and the lifecycle guard (no-interpreter build); `m198_python_path`

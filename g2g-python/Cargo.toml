@@ -37,6 +37,10 @@ pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+# `default_registry` + the videotestsrc / videoconvert / fakesink elements the
+# `pyelement` launch-registry test parses a pipeline around. g2g-plugins does not
+# depend on g2g-python, so this dev-only edge is acyclic (same pattern as g2g-ml).
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
 
 [lints]
 workspace = true

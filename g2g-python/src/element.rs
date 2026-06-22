@@ -17,8 +17,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
@@ -119,6 +120,12 @@ impl AsyncElement for PyTransform {
         self.fixed = Some(absolute_caps.clone());
         #[cfg(feature = "python")]
         {
+            // A registry-built `pyelement` starts with empty module/class until
+            // `module=`/`class=` properties are applied; fail clearly here
+            // rather than importing the empty module.
+            if self.module.is_empty() || self.class.is_empty() {
+                return Err(G2gError::NotConfigured);
+            }
             self.worker =
                 Some(crate::host::PyWorker::spawn(&self.module, &self.class, self.draw_label)?);
         }
@@ -199,6 +206,23 @@ impl AsyncElement for PyTransform {
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
             _ => None,
         }
+    }
+}
+
+impl PadTemplates for PyTransform {
+    /// Advertise the default accepted format (RGBA, any geometry) on both pads
+    /// for `gst-inspect` / autoplug. A `pyelement` is a same-format transform,
+    /// so sink and source carry the same set. (`with_accept` can host another
+    /// format programmatically; the launch template reflects the default.)
+    fn pad_templates() -> Vec<PadTemplate> {
+        let rgba = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let set = CapsSet::one(rgba);
+        Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
 

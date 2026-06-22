@@ -83,13 +83,18 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   `ObjectDetection` / relation graph the g2g-ml `detect` element built, NOT a new
   M88 build). Labels are interned `u32` ids (Python does the string->id step).
   Verified live (`m198_analytics`).
-- **Step 4: breadth.** Native `g2g` FrameIO read/write helpers + an opaque-blob
-  header registry (for serialized side-data like the embedding float32 blobs);
-  launch-registry factory (`pyelement module=... class=...` + autoplug) and
-  property parsing; `PyAggregator` (the `BaseAggregator` batching shape -> muxer
-  / `g2g-enterprise`) and `PySource`; GPU zero-copy (DLPack /
-  `__cuda_array_interface__`) so torch/onnx consume device memory without the
-  download tax.
+- **Step 4a (done): launch-registry factory.** `g2g_python::register(&mut
+  Registry)` adds a `pyelement` `LaunchFactory`; `PyTransform: PadTemplates`
+  (RGBA / any geometry). `... ! pyelement module=... class=... draw-label=... !
+  ...` parses, with properties applied via M104; `configure_pipeline` errors on
+  empty module/class. Verified `m198_registry`.
+- **Step 4 remainder: breadth.** Native `g2g` FrameIO read/write helpers + an
+  opaque-blob header registry (serialized side-data like the embedding float32
+  blobs); `PyAggregator` (the `BaseAggregator` batching shape -> muxer /
+  `g2g-enterprise`) and `PySource` (the `SourceLoop` variant: a Python source
+  producing frames); GPU zero-copy (DLPack / `__cuda_array_interface__`) so
+  torch/onnx consume device memory without the download tax (needs a GPU host +
+  free-threaded-capable torch to verify).
 - **Python side (gst-python-ml, separate repo):** a `backend/g2g/` package
   mirroring `backend/gst/` -- thin once the native `g2g` module exists.
 
