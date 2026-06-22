@@ -118,6 +118,22 @@ impl Seek {
         }
     }
 
+    /// A flushing **reverse** seek over `[start, stop]` (ns) at rate `-1.0`:
+    /// playback runs from `stop` down to `start`. The source emits frames in
+    /// descending PTS order; the sink maps them to ascending running time
+    /// (measured from `stop`, see [`Segment::to_running_time`]). A reverse
+    /// segment needs a finite `stop` to measure from, so both edges are `Set`.
+    pub fn reverse(start: u64, stop: u64) -> Seek {
+        Seek {
+            rate: -1.0,
+            flags: SeekFlags::FLUSH,
+            start_type: SeekType::Set,
+            start,
+            stop_type: SeekType::Set,
+            stop,
+        }
+    }
+
     /// Whether this is a flushing seek.
     pub fn is_flush(self) -> bool {
         self.flags.contains(SeekFlags::FLUSH)
@@ -450,6 +466,23 @@ mod tests {
         // The first post-seek frame (pts == target) continues at running time
         // 3_000, monotonic with the pre-seek timeline (gapless).
         assert_eq!(seg.to_running_time(8_000), Some(3_000));
+    }
+
+    #[test]
+    fn reverse_seek_builds_a_descending_segment_with_ascending_running_time() {
+        let seek = Seek::reverse(0, 100_000);
+        assert!(seek.is_reverse());
+        assert!(seek.is_flush());
+        let seg = Segment::for_flush_seek(&seek, None);
+        assert_eq!(seg.rate, -1.0);
+        assert_eq!(seg.start, 0);
+        assert_eq!(seg.stop, Some(100_000));
+        // Reverse: the highest PTS plays first (running time 0), the lowest last.
+        assert_eq!(seg.to_running_time(100_000), Some(0));
+        assert_eq!(seg.to_running_time(75_000), Some(25_000));
+        assert_eq!(seg.to_running_time(0), Some(100_000));
+        // Outside the range is clipped.
+        assert_eq!(seg.to_running_time(150_000), None);
     }
 
     #[test]

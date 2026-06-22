@@ -5,6 +5,30 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M212: reverse playback at the sink
+
+Reverse playback (`rate < 0`): a stream played from `stop` down to `start`. The
+finding is that the sink needs no reverse-specific code, the `Segment` running-
+time abstraction already generalizes presentation to negative rate.
+
+- **`Seek::reverse(start, stop)`**: a flushing reverse seek over `[start, stop]`
+  at rate `-1.0` (both edges `Set`, since reverse needs a finite `stop` to
+  measure running time from).
+- The source emits frames newest-PTS-first; `SyncSink` schedules each by
+  `Segment::to_running_time` (which measures reverse from `stop`) and clips via
+  `contains`, so descending PTS maps to **ascending** running time and frames
+  present in the correct visual order. No `SyncSink` change was needed.
+- Tests: `segment.rs` (a reverse seek builds a descending segment whose running
+  time ascends as PTS descends) and `m212_reverse` (a `RecordingClock` captures
+  the deadlines `SyncSink` schedules, proving reverse-ordered frames present in
+  ascending running-time order and above-`stop` frames are clipped; plus an
+  end-to-end reverse source → `SyncSink` pipeline).
+- Trick-mode KEY_UNIT frame selection (present only keyframes for fast scrub) is
+  a separate milestone: it needs a per-frame keyframe flag. The codec parsers
+  detect keyframes (`h264_au_is_keyframe`, vp8 `parse_keyframe`) but do not yet
+  surface one as a frame property; that flag is best added with its first
+  producer/consumer rather than plumbed speculatively.
+
 ### M211: non-flushing (accumulating) seek
 
 The non-flushing seek path, the gapless / segment-seek / loop case. Unlike a

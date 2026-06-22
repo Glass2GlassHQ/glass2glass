@@ -1121,8 +1121,16 @@ seek, keyframe `SNAP_BEFORE`, re-prepended parameter sets), and `SyncSink` maps 
 to running time through the `Segment` and clips pre-target frames so accurate seek
 presents the exact requested frame (M149). A non-flushing seek (M211) emits only
 the accumulating `Segment` (no `Flush`), so the source keeps producing on a
-continuous running-time line. Reverse/trick-mode sink handling and making the
-other in-tree sources seek-aware are open (DESIGN_TODO).
+continuous running-time line. Reverse playback (M211/M212, `Seek::reverse`,
+`rate < 0`) needs no sink-specific code: the source emits frames newest-PTS-first
+over `[start, stop]`, and `SyncSink` schedules each by `Segment::to_running_time`
+(which measures reverse from `stop`) and clips via `contains`, so descending PTS
+maps to ascending running time and presents in the correct visual order, the
+`Segment` abstraction generalizing the sink to negative rate transparently.
+Trick-mode KEY_UNIT frame selection (present only keyframes for fast scrub) needs
+a per-frame keyframe flag (the codec parsers already detect keyframes but do not
+yet surface one), and making the other in-tree sources seek-aware, are open
+(DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 
