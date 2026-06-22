@@ -484,6 +484,8 @@ GStreamer relies on parent ↔ child reference cycles via GObject reference coun
 #### 4.9.3 The Single Architectural Trade-Off
 Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at-most-N tracks). If an application genuinely needs runtime-growable pad count without an upper bound — e.g., a session router that accepts new RTP streams indefinitely — the dynamic layer uses a `Slab<Slot>` instead of a fixed array. Per-push slot lookup becomes one extra indirection. Since this only matters inside the already-type-erased dynamic layer, the cost is in the noise.
 
+The bounded-N realization landed in M205: `StreamDemux` (`g2g-plugins`) is a `MultiOutputElement` with N typed output ports, driven by `run_source_fanout`. Each port carries its own declared caps and is fed by a caller-supplied classifier (`Fn(&Frame) -> usize`); the first frame routed to a port emits that port's `CapsChanged` so the branch retypes from the demuxer's byte-stream input caps to the elementary stream's, the same announce a single-output demuxer does. The N branch links the runner pre-allocates *are* the dark slots: a port no stream ever routes to simply stays silent and takes the merged EOS at end. This is the multi-output demuxer (one element, several typed downstream branches); the prior fan-out elements (`Router`, `Gate`) only broadcast or A-B-switch a single caps. Container parsers (MPEG-TS multi-PID) wire onto it by keying the classifier on parsed stream identity; the `gst-launch` `demux name=d d. ! … d. ! …` text wiring and a `run_graph` demux node are follow-ups.
+
 ### 4.10 Architectural Tracks
 
 The framework is built along five interlocking tracks. The spec sections that

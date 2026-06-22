@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M205: content-based demultiplexer (multi-output fan-out)
+
+A single element can now split a multiplexed input onto N typed output ports
+(one per elementary stream), the `pad-added` / dynamic-pad analog for the
+bounded-N case (DESIGN.md §4.9.3 "dark slots"). Previously the fan-out layer had
+only `Router`/`Gate` (broadcast / A-B switch) and demuxers were single-output
+(one instance per stream); this is the first element that exposes multiple
+*typed* outputs.
+
+- **`StreamDemux`** (`g2g-plugins`): a `MultiOutputElement` with N output ports,
+  each carrying its own declared caps (the dark slots). A caller-supplied
+  classifier (`Fn(&Frame) -> usize`, the "content-based demux" hook) routes each
+  frame to a port; the first frame on a port emits that port's `CapsChanged`
+  ahead of it, so the branch retypes from the demuxer's byte-stream input caps to
+  the elementary stream's caps. A port no stream routes to stays dark.
+- No runner changes: it rides the existing `run_source_fanout`, which already
+  routes per-port (`push_to`) and re-solves each branch's `CapsChanged`
+  independently. The N branch links are the pre-allocated slots.
+- Tests (`m205_demux`): one demux splits an interleaved V/A/V/A/V multiplex into
+  a video branch (3 frames, retyped to H264) and an audio branch (2 frames, AAC);
+  an absent stream leaves its port silent (no frames, no caps).
+- Follow-ups: wiring a container parser (MPEG-TS multi-PID) onto it, the
+  `gst-launch` `demux name=d  d. ! ...  d. ! ...` text syntax, a `run_graph`
+  demux node, and runtime-unbounded pads (`Slab` slots) remain staged.
+
 ### M204: PTS-ordered muxer fan-in
 
 A fan-in muxer now interleaves its inputs by presentation timestamp instead of
