@@ -856,6 +856,11 @@ async fn source_arm<'a>(
     bus: Option<BusHandle>,
     progress: Option<PipelineProgress>,
 ) -> Result<u64, G2gError> {
+    // M206: announce the stream start before any data, one per source, so an
+    // application can bracket each stream's lifetime (StreamStart .. Eos).
+    if let Some(b) = &bus {
+        b.try_post(BusMessage::StreamStart);
+    }
     // M203: publish the source's duration (if it knows one) before producing,
     // so a `DURATION` query is answerable from the first poll, and push-notify a
     // change on the bus. Polled once here; a source that discovers its length

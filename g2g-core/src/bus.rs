@@ -19,8 +19,21 @@ use crate::tag::TagList;
 /// An out-of-band message from an element to the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BusMessage {
+    /// A new stream has started: posted by the runner's source arm before the
+    /// source produces any data, one per source (the GStreamer
+    /// `GST_MESSAGE_STREAM_START` analog, M206). Brackets a stream with the
+    /// matching [`Eos`](BusMessage::Eos) so an application can track stream
+    /// lifetime (e.g. reset per-stream UI on each start).
+    StreamStart,
     /// End-of-stream observed by the posting element.
     Eos,
+    /// An informational, non-error notification (the GStreamer
+    /// `GST_MESSAGE_INFO` analog, M206), the third severity below
+    /// [`Warning`](BusMessage::Warning) and [`Error`](BusMessage::Error). Carries
+    /// a human-readable message. Posted by elements or the application for
+    /// progress / status that is not a problem (a reconnect, a fallback taken),
+    /// so it never tears the pipeline down.
+    Info(alloc::string::String),
     /// Fatal error; the application should tear the pipeline down.
     Error(G2gError),
     /// Non-fatal condition worth surfacing.
@@ -204,5 +217,17 @@ mod tests {
         let (bus, handle) = Bus::new(2);
         block_on(handle.post(BusMessage::Custom(9))).unwrap();
         assert_eq!(block_on(bus.recv()), Some(BusMessage::Custom(9)));
+    }
+
+    #[test]
+    fn info_and_stream_start_round_trip() {
+        let (bus, handle) = Bus::new(4);
+        handle.try_post(BusMessage::StreamStart);
+        handle.try_post(BusMessage::Info(alloc::string::String::from("reconnecting")));
+        assert_eq!(bus.try_recv(), Some(BusMessage::StreamStart));
+        match bus.try_recv() {
+            Some(BusMessage::Info(s)) => assert_eq!(s, "reconnecting"),
+            other => panic!("expected Info, got {other:?}"),
+        }
     }
 }

@@ -1089,7 +1089,16 @@ out-of-band events, so an element notifies the application without a
 back-reference. `BusMessage` covers the lifecycle and quality signals an
 application reacts to:
 
-- `Eos`, `Error`, `Warning` — stream lifecycle and faults.
+- `StreamStart`, `Eos`, `Error`, `Warning`, `Info(String)` — stream lifecycle,
+  faults, and non-fatal status. `StreamStart` is posted by the source arm before
+  a source produces (one per source), bracketing each stream with its `Eos`
+  (`GST_MESSAGE_STREAM_START`); `Info` is the third severity below `Warning`,
+  element- / app-posted for status that is not a problem (`GST_MESSAGE_INFO`).
+- `DurationChanged { duration_ns }` — the total stream duration became known
+  (§4.15's query handle is the pull side; this is the push notification), posted
+  by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
+- `Tag(TagList)` — container / stream metadata, posted out of band
+  (`GST_MESSAGE_TAG`).
 - `NegotiationFailed(NegotiationFailure)` — structured caps conflict naming the
   responsible element pair (§4.13), posted by the coordinator on a startup or
   mid-stream negotiation failure.

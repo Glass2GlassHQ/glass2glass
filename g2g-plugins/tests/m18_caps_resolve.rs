@@ -236,10 +236,15 @@ async fn midstream_change_with_no_acceptable_output_fails_loud_to_bus() {
         .await
         .expect("run completes (the failure is signalled out-of-band, not fatal)");
 
-    match bus.try_recv() {
-        Some(BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) => {}
-        other => panic!("expected NegotiationFailed(EmptyLink), got {other:?}"),
+    // Drain and look for the failure: a per-source `StreamStart` (M206) precedes
+    // it, since this failure is mid-stream (after frames flow), not at startup.
+    let mut saw_empty_link = false;
+    while let Some(m) = bus.try_recv() {
+        if matches!(m, BusMessage::NegotiationFailed(NegotiationFailure::EmptyLink { .. })) {
+            saw_empty_link = true;
+        }
     }
+    assert!(saw_empty_link, "expected a NegotiationFailed(EmptyLink) on the bus");
     assert!(
         caps_log.lock().unwrap().is_empty(),
         "no NV12 reached the sink: the infeasible change was rejected, not forwarded"

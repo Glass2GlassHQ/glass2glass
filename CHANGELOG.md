@@ -5,6 +5,22 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M206: bus breadth (`StreamStart`, `Info`)
+
+Two GStreamer-common bus messages every player app expects, rounding out the
+message vocabulary.
+
+- **`BusMessage::StreamStart`** (the `GST_MESSAGE_STREAM_START` analog): posted
+  by the DAG runner's source arm before a source produces, one per source, so an
+  application brackets each stream's lifetime (`StreamStart` .. `Eos`). A muxer
+  pipeline posts one per input source.
+- **`BusMessage::Info(String)`** (the `GST_MESSAGE_INFO` analog): the third
+  severity below `Warning` / `Error`, for non-fatal status (a reconnect, a
+  fallback taken) that never tears the pipeline down. Element- / app-posted.
+- Both are additive (no consumer matches `BusMessage` exhaustively). Tests:
+  `m206_bus` (one `StreamStart` for a single source; one per source through a
+  muxer) and a bus round-trip unit test for `Info` + `StreamStart`.
+
 ### M205: content-based demultiplexer (multi-output fan-out)
 
 A single element can now split a multiplexed input onto N typed output ports
