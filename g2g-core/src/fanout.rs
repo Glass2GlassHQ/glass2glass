@@ -123,6 +123,24 @@ pub trait MultiOutputElement: ElementBound {
             <Self as MultiOutputElement>::intercept_caps(self, c)
         }))
     }
+
+    /// Runtime properties this demux exposes (M104), mirroring
+    /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
+    /// none. A demux overrides this (with `set_property` / `get_property`) to be
+    /// settable by name from a `gst-launch` line, the same as a transform.
+    fn properties(&self) -> &'static [PropertySpec] {
+        &[]
+    }
+
+    /// Set a property by name (M104). Default: every name is unknown.
+    fn set_property(&mut self, _name: &str, _value: PropValue) -> Result<(), PropError> {
+        Err(PropError::Unknown)
+    }
+
+    /// Read a property back by name (M104). Default: `None`.
+    fn get_property(&self, _name: &str) -> Option<PropValue> {
+        None
+    }
 }
 
 /// Multi-input element trait variant: an N-input, 1-output element (a

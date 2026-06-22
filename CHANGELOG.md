@@ -5,6 +5,39 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M210: demux node in `run_graph` + `gst-launch` fan-out wiring
+
+A content-routing demultiplexer is now a first-class DAG node, the symmetric
+fan-out counterpart to the muxer fan-in (M122/M208). Previously a
+`MultiOutputElement` (e.g. `StreamDemux`, M205) ran only through the bespoke
+`run_source_fanout` runner; it could not appear in a `run_graph` DAG or a
+`gst-launch` line.
+
+- **No new `NodeKind`.** A demux is structurally a tee (1-in/N-out), and per M205
+  it negotiates exactly like one at startup (all outputs carry the input caps,
+  then each branch retypes via a per-output `CapsChanged`). So the node keeps
+  `NodeKind::Tee(n)` for the solver/validation view and the runner dispatches on
+  a new `GraphNodeRef::Demux` payload instead. The solver is untouched.
+- **`Graph::add_demux(element, outputs) -> Demux`**: a tee-shaped node that
+  carries a routing element. `DynMultiOutputElement` is the dyn-safe mirror of
+  `MultiOutputElement` (transpose of `DynMultiInputElement`); `demux_arm` drives
+  it (the transpose of `muxer_arm`), routing each packet via the element and
+  closing every branch with `Eos` at end.
+- **`gst-launch`**: `register_demux` / `DemuxFactory` / `make_demux`; a node
+  registered as a demux with several outputs builds a demux instead of erroring
+  `FanOutWithoutTee` (`src ! d.  d. ! ...  d. ! ...  <demux> name=d`), the
+  transpose of the muxer's link-degree rule. The tee-exemption is scoped to
+  registered demuxers, so an unregistered fan-out still requires an explicit
+  `tee`.
+- No content-agnostic default demux is registered: routing is inherently
+  stream-specific (as the muxer side ships specific muxers, not a generic one),
+  so `register_demux` is the surface and content-specific demuxers register
+  through it.
+- Tests (`m210_demux_node`): a programmatic `src -> demux -> {sink, sink}` splits
+  frames by sequence parity (2 to each branch, verified with counting sinks) and
+  a `gst-launch` line fans a source out across two branches, both through
+  `run_graph`; plus a guard that an unregistered fan-out still needs a `tee`.
+
 ### M209: flattening bins + ghost pads
 
 Reusable named subgraphs with ghost pads, the top structural GStreamer-parity

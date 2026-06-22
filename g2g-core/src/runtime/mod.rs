@@ -58,14 +58,14 @@ pub use fanin::{
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    run_graph, run_graph_stateful, run_graph_with_bus, run_graph_with_progress, GraphNode,
-    GraphNodeRef,
+    run_graph, run_graph_stateful, run_graph_with_bus, run_graph_with_progress, DynMultiOutputElement,
+    GraphNode, GraphNodeRef,
 };
 
 #[cfg(feature = "std")]
 pub use autoplug::{
-    declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, MuxerFactory,
-    PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
+    MuxerFactory, PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

@@ -34,14 +34,16 @@ use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
 use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink, Reconfigure,
+    AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
+    Reconfigure,
 };
 use crate::error::G2gError;
-use crate::fanout::MultiInputElement;
+use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink};
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{MemoryDomain, SystemSlice};
+use crate::property::{PropError, PropValue, PropertySpec};
 use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
@@ -72,6 +74,12 @@ pub enum GraphNodeRef<'a> {
     Source(Box<dyn DynSourceLoop + 'a>),
     Element(Box<dyn DynAsyncElement + 'a>),
     Muxer(Box<dyn DynMultiInputElement + 'a>),
+    /// A content-routing demultiplexer: 1 input, N outputs. Structurally a tee
+    /// (its node kind is `Tee(n)`), so it negotiates as a tee at startup, but it
+    /// carries a [`MultiOutputElement`] that routes each packet to a chosen
+    /// output instead of broadcasting, and emits per-output `CapsChanged` so each
+    /// branch retypes from the byte-stream input (M210). `Graph::add_demux`.
+    Demux(Box<dyn DynMultiOutputElement + 'a>),
 }
 
 /// The owning, `'static` graph payload: what most callers build directly.
@@ -107,6 +115,16 @@ impl<'a> GraphNodeRef<'a> {
     pub fn muxer_ref(muxer: &'a mut (dyn DynMultiInputElement + 'a)) -> Self {
         GraphNodeRef::Muxer(Box::new(muxer))
     }
+
+    /// Box an owned fan-out demultiplexer (`add_demux`).
+    pub fn demux<D: MultiOutputElement + 'static>(demux: D) -> Self {
+        GraphNodeRef::Demux(Box::new(demux))
+    }
+
+    /// Box a borrowed fan-out demultiplexer.
+    pub fn demux_ref(demux: &'a mut (dyn DynMultiOutputElement + 'a)) -> Self {
+        GraphNodeRef::Demux(Box::new(demux))
+    }
 }
 
 impl core::fmt::Debug for GraphNodeRef<'_> {
@@ -115,7 +133,88 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
             GraphNodeRef::Source(_) => f.write_str("GraphNodeRef::Source(..)"),
             GraphNodeRef::Element(_) => f.write_str("GraphNodeRef::Element(..)"),
             GraphNodeRef::Muxer(_) => f.write_str("GraphNodeRef::Muxer(..)"),
+            GraphNodeRef::Demux(_) => f.write_str("GraphNodeRef::Demux(..)"),
         }
+    }
+}
+
+/// Dyn-safe mirror of [`MultiOutputElement`] for a fan-out demux node in the DAG
+/// runner, the transpose of [`DynMultiInputElement`]. Boxes `process`'s future
+/// and forwards the `Self: Sized` constraint methods. Only the methods the
+/// runner uses are mirrored.
+pub trait DynMultiOutputElement: ElementBound {
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_>;
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>>;
+    fn properties(&self) -> &'static [PropertySpec];
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
+    fn get_property(&self, name: &str) -> Option<PropValue>;
+}
+
+impl<T: MultiOutputElement> DynMultiOutputElement for T {
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        MultiOutputElement::caps_constraint_as_input(self)
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        MultiOutputElement::configure_pipeline(self, absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        Box::pin(MultiOutputElement::process(self, packet, out))
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        MultiOutputElement::properties(self)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        MultiOutputElement::set_property(self, name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        MultiOutputElement::get_property(self, name)
+    }
+}
+
+/// Forwarding impl so a borrowed `&mut dyn DynMultiOutputElement` can be boxed
+/// into a `Box<dyn DynMultiOutputElement + 'a>` graph node (the borrowing-graph
+/// convenience wrappers). Disjoint from the `MultiOutputElement` blanket above.
+impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        (**self).caps_constraint_as_input()
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        (**self).configure_pipeline(absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> BoxFuture<'a, Result<(), G2gError>> {
+        (**self).process(packet, out)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        (**self).properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        (**self).set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        (**self).get_property(name)
     }
 }
 
@@ -440,7 +539,23 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     elem.configure_output(&out_caps)?;
                 }
             }
-            NodeKind::Tee(_) => {}
+            NodeKind::Tee(_) => {
+                // A plain (broadcast) tee carries no element. A demux is a
+                // tee-shaped node carrying a `MultiOutputElement`, configured
+                // with its single input edge's negotiated caps (the byte stream);
+                // each branch retypes later via per-output `CapsChanged`.
+                if matches!(vg.element(node), Some(GraphNodeRef::Demux(_))) {
+                    let caps = solution[vg.in_edges(node)[0]].clone();
+                    let GraphNodeRef::Demux(elem) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    else {
+                        return Err(G2gError::CapsMismatch);
+                    };
+                    if let ConfigureOutcome::ReFixate(_) = elem.configure_pipeline(&caps)? {
+                        return Err(G2gError::FixationFailed);
+                    }
+                }
+            }
             NodeKind::Muxer(_) => {
                 // Configure each input pad with its in-edge's negotiated caps.
                 let in_edges: Vec<usize> = vg.in_edges(node).to_vec();
@@ -706,7 +821,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
-                Box::pin(tee_arm(in_rx, out_txs))
+                // A tee-shaped node carrying a demux element routes per-output;
+                // a plain tee broadcasts.
+                match element {
+                    Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(demux, in_rx, out_txs)),
+                    _ => Box::pin(tee_arm(in_rx, out_txs)),
+                }
             }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
@@ -770,7 +890,7 @@ fn element_ref<'g, 'a>(
 ) -> Option<&'g (dyn DynAsyncElement + 'a)> {
     match vg.element(node)? {
         GraphNodeRef::Element(elem) => Some(&**elem),
-        GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) => None,
+        GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => None,
     }
 }
 
@@ -1133,6 +1253,37 @@ async fn tee_arm(in_rx: LinkReceiver, out_txs: Vec<LinkSender>) -> Result<u64, G
             }
             Some(packet) => {
                 broadcast(&mut senders, packet).await?;
+            }
+            None => return Ok(0),
+        }
+    }
+}
+
+/// The demux arm: drain the single input edge and let the routing element
+/// dispatch each packet to a chosen output port (the transpose of `muxer_arm`).
+/// Mirrors the `run_source_fanout` router loop: a packet goes to
+/// `MultiOutputElement::process`, which calls `push_to(port, ..)`; on `Eos` the
+/// element flushes first, then the arm closes every branch with its own `Eos`
+/// (the runner owns the per-branch end, like the tee arm).
+async fn demux_arm<'a>(
+    mut demux: Box<dyn DynMultiOutputElement + 'a>,
+    in_rx: LinkReceiver,
+    out_txs: Vec<LinkSender>,
+) -> Result<u64, G2gError> {
+    let branch_count = out_txs.len();
+    let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
+    let mut multi = MultiSenderSink::new(senders);
+    loop {
+        match in_rx.recv().await {
+            Some(PipelinePacket::Eos) => {
+                demux.process(PipelinePacket::Eos, &mut multi).await?;
+                for port in 0..branch_count {
+                    multi.push_to(port, PipelinePacket::Eos).await?;
+                }
+                return Ok(0);
+            }
+            Some(packet) => {
+                demux.process(packet, &mut multi).await?;
             }
             None => return Ok(0),
         }

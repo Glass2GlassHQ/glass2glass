@@ -174,7 +174,9 @@ mod factory {
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::format_specs;
-    use crate::runtime::{DynMultiInputElement, DynSourceLoop, GraphNode, GraphNodeRef};
+    use crate::runtime::{
+        DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
+    };
 
     /// A registered element type: its autoplug metadata plus a constructor
     /// producing a boxed transform/sink for the graph runner. The constructor
@@ -290,6 +292,35 @@ mod factory {
     impl core::fmt::Debug for MuxerFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("MuxerFactory").field("name", &self.name).finish_non_exhaustive()
+        }
+    }
+
+    /// A named fan-out demuxer factory for the `gst-launch` parser (M210): the
+    /// transpose of [`MuxerFactory`]. A 1-to-N element built per use with the
+    /// output count the parser derives from link degree (the `d.` references),
+    /// because a [`MultiOutputElement`](crate::fanout::MultiOutputElement)'s
+    /// output-pad count must match the demux node's fan-out.
+    pub struct DemuxFactory {
+        name: &'static str,
+        build: fn(usize) -> Box<dyn DynMultiOutputElement>,
+    }
+
+    impl DemuxFactory {
+        /// Register a fan-out demuxer by name and an output-count constructor
+        /// (`|n| Box::new(MyDemux::new(n, ...))`).
+        pub fn new(name: &'static str, build: fn(usize) -> Box<dyn DynMultiOutputElement>) -> Self {
+            Self { name, build }
+        }
+
+        /// This factory's element name.
+        pub fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    impl core::fmt::Debug for DemuxFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("DemuxFactory").field("name", &self.name).finish_non_exhaustive()
         }
     }
 
@@ -479,6 +510,7 @@ mod factory {
         uris: Vec<UriSourceFactory>,
         launch: Vec<LaunchFactory>,
         muxers: Vec<MuxerFactory>,
+        demuxes: Vec<DemuxFactory>,
         /// gst-canonical-name aliases (M192): each maps a name to an ordered list
         /// of registered targets, the first that is actually registered wins. A
         /// plain rename is a one-entry list; `autovideosink` is a fallback chain
@@ -526,6 +558,13 @@ mod factory {
         /// returning `&mut self` to chain calls.
         pub fn register_muxer(&mut self, factory: MuxerFactory) -> &mut Self {
             self.muxers.push(factory);
+            self
+        }
+
+        /// Register a named fan-out demuxer for the `gst-launch` parser (M210),
+        /// returning `&mut self` to chain calls.
+        pub fn register_demux(&mut self, factory: DemuxFactory) -> &mut Self {
+            self.demuxes.push(factory);
             self
         }
 
@@ -602,6 +641,24 @@ mod factory {
         /// [`register_muxer`](Self::register_muxer).
         pub fn make_muxer(&self, name: &str, inputs: usize) -> Option<Box<dyn DynMultiInputElement>> {
             self.muxers.iter().find(|m| m.name == name).map(|m| (m.build)(inputs))
+        }
+
+        /// Construct a registered fan-out demuxer by name with `outputs` output
+        /// pads (the parser derives the count from the `d.` link degree, so it
+        /// matches the demux node's fan-out). `None` if `name` is not registered
+        /// via [`register_demux`](Self::register_demux).
+        pub fn make_demux(
+            &self,
+            name: &str,
+            outputs: usize,
+        ) -> Option<Box<dyn DynMultiOutputElement>> {
+            self.demuxes.iter().find(|d| d.name == name).map(|d| (d.build)(outputs))
+        }
+
+        /// Whether `name` is registered as a fan-out demuxer (the parser uses this
+        /// to allow a multi-output node without an explicit `tee`).
+        pub fn is_demux(&self, name: &str) -> bool {
+            self.demuxes.iter().any(|d| d.name == name)
         }
 
         /// The names of every element registerable by the parser: sources first,
@@ -834,8 +891,8 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, ElementFactory, LaunchFactory, MuxerFactory,
-    PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
+    MuxerFactory, PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

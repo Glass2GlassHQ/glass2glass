@@ -119,6 +119,25 @@ impl Tee {
     }
 }
 
+/// A demux handle returned by [`Graph::add_demux`]: 1 input pad, `n` output
+/// pads. Structurally a tee (its node kind is `Tee(n)`), but the node carries a
+/// content-routing element rather than broadcasting; see
+/// [`GraphNodeRef::Demux`](crate::runtime::GraphNodeRef::Demux).
+#[derive(Debug, Clone, Copy)]
+pub struct Demux(NodeId);
+
+impl Demux {
+    pub fn node(self) -> NodeId {
+        self.0
+    }
+    pub fn input(self) -> PadId {
+        PadId { node: self.0, index: 0 }
+    }
+    pub fn out(self, index: u8) -> PadId {
+        PadId { node: self.0, index }
+    }
+}
+
 /// A muxer handle returned by [`Graph::add_muxer`]: `n` input pads, 1 output.
 #[derive(Debug, Clone, Copy)]
 pub struct Muxer(NodeId);
@@ -199,6 +218,17 @@ impl<E> Graph<E> {
 
     pub fn add_muxer(&mut self, element: E, inputs: u8) -> Muxer {
         Muxer(self.push(NodeKind::Muxer(inputs), Some(element)))
+    }
+
+    /// Add a content-routing demultiplexer: 1 input, `outputs` outputs. The node
+    /// is `Tee(outputs)`-shaped (so it validates and negotiates exactly like a
+    /// tee, all outputs initially carrying the input caps) but carries a
+    /// routing `element`; the runner drives it via
+    /// [`GraphNodeRef::Demux`](crate::runtime::GraphNodeRef::Demux) and each
+    /// branch retypes from a per-output `CapsChanged` at runtime (M210). Unlike
+    /// `add_tee`, a demux carries an element payload.
+    pub fn add_demux(&mut self, element: E, outputs: u8) -> Demux {
+        Demux(self.push(NodeKind::Tee(outputs), Some(element)))
     }
 
     fn push(&mut self, kind: NodeKind, element: Option<E>) -> NodeId {

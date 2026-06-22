@@ -404,6 +404,32 @@ fn apply_muxer_props(
     Ok(())
 }
 
+fn apply_demux_props(
+    demux: &mut Box<dyn crate::runtime::DynMultiOutputElement>,
+    name: &str,
+    props: &[(String, String)],
+) -> Result<(), ParseError> {
+    for (key, value) in props {
+        let kind = demux
+            .properties()
+            .iter()
+            .find(|s| s.name == key)
+            .ok_or_else(|| ParseError::UnknownProperty { element: name.into(), key: key.clone() })?
+            .kind;
+        let parsed = PropValue::parse(kind, value).map_err(|_| ParseError::BadValue {
+            element: name.into(),
+            key: key.clone(),
+            value: value.clone(),
+        })?;
+        demux.set_property(key, parsed).map_err(|_| ParseError::BadValue {
+            element: name.into(),
+            key: key.clone(),
+            value: value.clone(),
+        })?;
+    }
+    Ok(())
+}
+
 /// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
 /// `t.` references into directed links, derive each element's role (and any tee's
 /// fan-out width) from its link degree, then construct and wire the nodes.
@@ -691,8 +717,15 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // A non-tee node with several inbound links is a muxer (built from the
     // registry with that input count); a tee has a single input pad.
     let is_muxer = |ei: usize| !is_tee(ei) && in_deg[ei] > 1;
+    // A node registered as a demuxer with several outbound links is a fan-out
+    // demux (M210): the transpose of a muxer. A registered name with one output
+    // falls back to its single-output launch element (e.g. `tsdemux`), the way a
+    // one-input muxer name falls back to its single-input element.
+    let is_demux = |ei: usize| {
+        !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name)
+    };
     for ei in 0..specs.len() {
-        if !is_tee(ei) && out_deg[ei] > 1 {
+        if !is_tee(ei) && !is_demux(ei) && out_deg[ei] > 1 {
             return Err(ParseError::FanOutWithoutTee(specs[ei].name.clone()));
         }
         if is_muxer(ei) && out_deg[ei] == 0 {
@@ -746,6 +779,12 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
             apply_muxer_props(&mut mux, &spec.name, &spec.props)?;
             graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
+        } else if is_demux(ei) {
+            let mut demux = registry
+                .make_demux(&spec.name, out_deg[ei])
+                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            apply_demux_props(&mut demux, &spec.name, &spec.props)?;
+            graph.add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8).node()
         } else if out_deg[ei] == 0 {
             let mut el = registry
                 .make_element(&spec.name)
@@ -762,15 +801,15 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         node_of.push(Some(node));
     }
 
-    // Wire edges. Each tee branch takes a distinct output pad (0..n) and each
-    // muxer input a distinct input pad (0..n); every other output and input is
-    // pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
+    // Wire edges. Each tee or demux branch takes a distinct output pad (0..n) and
+    // each muxer input a distinct input pad (0..n); every other output and input
+    // is pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
     let mut tee_next = alloc::vec![0u8; specs.len()];
     let mut mux_next = alloc::vec![0u8; specs.len()];
     for &(s, d, policy) in &links {
         let node_s = node_of[s].expect("contracted link source is a real node");
         let node_d = node_of[d].expect("contracted link destination is a real node");
-        let src = if is_tee(s) {
+        let src = if is_tee(s) || is_demux(s) {
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: node_s, index }
