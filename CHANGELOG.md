@@ -23,19 +23,30 @@ to a documented contract.
 - `format` maps g2g `RawVideoFormat` <-> the GStreamer-style format strings the
   Python `FrameIO` / `frame_format` code speaks, the single source of truth for
   the format half of the boundary contract (`YUYV` aliases `YUY2`).
-- `python` feature (pyo3 + numpy, implies std, off the no_std baseline): embeds
+- `python` feature (pyo3 0.26, implies std, off the no_std baseline): embeds
   CPython, registers a native `g2g` module a `backend/g2g` package imports, and
-  defines the per-frame contract `g2g_process(buf, w, h, fmt) -> (bytes|None,
-  [blobs])` (the `backend/gst` shape on a Rust `Frame`). The interpreter call is
-  inline + a `bytes` copy in the skeleton; zero-copy numpy over System memory
-  (step 2), the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata
-  build), a launch-registry factory and aggregator / source / GPU variants
-  (step 4) follow.
+  defines the per-frame contract `g2g_process(buf, w, h, fmt) -> [blobs]` (the
+  `backend/gst` shape on a Rust `Frame`).
+- **Step 2 (done): zero-copy per-frame path.** `buf` is a writable
+  buffer-protocol object (`FrameBuffer`, a `#[pyclass]` exposing
+  `__getbuffer__` over the frame's System slice) rather than a copied `bytes`:
+  Python reads / overwrites pixels in place via `memoryview` /
+  `np.frombuffer`, so neither direction copies (the `GstFrameIO`
+  map-and-write-in-place model). No Rust-side numpy crate; Python's own numpy
+  consumes the buffer. Verified live on the Fedora 43 system CPython 3.14: a
+  stdlib-only fixture element writes into the frame and the mutation is
+  observed on the frame that flows downstream.
+- Deferred: the GIL offload to a dedicated thread (step 2b: g2g's runtime is a
+  custom non-tokio executor, so the inline call blocks the arm and
+  `spawn_blocking` is unavailable; the right offload + the one-interpreter vs
+  sub-interpreter GIL-contention choice are documented in `DESIGN_TODO.md`);
+  the blob list -> `FrameMetaSet` (step 3, the M88 deferred metadata build);
+  the launch-registry factory and aggregator / source / GPU variants (step 4).
 - Tests: `format` round-trips; `m198_skeleton` covers caps negotiation
   (concrete-from-Any, format rejection, `with_accept`), configure, the property
-  bag, and the lifecycle guard. The `python` build is verified to compile under
-  the pyo3 0.23 API (CPython 3.13; 3.14 needs the forward-compat flag); the
-  live per-frame path needs libpython + a `backend/g2g` package to exercise.
+  bag, and the lifecycle guard (no-interpreter build); `m198_python_path`
+  (`python` feature) drives a fixture element through the live interpreter and
+  asserts the in-place write reaches Rust.
 
 ### M197 (coverage): branching decode pipelines
 

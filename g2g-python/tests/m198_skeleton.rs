@@ -7,9 +7,12 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelinePacket, PropValue,
-    PushOutcome, Rate, RawVideoFormat,
+    AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
+    RawVideoFormat,
 };
+// Used only by the configure test, which is gated to the no-interpreter build.
+#[cfg(not(feature = "python"))]
+use g2g_core::ConfigureOutcome;
 use g2g_python::PyTransform;
 
 fn rgba(w: u32, h: u32, fps: u32) -> Caps {
@@ -76,6 +79,10 @@ fn with_accept_hosts_a_different_format() {
     assert_eq!(el.intercept_caps(&upstream).unwrap(), upstream);
 }
 
+// Without the `python` feature, configure arms the element without touching an
+// interpreter. Under `python` it imports the named module, so the live path is
+// covered by m198_python_path.rs against a real fixture instead.
+#[cfg(not(feature = "python"))]
 #[test]
 fn configure_accepts_fixed_caps() {
     let mut el = PyTransform::new("action", "ActionTransform");
@@ -106,6 +113,7 @@ fn process_before_configure_is_rejected() {
     assert_eq!(res, Err(G2gError::NotConfigured));
 }
 
+#[cfg(not(feature = "python"))]
 #[test]
 fn eos_after_configure_drains_to_nothing() {
     let mut el = PyTransform::new("action", "ActionTransform");

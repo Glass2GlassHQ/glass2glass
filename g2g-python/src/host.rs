@@ -9,36 +9,91 @@
 //! a class whose instances expose
 //!
 //! ```text
-//! g2g_process(buf: bytes, width: int, height: int, fmt: str)
-//!     -> tuple[bytes | None, list[bytes]]
+//! g2g_process(buf, width: int, height: int, fmt: str) -> list[bytes]
 //! ```
 //!
-//! returning the (optionally overwritten) frame bytes and a list of opaque
-//! metadata blobs. This is the same shape `backend/gst` builds on a
-//! `Gst.Buffer`: read a frame, run the task, write a frame and/or append a
-//! blob. Step 2 replaces the `bytes` copy with a zero-copy numpy view over the
-//! System slice via the buffer protocol; step 3 routes the blob list into
-//! [`g2g_core::FrameMetaSet`] through the native `g2g` module.
+//! where `buf` is a **writable buffer-protocol object** over the frame's own
+//! System memory. Python wraps it (`memoryview(buf)`, or
+//! `np.frombuffer(buf, np.uint8).reshape(h, w, c)`) and reads / overwrites
+//! pixels in place, so neither direction copies. It returns a list of opaque
+//! metadata blobs. This is the `backend/gst` `GstFrameIO` shape (map the
+//! buffer, read a frame, write a frame in place, append a blob) on a g2g
+//! [`Frame`]. Step 3 routes the blob list into [`g2g_core::FrameMetaSet`].
 //!
-//! GIL note: CPython is single-interpreter and GIL-serialized; hosted elements
-//! contend on one lock. Elements run on the executor's task threads, so a
-//! production runner should hand `run_transform` to a Python-affine blocking
-//! thread (`tokio::task::spawn_blocking` or a dedicated OS thread, like
-//! `MfDecode`'s single-thread contract) rather than calling it inline as this
-//! skeleton does. Document the chosen `link_capacity` accordingly: a blocking
-//! hop widens the in-flight window.
+//! GIL / threading: CPython is single-interpreter and GIL-serialized. This host
+//! calls `g2g_process` **inline** under [`Python::attach`] (GIL acquire), which blocks the
+//! runner arm for the duration of the Python work. That is correct but not
+//! concurrent: g2g's runtime is a custom cooperative executor (`runtime::join`,
+//! not tokio), so `tokio::spawn_blocking` is unavailable and a blocking hop must
+//! go to a dedicated OS thread reached over a runtime-agnostic async channel
+//! (the `MfDecode` single-thread-affinity model). That offload, and the
+//! one-shared-interpreter vs per-element-sub-interpreter GIL-contention choice,
+//! are step 2b (see `DESIGN_TODO.md`); doing them before the executor contract
+//! is pinned risks the wrong abstraction.
 
+use std::os::raw::c_int;
 use std::sync::Once;
 
+use pyo3::exceptions::PyBufferError;
+use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
 
-use g2g_core::memory::SystemSlice;
 use g2g_core::{Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, RawVideoFormat};
 
 use crate::format::format_to_py;
 
 static INIT: Once = Once::new();
+
+/// Zero-copy writable view over a frame's System-memory bytes, handed to the
+/// hosted element through the Python buffer protocol. Holds a raw pointer into
+/// memory the host (`run_transform`) keeps alive and untouched for the whole
+/// `g2g_process` call; `unsendable` because the pointer is only ever touched on
+/// the GIL thread inside that call.
+#[pyclass(unsendable)]
+#[derive(Debug)]
+struct FrameBuffer {
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[pymethods]
+impl FrameBuffer {
+    unsafe fn __getbuffer__(
+        slf: PyRefMut<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("null buffer view"));
+        }
+        // SAFETY: `view` is a valid out-pointer supplied by CPython.
+        // `PyBuffer_FillInfo` increfs the exporter (`slf`) into `view->obj`, so
+        // the `FrameBuffer` (and thus the validity guarantee on `ptr`) outlives
+        // the view; CPython decrefs on release. `ptr`/`len` describe a slice
+        // the host pins for the whole call, and the Python contract forbids
+        // retaining the buffer past `g2g_process`'s return.
+        let ret = unsafe {
+            ffi::PyBuffer_FillInfo(
+                view,
+                slf.as_ptr(),
+                slf.ptr as *mut core::ffi::c_void,
+                slf.len as ffi::Py_ssize_t,
+                0, // writable
+                flags,
+            )
+        };
+        if ret == -1 {
+            Err(PyErr::take(slf.py()).unwrap_or_else(|| PyBufferError::new_err("fill failed")))
+        } else {
+            Ok(())
+        }
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
+        // Nothing allocated in `__getbuffer__` beyond the exporter refcount,
+        // which CPython manages; release is a no-op.
+    }
+}
 
 /// Native `g2g` module visible to the embedded interpreter. The FrameIO /
 /// AnalyticsBackend surface (M198 step 3) hangs off here; empty for now so the
@@ -59,14 +114,14 @@ pub fn init_host() {
         // Selected before the Python `backend` package is imported so its
         // GSTML_BACKEND branch binds to `backend/g2g`.
         std::env::set_var("GSTML_BACKEND", "g2g");
-        // SAFETY contract of append_to_inittab!: called before the interpreter
-        // is initialized. `auto-initialize` defers init to the first
-        // `with_gil`, and `Once` guarantees this runs first.
+        // append_to_inittab! must run before the interpreter is initialized;
+        // `auto-initialize` defers init to the first `with_gil`, and `Once`
+        // guarantees this runs first.
         pyo3::append_to_inittab!(g2g);
     });
 }
 
-/// Import `module`, instantiate `class`, set the `draw-label` property, and
+/// Import `module`, instantiate `class`, set the `draw_label` attribute, and
 /// return the live instance (a GIL-independent `Py` handle).
 pub(crate) fn instantiate(
     module: &str,
@@ -74,61 +129,57 @@ pub(crate) fn instantiate(
     draw_label: bool,
 ) -> Result<Py<PyAny>, G2gError> {
     init_host();
-    Python::with_gil(|py| -> PyResult<Py<PyAny>> {
-        let m = PyModule::import(py, module)?;
-        let obj = m.getattr(class)?.call0()?;
-        obj.setattr("draw_label", draw_label)?;
-        Ok(obj.unbind())
+    Python::attach(|py| -> Result<Py<PyAny>, G2gError> {
+        let obj = (|| -> PyResult<Py<PyAny>> {
+            let m = PyModule::import(py, module)?;
+            let obj = m.getattr(class)?.call0()?;
+            obj.setattr("draw_label", draw_label)?;
+            Ok(obj.unbind())
+        })();
+        obj.map_err(|e| py_fail(py, e))
     })
-    .map_err(py_err)
 }
 
-/// Hand one frame to the hosted element and rebuild the output frame.
-///
-/// Skeleton: copies the System slice into a `bytes`, calls `g2g_process`, and
-/// reads back only the (optional) overwritten frame. The blob list and the
-/// zero-copy buffer-protocol path are later steps (see module docs).
+/// Hand one frame to the hosted element. Python reads / overwrites the frame's
+/// System memory in place through the buffer protocol; the same frame (now
+/// possibly modified) flows on, timing and sequence preserved.
 pub(crate) fn run_transform(
     instance: &Py<PyAny>,
-    frame: Frame,
+    mut frame: Frame,
     caps: &Caps,
 ) -> Result<Frame, G2gError> {
-    let MemoryDomain::System(slice) = &frame.domain else {
-        // GPU / DMABUF domains need the download (step 4) before Python sees
-        // them; the skeleton requires System memory.
-        return Err(G2gError::UnsupportedDomain);
-    };
     let (width, height, fmt) = raw_video_dims(caps)?;
 
-    let out_bytes = Python::with_gil(|py| -> PyResult<Option<Vec<u8>>> {
-        let buf = PyBytes::new(py, slice.as_slice());
-        let ret = instance
-            .bind(py)
-            .call_method1("g2g_process", (buf, width, height, format_to_py(fmt)))?;
-        // ret is (out_bytes | None, [blobs]); the skeleton reads only frame 0.
-        // TODO(M198 step 3): route ret[1] (the blob list) into FrameMetaSet.
-        let frame_obj = ret.get_item(0)?;
-        if frame_obj.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(frame_obj.extract::<Vec<u8>>()?))
-        }
-    })
-    .map_err(py_err)?;
+    // Scope the mutable borrow so `frame` can be moved into the return after
+    // the call. The raw pointer outlives the borrow; the heap buffer it points
+    // at does not move when `frame` does (a `Box` move relocates only the
+    // pointer, not the allocation), and Python is done with the buffer before
+    // the return.
+    let (ptr, len) = {
+        let MemoryDomain::System(slice) = &mut frame.domain else {
+            // GPU / DMABUF domains need the download (step 4) before Python
+            // sees them; the skeleton requires System memory.
+            return Err(G2gError::UnsupportedDomain);
+        };
+        let bytes = slice.as_mut_slice();
+        (bytes.as_mut_ptr(), bytes.len())
+    };
 
-    Ok(match out_bytes {
-        // Python overwrote the frame (e.g. drew the label overlay): rebuild on
-        // a fresh System slice, preserving timing and sequence for latency
-        // traceability.
-        Some(bytes) => Frame {
-            domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            timing: frame.timing,
-            sequence: frame.sequence,
-            meta: Default::default(),
-        },
-        // No overlay drawn: forward the input frame untouched.
-        None => frame,
-    })
+    Python::attach(|py| -> Result<(), G2gError> {
+        (|| -> PyResult<()> {
+            let buffer = Py::new(py, FrameBuffer { ptr, len })?;
+            let _blobs = instance.bind(py).call_method1(
+                "g2g_process",
+                (buffer, width, height, format_to_py(fmt)),
+            )?;
+            // TODO(M198 step 3): route `_blobs` (the metadata list) into
+            // `frame.meta` (FrameMetaSet).
+            Ok(())
+        })()
+        .map_err(|e| py_fail(py, e))
+    })?;
+
+    Ok(frame)
 }
 
 /// Pull the fixed `(width, height, format)` out of negotiated raw-video caps.
@@ -148,8 +199,10 @@ fn dim_fixed(d: &Dim) -> Result<u32, G2gError> {
     }
 }
 
-fn py_err(_e: PyErr) -> G2gError {
-    // TODO(M198 step 2): carry the Python traceback (e.to_string under the GIL)
-    // into a richer error rather than collapsing to Other.
+/// Surface the Python traceback to stderr (the standard pyo3 path) before
+/// collapsing to a structural error; `G2gError` carries no string payload, so a
+/// richer error (carrying the traceback) waits on a core enum change.
+fn py_fail(py: Python<'_>, e: PyErr) -> G2gError {
+    e.print(py);
     G2gError::Hardware(HardwareError::Other)
 }

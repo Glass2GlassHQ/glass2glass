@@ -57,11 +57,20 @@ CPython (pyo3). Decision taken: in-process pyo3, not out-of-process IPC.
   `g2g` module stub + the `g2g_process(buf, w, h, fmt) -> (bytes|None, [blobs])`
   per-frame contract. Negotiation half builds on the no-libpython profile; the
   Python call is inline + a `bytes` copy.
-- **Step 2: real per-frame path, zero-copy.** Replace the `bytes` copy with a
-  numpy view over the System slice via the buffer protocol; run the call on a
-  Python-affine blocking thread (`spawn_blocking` / dedicated OS thread, the
-  `MfDecode` single-thread contract), not inline; carry the Python traceback
-  into the error. End-to-end run of `ActionTask` / embedding on system memory.
+- **Step 2 (done): zero-copy per-frame path.** `FrameBuffer` (`#[pyclass]` with
+  `__getbuffer__`) hands Python a writable buffer-protocol view over the frame's
+  System slice; Python reads / overwrites in place (`memoryview` /
+  `np.frombuffer`), no copy either way, no Rust-side numpy crate. pyo3 bumped to
+  0.26 for CPython 3.14. Verified live on the system 3.14 (stdlib fixture writes
+  into the frame, mutation observed downstream). Python traceback is surfaced to
+  stderr via `PyErr::print` (a richer error needs a `G2gError` string payload).
+- **Step 2b: GIL offload.** The call is still inline under `Python::attach`,
+  which blocks the runner arm. g2g's runtime is a custom cooperative executor
+  (`runtime::join`, not tokio), so `spawn_blocking` is out: offload to a
+  dedicated Python-affine OS thread reached over a runtime-agnostic async
+  channel (the `MfDecode` single-thread-affinity model). Decide here whether all
+  hosted elements share one interpreter thread (GIL serializes them anyway) or
+  use per-element sub-interpreters; document the resulting `link_capacity`.
 - **Step 3: analytics metadata.** `AnalyticsBackend` impl on the native `g2g`
   module writing into `FrameMetaSet` -- this is the "first detection element"
   that the M88 full `FrameMeta` build (trait body + relation graph) was deferred

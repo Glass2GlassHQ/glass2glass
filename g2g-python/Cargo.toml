@@ -18,19 +18,16 @@ std = ["g2g-core/std", "g2g-core/runtime"]
 # and run time, so it is off the no_std / RTOS baseline and implies std. The
 # default build negotiates caps but cannot run frames (the per-frame Python
 # call lives behind this feature).
-python = ["std", "dep:pyo3", "dep:numpy"]
+python = ["std", "dep:pyo3"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
 # Embedded CPython bridge (python feature). `auto-initialize` starts the
-# interpreter on first GIL acquisition. 0.23 supports CPython <= 3.13; on a
-# 3.14+ host either build with PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 or bump
-# pyo3 (the host.rs API surface tracks the 0.23 line).
-pyo3 = { version = "0.23", optional = true, features = ["auto-initialize"] }
-# Zero-copy numpy <-> Rust slice views over System-memory frames (python
-# feature). The buffer-protocol path that avoids a per-frame copy lands in
-# step 2; pulled in now so the dependency surface is fixed.
-numpy = { version = "0.23", optional = true }
+# interpreter on first GIL acquisition. 0.26+ supports CPython 3.14 (the Fedora
+# 43 system Python). Zero-copy frame access uses the Python buffer protocol, so
+# the host hands Python a writable buffer and Python's own numpy consumes it via
+# `np.frombuffer`, no Rust-side numpy crate needed.
+pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
