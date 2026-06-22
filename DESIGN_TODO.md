@@ -159,6 +159,29 @@ snapshot policy rather than consume-one-per-round, so it needs a second
 `SyncPolicy` variant first, `T: Clone` or a borrowing `peek_round`). Refactors
 are behaviour-preserving and each guarded by that element's existing tests.
 
+## GStreamer porting story (M200+)
+
+[PORTING.md](PORTING.md) is the guide (pipelines, element mapping, app code,
+custom elements, third-party registration, gaps). Infra landed in M200:
+- `Caps::to_gst_string()` (g2g-core) — the inverse of the capsfilter parser;
+  round-trips. Powers logs / diagnostics and a future `g2g-launch -v` caps dump.
+- `g2g_plugins::gst_compat` — a gst->g2g element-name map (`gst_equivalent`) and
+  a launch linter (`lint_launch`) that turns a parse failure into a porting
+  suggestion. Wired into `g2g-launch` (hint on error) and `g2g-inspect --gst`.
+- `examples/third_party_element.rs` — the register-a-third-party-element path,
+  end to end.
+
+**Dynamic plugin loading (not started).** Today third-party native elements are
+added at build time (a crate + `Registry::register_*`; see PORTING.md §7) and a
+packaged binary extends only via the Python host (`pyelement`/`pysrc`/
+`pyaggregator`, no recompile) or a package rebuild. A GStreamer-style dynamic
+loader would `dlopen` a `cdylib` exporting a stable `g2g_plugin_register` entry
+point, discovered via a `G2G_PLUGIN_PATH`. The hard part is Rust's unstable ABI:
+options are a C-ABI shim (elements coded against a C surface), version+toolchain-
+locked `extern "Rust"` plugins (fragile across compilers), or a stable-ABI crate
+(`abi_stable` / `stabby`). Decide the ABI strategy before building; until then the
+Python host is the no-recompile story.
+
 ## gst-launch DSL harmonization (M182+)
 
 The `parse_launch` DSL is a GStreamer-compatibility surface; its human-facing

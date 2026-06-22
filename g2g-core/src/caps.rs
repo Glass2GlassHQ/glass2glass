@@ -1,3 +1,5 @@
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::G2gError;
@@ -182,6 +184,115 @@ impl Caps {
             Caps::CompressedVideo { width, height, framerate, .. }
             | Caps::RawVideo { width, height, framerate, .. } => Some((width, height, framerate)),
             Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => None,
+        }
+    }
+
+    /// Render these caps as a GStreamer caps string, the inverse of the
+    /// `capsfilter` parser (`g2g_plugins::capsfilter::parse_caps`). For `-v`
+    /// pipeline dumps, logs, and porting diagnostics. The fixed media types
+    /// round-trip through the parser; `Tensor` has no GStreamer media type and
+    /// is rendered as a g2g-specific `tensor/x-raw` descriptor.
+    pub fn to_gst_string(&self) -> String {
+        match self {
+            Caps::RawVideo { format, width, height, framerate } => {
+                let mut s = format!("video/x-raw,format={}", raw_format_gst_name(*format));
+                push_dim(&mut s, "width", width);
+                push_dim(&mut s, "height", height);
+                push_rate(&mut s, framerate);
+                s
+            }
+            Caps::CompressedVideo { codec, width, height, framerate } => {
+                let mut s = String::from(codec_gst_media_type(*codec));
+                push_dim(&mut s, "width", width);
+                push_dim(&mut s, "height", height);
+                push_rate(&mut s, framerate);
+                s
+            }
+            Caps::Audio { format, channels, sample_rate } => {
+                let (media_type, fmt) = audio_gst_media_type(*format);
+                let mut s = String::from(media_type);
+                if let Some(f) = fmt {
+                    s.push_str(&format!(",format={f}"));
+                }
+                if *channels != 0 {
+                    s.push_str(&format!(",channels={channels}"));
+                }
+                if *sample_rate != ANY_SAMPLE_RATE && *sample_rate != 0 {
+                    s.push_str(&format!(",rate={sample_rate}"));
+                }
+                s
+            }
+            // No GStreamer media type for tensors; a g2g-specific descriptor.
+            Caps::Tensor { dtype, shape, layout } => {
+                format!("tensor/x-raw,dtype={dtype:?},layout={layout:?},shape={shape:?}")
+            }
+            Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
+        }
+    }
+}
+
+/// The GStreamer `format=` name for a raw video format (uppercase, the M182
+/// vocabulary the parser also accepts).
+fn raw_format_gst_name(f: RawVideoFormat) -> &'static str {
+    match f {
+        RawVideoFormat::Nv12 => "NV12",
+        RawVideoFormat::I420 => "I420",
+        RawVideoFormat::Rgba8 => "RGBA",
+        RawVideoFormat::Bgra8 => "BGRA",
+        RawVideoFormat::Yuyv => "YUY2",
+    }
+}
+
+/// The GStreamer media type for a compressed video codec.
+fn codec_gst_media_type(c: VideoCodec) -> &'static str {
+    match c {
+        VideoCodec::H264 => "video/x-h264",
+        VideoCodec::H265 => "video/x-h265",
+        VideoCodec::Av1 => "video/x-av1",
+        VideoCodec::Vp8 => "video/x-vp8",
+        VideoCodec::Vp9 => "video/x-vp9",
+        VideoCodec::Mjpeg => "image/jpeg",
+    }
+}
+
+/// The GStreamer media type (and raw `format=` name, if raw) for an audio format.
+fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) {
+    match f {
+        AudioFormat::Aac => ("audio/mpeg", None),
+        AudioFormat::Opus => ("audio/x-opus", None),
+        AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
+        AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
+    }
+}
+
+/// The GStreamer media type for a container byte stream.
+fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
+    match e {
+        ByteStreamEncoding::MpegTs => "video/mpegts",
+        ByteStreamEncoding::Matroska => "video/x-matroska",
+        ByteStreamEncoding::Ogg => "application/ogg",
+        ByteStreamEncoding::Flv => "video/x-flv",
+        ByteStreamEncoding::IsoBmff => "video/quicktime",
+    }
+}
+
+/// Append `,key=value` for a fixed dimension; omit `Any` / `Range` (a wildcard
+/// is the absence of the field in GStreamer caps).
+fn push_dim(s: &mut String, key: &str, d: &Dim) {
+    if let Dim::Fixed(v) = d {
+        s.push_str(&format!(",{key}={v}"));
+    }
+}
+
+/// Append `,framerate=N/D` for a fixed rate (Q16 fps). A whole-number fps prints
+/// as `fps/1`; otherwise the exact Q16 value prints as `q16/65536`, which the
+/// parser reads back to the same Q16.
+fn push_rate(s: &mut String, r: &Rate) {
+    if let Rate::Fixed(q16) = r {
+        if q16 % 65536 == 0 {
+            s.push_str(&format!(",framerate={}/1", q16 >> 16));
+        } else {
+            s.push_str(&format!(",framerate={q16}/65536"));
         }
     }
 }

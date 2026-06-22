@@ -97,6 +97,11 @@ fn main() {
         Ok(graph) => graph,
         Err(err) => {
             eprintln!("parse error: {err}");
+            // Add a gst->g2g porting hint when one applies.
+            let report = g2g_plugins::gst_compat::lint_launch(&reg, &pipeline);
+            for hint in &report.findings {
+                eprintln!("  hint: {hint}");
+            }
             process::exit(1);
         }
     };

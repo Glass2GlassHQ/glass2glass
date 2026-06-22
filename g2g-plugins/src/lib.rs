@@ -78,6 +78,10 @@ pub mod uridecodebin;
 // gst-inspect (M107). std (the Registry is std).
 #[cfg(feature = "std")]
 pub mod registry;
+// GStreamer porting helpers: gst->g2g element map + launch linter (M200). std
+// (uses the Registry + parse_launch).
+#[cfg(feature = "std")]
+pub mod gst_compat;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.

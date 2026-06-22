@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M200: GStreamer porting story (guide + infra)
+
+A porting guide plus the infra it leans on, to make moving from GStreamer to g2g
+concrete.
+
+- **[PORTING.md](PORTING.md)**: mental model, porting a `gst-launch` line,
+  element-name mapping, caps strings, application-code mapping, porting a custom
+  element (`GstBaseTransform`->`AsyncElement`, `GstBaseSrc`->`SourceLoop`,
+  `GstAggregator`->`MultiInputElement`), adding third-party elements (incl. the
+  packaged-binary / dynamic-plugin story), known gaps, and a CLI reference.
+- **`Caps::to_gst_string()`** (g2g-core): renders `Caps` as a GStreamer caps
+  string, the inverse of the `capsfilter` parser; round-trips through it.
+- **`g2g_plugins::gst_compat`**: `gst_equivalent(&registry, name)` maps a gst
+  element name to its g2g form (available / renamed / unsupported-with-hint /
+  unknown), consulting the live registry (aliases + feature-gated elements) then
+  a static guidance table; `lint_launch(&registry, line)` runs `parse_launch`
+  and turns the first error into a porting suggestion.
+- **`g2g-inspect --gst <name>`**: look up a gst element's g2g equivalent.
+- **`g2g-launch`**: prints a gst->g2g `hint:` line when a pipeline fails to parse.
+- **`examples/third_party_element.rs`**: a registered third-party `AsyncElement`
+  used by name in a launch line, end to end (`cargo run -p g2g-plugins
+  --features std --example third_party_element`).
+- Tests: caps-string round-trip, linter (clean line ok, unknown-encoder
+  suggestion), `gst_equivalent` classification. Documented the dynamic-plugin
+  gap (no `.so` scanning yet) in `DESIGN_TODO.md`.
+
 ### M199: `InputAggregator`, a shared per-input collector for muxers
 
 `g2g-core::aggregator::InputAggregator<T>` factors out the per-input frame

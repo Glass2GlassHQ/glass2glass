@@ -367,5 +367,10 @@ required-features = ["std"]
 name = "g2g-inspect"
 required-features = ["std"]
 
+# Porting reference: a third-party element registered and run via the launcher.
+[[example]]
+name = "third_party_element"
+required-features = ["std"]
+
 [lints]
 workspace = true
