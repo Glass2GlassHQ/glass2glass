@@ -231,6 +231,16 @@ pub fn default_registry() -> Registry {
             Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
         ))
     }));
+    // Multi-stream MPEG-TS fan-in (M208): the A+V container case. `mpegtsmux` is
+    // registered both as a single-input launch element (the `tsmux::TsMux` above)
+    // and here as a fan-in muxer (`tsmuxn::TsMux`); the parser picks by link
+    // degree (`make_element` for one input, `make_muxer` for several), so the one
+    // name covers both the `! mpegtsmux !` and `v.! m.  a.! m.  mpegtsmux name=m`
+    // shapes the way gst's request sink pads do. Each input's PMT stream type is
+    // learned from its negotiated caps; AUs interleave by PTS (M204).
+    reg.register_muxer(MuxerFactory::new("mpegtsmux", |inputs| {
+        Box::new(crate::tsmuxn::TsMux::new(inputs))
+    }));
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));

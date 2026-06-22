@@ -5,6 +5,23 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M208: `gst-launch` fan-in for the multi-stream TS muxer
+
+The M207 multi-input `tsmuxn::TsMux` is now reachable from the `gst-launch` text
+path, so an A+V multiplex can be expressed without dropping to a programmatic
+runner.
+
+- **`mpegtsmux` registered as a fan-in muxer** (`register_muxer`) in addition to
+  its existing single-input launch element (`tsmux::TsMux`). The parser picks by
+  link degree: one inbound link builds the single-stream element (`! mpegtsmux !`),
+  several build the multi-input `tsmuxn::TsMux` (`v.! m.  a.! m.  mpegtsmux name=m`).
+  One name covers both shapes, the way gst's request sink pads do — no new syntax.
+- Test (`m208_launch_ts_av_fanin`): an H.264 and an AAC source join at
+  `mpegtsmux name=m` and run end to end through `run_graph` (5 AUs → 5 TS frames);
+  asserts the muxer node has two input pads and that a single-input `mpegtsmux`
+  stays a transform node. Byte-level multiplex correctness stays covered by M207.
+- Still staged for the TS muxer: a no-PCR → PCR timing upgrade.
+
 ### M207: multi-stream MPEG-TS muxing (A+V into one TS)
 
 Muxing audio + video into a single MPEG-TS program now works, the everyday
@@ -23,8 +40,8 @@ elementary stream per TS), so an A+V multiplex was impossible.
 - Test (`m207_ts_av_mux`): a video and an audio source are muxed into one TS,
   then each elementary stream is recovered by demuxing it back out with the
   existing single-output `TsDemux` — A+V round-trip through a single multiplex.
-- Follow-up: wiring the multi-input muxer into the `gst-launch` fan-in syntax
-  and a no-PCR → PCR upgrade remain staged.
+- Follow-up: a no-PCR → PCR upgrade remains staged. (The `gst-launch` fan-in
+  wiring of the multi-input muxer landed in M208.)
 
 ### M206: bus breadth (`StreamStart`, `Info`)
 

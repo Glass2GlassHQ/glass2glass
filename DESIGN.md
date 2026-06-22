@@ -1267,8 +1267,11 @@ carrying N elementary streams, each on its own PID and named in one PMT. The
 single-input `tsmux::TsMux` element wraps a one-stream muxer (`! mpegtsmux !`);
 the multi-input `tsmuxn::TsMux` (a `MultiInputElement`) muxes A+V, interleaving
 access units across inputs by PTS via the M204 `take_earliest_by` merge so the
-multiplex is decode-ordered. Multi-program selection, PCR-based timing, and the
-`gst-launch` fan-in wiring of the multi-input muxer are follow-ups.
+multiplex is decode-ordered. The `mpegtsmux` name is registered both as the
+single-input launch element and (M208) as a fan-in muxer, so the text parser
+picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
+(`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads. Multi-
+program selection and PCR-based timing are follow-ups.
 
 The Matroska / WebM demuxer (M110) is the second, the same parser + element split
 keyed on `Caps::ByteStream{Matroska}`. `g2g-plugins::matroska::MatroskaDemuxer` is

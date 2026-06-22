@@ -12,9 +12,13 @@
 //! queued), so the muxed TS is monotonic across streams the way a decoder
 //! expects. The PMT (built once all inputs are configured) names every stream.
 //!
-//! Scope: one program, no PCR (see [`crate::mpegts::TsMuxer`]). Wiring it into
-//! the `gst-launch` fan-in syntax is a follow-up; today it runs through
-//! `run_muxer_sink` / a `run_graph` muxer node programmatically.
+//! Scope: one program, no PCR (see [`crate::mpegts::TsMuxer`]). Reachable from
+//! the `gst-launch` fan-in syntax (M208): registered as the `mpegtsmux` muxer in
+//! [`default_registry`](crate::registry::default_registry), so
+//! `v.! m.  a.! m.  mpegtsmux name=m ! sink` builds this element when more than
+//! one input links (a single input still builds the single-stream
+//! [`crate::tsmux::TsMux`]). Also runs programmatically through `run_muxer_sink`
+//! / a `run_graph` muxer node.
 
 use core::future::Future;
 use core::pin::Pin;
