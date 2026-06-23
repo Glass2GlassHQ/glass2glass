@@ -36,6 +36,19 @@ udp-ingress = ["std", "tokio/net"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
+# macOS hardware H.264 decode via VideoToolbox (VTDecompressionSession). Pulls the
+# objc2 VideoToolbox / Core Media / Core Video / Core Foundation bindings;
+# macOS-only (the deps live under [target.'cfg(target_os = "macos")']), implies
+# std. The macOS counterpart of mf-decode; first element of the macOS platform
+# track. See DESIGN_TODO.md "Platform: macOS".
+vtdecode = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-video-toolbox",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+]
 # Windows H.264 encode via the Media Foundation H.264 Encoder MFT
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.
@@ -295,6 +308,51 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_Graphics_Gdi",
+] }
+
+# VideoToolbox / Core Media / Core Video bindings are macOS-only; target-gate so
+# other platforms never attempt to resolve the objc2 framework crates (which link
+# the Apple frameworks). Drives the `vtdecode` element. Feature flags select only
+# the symbols the decoder uses; they may need adjusting on the first on-device
+# build (this Linux dev host cannot compile the macOS target). objc2 0.6, the
+# framework crates 0.3.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-video-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-core-media",
+    "objc2-core-video",
+    "VTBase",
+    "VTErrors",
+    "VTDecompressionSession",
+] }
+objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-core-video",
+    "CMBase",
+    "CMTime",
+    "CMFormatDescription",
+    "CMFormatDescriptionBridge",
+    "CMBlockBuffer",
+    "CMSampleBuffer",
+] }
+objc2-core-video = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "CVBase",
+    "CVReturn",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+] }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFString",
+    "CFNumber",
+    "CFDictionary",
 ] }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try

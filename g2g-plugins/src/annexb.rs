@@ -116,6 +116,50 @@ pub(crate) fn nal_units_any(data: &[u8]) -> NalUnitsAny<'_> {
     }
 }
 
+/// H.264 NAL unit type: the low 5 bits of the first NAL header byte.
+#[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
+pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
+    nal.first().map(|b| b & 0x1F)
+}
+
+/// Collect the H.264 SPS (type 7) and PPS (type 8) NAL units from an access unit
+/// (either framing), returned as owned copies so the caller can cache them across
+/// frames. VideoToolbox builds its `CMVideoFormatDescription` from the parameter
+/// sets (supplied out of band), not from NALs inside the decode sample, so the
+/// decoder pulls these out and feeds only the VCL NALs to each frame.
+#[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
+pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
+    for nal in nal_units_any(au) {
+        match h264_nal_type(nal) {
+            Some(7) => sps.push(nal.to_vec()),
+            Some(8) => pps.push(nal.to_vec()),
+            _ => {}
+        }
+    }
+    (sps, pps)
+}
+
+/// Convert an access unit (Annex-B or AVCC) to AVCC form, each retained NAL
+/// preceded by its 4-byte big-endian length (`lengthSizeMinusOne = 3`), keeping
+/// only NALs for which `keep` returns true. VideoToolbox decode samples carry the
+/// VCL (+ SEI) NALs length-prefixed; the parameter sets live in the format
+/// description (see [`h264_parameter_sets`]), so the decoder excludes SPS / PPS /
+/// AUD via `keep`. The inverse of [`avcc_nal_units`] for the kept NALs.
+#[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
+pub(crate) fn to_avcc<F: Fn(&[u8]) -> bool>(au: &[u8], keep: F) -> Vec<u8> {
+    let mut out = Vec::with_capacity(au.len() + 16);
+    for nal in nal_units_any(au) {
+        if !keep(nal) {
+            continue;
+        }
+        out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        out.extend_from_slice(nal);
+    }
+    out
+}
+
 /// Convert EBSP to RBSP by removing `0x03` emulation-prevention bytes that
 /// follow two consecutive zero bytes (H.264 / H.265 share this encoding).
 /// Always returns owned bytes for parser simplicity.
@@ -279,5 +323,40 @@ mod tests {
         avcc.extend_from_slice(&10u32.to_be_bytes());
         avcc.extend_from_slice(&[0x67, 0x42, 0xC0]);
         assert_eq!(avcc_nal_units(&avcc).count(), 0, "truncated NAL is dropped");
+    }
+
+    #[test]
+    fn parameter_sets_extracted_from_mixed_au() {
+        // SPS (7), PPS (8), SEI (6), IDR slice (5), in Annex-B.
+        let sps: &[u8] = &[0x67, 0x42, 0xE0, 0x1E];
+        let pps: &[u8] = &[0x68, 0xCE, 0x3C, 0x80];
+        let sei: &[u8] = &[0x06, 0x05, 0x01];
+        let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+        let mut au = Vec::new();
+        for nal in [sps, pps, sei, idr] {
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(nal);
+        }
+        let (got_sps, got_pps) = h264_parameter_sets(&au);
+        assert_eq!(got_sps, vec![sps.to_vec()]);
+        assert_eq!(got_pps, vec![pps.to_vec()]);
+    }
+
+    #[test]
+    fn to_avcc_keeps_vcl_excludes_parameter_sets_and_round_trips() {
+        let sps: &[u8] = &[0x67, 0x42, 0xE0, 0x1E];
+        let pps: &[u8] = &[0x68, 0xCE];
+        let sei: &[u8] = &[0x06, 0x05, 0x01];
+        let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
+        let mut au = Vec::new();
+        for nal in [sps, pps, sei, idr] {
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(nal);
+        }
+        // Exclude SPS(7) / PPS(8) / AUD(9); keep SEI + VCL, like the decoder.
+        let avcc = to_avcc(&au, |nal| !matches!(h264_nal_type(nal), Some(7 | 8 | 9)));
+        // The kept NALs, recovered by the AVCC iterator, are SEI then IDR.
+        let kept: Vec<&[u8]> = avcc_nal_units(&avcc).collect();
+        assert_eq!(kept, vec![sei, idr], "parameter sets dropped, order preserved");
     }
 }

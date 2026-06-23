@@ -170,6 +170,13 @@ pub mod udpsrc;
 #[cfg(all(target_os = "windows", feature = "mf-decode"))]
 pub mod mfdecode;
 
+// VideoToolbox H.264 decode is macOS-only, the macOS counterpart of mfdecode.
+// The objc2 framework dependencies are target-gated, so the module only exists
+// when building for macOS with the `vtdecode` feature; enabling the feature on
+// other platforms is a no-op (first element of the macOS platform track, M218).
+#[cfg(all(target_os = "macos", feature = "vtdecode"))]
+pub mod vtdecode;
+
 // Media Foundation H.264 encode, the encode-side mirror of mfdecode. Same
 // Windows-only target gate; enabling the feature elsewhere is a no-op.
 #[cfg(all(target_os = "windows", feature = "mf-encode"))]

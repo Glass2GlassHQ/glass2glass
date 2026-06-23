@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M218: macOS platform track begins -- VideoToolbox H.264 decode (`VtDecode`)
+
+The first element of the macOS platform integration (the biggest remaining
+parity gap, see DESIGN_TODO.md "Gap analysis to 80% parity"). `VtDecode`
+(`vtdecode` feature, macOS-only) is the macOS counterpart of `MfDecode`:
+Annex-B H.264 in, NV12 `MemoryDomain::System` out, via a
+`VTDecompressionSession`. It establishes the reusable macOS plumbing (the
+`vtdecode` feature + the `objc2` / `objc2-video-toolbox` / `objc2-core-media` /
+`objc2-core-video` / `objc2-core-foundation` deps under
+`[target.'cfg(target_os = "macos")']`), so the rest of the macOS elements
+(vtencode, AVFoundation capture, Core Audio, Metal present) slot in cheaply.
+
+- **`annexb::{h264_parameter_sets, to_avcc}`** (g2g-plugins, pure logic,
+  host-tested): VideoToolbox wants AVCC framing with the SPS/PPS supplied out of
+  band (in the `CMVideoFormatDescription`), unlike Media Foundation's in-band
+  Annex-B. These pull the parameter sets out of an access unit and convert the
+  remaining VCL/SEI NALs to 4-byte-length-prefixed AVCC. Unit-tested on Linux.
+- **`VtDecode`** (`g2g-plugins/src/vtdecode.rs`, `cfg(all(target_os = "macos",
+  feature = "vtdecode"))`): mirrors `MfDecode`'s `AsyncElement` contract (caps,
+  `DerivedOutput` H.264->NV12, pad templates, `Send`-under-single-thread). Builds
+  the session lazily from the first keyframe's parameter sets, rebuilds on a
+  mid-stream SPS/PPS change, decodes synchronously, and packs the bi-planar
+  `CVPixelBuffer` to tight NV12.
+- **COMPILE-PENDING / on-device validation.** This Linux dev host cannot compile
+  or run the macOS target, so the VideoToolbox FFI is written against the real
+  objc2 0.3.2 signatures (verified against the fetched crate source) but has not
+  been built. `cargo check --workspace` on Linux confirms the gating keeps it out
+  of non-macOS builds and the `annexb` helpers pass their tests; the actual
+  decode must be validated on a Mac, where a few FFI details (marked `// NOTE` in
+  the source) will likely need adjusting. Same on-device-validation model as the
+  target-gated `mf-decode` path.
+
 ### M217: input-side GPU surface-import for `WgpuPreprocess`
 
 The input-side counterpart of M215: `WgpuPreprocess` can now consume an NV12

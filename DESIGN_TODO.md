@@ -932,16 +932,30 @@ parsers have follow-ups:
 ### Platform: macOS
 
 A whole platform gap. We compile for Linux + Windows + wasm32 + bare-metal;
-macOS has zero element coverage. 5–8 sessions for the baseline:
+macOS had zero element coverage. 5–8 sessions for the baseline:
 
-- **`vtdecode` / `vtencode`** — VideoToolbox H.264 / HEVC decode + encode.
+- **`vtdecode` — STARTED (M218).** VideoToolbox H.264 decode (`VtDecode`,
+  `vtdecode` feature), the macOS counterpart of `MfDecode`: Annex-B H.264 in,
+  NV12 `System` out, via `VTDecompressionSession`. Pulls SPS/PPS for the
+  `CMVideoFormatDescription` and feeds AVCC VCL NALs per frame (the
+  `annexb::{h264_parameter_sets, to_avcc}` helpers, host-tested). Establishes the
+  macOS platform plumbing: `vtdecode` feature + the `objc2` /
+  `objc2-video-toolbox` / `objc2-core-media` / `objc2-core-video` /
+  `objc2-core-foundation` deps under `[target.'cfg(target_os = "macos")']`.
+  **COMPILE-PENDING:** written against the objc2 0.3.2 API but never built (no
+  macOS in CI); needs a first `cargo build` on a Mac to settle a few FFI details
+  (import paths for `OSStatus`, the `CFRetained` adopt, the `CVImageBuffer` ->
+  `CVPixelBuffer` cast, the `CMVideoFormatDescription` type), each marked `// NOTE`
+  in `vtdecode.rs`. HEVC, a `CVPixelBuffer`/`IOSurface` zero-copy domain, and the
+  registry wiring (`avdec_h264` alias) are the next steps.
+- **`vtencode`** — VideoToolbox H.264 / HEVC encode.
 - **`avfvideosrc` / `avfaudiosrc`** — AVFoundation camera + microphone.
 - **`coreaudiosink` / `coreaudiosrc`** — Core Audio in/out.
 - **`metalvideosink`** — Metal presentation.
 
 Each individually is 1–2 sessions; the platform integration (`framework`
 linking, `objc2` bindings, macOS-specific feature gates) is the bulk of
-the work and only pays off once.
+the work and only pays off once (M218 paid most of it for the decode side).
 
 ### Platform: Android
 
