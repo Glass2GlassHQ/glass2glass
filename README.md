@@ -1,5 +1,7 @@
 # glass2glass (`g2g`)
 
+[![CI](https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml/badge.svg)](https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml)
+
 A hardware-first, sans-IO, asynchronous multimedia graph framework in pure
 Rust — designed to replace GStreamer in AI-driven, real-time embedded (RTOS),
 cloud ingestion, and browser targets.

@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Cross-platform baseline: the default-feature (no_std + alloc) build and the
+  # default test suite on all three OSes. No system libraries: everything here is
+  # pure Rust, so it is the safety net that must stay green everywhere.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check (no_std default build)
+        run: cargo check --workspace --locked
+      - name: test (default features)
+        run: cargo test --workspace --locked
+
+  # Lints, default features, Linux. Not run with `-D warnings`: the workspace is
+  # hand-formatted and carries some intentional warnings, so CI fails only on
+  # clippy errors, not warnings. (No `cargo fmt --check`: the repo is deliberately
+  # not rustfmt-clean, see feedback in AGENTS.md / project memory.)
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked
+
+  # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
+  # that build with stable, apt-installable system libraries. Intentionally
+  # omitted (need version-pinned or proprietary deps, add separately):
+  #   ffmpeg (libav* version-sensitive), vaapi (libva + GBM + bindgen),
+  #   pipewire (libpipewire version-sensitive), cuda / cuda-gl (NVIDIA driver),
+  #   ort (downloads ONNX Runtime binaries at build).
+  features-linux:
+    name: features (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libasound2-dev libpulse-dev \
+            libopus-dev libvpx-dev libwayland-dev libxkbcommon-dev
+      - name: check g2g-plugins (linux feature set)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          rtsp,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,vpx,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
+      - name: check g2g-ml (wgpu + burn)
+        run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+
+  # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
+  # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no
+  # system-library install is needed.
+  features-windows:
+    name: features (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (windows feature set)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src
+
+  # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
+  # ML path on the Metal backend. The objc2 crates link the system frameworks
+  # present on the runner, so no install is needed. This is the job that actually
+  # compiles the VtDecode VideoToolbox FFI (the dev host is Linux and cannot).
+  features-macos:
+    name: features (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (vtdecode)
+        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode
+      - name: check g2g-ml (wgpu + burn, Metal)
+        run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+
+  # The no_std + wasm pillar: the core builds for the browser target. (A bare-
+  # metal target like thumbv7em needs the critical-section feature + a CS impl, so
+  # it is left to a dedicated embedded job.)
+  wasm:
+    name: wasm (g2g-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p g2g-core --locked --target wasm32-unknown-unknown
