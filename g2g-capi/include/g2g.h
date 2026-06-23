@@ -126,6 +126,36 @@ void g2g_appsrc_free(G2gAppSrc *src);
 void g2g_appsink_set_callback(const char *channel, G2gAppSinkCallback cb,
                               void *user);
 
+/* Pull mode (alternative to the callback): the application pulls whole samples
+ * out of `appsink channel=<name>`. A pulled sample OWNS its bytes (zero-copy:
+ * the same buffer, including an appsrc lend) until g2g_sample_free. A full pull
+ * queue backpressures the pipeline. */
+
+/* Opaque appsink pull handle and pulled sample. */
+typedef struct AppSink G2gAppSink;
+typedef struct Sample G2gSample;
+
+/* Register `appsink channel=<name>` (NULL -> "default") in pull mode. Call
+ * before launch. */
+G2gAppSink *g2g_appsink_new(const char *channel);
+
+/* Block until the next sample. 1 with *out set, 0 once the stream has ended. */
+int g2g_appsink_pull(const G2gAppSink *sink, G2gSample **out);
+
+/* Non-blocking: 1 with *out set, 0 if none pending yet, -1 once ended. */
+int g2g_appsink_try_pull(const G2gAppSink *sink, G2gSample **out);
+
+/* Free an appsink pull handle. */
+void g2g_appsink_free(G2gAppSink *sink);
+
+/* Borrow a pulled sample's bytes / length / timestamp (valid until freed). */
+const uint8_t *g2g_sample_data(const G2gSample *s);
+size_t g2g_sample_len(const G2gSample *s);
+uint64_t g2g_sample_pts(const G2gSample *s);
+
+/* Free a pulled sample (releases its frame; fires an appsrc lend's free). */
+void g2g_sample_free(G2gSample *s);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,10 +26,11 @@ use std::os::raw::c_int;
 use std::ptr;
 use std::thread::JoinHandle;
 
+use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
-use g2g_core::{Bus, BusMessage, G2gError, PipelineState};
-use g2g_plugins::appsink::{set_appsink_callback, SampleCallback};
+use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
+use g2g_plugins::appsink::{register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
@@ -385,6 +386,195 @@ pub unsafe extern "C" fn g2g_appsink_set_callback(
     // SAFETY: caller contract on `channel`.
     let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
     set_appsink_callback(name, cb, user);
+}
+
+/// Opaque application-sink pull handle: the receive end of an
+/// `appsink channel=<name>` registered in pull mode.
+#[derive(Debug)]
+pub struct AppSink {
+    pull: AppSinkPull,
+}
+
+/// Opaque pulled sample. Owns the frame, so its bytes stay valid (zero-copy,
+/// including an `appsrc` foreign lend) until [`g2g_sample_free`].
+#[derive(Debug)]
+pub struct Sample {
+    // Keeps the frame's bytes alive for the sample's lifetime; never read
+    // directly (the flat view below points into it).
+    _frame: Frame,
+    // A materialized copy for strided `SystemView` frames, owned here so its
+    // pointer stays valid; `None` for a contiguous `System` frame.
+    _materialized: Option<Box<[u8]>>,
+    data: *const u8,
+    len: usize,
+    pts_ns: u64,
+}
+
+/// Build a flat sample view over a pulled frame without copying contiguous
+/// system memory (a strided view is materialized once).
+fn sample_from_frame(frame: Frame) -> Sample {
+    let mut materialized: Option<Box<[u8]>> = None;
+    let (data, len) = match &frame.domain {
+        MemoryDomain::System(s) => {
+            let b = s.as_slice();
+            (b.as_ptr(), b.len())
+        }
+        MemoryDomain::SystemView(sv) => {
+            let b = sv.materialize();
+            let view = (b.as_ptr(), b.len());
+            materialized = Some(b);
+            view
+        }
+        // GPU-resident frames need a download the v1 path does not do.
+        _ => (ptr::null(), 0),
+    };
+    let pts_ns = frame.timing.pts_ns;
+    Sample { _frame: frame, _materialized: materialized, data, len, pts_ns }
+}
+
+/// Register `appsink channel=<name>` (null -> "default") in pull mode and return
+/// its handle. Call before launch.
+///
+/// # Safety
+/// `channel`, if non-null, must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsink_new(channel: *const c_char) -> *mut AppSink {
+    // SAFETY: caller contract on `channel`.
+    let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
+    Box::into_raw(Box::new(AppSink { pull: register_appsink_pull(name) }))
+}
+
+/// Block until the next frame, writing an owned sample to `*out`. Returns 1 with
+/// a sample, or 0 once the stream has ended (no sample written). Free the sample
+/// with [`g2g_sample_free`].
+///
+/// # Safety
+/// `sink` must be a live handle; `out` must point to writable `*mut Sample`.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsink_pull(sink: *const AppSink, out: *mut *mut Sample) -> c_int {
+    // SAFETY: caller contract: `sink` is a live handle.
+    let Some(s) = (unsafe { sink.as_ref() }) else { return 0 };
+    if out.is_null() {
+        return 0;
+    }
+    match block_on(s.pull.pull()) {
+        Some(frame) => {
+            // SAFETY: caller contract: `out` is writable.
+            unsafe { *out = Box::into_raw(Box::new(sample_from_frame(frame))) };
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Non-blocking pull. Returns 1 with a sample in `*out`, 0 if none is pending
+/// yet, or -1 once the stream has ended (or on a null argument).
+///
+/// # Safety
+/// `sink` must be a live handle; `out` must point to writable `*mut Sample`.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsink_try_pull(sink: *const AppSink, out: *mut *mut Sample) -> c_int {
+    // SAFETY: caller contract: `sink` is a live handle.
+    let Some(s) = (unsafe { sink.as_ref() }) else { return -1 };
+    if out.is_null() {
+        return -1;
+    }
+    match s.pull.try_pull() {
+        Pull::Frame(frame) => {
+            // SAFETY: caller contract: `out` is writable.
+            unsafe { *out = Box::into_raw(Box::new(sample_from_frame(frame))) };
+            1
+        }
+        Pull::Empty => 0,
+        Pull::Ended => -1,
+    }
+}
+
+/// Free an appsink pull handle. Dropping it closes the pull channel. Null is a
+/// no-op.
+///
+/// # Safety
+/// `sink` must be a handle from [`g2g_appsink_new`], not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsink_free(sink: *mut AppSink) {
+    if sink.is_null() {
+        return;
+    }
+    // SAFETY: caller contract: `sink` came from `Box::into_raw`, freed once.
+    drop(unsafe { Box::from_raw(sink) });
+}
+
+/// Pointer to a sample's bytes (valid until [`g2g_sample_free`]), or null.
+///
+/// # Safety
+/// `s` must be a live sample handle.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_sample_data(s: *const Sample) -> *const u8 {
+    // SAFETY: caller contract: `s` is a live handle.
+    unsafe { s.as_ref() }.map_or(ptr::null(), |s| s.data)
+}
+
+/// Length in bytes of a sample's data.
+///
+/// # Safety
+/// `s` must be a live sample handle.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_sample_len(s: *const Sample) -> usize {
+    // SAFETY: caller contract: `s` is a live handle.
+    unsafe { s.as_ref() }.map_or(0, |s| s.len)
+}
+
+/// Presentation timestamp (ns) of a sample.
+///
+/// # Safety
+/// `s` must be a live sample handle.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_sample_pts(s: *const Sample) -> u64 {
+    // SAFETY: caller contract: `s` is a live handle.
+    unsafe { s.as_ref() }.map_or(0, |s| s.pts_ns)
+}
+
+/// Free a sample (releasing its frame; an `appsrc` lend's free callback fires
+/// here if this frame carried one). Null is a no-op.
+///
+/// # Safety
+/// `s` must be a sample from a pull call, not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_sample_free(s: *mut Sample) {
+    if s.is_null() {
+        return;
+    }
+    // SAFETY: caller contract: `s` came from `Box::into_raw`, freed once.
+    drop(unsafe { Box::from_raw(s) });
+}
+
+/// Minimal park-based executor: drive a future to completion on the calling
+/// thread. The runtime channel's recv future registers this waker, and the
+/// pipeline's run thread wakes it cross-thread, so a blocking pull works without
+/// pulling in a full async runtime.
+fn block_on<F: core::future::Future>(fut: F) -> F::Output {
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct ThreadWaker(std::thread::Thread);
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut fut = core::pin::pin!(fut);
+    loop {
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => return v,
+            Poll::Pending => std::thread::park(),
+        }
+    }
 }
 
 /// Borrow a C string as `&str`, or `None` if null / not UTF-8.

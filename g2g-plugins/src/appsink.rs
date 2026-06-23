@@ -1,16 +1,19 @@
 //! Application sink (`appsink`): the application receives buffers out of a
-//! running pipeline (M233), the `gst-appsink` analog.
+//! running pipeline (M233 callback, M235 pull), the `gst-appsink` analog.
 //!
-//! v1 is the GStreamer `new-sample`-callback model: register a callback under a
-//! channel name *before* launch, and the `appsink channel=<name>` element
-//! invokes it once per frame, on the pipeline's run thread, with a borrowed view
-//! of the frame bytes (copy if you need to keep them). End-of-stream is the
-//! callback with `data == null, len == 0`. A blocking pull API can layer on
-//! later; the callback is the lower-level primitive.
+//! Two delivery modes, selected by what the application registers under the
+//! sink's `channel` name *before* launch (the parameterless `fn` factory means
+//! the element is handed neither directly, so both are parked in a named
+//! global and claimed at `configure_pipeline`):
 //!
-//! Like [`crate::appsrc`], the parameterless `fn` factory means the element
-//! cannot be handed the callback directly, so it is parked in a named global and
-//! claimed at `configure_pipeline`.
+//! - **Callback** ([`set_appsink_callback`], the GStreamer `new-sample` model):
+//!   the element invokes the callback per frame on the run thread with a
+//!   borrowed view; copy if you need to keep it. EOS is `data == null, len == 0`.
+//! - **Pull** ([`register_appsink_pull`]): the element hands each whole [`Frame`]
+//!   to a bounded channel and the application pulls it ([`AppSinkPull`]). The
+//!   pulled frame *owns* its bytes (zero-copy: the same `SystemSlice`, including
+//!   an `appsrc` foreign lend), valid until the application drops it. A full
+//!   channel backpressures the pipeline, the correct slow-consumer behaviour.
 
 use core::ffi::c_void;
 use core::future::Future;
@@ -23,11 +26,17 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 
+use g2g_core::frame::Frame;
+use g2g_core::runtime::{bounded, Receiver, Sender};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec,
 };
+
+/// Bounded depth of the element -> application pull channel. A full channel
+/// backpressures the pipeline (the slow-consumer behaviour appsink wants).
+const PULL_DEPTH: usize = 8;
 
 /// The C callback shape: `(data, len, pts_ns, user)`. `data == null` / `len == 0`
 /// signals end-of-stream.
@@ -44,31 +53,91 @@ struct Slot {
 // only ever called, never dereferenced by this crate.
 unsafe impl Send for Slot {}
 
-/// Named callbacks, keyed by the `appsink channel` property. Set by
-/// [`set_appsink_callback`] before launch; claimed once by the element.
-static SINKS: Mutex<BTreeMap<String, Slot>> = Mutex::new(BTreeMap::new());
-
-/// Register the per-frame callback for `appsink channel=<channel>`. Call before
-/// launching. A later registration under the same name replaces the earlier one
-/// (until the element claims it at startup).
-pub fn set_appsink_callback(channel: &str, cb: SampleCallback, user: *mut c_void) {
-    SINKS.lock().insert(channel.to_string(), Slot { cb, user });
-}
-
-/// Application pull/callback sink. Accepts any caps; hands each frame's bytes to
-/// the registered callback.
-#[derive(Debug, Default)]
-pub struct AppSink {
-    channel: String,
-    configured: bool,
-    slot: Option<Slot>,
-    received: u64,
-}
-
 impl core::fmt::Debug for Slot {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Slot").finish_non_exhaustive()
     }
+}
+
+/// One item on the pull channel: a frame or the end-of-stream marker.
+#[derive(Debug)]
+enum Pulled {
+    Frame(Frame),
+    Eos,
+}
+
+/// How an `appsink channel=<name>` delivers: invoke a callback, or feed a pull
+/// channel. Set by [`set_appsink_callback`] / [`register_appsink_pull`].
+#[derive(Debug)]
+enum SinkMode {
+    Callback(Slot),
+    Pull(Sender<Pulled>),
+}
+
+/// Named delivery modes, keyed by the `appsink channel` property; claimed once
+/// by the element at startup. The bridge the parameterless `fn` factory forces.
+static SINKS: Mutex<BTreeMap<String, SinkMode>> = Mutex::new(BTreeMap::new());
+
+/// Register the per-frame callback for `appsink channel=<channel>`. Call before
+/// launching. Replaces any prior registration under the same name.
+pub fn set_appsink_callback(channel: &str, cb: SampleCallback, user: *mut c_void) {
+    SINKS.lock().insert(channel.to_string(), SinkMode::Callback(Slot { cb, user }));
+}
+
+/// Register `appsink channel=<channel>` in pull mode and return the
+/// application's pull handle. Call before launching.
+pub fn register_appsink_pull(channel: &str) -> AppSinkPull {
+    let (tx, rx) = bounded::<Pulled>(PULL_DEPTH);
+    SINKS.lock().insert(channel.to_string(), SinkMode::Pull(tx));
+    AppSinkPull { rx }
+}
+
+/// Outcome of a non-blocking [`AppSinkPull::try_pull`].
+#[derive(Debug)]
+pub enum Pull {
+    /// A frame is ready.
+    Frame(Frame),
+    /// No frame pending yet (the pipeline is still running).
+    Empty,
+    /// The stream has ended; no more frames will arrive.
+    Ended,
+}
+
+/// The application's pull handle for an `appsink`. Dropping it closes the pull
+/// channel; the element then drops frames it cannot deliver.
+#[derive(Debug)]
+pub struct AppSinkPull {
+    rx: Receiver<Pulled>,
+}
+
+impl AppSinkPull {
+    /// Non-blocking: return the next frame if one is queued.
+    pub fn try_pull(&self) -> Pull {
+        match self.rx.try_recv() {
+            Some(Pulled::Frame(f)) => Pull::Frame(f),
+            Some(Pulled::Eos) => Pull::Ended,
+            None => Pull::Empty,
+        }
+    }
+
+    /// Await the next frame; `None` once the stream ends (EOS) or the pipeline
+    /// is gone. The application drives this to completion (e.g. a `block_on` on
+    /// its own thread) while the pipeline runs on another.
+    pub async fn pull(&self) -> Option<Frame> {
+        match self.rx.recv().await {
+            Some(Pulled::Frame(f)) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+/// Application pull/callback sink. Accepts any caps.
+#[derive(Debug, Default)]
+pub struct AppSink {
+    channel: String,
+    configured: bool,
+    mode: Option<SinkMode>,
+    received: u64,
 }
 
 impl AppSink {
@@ -88,13 +157,6 @@ impl AppSink {
     pub fn received(&self) -> u64 {
         self.received
     }
-
-    /// Invoke the callback for one host-visible buffer, if a callback is set.
-    fn deliver(&self, data: &[u8], pts_ns: u64) {
-        if let Some(slot) = &self.slot {
-            (slot.cb)(data.as_ptr(), data.len(), pts_ns, slot.user);
-        }
-    }
 }
 
 impl AsyncElement for AppSink {
@@ -111,7 +173,7 @@ impl AsyncElement for AppSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.slot = SINKS.lock().remove(self.channel_name());
+        self.mode = SINKS.lock().remove(self.channel_name());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -120,7 +182,7 @@ impl AsyncElement for AppSink {
         ElementMetadata::new(
             "Application sink",
             "Sink",
-            "Hands each buffer to the application's callback (set_appsink_callback / g2g_appsink_set_callback)",
+            "Delivers buffers to the application via callback or pull (g2g_appsink_*)",
             "g2g",
         )
     }
@@ -137,23 +199,39 @@ impl AsyncElement for AppSink {
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     self.received += 1;
-                    // Deliver only host-visible memory; a GPU-resident frame
-                    // would need a download the v1 path does not do, so it is
-                    // skipped (the frame count still advances).
-                    match &f.domain {
-                        MemoryDomain::System(s) => self.deliver(s.as_slice(), f.timing.pts_ns),
-                        MemoryDomain::SystemView(sv) => {
-                            self.deliver(&sv.materialize(), f.timing.pts_ns)
+                    match &self.mode {
+                        // Callback: deliver a borrowed view of host-visible
+                        // memory (GPU-resident frames need a download the v1
+                        // path skips; the count still advances).
+                        Some(SinkMode::Callback(slot)) => match &f.domain {
+                            MemoryDomain::System(s) => {
+                                let b = s.as_slice();
+                                (slot.cb)(b.as_ptr(), b.len(), f.timing.pts_ns, slot.user);
+                            }
+                            MemoryDomain::SystemView(sv) => {
+                                let b = sv.materialize();
+                                (slot.cb)(b.as_ptr(), b.len(), f.timing.pts_ns, slot.user);
+                            }
+                            _ => {}
+                        },
+                        // Pull: hand the whole frame over (zero-copy); awaiting
+                        // a full channel backpressures the pipeline. A closed
+                        // channel (app dropped its handle) drops the frame.
+                        Some(SinkMode::Pull(tx)) => {
+                            let _ = tx.send(Pulled::Frame(f)).await;
                         }
-                        _ => {}
+                        None => {}
                     }
                 }
-                PipelinePacket::Eos => {
-                    // EOS marker: data == null, len == 0.
-                    if let Some(slot) = &self.slot {
+                PipelinePacket::Eos => match &self.mode {
+                    Some(SinkMode::Callback(slot)) => {
                         (slot.cb)(core::ptr::null(), 0, 0, slot.user);
                     }
-                }
+                    Some(SinkMode::Pull(tx)) => {
+                        let _ = tx.send(Pulled::Eos).await;
+                    }
+                    None => {}
+                },
                 // Control packets are not surfaced to the application in v1.
                 PipelinePacket::Flush
                 | PipelinePacket::CapsChanged(_)
@@ -181,7 +259,7 @@ impl AsyncElement for AppSink {
 static APPSINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "channel",
     PropKind::Str,
-    "callback name matching set_appsink_callback (default \"default\")",
+    "delivery name matching set_appsink_callback / register_appsink_pull (default \"default\")",
 )];
 
 impl PadTemplates for AppSink {
