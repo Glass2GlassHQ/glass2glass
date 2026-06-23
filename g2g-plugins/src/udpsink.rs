@@ -28,6 +28,7 @@ use crate::filesink::io_err;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtx;
+use crate::ulpfec::FecEncoder;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -69,6 +70,9 @@ pub struct UdpSink {
     rtx: Option<(u8, u32)>,
     /// Sequence counter for the RTX stream (its own numbering space).
     rtx_seq: u16,
+    /// RFC 5109 ULPFEC: when set, a repair packet is emitted per media group
+    /// for latency-free single-loss recovery (independent of NACK/RTX).
+    fec: Option<FecEncoder>,
     /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
     retx_buf: VecDeque<(u16, Vec<u8>)>,
@@ -93,6 +97,7 @@ impl UdpSink {
             retransmit: true,
             rtx: None,
             rtx_seq: 0,
+            fec: None,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
             packets_sent: 0,
@@ -130,6 +135,14 @@ impl UdpSink {
     /// same-stream resend. The receiver must be told the same `apt` mapping.
     pub fn with_rtx(mut self, rtx_payload_type: u8, rtx_ssrc: u32) -> Self {
         self.rtx = Some((rtx_payload_type & 0x7F, rtx_ssrc));
+        self
+    }
+
+    /// Emit an RFC 5109 ULPFEC repair packet every `group` media packets on
+    /// `fec_payload_type` / `fec_ssrc`, recovering a single per-group loss at the
+    /// receiver with no round trip. Complements (does not replace) NACK/RTX.
+    pub fn with_fec(mut self, group: usize, fec_payload_type: u8, fec_ssrc: u32) -> Self {
+        self.fec = Some(FecEncoder::new(group, fec_payload_type, fec_ssrc));
         self
     }
 
@@ -268,6 +281,16 @@ impl AsyncElement for UdpSink {
                         packetizer.packetize(slice.as_slice(), timestamp)
                     };
                     self.ensure_socket()?;
+                    // Generate any ULPFEC repair packets for the just-built media
+                    // (before the borrow of `self.socket` below).
+                    let mut fec_packets = Vec::new();
+                    if let Some(fec) = self.fec.as_mut() {
+                        for pkt in &packets {
+                            if let Some(repair) = fec.push(pkt) {
+                                fec_packets.push(repair);
+                            }
+                        }
+                    }
                     let mut sent = 0u64;
                     let mut bytes = 0u64;
                     {
@@ -276,6 +299,12 @@ impl AsyncElement for UdpSink {
                             socket.send(pkt).await.map_err(io_err)?;
                             sent += 1;
                             bytes += pkt.len() as u64;
+                        }
+                        // Repair packets follow the media they protect.
+                        for repair in &fec_packets {
+                            socket.send(repair).await.map_err(io_err)?;
+                            sent += 1;
+                            bytes += repair.len() as u64;
                         }
                     }
                     // Keep each sent packet in the bounded retransmission history,

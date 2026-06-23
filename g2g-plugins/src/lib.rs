@@ -74,6 +74,9 @@ pub mod rtcp;
 // Sans-IO RFC 4588 RTP retransmission (RTX) framing: wraps a resent packet in a
 // distinct payload type with the original sequence number prepended.
 pub mod rtx;
+// Sans-IO RTP forward error correction (ULPFEC, RFC 5109): XOR repair packets
+// that recover a single per-group loss with no round trip.
+pub mod ulpfec;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.

@@ -348,8 +348,10 @@ sans-IO `rtspserver` responder; PLAY-direction serving validated, ANNOUNCE/RECOR
 spoken by the responder). **SRT both directions started M224** (`srtsink`/`srtsrc`
 + sans-IO `srt` module; HSv5 handshake + NAK ARQ validated g2g<->g2g). Remaining:
 SRT encryption/TSBPD/congestion + real-peer interop, the RTSP ANNOUNCE/RECORD
-*source* element, multi-client RTSP, RTP FEC (ULPFEC / FlexFEC; jitter buffer /
-RTCP / NACK / RTX already done). See the RTMP/SRT and RTP entries under `### High`.
+*source* element, multi-client RTSP. RTP **FEC (ULPFEC) landed M225** (`ulpfec`
+module + `UdpSink`/`UdpSrc` `with_fec`; jitter buffer / RTCP / NACK / RTX / FEC
+all done now); FlexFEC + multi-level burst FEC remain. See the RTMP/SRT and RTP
+entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
@@ -603,9 +605,12 @@ Production-shape needs that block specific real-world use cases.
     byte-exact original (marker bit rebuilt from the RTX header, not the OSN).
     `UdpSink::with_rtx` / `UdpSrc::with_rtx` opt in; validated end-to-end over the
     lossy-proxy loopback. SSRC- and session-multiplexed RTX both supported.
-  - **FEC** (ULPFEC / FlexFEC). Forward error correction trades bandwidth for
-    latency-free recovery (no round-trip), the better fit when RTT is high or the
-    path is one-way; a separate track from NACK/RTX.
+  - **FEC -- ULPFEC DONE (M225).** `g2g-plugins::ulpfec` (single-level RFC 5109,
+    `no_std`): `build_fec_packet` / `recover_packet` + `FecEncoder` / `FecDecoder`;
+    `UdpSink::with_fec` / `UdpSrc::with_fec`. Recovers a single per-group loss with
+    no round trip, validated over a one-way lossy loopback (RTCP + retransmit off).
+    Remaining FEC: FlexFEC (RFC 8627), and multi-level / interleaved ULPFEC for
+    burst loss (single-level recovers one loss per group).
   `RtspSrc` via `retina` covers the RTSP case (retina has its own jitterbuffer).
 
 - **Property system + introspection + `gst-launch` DSL — DONE (M104-M106).**

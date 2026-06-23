@@ -747,9 +747,15 @@ runs RTP/RTCP-muxed on the one socket (RFC 5761): `UdpSrc` sends periodic
 receiver reports and emits a NACK for each detected gap, and `UdpSink` honors
 those NACKs by retransmitting from its send history (§4.12). A retransmit
 arriving inside the jitter hold window heals the gap before it is declared lost,
-so the loop recovers packet loss end to end. RFC 4588 RTX (a distinct
-retransmission payload; plain same-stream resend is used today) and FEC are the
-remaining receive-side items.
+so the loop recovers packet loss end to end. **RFC 4588 RTX** (M222, `rtx.rs`)
+wraps a NACK resend in a distinct payload type / SSRC with the original sequence
+prepended (`UdpSink::with_rtx` / `UdpSrc::with_rtx`), unambiguous under heavy
+loss. **ULPFEC** (M225, `ulpfec.rs`, RFC 5109) adds *feedback-free* recovery: the
+sender XORs each group of media packets into a repair packet (`with_fec`), and
+the receiver reconstructs a single per-group loss from the repair plus the
+survivors and injects it into the jitter buffer, with no round trip, the better
+fit for one-way or high-RTT paths. NACK, RTX, and FEC compose; FlexFEC and
+multi-level burst FEC are the remaining receive-side items.
 
 This is **raw RTP** with no RTSP/SDP, so there is no out-of-band stream
 description: the output geometry is a declared hint (`with_video_size` /

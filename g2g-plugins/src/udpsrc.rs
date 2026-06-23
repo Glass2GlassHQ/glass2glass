@@ -32,6 +32,7 @@ use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
 use crate::rtx;
+use crate::ulpfec::FecDecoder;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -67,6 +68,9 @@ pub struct UdpSrc {
     /// reconstructed to the original stream before reordering. `apt` is the
     /// associated (original) payload type the rebuilt packet is restamped with.
     rtx: Option<(u8, u8)>,
+    /// RFC 5109 ULPFEC: when set, packets on this payload type are repair packets
+    /// fed to the FEC decoder, which recovers single per-group media losses.
+    fec_pt: Option<u8>,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -87,6 +91,7 @@ impl UdpSrc {
             rtcp_rr_interval_ms: DEFAULT_RR_INTERVAL_MS,
             nack_enabled: true,
             rtx: None,
+            fec_pt: None,
             std_socket: None,
             configured: false,
         }
@@ -148,6 +153,14 @@ impl UdpSrc {
     /// any other packet, so a retransmission fills its gap.
     pub fn with_rtx(mut self, rtx_payload_type: u8, apt: u8) -> Self {
         self.rtx = Some((rtx_payload_type & 0x7F, apt & 0x7F));
+        self
+    }
+
+    /// Decode RFC 5109 ULPFEC repair packets (this payload type) and inject any
+    /// recovered media into the jitter buffer, filling a single per-group loss
+    /// with no retransmission round trip.
+    pub fn with_fec(mut self, fec_payload_type: u8) -> Self {
+        self.fec_pt = Some(fec_payload_type & 0x7F);
         self
     }
 
@@ -237,6 +250,8 @@ impl SourceLoop for UdpSrc {
             // The original media stream's SSRC, learned from the first non-RTX
             // packet; an RFC 4588 RTX resend is restamped back onto it.
             let mut media_ssrc_seen: Option<u32> = None;
+            // ULPFEC decoder; only consulted when a FEC payload type is set.
+            let mut fec_decoder = FecDecoder::default();
 
             // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to
             // report to (learned from the first datagram) and report timers.
@@ -344,6 +359,15 @@ impl SourceLoop for UdpSrc {
                     // media stream's SSRC before reordering, so the resend simply
                     // fills its gap. Drop it if no original SSRC is known yet.
                     let pt = buf[1] & 0x7F;
+                    // ULPFEC repair packet: feed the decoder and inject any
+                    // recovered media into the jitter buffer (no NAK round trip).
+                    if self.fec_pt == Some(pt) {
+                        fec_decoder.push_fec(&buf[..n]);
+                        for rec in fec_decoder.take_recovered() {
+                            jitter.push(&rec, now);
+                        }
+                        continue;
+                    }
                     let is_rtx = self.rtx.is_some_and(|(rtx_pt, _)| pt == rtx_pt);
                     let reconstructed = match (is_rtx, self.rtx, media_ssrc_seen) {
                         (true, Some((_, apt)), Some(ssrc)) => {
@@ -365,6 +389,14 @@ impl SourceLoop for UdpSrc {
                     stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
                     peer = Some(from);
                     jitter.push(pkt, now);
+                    // Record the packet for FEC and inject anything its arrival
+                    // now lets a buffered repair packet recover.
+                    if self.fec_pt.is_some() {
+                        fec_decoder.push_media(pkt_seq, pkt);
+                        for rec in fec_decoder.take_recovered() {
+                            jitter.push(&rec, now);
+                        }
+                    }
 
                     // Request retransmission of any open gaps, rate-limited.
                     if self.nack_enabled && now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {

@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M225: RTP forward error correction (ULPFEC, RFC 5109)
+
+Completes the RTP resilience story: NAK (M96) and RTX (M222) recover loss with a
+feedback round trip; FEC recovers it *without* one, the better fit for one-way or
+high-RTT paths. The sender XORs each group of media packets into a repair packet;
+the receiver reconstructs a single per-group loss from the repair plus the
+survivors.
+
+- **Sans-IO `ulpfec` module** (`g2g-plugins::ulpfec`, always compiled, `no_std`):
+  single-level ULPFEC (`L=0`, 16-bit mask) per RFC 5109. `build_fec_packet` XORs
+  a contiguous media group into a repair RTP packet (FEC header + level-0 header +
+  XORed payload); `recover_packet` rebuilds the one missing member byte-exact
+  (recovering the P/X/CC, M/PT, timestamp, length, and payload from the XOR).
+  `FecEncoder` emits one repair per group; `FecDecoder` buffers recent media +
+  repair packets and recovers any group missing exactly one member (chained, so a
+  recovery can satisfy a later group).
+- **`UdpSink::with_fec(group, fec_pt, fec_ssrc)`** emits a repair packet per group
+  on a distinct payload type; **`UdpSrc::with_fec(fec_pt)`** feeds repair packets
+  to the decoder and injects recoveries into the jitter buffer.
+- **End-to-end loopback test** (`udp_loopback::fec_recovers_dropped_packets_without_retransmission`):
+  a strictly one-way receiver (RTCP off) with the sender's retransmit disabled
+  recovers a dropped packet in every FEC group purely from the repair packets -
+  all 12 AUs delivered in order, zero retransmissions. ULPFEC recovers a single
+  loss per group; multi-loss or longer bursts still fall to NAK/RTX.
+
 ### M224: SRT transport (`srtsink` / `srtsrc`) - reliable low-latency contribution
 
 SRT (Secure Reliable Transport) over UDP, both directions: a caller sink that
