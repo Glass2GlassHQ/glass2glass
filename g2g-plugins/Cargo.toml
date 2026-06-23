@@ -58,6 +58,16 @@ vtdecode = [
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
 ]
+# macOS hardware H.264 encode via VideoToolbox (VTCompressionSession); same objc2
+# framework deps as vtdecode, plus the compression-session bindings.
+vtencode = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-video-toolbox",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+]
 # Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
 # "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
@@ -366,6 +376,9 @@ objc2-video-toolbox = { version = "0.3", optional = true, default-features = fal
     "VTBase",
     "VTErrors",
     "VTDecompressionSession",
+    "VTCompressionSession",
+    "VTCompressionProperties",
+    "VTSession",
 ] }
 objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
     "std",

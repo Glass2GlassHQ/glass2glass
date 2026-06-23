@@ -169,6 +169,23 @@ pub(crate) fn to_avcc<F: Fn(&[u8]) -> bool>(au: &[u8], keep: F) -> Vec<u8> {
     out
 }
 
+/// Convert AVCC (4-byte length-prefixed NALs) to Annex-B, each NAL preceded by a
+/// 4-byte start code. The inverse of [`to_avcc`]: VideoToolbox's H.264 *encoder*
+/// emits length-prefixed NALs, but the g2g pipeline is Annex-B framed
+/// (downstream H.264 elements assume start codes), so the encoder converts on the
+/// way out. Each NAL gets a 4-byte start code (`00 00 00 01`); the parameter sets
+/// are prepended separately on keyframes (they live in the format description,
+/// not the sample).
+#[cfg(any(all(target_os = "macos", feature = "vtencode"), test))]
+pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(avcc.len() + 16);
+    for nal in avcc_nal_units(avcc) {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    }
+    out
+}
+
 /// Convert EBSP to RBSP by removing `0x03` emulation-prevention bytes that
 /// follow two consecutive zero bytes (H.264 / H.265 share this encoding).
 /// Always returns owned bytes for parser simplicity.
@@ -323,6 +340,24 @@ mod tests {
         let from_avcc: Vec<&[u8]> = nal_units_any(&avcc).collect();
         assert_eq!(from_annexb, vec![sps, idr]);
         assert_eq!(from_avcc, vec![sps, idr], "AVCC yields the same NALs");
+    }
+
+    #[test]
+    fn avcc_to_annexb_prefixes_each_nal_with_a_start_code() {
+        let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
+        let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x0A];
+        let mut avcc = Vec::new();
+        avcc.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+        avcc.extend_from_slice(sps);
+        avcc.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+        avcc.extend_from_slice(idr);
+
+        let annexb = avcc_to_annexb(&avcc);
+        assert!(is_annex_b(&annexb), "output is Annex-B framed");
+        let nals: Vec<&[u8]> = nal_units(&annexb).collect();
+        assert_eq!(nals, vec![sps, idr], "the same NALs, now start-code framed");
+        // Every NAL is preceded by a 4-byte start code.
+        assert_eq!(&annexb[..4], &[0, 0, 0, 1]);
     }
 
     #[test]

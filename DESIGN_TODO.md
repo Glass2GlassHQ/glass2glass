@@ -324,9 +324,10 @@ parity claim, highest leverage first:
 
 **1. Platforms -- the biggest remaining track.** Decode is now started on both
 new platforms; the rest of each platform's elements are owed.
-- macOS: `VtDecode` (VideoToolbox H.264) landed M218 and **compiles in CI** (the
-  native `macos` runner). Owed: vtencode, AVFoundation capture, Core Audio, Metal
-  present. See `### Platform: macOS`.
+- macOS: `VtDecode` (VideoToolbox H.264 decode, M218) and `VtEncode` (VideoToolbox
+  H.264 encode, M231) both **compile in CI** (the native `macos` runner). Owed:
+  AVFoundation capture, Core Audio, Metal present; on-device runtime validation of
+  both VT elements. See `### Platform: macOS`.
 - Android: `MediaCodecDec` (NDK MediaCodec H.264) landed M219 and
   **cross-compiles in CI** (`aarch64-linux-android`; there is no native Android
   runner). Owed: encode, Camera2, AAudio, Surface present. See `### Platform:
@@ -987,7 +988,10 @@ macOS had zero element coverage. 5–8 sessions for the baseline:
   `CVPixelBuffer` cast, the `CMVideoFormatDescription` type), each marked `// NOTE`
   in `vtdecode.rs`. HEVC, a `CVPixelBuffer`/`IOSurface` zero-copy domain, and the
   registry wiring (`avdec_h264` alias) are the next steps.
-- **`vtencode`** — VideoToolbox H.264 / HEVC encode.
+- **`vtencode`** — VideoToolbox H.264 encode **landed M231** (compile-pending like
+  vtdecode; the `macos` CI job compiles it, on-device validation owed). NV12 ->
+  Annex-B, `VTCompressionSession` + AVCC->Annex-B framing with SPS/PPS prepended on
+  keyframes; FFI spots marked `// NOTE` in `vtencode.rs`. HEVC is the next step.
 - **`avfvideosrc` / `avfaudiosrc`** — AVFoundation camera + microphone.
 - **`coreaudiosink` / `coreaudiosrc`** — Core Audio in/out.
 - **`metalvideosink`** — Metal presentation.

@@ -103,8 +103,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: check g2g-plugins (vtdecode)
-        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode
+      - name: check g2g-plugins (vtdecode + vtencode)
+        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode,vtencode
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 

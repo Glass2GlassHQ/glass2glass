@@ -200,6 +200,9 @@ pub mod mfdecode;
 // other platforms is a no-op (first element of the macOS platform track, M218).
 #[cfg(all(target_os = "macos", feature = "vtdecode"))]
 pub mod vtdecode;
+// VideoToolbox H.264 encode (M231), the encode counterpart of vtdecode.
+#[cfg(all(target_os = "macos", feature = "vtencode"))]
+pub mod vtencode;
 
 // NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
 // vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only

@@ -5,6 +5,7 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+- M231: macOS VideoToolbox H.264 encode (`VtEncode`, `vtencode` feature) - NV12 -> Annex-B via `VTCompressionSession`, AVCC->Annex-B framing with SPS/PPS prepended on keyframes (`annexb::avcc_to_annexb`, host-tested). Compile-pending like `VtDecode`; the macOS CI job compiles the FFI, on-device validation owed.
 - M230: multi-client RTSP server (`rtspserversink` serves N players) - per-client handshake + per-client RTP session; the first buffer blocks until one player PLAYs, then every buffer also accepts new players non-blocking and broadcasts to all, reaping the disconnected.
 - M229: SRT encryption (`srtsink`/`srtsrc` `with_passphrase`) - AES-128-CTR payload cipher, a PBKDF2-HMAC-SHA1 passphrase KEK, RFC 3394 key wrap, and the stream key exchanged in the handshake KM extension. New `srtcrypto` module behind the `srt` feature.
 - M228: RTSP server source (`rtspserversrc`) - accepts a publisher (ANNOUNCE/SETUP/RECORD) and depayloads its RTP H.264, the ingest inverse of `rtspserversink`.
