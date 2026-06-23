@@ -24,6 +24,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pixel::{frame_byte_size, is_yuv420};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -366,18 +367,6 @@ impl PadTemplates for VideoScale {
     }
 }
 
-fn is_yuv420(format: RawVideoFormat) -> bool {
-    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
-}
-
-fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
-    let (w, h) = (w as usize, h as usize);
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
-        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
-        RawVideoFormat::Yuyv => w * h * 2,
-    }
-}
 
 /// Map an output index to its source sampling position, returning the two
 /// neighbouring source indices and the Q16 weight between them. Uses

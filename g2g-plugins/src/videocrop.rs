@@ -19,6 +19,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pixel::{frame_byte_size, is_yuv420};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -309,10 +310,6 @@ impl PadTemplates for VideoCrop {
     }
 }
 
-fn is_yuv420(format: RawVideoFormat) -> bool {
-    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
-}
-
 /// Shrink a dimension by `by`, collapsing to `None` (an empty caps) when the
 /// crop would consume the whole extent.
 fn shrink(d: &Dim, by: u32) -> Option<Dim> {
@@ -324,15 +321,6 @@ fn shrink(d: &Dim, by: u32) -> Option<Dim> {
             Some(Dim::Range { min, max })
         }
         Dim::Any => Some(Dim::Any),
-    }
-}
-
-fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
-    let (w, h) = (w as usize, h as usize);
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
-        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
-        RawVideoFormat::Yuyv => w * h * 2,
     }
 }
 

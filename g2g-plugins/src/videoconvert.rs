@@ -18,6 +18,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::pixel::{frame_byte_size, is_yuv420};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -376,20 +377,6 @@ impl PadTemplates for VideoConvert {
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
-    }
-}
-
-fn is_yuv420(format: RawVideoFormat) -> bool {
-    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
-}
-
-fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
-    let (w, h) = (w as usize, h as usize);
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
-        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
-        // Packed 4:2:2: two bytes per pixel (Y0 U Y1 V over each pixel pair).
-        RawVideoFormat::Yuyv => w * h * 2,
     }
 }
 

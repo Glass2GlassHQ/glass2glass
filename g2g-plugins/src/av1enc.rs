@@ -19,11 +19,9 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     RawVideoFormat, Rate, VideoCodec,
 };
 
@@ -182,20 +180,15 @@ impl Av1Enc {
         packets: Vec<(Vec<u8>, u64)>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if !packets.is_empty() && !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
-            self.caps_sent = true;
-        }
-        for (data, pts_ns) in packets {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
+        let caps = self.output_caps();
+        crate::encoder_base::emit_packets(
+            &mut self.caps_sent,
+            &mut self.emitted,
+            packets,
+            &caps,
+            out,
+        )
+        .await
     }
 }
 
@@ -315,7 +308,9 @@ impl PadTemplates for Av1Enc {
 mod tests {
     use super::*;
     use crate::av1parse::Av1Parse;
-    use g2g_core::PushOutcome;
+    use g2g_core::frame::Frame;
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{FrameTiming, PushOutcome};
 
     fn i420_grey(w: usize, h: usize) -> Vec<u8> {
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));

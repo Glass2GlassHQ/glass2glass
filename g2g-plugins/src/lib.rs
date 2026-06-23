@@ -223,6 +223,10 @@ pub mod mfaacencode;
 #[cfg(all(target_os = "windows", feature = "mf-aac"))]
 pub mod mfaacdecode;
 
+// Shared frame-emission loop for the packet-producing encoders below.
+#[cfg(any(feature = "av1-encode", feature = "vpx", feature = "opus"))]
+mod encoder_base;
+
 // AV1 software encode via the pure-Rust rav1e crate (cross-platform).
 #[cfg(feature = "av1-encode")]
 pub mod av1enc;

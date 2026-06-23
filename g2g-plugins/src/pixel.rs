@@ -12,3 +12,20 @@ pub(crate) fn rgba_rb_offsets(format: RawVideoFormat) -> (usize, usize) {
         _ => unreachable!("packed RGBA / BGRA only"),
     }
 }
+
+/// True for the planar 4:2:0 formats whose chroma is half-width and
+/// half-height, so callers must validate even dimensions before slicing planes.
+pub(crate) fn is_yuv420(format: RawVideoFormat) -> bool {
+    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
+}
+
+/// Tightly-packed byte size of one `w x h` frame in `format` (no row padding).
+pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
+    let (w, h) = (w as usize, h as usize);
+    match format {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
+        RawVideoFormat::Nv12 | RawVideoFormat::I420 => w * h * 3 / 2,
+        // Packed 4:2:2: two bytes per pixel (Y0 U Y1 V over each pixel pair).
+        RawVideoFormat::Yuyv => w * h * 2,
+    }
+}

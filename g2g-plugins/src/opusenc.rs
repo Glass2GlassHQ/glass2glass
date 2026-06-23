@@ -21,11 +21,9 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
 use audiopus::coder::Encoder;
@@ -161,20 +159,15 @@ impl OpusEnc {
         packets: Vec<(Vec<u8>, u64)>,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if !packets.is_empty() && !self.caps_sent {
-            out.push(PipelinePacket::CapsChanged(self.output_caps())).await?;
-            self.caps_sent = true;
-        }
-        for (data, pts_ns) in packets {
-            let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
-                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
-                self.emitted,
-            );
-            self.emitted += 1;
-            out.push(PipelinePacket::DataFrame(frame)).await?;
-        }
-        Ok(())
+        let caps = self.output_caps();
+        crate::encoder_base::emit_packets(
+            &mut self.caps_sent,
+            &mut self.emitted,
+            packets,
+            &caps,
+            out,
+        )
+        .await
     }
 }
 
