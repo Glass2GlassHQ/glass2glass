@@ -8,13 +8,22 @@
 //! contract `OrtInference` builds on the CPU, so it composes with the existing
 //! tensor graph (`-> TensorBatcher -> inference -> TensorPostprocess`).
 //!
-//! This is the system-memory variant: the NV12 bytes are uploaded to a storage
-//! buffer and the f32 tensor is read back to `MemoryDomain::System`. The
-//! zero-copy path (binding a decoder's `DmaBuf`/`D3D11Texture` surface straight
-//! into the compute pass and emitting a GPU-resident tensor domain) is the
-//! follow-up; it needs the surface-import handshake and a GPU tensor domain in
-//! core. RGBA input (normalize only, no colour convert) is likewise a small
-//! follow-up.
+//! Both ends of the compute can now stay on the GPU:
+//! - **Output (M215, [`with_gpu_output`](WgpuPreprocess::with_gpu_output)):** the
+//!   f32 tensor is left in a `wgpu::Buffer` (`MemoryDomain::WgpuBuffer`) instead
+//!   of read back to `MemoryDomain::System`, so `WgpuInference` binds it on-device.
+//! - **Input (M217, surface-import):** when the NV12 frame arrives already on the
+//!   GPU as a `MemoryDomain::WgpuTexture` (an R8Uint texture in standard NV12
+//!   byte layout, see [`WgpuNv12Texture`]), the element samples it straight into
+//!   the compute pass on the producer's own device, with no CPU upload. The
+//!   default `MemoryDomain::System` path (upload NV12 bytes to a storage buffer)
+//!   is unchanged.
+//!
+//! With both ends GPU-resident, `surface -> WgpuPreprocess -> WgpuInference` runs
+//! with the pixels never touching the CPU. A real GPU NV12 decoder
+//! (`DmaBuf`/`D3D11Texture`/CUDA import into a wgpu texture) is the producer that
+//! slots in upstream; until one lands, [`nv12_to_gpu_texture`] stands in for it.
+//! RGBA input (normalize only, no colour convert) is a small follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -23,8 +32,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, OwnedWgpuBuffer, PipelinePacket, Rate, RawVideoFormat, TensorDType,
-    TensorLayout, TensorShape, WgpuBufferKeepAlive,
+    MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket, Rate,
+    RawVideoFormat, TensorDType, TensorLayout, TensorShape, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
@@ -74,6 +83,49 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Surface-import variant of `SHADER` (M217): the NV12 frame arrives as an
+/// R8Uint texture of size `width x (height * 3/2)` holding the bytes in the
+/// standard NV12 layout (Y plane in rows `[0, h)`, interleaved Cb,Cr in rows
+/// `[h, h*3/2)`), so the byte at logical index `i` is texel `(i % w, i / w)`.
+/// `textureLoad` reads the exact integer byte (no sampler, no filtering), so the
+/// math and the output are identical to the storage-buffer path. `out` is the
+/// same f32 NCHW tensor.
+const TEX_SHADER: &str = r#"
+struct Dims { width: u32, height: u32, _pad0: u32, _pad1: u32 };
+
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var nv12: texture_2d<u32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let w = dims.width;
+    let h = dims.height;
+    if (x >= w || y >= h) { return; }
+
+    let yv = f32(textureLoad(nv12, vec2<i32>(i32(x), i32(y)), 0).r);
+    // UV is half-resolution, packed in the rows after the Y plane: the Cb,Cr
+    // pair for this pixel sits at column (x/2)*2 of row h + y/2.
+    let cx = i32((x / 2u) * 2u);
+    let cy = i32(h + y / 2u);
+    let cb = f32(textureLoad(nv12, vec2<i32>(cx, cy), 0).r) - 128.0;
+    let cr = f32(textureLoad(nv12, vec2<i32>(cx + 1, cy), 0).r) - 128.0;
+
+    let yy = (yv - 16.0) * 1.164383;
+    let r = yy + 1.596027 * cr;
+    let g = yy - 0.391762 * cb - 0.812968 * cr;
+    let b = yy + 2.017232 * cb;
+
+    let area = w * h;
+    let li = y * w + x;
+    out[li] = clamp(r, 0.0, 255.0) / 255.0;
+    out[area + li] = clamp(g, 0.0, 255.0) / 255.0;
+    out[2u * area + li] = clamp(b, 0.0, 255.0) / 255.0;
+}
+"#;
+
 /// The host BT.601 reference matching `SHADER`, kept public so the test (and a
 /// CPU-fallback caller) can compare against the GPU output. Returns the f32
 /// NCHW RGB tensor for one NV12 frame.
@@ -116,12 +168,32 @@ struct Gpu {
     out_bytes: usize,
 }
 
+/// Surface-import GPU resources (M217): the texture-sampling pipeline and the
+/// output buffers, built lazily on the first GPU-texture frame, on the device
+/// that frame's texture lives on (a texture is bindable only on its own device).
+/// No input buffer: the input is the incoming texture, bound per frame, so the
+/// bind group is rebuilt per dispatch.
+#[derive(Debug)]
+struct TexGpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::ComputePipeline,
+    dims_buf: wgpu::Buffer,
+    out_buf: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    out_bytes: usize,
+}
+
 #[derive(Debug)]
 pub struct WgpuPreprocess {
     width: u32,
     height: u32,
     configured: bool,
     gpu: Option<Gpu>,
+    /// Surface-import resources, built on the first GPU-texture frame from that
+    /// frame's device (M217). Separate from `gpu` because the texture path binds
+    /// a sampled texture, not a storage buffer, and adopts the producer's device.
+    tex_gpu: Option<TexGpu>,
     last_caps: Option<Caps>,
     emitted: u64,
     /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
@@ -143,6 +215,7 @@ impl WgpuPreprocess {
             height: 0,
             configured: false,
             gpu: None,
+            tex_gpu: None,
             last_caps: None,
             emitted: 0,
             gpu_output: false,
@@ -285,6 +358,103 @@ impl WgpuPreprocess {
             WgpuBufferOwner::new(gpu.device.clone(), gpu.queue.clone(), frame_buf, gpu.out_bytes);
         Ok(OwnedWgpuBuffer::new(gpu.out_bytes, std::sync::Arc::new(owner)))
     }
+
+    /// Build the surface-import pipeline and output buffers on `device` (M217).
+    /// Idempotent: built once, on the first GPU-texture frame, because the
+    /// device is only known once such a frame arrives.
+    fn ensure_tex_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.tex_gpu.is_some() {
+            return;
+        }
+        self.tex_gpu = Some(build_tex_gpu(device, queue, self.width, self.height));
+    }
+
+    /// Surface-import dispatch (M217): sample the incoming NV12 texture straight
+    /// into the compute pass on its own device, no CPU upload. Returns the tensor
+    /// domain, GPU-resident (`WgpuBuffer`) when `gpu_output` is set or read back
+    /// to `System` otherwise, mirroring [`dispatch`] / [`dispatch_gpu`]. The bind
+    /// group is rebuilt per frame because the input texture changes per frame.
+    fn dispatch_tex(&self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
+        let tg = self.tex_gpu.as_ref().ok_or(G2gError::NotConfigured)?;
+        let texture = owner.texture();
+        // The texture must hold the NV12 frame in the standard byte layout:
+        // width x (height + height/2), one byte per texel (R8Uint).
+        if texture.width() != self.width || texture.height() != self.height + self.height / 2 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let layout = tg.pipeline.get_bind_group_layout(0);
+        let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nv12-tex-binding"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tg.dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tg.out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder =
+            tg.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("nv12-tex->rgb"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&tg.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let gx = self.width.div_ceil(WORKGROUP);
+            let gy = self.height.div_ceil(WORKGROUP);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+
+        if self.gpu_output {
+            // Fresh per-frame buffer, like dispatch_gpu, so the next frame's
+            // compute can't clobber one still in flight downstream.
+            let frame_buf = tg.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("preprocess-tensor"),
+                size: tg.out_bytes as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &frame_buf, 0, tg.out_bytes as u64);
+            tg.queue.submit([encoder.finish()]);
+            let owner =
+                WgpuBufferOwner::new(tg.device.clone(), tg.queue.clone(), frame_buf, tg.out_bytes);
+            Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
+                tg.out_bytes,
+                std::sync::Arc::new(owner),
+            )))
+        } else {
+            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &tg.staging, 0, tg.out_bytes as u64);
+            tg.queue.submit([encoder.finish()]);
+            let slice = tg.staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            tg.device
+                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            rx.recv()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
+            tg.staging.unmap();
+            Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
+        }
+    }
 }
 
 /// Owns a GPU-resident linear tensor buffer: the `wgpu::Buffer` holding an f32
@@ -373,6 +543,51 @@ impl WgpuBufferKeepAlive for WgpuBufferOwner {
     }
 }
 
+/// Owns a GPU-resident NV12 frame for surface-import into [`WgpuPreprocess`]
+/// (M217): an R8Uint `wgpu::Texture` of size `width x (height * 3/2)` holding the
+/// bytes in the standard NV12 layout (Y plane, then interleaved Cb,Cr), plus the
+/// device / queue it lives on. Boxed as the [`WgpuKeepAlive`] of a
+/// [`MemoryDomain::WgpuTexture`]; `WgpuPreprocess` downcasts to recover the
+/// texture and adopt its device (a texture is bindable only on its own device),
+/// so the NV12 pixels are sampled straight into the compute pass with no CPU
+/// upload. A real GPU NV12 decoder is the intended producer; until one lands,
+/// [`nv12_to_gpu_texture`] builds one from system bytes.
+#[derive(Debug)]
+pub struct WgpuNv12Texture {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
+}
+
+impl WgpuNv12Texture {
+    /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
+        Self { device, queue, texture }
+    }
+
+    /// The backing NV12 texture, for the importer to sample directly.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    /// The device the texture lives on; the importer adopts it to bind the
+    /// texture rather than uploading the frame to its own device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue paired with [`device`](Self::device).
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+}
+
+impl WgpuKeepAlive for WgpuNv12Texture {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
 impl AsyncElement for WgpuPreprocess {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -429,16 +644,34 @@ impl AsyncElement for WgpuPreprocess {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    self.ensure_gpu().await?;
-                    // GPU-output mode keeps the tensor on the device (M215);
-                    // otherwise read it back to system memory as before.
-                    let domain = if self.gpu_output {
-                        MemoryDomain::WgpuBuffer(self.dispatch_gpu(slice.as_slice())?)
-                    } else {
-                        MemoryDomain::System(SystemSlice::from_boxed(self.dispatch(slice.as_slice())?))
+                    let domain = match &frame.domain {
+                        // System input: upload the NV12 bytes to a storage buffer
+                        // and run the compute on the element's own device.
+                        MemoryDomain::System(slice) => {
+                            self.ensure_gpu().await?;
+                            // GPU-output mode keeps the tensor on the device
+                            // (M215); otherwise read it back to system memory.
+                            if self.gpu_output {
+                                MemoryDomain::WgpuBuffer(self.dispatch_gpu(slice.as_slice())?)
+                            } else {
+                                MemoryDomain::System(SystemSlice::from_boxed(
+                                    self.dispatch(slice.as_slice())?,
+                                ))
+                            }
+                        }
+                        // Surface-import (M217): the NV12 frame is already a GPU
+                        // texture. Adopt its device and sample it directly, no
+                        // CPU upload. A foreign keep-alive we cannot bind.
+                        MemoryDomain::WgpuTexture(owned) => {
+                            let owner = owned
+                                .keep_alive()
+                                .as_any()
+                                .downcast_ref::<WgpuNv12Texture>()
+                                .ok_or(G2gError::UnsupportedDomain)?;
+                            self.ensure_tex_gpu(owner.device(), owner.queue());
+                            self.dispatch_tex(owner)?
+                        }
+                        _ => return Err(G2gError::UnsupportedDomain),
                     };
                     let new_caps = self.tensor_caps();
                     if self.last_caps.as_ref() != Some(&new_caps) {
@@ -579,6 +812,126 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
         nv12_padded,
         out_bytes,
     })
+}
+
+/// Build the surface-import resources on an already-existing device (the one the
+/// incoming NV12 texture lives on), M217. Unlike [`build_gpu`] it requests no
+/// adapter / device: a texture is bindable only on its own device, so the
+/// importer adopts the producer's rather than creating its own.
+fn build_tex_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> TexGpu {
+    let area = width as usize * height as usize;
+    let out_bytes = 3 * area * 4;
+
+    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rgb-tensor-out"),
+        size: out_bytes as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: out_bytes as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("dims"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut dims = [0u8; 16];
+    dims[0..4].copy_from_slice(&width.to_le_bytes());
+    dims[4..8].copy_from_slice(&height.to_le_bytes());
+    queue.write_buffer(&dims_buf, 0, &dims);
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("nv12-tex-rgb-normalize"),
+        source: wgpu::ShaderSource::Wgsl(TEX_SHADER.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("nv12-tex-rgb-normalize"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    TexGpu {
+        device: device.clone(),
+        queue: queue.clone(),
+        pipeline,
+        dims_buf,
+        out_buf,
+        staging,
+        out_bytes,
+    }
+}
+
+/// Stand-in for a GPU NV12 decoder until one lands (M217): upload NV12 system
+/// bytes to a GPU R8Uint texture of size `width x (height * 3/2)` (the standard
+/// NV12 byte layout) on a fresh wgpu device, and return it as the
+/// `MemoryDomain::WgpuTexture` domain [`WgpuPreprocess`] surface-imports. A real
+/// GPU decoder (`DmaBuf`/`D3D11Texture`/CUDA import) produces this domain
+/// directly; this exists so the surface-import path is exercisable end-to-end.
+pub async fn nv12_to_gpu_texture(
+    nv12: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<MemoryDomain, G2gError> {
+    if width % 2 != 0 || height % 2 != 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let tex_rows = height + height / 2;
+    if nv12.len() < (width * tex_rows) as usize {
+        return Err(G2gError::CapsMismatch);
+    }
+
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .map_err(gpu_err)?;
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
+        .await
+        .map_err(gpu_err)?;
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("nv12-surface"),
+        size: wgpu::Extent3d { width, height: tex_rows, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    // write_texture has no 256-byte bytes_per_row constraint (it stages
+    // internally), so the unaligned NV12 width is fine.
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &nv12[..(width * tex_rows) as usize],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width),
+            rows_per_image: Some(tex_rows),
+        },
+        wgpu::Extent3d { width, height: tex_rows, depth_or_array_layers: 1 },
+    );
+
+    let owner = WgpuNv12Texture::new(device, queue, texture);
+    Ok(MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+        width,
+        height,
+        std::sync::Arc::new(owner),
+    )))
 }
 
 #[cfg(test)]

@@ -13,7 +13,9 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
-use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess};
+use g2g_ml::wgpupreprocess::{
+    gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
+};
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
     Caps::RawVideo {
@@ -197,5 +199,116 @@ async fn gpu_output_keeps_tensor_on_device_and_matches_reference() {
     assert_eq!(got.len(), 3 * w * h, "NCHW RGB tensor length");
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
         assert!((g - e).abs() < 1e-3, "element {i}: gpu-resident {g} vs cpu reference {e}");
+    }
+}
+
+/// M217: surface-import. The NV12 frame arrives already on the GPU as a
+/// `MemoryDomain::WgpuTexture`; the element samples it straight into the compute
+/// pass (no CPU upload) and the result matches the system-memory / BT.601 CPU
+/// reference exactly. Reuses the same NV12 frame as the system-input test so the
+/// two paths are proven to produce identical output.
+#[tokio::test]
+async fn surface_import_samples_gpu_texture_and_matches_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let (w, h) = (4usize, 2usize);
+    let y_plane = [16u8, 81, 145, 235, 41, 100, 200, 128];
+    let uv_plane = [128u8, 128, 90, 200];
+    let nv12: Vec<u8> = y_plane.iter().chain(&uv_plane).copied().collect();
+
+    // Stand in for a GPU NV12 decoder: the frame is GPU-resident before it ever
+    // reaches the element.
+    let domain = nv12_to_gpu_texture(&nv12, w as u32, h as u32).await.expect("upload nv12 texture");
+    assert!(matches!(domain, MemoryDomain::WgpuTexture(_)), "input is a GPU texture, not System");
+
+    let mut element = WgpuPreprocess::new();
+    element.configure_pipeline(&nv12_caps(w as u32, h as u32)).expect("configure NV12");
+
+    let mut out = Collect::default();
+    let frame = Frame {
+        domain,
+        timing: FrameTiming { pts_ns: 555, dts_ns: 555, ..FrameTiming::default() },
+        sequence: 3,
+        meta: Default::default(),
+    };
+    element.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("surface-import");
+
+    let tensor = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a tensor frame");
+    let got = frame_f32(tensor);
+
+    let expected = nv12_to_rgb_tensor(&nv12, w, h);
+    assert_eq!(got.len(), 3 * w * h, "NCHW RGB tensor length");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-3, "element {i}: surface-import {g} vs cpu reference {e}");
+    }
+    // chroma path ran (coloured block breaks grayscale R==G==B).
+    let area = w * h;
+    assert!(
+        (0..area).any(|px| (got[px] - got[area + px]).abs() > 1e-3),
+        "coloured block should break grayscale"
+    );
+    assert_eq!(tensor.timing.pts_ns, 555, "timing flows through surface-import");
+}
+
+/// M217 + M215: surface-import in **and** GPU-resident tensor out, so the
+/// preprocess stage touches the CPU at neither end. Read the result back only at
+/// the end and compare to the CPU reference.
+#[tokio::test]
+async fn surface_import_with_gpu_output_stays_resident() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let (w, h) = (4usize, 2usize);
+    let y_plane = [16u8, 81, 145, 235, 41, 100, 200, 128];
+    let uv_plane = [128u8, 128, 90, 200];
+    let nv12: Vec<u8> = y_plane.iter().chain(&uv_plane).copied().collect();
+
+    let domain = nv12_to_gpu_texture(&nv12, w as u32, h as u32).await.expect("upload nv12 texture");
+    let mut element = WgpuPreprocess::new().with_gpu_output();
+    element.configure_pipeline(&nv12_caps(w as u32, h as u32)).expect("configure NV12");
+
+    let mut out = Collect::default();
+    let frame = Frame {
+        domain,
+        timing: FrameTiming::default(),
+        sequence: 0,
+        meta: Default::default(),
+    };
+    element.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("surface-import gpu");
+
+    let tensor = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a tensor frame");
+    let MemoryDomain::WgpuBuffer(owned) = &tensor.domain else {
+        panic!("texture in + gpu_output must stay resident, got {:?}", tensor.domain.kind());
+    };
+    let owner = owned
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuBufferOwner>()
+        .expect("recover the buffer owner");
+    let bytes = owner.read_back().expect("read tensor back");
+    let got: Vec<f32> =
+        bytes.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+
+    let expected = nv12_to_rgb_tensor(&nv12, w, h);
+    assert_eq!(got.len(), 3 * w * h);
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-3, "element {i}: resident {g} vs cpu reference {e}");
     }
 }

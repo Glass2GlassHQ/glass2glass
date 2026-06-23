@@ -5,6 +5,35 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M217: input-side GPU surface-import for `WgpuPreprocess`
+
+The input-side counterpart of M215: `WgpuPreprocess` can now consume an NV12
+frame that is **already on the GPU**, sampling it straight into the compute pass
+with no CPU upload. With M215 (GPU-resident tensor out) and M216 (`WgpuInference`
+binding it), `surface -> WgpuPreprocess -> WgpuInference` now runs with the pixels
+never touching the CPU end to end.
+
+- **`MemoryDomain::WgpuTexture` input.** When the frame arrives as a
+  `WgpuTexture` whose keep-alive downcasts to the new **`WgpuNv12Texture`** (an
+  R8Uint `wgpu::Texture` of size `width x (height * 3/2)` holding the bytes in
+  the standard NV12 layout, plus its device/queue), the element adopts that
+  device (a texture is bindable only on its own device, same device-identity
+  rule as M216) and samples the texture with `textureLoad` in a new compute
+  shader variant. The result is bit-identical to the storage-buffer path. The
+  default `MemoryDomain::System` path (CPU upload) is unchanged; both input paths
+  compose with both output modes (System read-back or `with_gpu_output`).
+- **`nv12_to_gpu_texture(nv12, w, h)`** stands in for a real GPU NV12 decoder
+  until one lands: it uploads system NV12 bytes to the R8Uint surface and returns
+  the `WgpuTexture` domain the element imports. A real decoder
+  (`DmaBuf`/`D3D11Texture`/CUDA import into a wgpu texture) produces this domain
+  directly.
+- Tests (`wgpu_preprocess` + `wgpu_inference`, real RTX 3060): surface-import
+  matches the CPU reference in both System and GPU-output modes, and the full
+  `GPU NV12 surface -> preprocess -> inference -> logits` chain (read back only at
+  the very end) matches a full CPU reference. Skips with no wgpu adapter.
+- Remaining for the full decode->display loop: CUDA<->wgpu interop, to join the
+  NVDEC decode side to this wgpu surface-import.
+
 ### M216: GPU-resident tensor inference consumer (`WgpuInference`)
 
 The consumer half of the keep-on-GPU inference branch M215 opened: a wgpu matmul

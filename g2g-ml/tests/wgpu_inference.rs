@@ -14,7 +14,9 @@ use g2g_core::{
     TensorShape,
 };
 use g2g_ml::wgpuinfer::{linear_reference, WgpuInference};
-use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess};
+use g2g_ml::wgpupreprocess::{
+    gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
+};
 
 const W: u32 = 4;
 const H: u32 = 2;
@@ -62,6 +64,10 @@ fn nv12_frame(bytes: Vec<u8>, pts_ns: u64, sequence: u64) -> Frame {
         sequence,
         meta: Default::default(),
     }
+}
+
+fn nv12_texture_frame(domain: MemoryDomain) -> Frame {
+    Frame { domain, timing: FrameTiming { pts_ns: 99, dts_ns: 99, ..FrameTiming::default() }, sequence: 0, meta: Default::default() }
 }
 
 fn sample_nv12() -> Vec<u8> {
@@ -252,6 +258,65 @@ async fn rejects_system_memory_input() {
         Err(G2gError::UnsupportedDomain),
         "System input is the CPU path's job (BurnInference)"
     );
+}
+
+/// The full keep-on-GPU branch (M215 + M216 + M217): a GPU NV12 surface ->
+/// `WgpuPreprocess` (surface-import in, GPU-resident tensor out) -> `WgpuInference`
+/// (binds that tensor) -> logits, with the pixels never touching the CPU until
+/// the logits are read back at the very end. The result matches a full CPU
+/// reference (NV12 -> RGB tensor -> linear).
+#[tokio::test]
+async fn surface_to_logits_keeps_everything_on_gpu() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let nv12 = sample_nv12();
+    let (weights, bias) = weights_bias();
+
+    // GPU NV12 surface in (no CPU upload inside the element).
+    let domain = nv12_to_gpu_texture(&nv12, W, H).await.expect("gpu nv12 surface");
+    let mut pre = WgpuPreprocess::new().with_gpu_output();
+    pre.configure_pipeline(&nv12_caps(W, H)).expect("configure preprocess");
+    let mut pout = Collect::default();
+    pre.process(PipelinePacket::DataFrame(nv12_texture_frame(domain)), &mut pout)
+        .await
+        .expect("surface-import preprocess");
+    let tensor_frame = pout
+        .packets
+        .into_iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a GPU-resident tensor frame");
+    assert!(
+        matches!(tensor_frame.domain, MemoryDomain::WgpuBuffer(_)),
+        "tensor stays on the GPU between preprocess and inference"
+    );
+
+    // Inference binds the resident tensor directly.
+    let mut infer = WgpuInference::linear(W, H, weights.clone(), bias.clone()).unwrap();
+    infer.configure_pipeline(&tensor_in_caps()).expect("configure inference");
+    let mut iout = Collect::default();
+    infer.process(PipelinePacket::DataFrame(tensor_frame), &mut iout).await.expect("gpu inference");
+
+    let frame = iout
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a logits frame");
+    let got = logits_from_system(frame);
+
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = linear_reference(&cpu_tensor, &weights, &bias);
+    assert_eq!(got.len(), N);
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-2, "logit {i}: gpu chain {g} vs cpu reference {e}");
+    }
 }
 
 #[test]
