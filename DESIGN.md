@@ -1178,10 +1178,14 @@ over `[start, stop]`, and `SyncSink` schedules each by `Segment::to_running_time
 (which measures reverse from `stop`) and clips via `contains`, so descending PTS
 maps to ascending running time and presents in the correct visual order, the
 `Segment` abstraction generalizing the sink to negative rate transparently.
-Trick-mode KEY_UNIT frame selection (present only keyframes for fast scrub) needs
-a per-frame keyframe flag (the codec parsers already detect keyframes but do not
-yet surface one), and making the other in-tree sources seek-aware, are open
-(DESIGN_TODO).
+**Trick-mode KEY_UNIT** frame selection (present only keyframes for fast scrub)
+is done (M226): `FrameTiming::keyframe` carries a per-frame flag (set by
+`h264parse` from `h264_au_is_keyframe`, and by `mp4src` / `fmp4demux` from the
+container sync-sample / `trun` keyframe flag), a `TRICKMODE` seek sets
+`Segment::key_units_only` in `from_seek`, and `SyncSink` drops non-keyframe frames
+under such a segment before scheduling them (counted by `trick_dropped()`).
+Segment seeks (CMAF / DASH), re-preroll after a flushing seek when paused, and
+making the other in-tree sources seek-aware remain open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

@@ -53,6 +53,8 @@ pub struct SyncSink<C: AsyncClock> {
     segment: Option<Segment>,
     /// Frames dropped because they fell outside the segment (accurate-seek clip).
     clipped: u64,
+    /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
+    trick_dropped: u64,
     bus: Option<BusHandle>,
     /// QoS signal pending delivery upstream (M174): set when a late frame is
     /// dropped, consumed by the runner via [`take_qos`](AsyncElement::take_qos)
@@ -74,6 +76,7 @@ impl<C: AsyncClock> SyncSink<C> {
             dropped: 0,
             segment: None,
             clipped: 0,
+            trick_dropped: 0,
             bus: None,
             pending_qos: None,
         }
@@ -100,6 +103,11 @@ impl<C: AsyncClock> SyncSink<C> {
     /// Frames dropped because they arrived too late under the QoS bound.
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
+    pub fn trick_dropped(&self) -> u64 {
+        self.trick_dropped
     }
 
     /// Frames clipped because they fell outside the current segment, eg the
@@ -171,6 +179,13 @@ where
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     let pts = f.timing.pts_ns;
+                    // Trick-mode KEY_UNIT: under a `key_units_only` segment, present
+                    // only keyframes (fast scrub), dropping dependent frames before
+                    // the deadline math so they are never scheduled.
+                    if self.segment.as_ref().is_some_and(|s| s.key_units_only) && !f.timing.keyframe {
+                        self.trick_dropped += 1;
+                        return Ok(());
+                    }
                     // Map PTS to running time through the segment; a frame outside
                     // it (the decoded frames before an accurate-seek target) is
                     // clipped. Without a segment, PTS is the running time directly.
@@ -245,7 +260,7 @@ mod tests {
     use core::future::Ready;
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome, Seek};
+    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome, Seek, SeekFlags, SeekType};
 
     /// A clock fixed at 0 whose sleep resolves immediately (the deadline is in the
     /// future of `now == 0`, so no QoS drop fires and no real wait happens).
@@ -295,6 +310,44 @@ mod tests {
         assert_eq!(sink.clipped(), 1, "the pre-target keyframe is clipped");
         assert_eq!(sink.received(), 1, "only the at/after-target frame is presented");
         assert_eq!(sink.last_sequence(), Some(1));
+    }
+
+    /// A keyframe-tagged frame for the trick-mode test.
+    fn frame_kf(pts_ns: u64, sequence: u64, keyframe: bool) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8]))),
+            FrameTiming { pts_ns, keyframe, ..FrameTiming::default() },
+            sequence,
+        ))
+    }
+
+    #[tokio::test]
+    async fn trickmode_segment_presents_only_keyframes() {
+        let mut sink = SyncSink::new(InstantClock);
+        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs })
+            .unwrap();
+        let mut out = NullSink;
+        // A 2x trick-mode seek: the segment asks the sink for key units only.
+        let seek = Seek {
+            rate: 2.0,
+            flags: SeekFlags::FLUSH | SeekFlags::TRICKMODE,
+            start_type: SeekType::Set,
+            start: 0,
+            stop_type: SeekType::None,
+            stop: 0,
+        };
+        let seg = Segment::for_flush_seek(&seek, None);
+        assert!(seg.key_units_only, "the TRICKMODE flag set key_units_only");
+        sink.process(PipelinePacket::Segment(seg), &mut out).await.unwrap();
+
+        sink.process(frame_kf(0, 0, true), &mut out).await.unwrap(); // keyframe: presented
+        sink.process(frame_kf(20_000_000, 1, false), &mut out).await.unwrap(); // dropped
+        sink.process(frame_kf(40_000_000, 2, false), &mut out).await.unwrap(); // dropped
+        sink.process(frame_kf(60_000_000, 3, true), &mut out).await.unwrap(); // keyframe: presented
+
+        assert_eq!(sink.received(), 2, "only the two keyframes are presented");
+        assert_eq!(sink.trick_dropped(), 2, "the dependent frames are dropped");
+        assert_eq!(sink.last_sequence(), Some(3));
     }
 
     #[tokio::test]

@@ -119,6 +119,7 @@ impl SourceLoop for Mp4AudioSrc {
                         duration_ns: s.duration_ns,
                         capture_ns: s.pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
+                        keyframe: false, // audio: every sample is independent
                     },
                     sequence,
                     meta: Default::default(),

@@ -115,8 +115,11 @@ impl AsyncElement for H264Parse {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
-                PipelinePacket::DataFrame(frame) => {
+                PipelinePacket::DataFrame(mut frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
+                        // Surface the keyframe flag for trick-mode / keyframe seek
+                        // (the parser is the producer that can detect it).
+                        let is_keyframe = crate::h264util::h264_au_is_keyframe(slice.as_slice());
                         if let Some(info) = extract_sps_info(slice.as_slice()) {
                             let new_caps = Caps::CompressedVideo {
                                 codec: VideoCodec::H264,
@@ -131,6 +134,7 @@ impl AsyncElement for H264Parse {
                                 self.sps_emitted += 1;
                             }
                         }
+                        frame.timing.keyframe = is_keyframe;
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }

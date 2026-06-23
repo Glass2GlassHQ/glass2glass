@@ -5,6 +5,28 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M226: per-frame keyframe flag + trick-mode KEY_UNIT playback (seek depth)
+
+Closes the deferred trick-mode gap: fast-scrub playback that presents only
+keyframes. The piece that was missing was a per-frame keyframe flag (parsers
+*detected* keyframes but didn't surface one), so it is built here with its
+producers and consumer together.
+
+- **`FrameTiming::keyframe`** (`g2g-core`): a per-frame flag marking an
+  independently-decodable unit, `false` (dependent) when unknown.
+- **Producers**: `h264parse` sets it via `h264_au_is_keyframe` (the helper is now
+  always compiled, not just under wasm); `mp4src` and `fmp4demux` set it from the
+  container sync-sample / `trun` keyframe flag, so trick mode works straight from
+  a demuxer; `videotestsrc` marks raw frames as independently presentable.
+- **`Segment::key_units_only`** (`g2g-core`): the
+  `GST_SEGMENT_FLAG_TRICKMODE_KEY_UNITS` analog, set from a seek's existing
+  `TRICKMODE` flag in `from_seek`.
+- **Consumer**: `SyncSink` drops non-keyframe frames under a `key_units_only`
+  segment (before the deadline math, so they are never scheduled), counted via
+  `trick_dropped()`. A `2x` trick-mode seek now presents only the keyframes.
+- Tests: `segment` (the flag derives from `TRICKMODE`), `syncsink`
+  (`trickmode_segment_presents_only_keyframes`), `h264parse` (keyframe surfaced).
+
 ### M225: RTP forward error correction (ULPFEC, RFC 5109)
 
 Completes the RTP resilience story: NAK (M96) and RTX (M222) recover loss with a

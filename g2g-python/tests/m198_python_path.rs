@@ -38,7 +38,7 @@ fn frame_2x1_rgba(first: u8) -> Frame {
     bytes[0] = first;
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 },
+        timing: FrameTiming { pts_ns: 0, dts_ns: 0, duration_ns: 0, capture_ns: 0, arrival_ns: 0 , keyframe: false},
         sequence: 0,
         meta: Default::default(),
     }

@@ -270,6 +270,7 @@ impl SourceLoop for VideoTestSrc {
                         duration_ns: pts_step_ns,
                         capture_ns: pts,
                         arrival_ns,
+                        keyframe: true, // raw frames are each independently presentable
                     },
                     sequence: seq,
                     meta: Default::default(),

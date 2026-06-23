@@ -107,6 +107,7 @@ impl PySource {
                 duration_ns: pts_step_ns,
                 capture_ns: pts,
                 arrival_ns: 0,
+                keyframe: false,
             },
             sequence: seq,
             meta: Default::default(),

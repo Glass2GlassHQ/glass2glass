@@ -201,6 +201,7 @@ impl SourceLoop for AudioTestSrc {
                         duration_ns: buffer_duration_ns,
                         capture_ns: pts,
                         arrival_ns,
+                        keyframe: false, // audio: every buffer is independent
                     },
                     sequence: seq,
                     meta: Default::default(),

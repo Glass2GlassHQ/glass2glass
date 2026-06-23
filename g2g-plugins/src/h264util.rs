@@ -3,6 +3,8 @@
 //! string from the SPS. NAL splitting is shared via [`crate::annexb`]. Pure and
 //! host-testable; the element itself only runs in a browser.
 
+// Only `h264_codec_string` (WebCodecs / wasm) needs an owned String.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 use alloc::string::String;
 
 use crate::annexb::nal_units;
@@ -22,6 +24,9 @@ pub(crate) fn h264_au_is_keyframe(au: &[u8]) -> bool {
 /// type 7): `"avc1."` followed by profile_idc, the constraint-set byte, and
 /// level_idc as six uppercase hex digits (e.g. `"avc1.42E01E"`). `None` if the
 /// access unit carries no SPS.
+// Only the WebCodecs decoder (wasm) needs this; h264parse uses the keyframe
+// helper. Gated so the always-compiled module stays warning-clean elsewhere.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 pub(crate) fn h264_codec_string(au: &[u8]) -> Option<String> {
     let sps = nal_units(au).find(|nal| nal_type(nal) == Some(7))?;
     // sps[0] is the NAL header; the next three bytes are profile_idc, the

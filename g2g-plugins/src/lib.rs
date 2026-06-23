@@ -394,9 +394,8 @@ mod webutil;
 #[cfg(all(target_arch = "wasm32", feature = "web-codecs"))]
 pub mod webcodecsdecode;
 
-// H.264 Annex-B helpers for WebCodecsDecode (NAL split, keyframe, codec
-// string). Pure; compiled under cfg(test) so the logic is host-testable.
-#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
+// H.264 Annex-B helpers (NAL split, keyframe detection, codec string). Pure
+// no_std; used by h264parse (keyframe flag) and WebCodecsDecode.
 mod h264util;
 
 // Embassy RTOS clock backend (M43): the embedded deployment-profile clock over

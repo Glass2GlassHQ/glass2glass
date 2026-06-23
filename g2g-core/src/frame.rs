@@ -58,6 +58,12 @@ pub struct FrameTiming {
     /// glass-to-glass latency is `sink_now - arrival_ns`. Zero on
     /// frames synthesized by transforms or unit tests.
     pub arrival_ns: u64,
+    /// Whether this frame begins an independently-decodable unit (a keyframe /
+    /// IDR). Set by the parsers that detect it; consumed by trick-mode KEY_UNIT
+    /// playback (the sink drops non-keyframes under a `TRICKMODE` segment) and by
+    /// keyframe-aware seeking. `false` when unknown (the safe default: a frame is
+    /// treated as a dependent frame unless a producer marks it a keyframe).
+    pub keyframe: bool,
 }
 
 #[cfg(test)]

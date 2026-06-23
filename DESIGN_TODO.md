@@ -357,10 +357,11 @@ entries under `### High`.
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
   multi-element subgraph mid-stream re-solve (1-link done), the
   `scale_then_convert` geometry-pin known limit.
-- Seek: trick-mode KEY_UNIT frame selection (needs a per-frame keyframe flag,
-  deferred to its first consumer), segment seeks (CMAF / DASH), re-preroll after
-  a flushing seek when paused, more seekable sources. (reverse + non-flushing
-  done, M211/M212.)
+- Seek: trick-mode KEY_UNIT frame selection **DONE (M226)** -- `FrameTiming::keyframe`
+  (set by h264parse / mp4src / fmp4demux) + `Segment::key_units_only` (from a seek's
+  `TRICKMODE` flag) + `SyncSink` dropping non-keyframes under it. Remaining seek:
+  segment seeks (CMAF / DASH), re-preroll after a flushing seek when paused, more
+  seekable sources. (reverse + non-flushing done, M211/M212.)
 - Codecs: pure-Rust / wasm decode (dav1d / rav1d, vpx) to drop the ffmpeg FFI.
 
 **4. GPU keep-on-GPU pillar.** M213-M217 closed zero-copy GPU fan-out, the

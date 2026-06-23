@@ -165,6 +165,11 @@ pub struct Segment {
     pub time: u64,
     /// Current playback position within the segment (ns).
     pub position: u64,
+    /// Trick mode: only key units (keyframes) are to be presented, the rest
+    /// dropped (the `GST_SEGMENT_FLAG_TRICKMODE_KEY_UNITS` analog). Set from a
+    /// seek's `TRICKMODE` flag; a sink honoring it presents only frames whose
+    /// [`FrameTiming::keyframe`](crate::frame::FrameTiming) is set.
+    pub key_units_only: bool,
 }
 
 impl Segment {
@@ -178,6 +183,7 @@ impl Segment {
             stop: None,
             time: 0,
             position: 0,
+            key_units_only: false,
         }
     }
 
@@ -289,7 +295,17 @@ impl Segment {
             SeekType::Set => Some(seek.stop),
             SeekType::End => Some(duration.unwrap_or(0).saturating_sub(seek.stop)),
         };
-        Segment { rate: seek.rate, applied_rate: 1.0, base, start, stop, time: start, position: start }
+        Segment {
+            rate: seek.rate,
+            applied_rate: 1.0,
+            base,
+            start,
+            stop,
+            time: start,
+            position: start,
+            // Trick-mode seeks ask the sink to present key units only.
+            key_units_only: seek.flags.contains(SeekFlags::TRICKMODE),
+        }
     }
 }
 
