@@ -354,9 +354,21 @@ all done now); FlexFEC + multi-level burst FEC remain. See the RTMP/SRT and RTP
 entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
-- Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
-  multi-element subgraph mid-stream re-solve (1-link done), the
-  `scale_then_convert` geometry-pin known limit.
+- Negotiation -- **a core-solver redesign, give it a dedicated session.** The
+  remaining items (the `scale_then_convert` geometry-pin known limit, multi-element
+  subgraph mid-stream re-solve; unbounded request pads are separate) all need the
+  same missing capability: **field-level bidirectional caps coupling** -- narrowing
+  a `Range` *within* a surviving alternative, not just dropping whole alternatives
+  (`backward_filter_derived` only drops alts; `backward_feasible()` returns `None`
+  for `DerivedOutput`). `DerivedOutput` is an opaque `Fn(&Caps)->CapsSet`, so there
+  is no analytic inverse; the fix is a new constraint variant that exposes per-field
+  passthrough / invertibility so a downstream field pin can flow back through a
+  passthrough transform. HIGH regression risk (the CSP solver underpins every
+  pipeline); today's behavior is *safe* (fails loud `CapsMismatch`, never silently
+  mis-fixates). Assessed 2026-06-23: do this as a designed, adversarially-tested
+  piece, not a tail-end change. A lower-risk adjacent win: route negotiation
+  failures (`CapsMismatch` / `EmptyLink`) through the `Bus` (not observable there
+  today).
 - Seek: trick-mode KEY_UNIT frame selection **DONE (M226)** -- `FrameTiming::keyframe`
   (set by h264parse / mp4src / fmp4demux) + `Segment::key_units_only` (from a seek's
   `TRICKMODE` flag) + `SyncSink` dropping non-keyframes under it. Remaining seek:
