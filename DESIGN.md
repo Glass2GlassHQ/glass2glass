@@ -1150,6 +1150,54 @@ known without sniffing the byte stream.
   produces (geometry resolves at negotiation), which is all the chain search
   needs to pick the right decoder.
 
+#### 4.13.10 Current limits
+
+The solver is **arc consistency** (constraint propagation over per-link caps),
+not a complete CSP search. That bounds exactly where it is complete and where it
+is not:
+
+- **Linear chains are complete.** A linear pipeline is a tree of binary
+  (adjacent-link) constraints, and arc consistency is complete for
+  tree-structured binary CSPs: if a satisfying assignment exists it is found.
+  With `DerivedCoupled`'s field-level coupling (§4.13.1), a downstream pin on a
+  passthrough field couples back through any number of passthrough transforms
+  (`videoscale ! videoconvert ! caps`, and deeper). This family is closed.
+
+- **Backward coupling stops at a format-changing (`DerivedOutput`) transform.**
+  `backward_feasible()` returns `None` for `DerivedOutput`: a transform that
+  genuinely re-derives its output (a decoder, or a converter that also rescales)
+  cannot be inverted, so a downstream pin behind one does not narrow its input.
+  The `DerivedCoupled` inverse only covers the fields a transform *declares*
+  passthrough. Generalizing it (a partial inverse over the invertible fields of
+  a `DerivedOutput`) is the natural next increment, deferred until a real element
+  needs it: a wrong guess at the inverse relation is worse than the current loud
+  `CapsMismatch`.
+
+- **Non-tree topologies are not guaranteed.** Arc consistency is incomplete on
+  cyclic constraint graphs. Independent fan-out (a tee feeding unrelated sink
+  branches) stays a tree and is fine, but a true *diamond* (split, then divergent
+  transforms, then a fan-in whose inputs are caps-coupled) can fail loud even
+  when a satisfying assignment exists; resolving it needs higher consistency or
+  backtracking search.
+
+- **Cross-field validity within one element is not modelled.** Constraints
+  *among an element's own caps fields* (a 4:2:0 format requiring even dimensions,
+  chroma siting) are non-binary and are deliberately kept out of the declarative
+  constraint: caps fields stay independent within an alternative, and an element
+  enumerates valid combinations as separate `CapsSet` alternatives instead. The
+  hard cases were judged not worth a declarative encoding.
+
+- **Allocation is a separate cascade.** Buffer-pool / stride / alignment
+  negotiation (§4.13.5, the M12 allocation query) runs after caps fixation, not
+  folded into the caps CSP. A downstream allocator whose layout requirement
+  should feed back into the *caps* choice is not expressed; this is the most
+  likely future pressure point as real GPU/hardware allocators land.
+
+Reaching for a full CSP search (backtracking, path consistency) is only
+warranted once a real pipeline exercises the non-tree or `DerivedOutput`-inverse
+cases above; today every shape that arises in practice is either complete or
+fails loud rather than mis-fixating.
+
 ### 4.14 Pipeline Lifecycle: State Machine, Preroll, and Seek
 
 The lifecycle spine sits on top of the DAG runner: it turns "build, run to EOS,

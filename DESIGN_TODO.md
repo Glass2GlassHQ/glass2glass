@@ -225,13 +225,15 @@ edits (the typed core is unaffected, only the string<->enum boundary).
       the union of `f` over the surviving inputs (`forward_derived_union`).
       `videoconvert ! videoscale ! video/x-raw,format=NV12,width=160,height=120`
       resolves; a bare `videoconvert ! videoscale` stays passthrough.
-      KNOWN LIMIT: the reverse order, `videoscale ! videoconvert ! caps`, where a
-      *geometry* pin sits behind a geometry-passthrough transform, does not
-      resolve and fails loud at runtime (CapsMismatch, no silent mis-fixate).
-      Dropping whole alternatives can't narrow a `Range` *within* an alternative;
-      that needs field-level bidirectional coupling, a larger redesign deferred
-      past M188. `backward_feasible()` likewise still returns `None` for
-      `DerivedOutput`, so mid-stream re-solve back-prop is separate and deferred.
+      RESOLVED by M227 (field-level bidirectional coupling, `DerivedCoupled`):
+      the reverse order `videoscale ! videoconvert ! caps`, a *geometry* pin
+      behind a geometry-passthrough transform, now couples the pin back within an
+      alternative (`Range ∩ Fixed = Fixed`), through any number of passthrough
+      hops. Remaining gap: `backward_feasible()` still returns `None` for
+      `DerivedOutput`, so a pin behind a genuinely format-changing (non-passthrough)
+      transform (a decoder, or a convert-that-rescales) does not couple back;
+      deferred until a real element needs it. See DESIGN.md §4.13.10 for the full
+      current-limits list.
     - **Mid-stream re-cascade `configure_output` DONE, M189.** A caps-driven
       transform now re-resolves its output target on a mid-stream `CapsChanged`,
       not only at startup: both transform-arm re-cascade paths (the linear
