@@ -26,6 +26,7 @@ use std::os::raw::c_int;
 use std::ptr;
 use std::thread::JoinHandle;
 
+use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
 use g2g_core::{Bus, BusMessage, G2gError, PipelineState};
 use g2g_plugins::appsink::{set_appsink_callback, SampleCallback};
@@ -303,6 +304,40 @@ pub unsafe extern "C" fn g2g_appsrc_push(
     // SAFETY: caller contract: `data` covers `len` bytes (empty when null).
     let bytes = if len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(data, len) } };
     c_int::from(p.feed.push(bytes, pts_ns))
+}
+
+/// Push a buffer **zero-copy**: the pipeline reads `data[..len]` directly (no
+/// copy), and `free(user)` is invoked exactly once when the frame is finally
+/// dropped, returning the buffer to the application. A `null` `free` lends the
+/// buffer for the whole pipeline lifetime without reclamation (the application
+/// guarantees it outlives the run).
+///
+/// Returns 1 if accepted. Returns 0 if the feed is full or closed (in which case
+/// `free` still fires immediately, the lend released), or if `data` is null with
+/// `len > 0` (an invalid call: the lend is not taken and `free` is not invoked).
+/// A mutating element downstream transparently copies the bytes out first, so
+/// the lend stays read-only.
+///
+/// # Safety
+/// `data` must point to `len` bytes that stay valid and unmodified until `free`
+/// runs; `free`/`user` must be safe to invoke once from the pipeline's thread.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsrc_push_lend(
+    p: *const AppSrc,
+    data: *const u8,
+    len: usize,
+    pts_ns: u64,
+    free: Option<unsafe extern "C" fn(*mut c_void)>,
+    user: *mut c_void,
+) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    if data.is_null() && len != 0 {
+        return 0;
+    }
+    // SAFETY: caller contract: `data[..len]` is valid until `free(user)` runs.
+    let slice = unsafe { SystemSlice::from_foreign(data, len, free, user) };
+    c_int::from(p.feed.push_slice(slice, pts_ns))
 }
 
 /// Signal end-of-stream on the feed: the `appsrc` emits a final EOS. Returns 1

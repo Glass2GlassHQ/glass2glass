@@ -42,10 +42,11 @@ use crate::capsfilter::parse_caps_set;
 /// drains it as it runs.
 const FEED_DEPTH: usize = 16;
 
-/// One item crossing the feed channel: a buffer or the end-of-stream marker.
+/// One item crossing the feed channel: a buffer (owned or a zero-copy foreign
+/// lend, both a `SystemSlice`) or the end-of-stream marker.
 #[derive(Debug)]
 enum AppItem {
-    Frame { data: Box<[u8]>, pts_ns: u64 },
+    Frame { slice: SystemSlice, pts_ns: u64 },
     Eos,
 }
 
@@ -65,12 +66,19 @@ pub struct AppSrcFeed {
 }
 
 impl AppSrcFeed {
-    /// Push one buffer with presentation timestamp `pts_ns`. Copies `data` into
-    /// a `System` frame. Returns `false` if the feed is full (retry later) or
-    /// the pipeline has gone away.
+    /// Push one buffer with presentation timestamp `pts_ns`, copying `data` into
+    /// an owned `System` frame. Returns `false` if the feed is full (retry
+    /// later) or the pipeline has gone away.
     pub fn push(&self, data: &[u8], pts_ns: u64) -> bool {
-        let item = AppItem::Frame { data: data.to_vec().into_boxed_slice(), pts_ns };
-        self.tx.try_send(item).is_ok()
+        self.push_slice(SystemSlice::from_boxed(data.to_vec().into_boxed_slice()), pts_ns)
+    }
+
+    /// Push a pre-built buffer, for the zero-copy path: pass a
+    /// [`SystemSlice::from_foreign`] to lend the application's bytes without a
+    /// copy (the free callback fires when the frame is finally dropped).
+    /// Returns `false` (releasing `slice`) if the feed is full or closed.
+    pub fn push_slice(&self, slice: SystemSlice, pts_ns: u64) -> bool {
+        self.tx.try_send(AppItem::Frame { slice, pts_ns }).is_ok()
     }
 
     /// Signal end-of-stream: the source emits a final `Eos` and `run` returns.
@@ -168,9 +176,9 @@ impl SourceLoop for AppSrc {
             let mut pushed = 0u64;
             // The loop ends when the pattern stops matching: an explicit
             // `AppItem::Eos`, or `None` once every feed handle has dropped.
-            while let Some(AppItem::Frame { data, pts_ns }) = feed.recv().await {
+            while let Some(AppItem::Frame { slice, pts_ns }) = feed.recv().await {
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(data)),
+                    domain: MemoryDomain::System(slice),
                     timing: FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
                     sequence: self.seq,
                     meta: Default::default(),

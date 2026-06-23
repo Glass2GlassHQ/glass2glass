@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use core::ffi::c_void;
 
 #[cfg(feature = "runtime")]
 use crate::pool::PooledBuffer;
@@ -141,11 +142,41 @@ enum SystemSliceInner {
     // is carried explicitly rather than inferred from the buffer capacity.
     #[cfg(feature = "runtime")]
     Pooled { buffer: PooledBuffer<Box<[u8]>>, len: usize },
+    // Foreign-owned CPU bytes lent to the pipeline zero-copy (M234), e.g. an
+    // application buffer through the C ABI. Freed via the callback on drop.
+    Foreign(ForeignSlice),
 }
 
 impl SystemSlice {
     pub fn from_boxed(bytes: Box<[u8]>) -> Self {
         Self { inner: SystemSliceInner::Owned(bytes) }
+    }
+
+    /// Wrap foreign-owned CPU bytes zero-copy: no copy is made, the pipeline
+    /// reads `ptr[..len]` directly, and on drop `free(user)` is invoked (if
+    /// `free` is `Some`) to hand the buffer back to its owner. A mutating
+    /// consumer ([`as_mut_slice`](Self::as_mut_slice)) transparently copies the
+    /// bytes out first, so the lend stays read-only.
+    ///
+    /// # Safety
+    /// `ptr` must point to `len` bytes that stay valid and unmodified by the
+    /// lender until `free` runs; `free`/`user` must be safe to invoke from the
+    /// pipeline's thread (the lend contract). A `None` `free` means the lender
+    /// guarantees the buffer outlives the pipeline (no reclamation needed).
+    pub unsafe fn from_foreign(
+        ptr: *const u8,
+        len: usize,
+        free: Option<unsafe extern "C" fn(*mut c_void)>,
+        user: *mut c_void,
+    ) -> Self {
+        Self {
+            inner: SystemSliceInner::Foreign(ForeignSlice {
+                ptr: ptr as usize,
+                len,
+                free,
+                user: user as usize,
+            }),
+        }
     }
 
     /// Wrap a pooled buffer, exposing only its first `len` bytes (the valid
@@ -161,14 +192,59 @@ impl SystemSlice {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &buffer.as_ref()[..*len],
+            SystemSliceInner::Foreign(f) => f.as_slice(),
         }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        // A lent foreign buffer is read-only: copy it out (returning the lend to
+        // its owner via the free callback when the old inner drops) and continue
+        // with owned bytes, so an in-place transform never writes the lender's
+        // memory.
+        if matches!(self.inner, SystemSliceInner::Foreign(_)) {
+            let owned = self.as_slice().to_vec().into_boxed_slice();
+            self.inner = SystemSliceInner::Owned(owned);
+        }
         match &mut self.inner {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
+            SystemSliceInner::Foreign(_) => unreachable!("converted to Owned above"),
+        }
+    }
+}
+
+/// Foreign-owned CPU bytes lent to the pipeline (M234). Pointers are stored as
+/// `usize` so the type is `Send`/`Sync` without an `unsafe impl`, the same
+/// convention [`OwnedCudaBuffer`] uses for device pointers; the lender's
+/// contract (documented on [`SystemSlice::from_foreign`]) certifies the bytes
+/// are valid and safe to read from the pipeline thread. Dropping it invokes the
+/// free callback, returning the buffer to its owner.
+#[derive(Debug)]
+pub struct ForeignSlice {
+    ptr: usize,
+    len: usize,
+    free: Option<unsafe extern "C" fn(*mut c_void)>,
+    user: usize,
+}
+
+impl ForeignSlice {
+    fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: the lend contract (see `SystemSlice::from_foreign`) guarantees
+        // `ptr` covers `len` valid bytes, unmodified for this slice's lifetime.
+        unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+    }
+}
+
+impl Drop for ForeignSlice {
+    fn drop(&mut self) {
+        if let Some(free) = self.free {
+            // SAFETY: the lend contract certifies `free(user)` is safe to call
+            // once, here, to reclaim the buffer. Called exactly once (on drop).
+            unsafe { free(self.user as *mut c_void) };
         }
     }
 }
@@ -733,5 +809,47 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
         let tex = OwnedWebGPUExternalTexture::new(16, 16, Arc::new(FlagOnDrop(dropped)));
         assert!(tex.keep_alive().as_any().downcast_ref::<FlagOnDrop>().is_some());
+    }
+
+    /// Increments the `AtomicUsize` at `user`, standing in for an application's
+    /// buffer-reclaim notify.
+    extern "C" fn count_free(user: *mut c_void) {
+        // SAFETY: the tests pass a live &AtomicUsize as `user`.
+        unsafe { &*(user as *const core::sync::atomic::AtomicUsize) }
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn foreign_slice_reads_in_place_and_frees_once_on_drop() {
+        use core::sync::atomic::AtomicUsize;
+        let buf = [1u8, 2, 3, 4];
+        let frees = AtomicUsize::new(0);
+        let user = &frees as *const AtomicUsize as *mut c_void;
+        // SAFETY: `buf` outlives the slice; `count_free` is safe to call once.
+        let s = unsafe { SystemSlice::from_foreign(buf.as_ptr(), buf.len(), Some(count_free), user) };
+        // Zero-copy read: the slice points at the same bytes (same address).
+        assert_eq!(s.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(s.as_slice().as_ptr(), buf.as_ptr(), "read in place, no copy");
+        assert_eq!(frees.load(Ordering::SeqCst), 0, "not freed while live");
+        drop(s);
+        assert_eq!(frees.load(Ordering::SeqCst), 1, "freed exactly once on drop");
+    }
+
+    #[test]
+    fn foreign_slice_copies_out_on_mutation() {
+        use core::sync::atomic::AtomicUsize;
+        let buf = [5u8; 4];
+        let frees = AtomicUsize::new(0);
+        let user = &frees as *const AtomicUsize as *mut c_void;
+        // SAFETY: `buf` outlives the slice; `count_free` is safe to call once.
+        let mut s =
+            unsafe { SystemSlice::from_foreign(buf.as_ptr(), buf.len(), Some(count_free), user) };
+        // Mutating returns the lend (free fires) and switches to an owned copy.
+        s.as_mut_slice()[0] = 9;
+        assert_eq!(frees.load(Ordering::SeqCst), 1, "CoW released the lend");
+        assert_eq!(s.as_slice(), &[9, 5, 5, 5]);
+        assert_ne!(s.as_slice().as_ptr(), buf.as_ptr(), "now an owned copy");
+        drop(s);
+        assert_eq!(frees.load(Ordering::SeqCst), 1, "no double free after CoW");
     }
 }

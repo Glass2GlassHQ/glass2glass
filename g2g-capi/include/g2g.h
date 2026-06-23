@@ -103,6 +103,18 @@ G2gAppSrc *g2g_appsrc_new(const char *channel);
 int g2g_appsrc_push(const G2gAppSrc *src, const uint8_t *data, size_t len,
                     uint64_t pts_ns);
 
+/* Buffer-free callback for a zero-copy lend; invoked once with `user` when the
+ * pipeline has fully consumed the lent buffer. */
+typedef void (*G2gFreeFunc)(void *user);
+
+/* Push `len` bytes ZERO-COPY: the pipeline reads them in place and calls
+ * `free(user)` once the frame is dropped. A NULL `free` lends for the whole run
+ * with no reclamation. 1 if accepted; 0 if full/closed (free fires immediately)
+ * or `data` is NULL with len>0 (not taken, free not called). A mutating element
+ * downstream copies the bytes out first, so the lend stays read-only. */
+int g2g_appsrc_push_lend(const G2gAppSrc *src, const uint8_t *data, size_t len,
+                         uint64_t pts_ns, G2gFreeFunc free, void *user);
+
 /* Signal end-of-stream; the appsrc emits a final EOS. */
 int g2g_appsrc_end_of_stream(const G2gAppSrc *src);
 
