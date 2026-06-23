@@ -58,6 +58,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
 
 /// Default bounded depth of the element->session media channel. Backpressures
@@ -127,6 +128,11 @@ pub struct WebRtcSink {
     /// STUN server (`host:port`) for ICE NAT traversal toward a cloud SFU.
     /// `None` = host candidate only (LAN / self-hosted same network).
     stun_server: Option<String>,
+    /// TURN relay (`host:port`) + long-term credentials for the NAT cases a
+    /// server-reflexive candidate cannot punch through. `None` = no relay.
+    turn_server: Option<String>,
+    turn_user: String,
+    turn_pass: String,
     queue_depth: usize,
     configured: bool,
     /// The media kind, decided from the configured caps (H.264 video or Opus
@@ -155,6 +161,9 @@ impl WebRtcSink {
             whip_url: whip_url.into(),
             bearer: None,
             stun_server: None,
+            turn_server: None,
+            turn_user: String::new(),
+            turn_pass: String::new(),
             queue_depth: DEFAULT_QUEUE_DEPTH,
             configured: false,
             track: Track::Video,
@@ -181,6 +190,24 @@ impl WebRtcSink {
     /// behind NAT; unset means host candidate only (works on a LAN).
     pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
         self.stun_server = Some(server.into());
+        self
+    }
+
+    /// Set a TURN relay (`host:port`) with long-term credentials. The relay is
+    /// the fallback for NAT/firewall situations a STUN server-reflexive
+    /// candidate cannot traverse (symmetric NAT, restrictive networks); LiveKit
+    /// Cloud and other SFUs sometimes require it. Compose with
+    /// [`Self::with_stun_server`]: ICE picks the relay only if the direct paths
+    /// fail.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.turn_server = Some(server.into());
+        self.turn_user = username.into();
+        self.turn_pass = password.into();
         self
     }
 
@@ -215,6 +242,16 @@ impl WebRtcSink {
         // a STUN server is set (needed to reach a cloud SFU across NAT).
         add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
 
+        // TURN relay candidate when configured: the fallback path for NATs a
+        // server-reflexive candidate cannot traverse. Allocation failure degrades
+        // gracefully to the host/srflx candidates (the publish still attempts).
+        let turn = match &self.turn_server {
+            Some(server) => {
+                turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
+            }
+            None => None,
+        };
+
         // Offer a single send-only m-line for the configured track.
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
             let mut api = rtc.sdp_api();
@@ -229,7 +266,7 @@ impl WebRtcSink {
         rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
-        tokio::spawn(run_session(rtc, socket, local, mid, self.track, rx));
+        tokio::spawn(run_session(rtc, socket, local, mid, self.track, turn, rx));
         self.tx = Some(tx);
         Ok(())
     }
@@ -245,6 +282,13 @@ static WEBRTCSINK_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "STUN server host:port for ICE NAT traversal to a cloud SFU (empty = host-only)",
     ),
+    PropertySpec::new(
+        "turn-server",
+        PropKind::Str,
+        "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
+    ),
+    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term credential username"),
+    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term credential password"),
 ];
 
 /// The H.264 sink caps this element accepts (any geometry / framerate).
@@ -322,6 +366,19 @@ impl AsyncElement for WebRtcSink {
                 self.stun_server = if s.is_empty() { None } else { Some(s.into()) };
                 Ok(())
             }
+            "turn-server" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.turn_server = if s.is_empty() { None } else { Some(s.into()) };
+                Ok(())
+            }
+            "turn-user" => {
+                self.turn_user = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            "turn-pass" => {
+                self.turn_pass = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -331,6 +388,9 @@ impl AsyncElement for WebRtcSink {
             "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
             "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
+            "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
+            "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
+            "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
             _ => None,
         }
     }
@@ -386,12 +446,15 @@ async fn run_session(
     local: SocketAddr,
     mid: Mid,
     track: Track,
+    mut turn: Option<TurnClient>,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
     // The negotiated payload type for this track's codec, discovered once the
     // writer exists.
     let mut pt: Option<Pt> = None;
+    // Keep the TURN allocation + permissions alive while the session runs.
+    let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
 
     loop {
         // Drain pending output until str0m asks us to wait for a deadline.
@@ -399,7 +462,18 @@ async fn run_session(
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
                 Ok(Output::Transmit(t)) => {
-                    let _ = socket.send_to(&t.contents, t.destination).await;
+                    // Relay-sourced datagrams go through TURN (Send indication to
+                    // the server); direct host/srflx datagrams go straight out.
+                    match turn.as_mut() {
+                        Some(tc) if t.source == tc.relay_addr() => {
+                            let _ = tc.ensure_permission(&socket, t.destination).await;
+                            let wrapped = tc.wrap_send(t.destination, &t.contents);
+                            let _ = socket.send_to(&wrapped, tc.server_addr()).await;
+                        }
+                        _ => {
+                            let _ = socket.send_to(&t.contents, t.destination).await;
+                        }
+                    }
                 }
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
@@ -412,10 +486,31 @@ async fn run_session(
         let timeout = deadline.saturating_duration_since(Instant::now());
 
         tokio::select! {
-            // Incoming UDP (STUN / DTLS / RTCP from the peer).
+            // Incoming UDP (STUN / DTLS / RTCP from the peer, or TURN-framed
+            // traffic from the relay server).
             r = socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else { return };
-                if let Ok(contents) = (&buf[..n]).try_into() {
+                let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
+                if from_turn {
+                    // Unwrap a Data indication to (peer, payload) and feed str0m
+                    // as if it arrived directly on the relay candidate. Control
+                    // responses (CreatePermission / Refresh success) parse to None
+                    // and are discarded.
+                    if let Some(tc) = turn.as_mut() {
+                        if let Some((peer, payload)) = tc.parse_data(&buf[..n]) {
+                            let relay = tc.relay_addr();
+                            if let Ok(contents) = payload.as_slice().try_into() {
+                                let input = Input::Receive(
+                                    Instant::now(),
+                                    Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
+                                );
+                                if rtc.handle_input(input).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                } else if let Ok(contents) = (&buf[..n]).try_into() {
                     let input = Input::Receive(
                         Instant::now(),
                         Receive { proto: Protocol::Udp, source, destination: local, contents },
@@ -424,6 +519,13 @@ async fn run_session(
                         return;
                     }
                 }
+            }
+            // Keep the TURN allocation + permissions alive.
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
+                if let Some(tc) = turn.as_mut() {
+                    let _ = tc.refresh(&socket).await;
+                }
+                refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
             }
             // An encoded access unit to publish.
             unit = rx.recv() => {
@@ -486,9 +588,15 @@ mod tests {
 
     #[test]
     fn builders_set_fields() {
-        let sink = WebRtcSink::new("http://h/whip").with_bearer("tok").with_queue_depth(8);
+        let sink = WebRtcSink::new("http://h/whip")
+            .with_bearer("tok")
+            .with_queue_depth(8)
+            .with_turn_server("turn:3478", "u", "p");
         assert_eq!(sink.bearer.as_deref(), Some("tok"));
         assert_eq!(sink.queue_depth, 8);
+        assert_eq!(sink.turn_server.as_deref(), Some("turn:3478"));
+        assert_eq!(sink.turn_user, "u");
+        assert_eq!(sink.turn_pass, "p");
         assert_eq!(sink.frames_sent(), 0);
     }
 
@@ -505,6 +613,14 @@ mod tests {
         assert_eq!(sink.bearer.as_deref(), Some("secret"));
         sink.set_property("stun-server", PropValue::Str("stun.l.google.com:19302".into())).unwrap();
         assert_eq!(sink.stun_server.as_deref(), Some("stun.l.google.com:19302"));
+        sink.set_property("turn-server", PropValue::Str("relay:3478".into())).unwrap();
+        sink.set_property("turn-user", PropValue::Str("u".into())).unwrap();
+        sink.set_property("turn-pass", PropValue::Str("p".into())).unwrap();
+        assert_eq!(sink.turn_server.as_deref(), Some("relay:3478"));
+        assert_eq!(sink.get_property("turn-user"), Some(PropValue::Str("u".into())));
+        // Empty turn-server clears the relay.
+        sink.set_property("turn-server", PropValue::Str(String::new())).unwrap();
+        assert_eq!(sink.turn_server, None);
         // Empty bearer clears it; unknown name and wrong type are distinct errors.
         sink.set_property("bearer", PropValue::Str(String::new())).unwrap();
         assert_eq!(sink.bearer, None);

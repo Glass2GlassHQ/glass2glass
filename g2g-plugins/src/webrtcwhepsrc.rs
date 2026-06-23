@@ -5,16 +5,23 @@
 //! [`crate::webrtcsrc::WebRtcSrc`].
 //!
 //! WHEP is client-offers-recvonly: the source builds a str0m `Rtc` with a single
-//! recv-only H.264 m-line, POSTs the SDP offer to the WHEP endpoint, applies the
-//! answer, then drives str0m's `poll_output` / `handle_input` loop on a tokio
-//! `UdpSocket`. Each `Event::MediaData` is a depacketized Annex-B access unit
-//! (str0m's H.264 depayloader emits start-code framing, which is exactly g2g's
-//! convention), forwarded downstream with its RTP-clock PTS.
+//! recv-only m-line for the chosen track, POSTs the SDP offer to the WHEP
+//! endpoint, applies the answer, then drives str0m's `poll_output` /
+//! `handle_input` loop on a tokio `UdpSocket`. Each `Event::MediaData` is a
+//! depacketized access unit, forwarded downstream with its RTP-clock PTS: for
+//! video the H.264 depayloader emits Annex-B start-code framing (exactly g2g's
+//! convention); for audio each Opus packet is forwarded as-is.
+//!
+//! The track is video (H.264) by default, or Opus audio via
+//! [`WebRtcWhepSrc::audio`] / `media=audio`; one m-line per source (a
+//! `SourceLoop` has a single output pad). NAT traversal: a STUN server-reflexive
+//! candidate via `stun-server`, and a TURN relay via
+//! [`WebRtcWhepSrc::with_turn_server`] for the cases STUN cannot punch through.
 //!
 //! Status: compile-validated against str0m 0.20. The live subscribe path
-//! (ICE/DTLS/SRTP handshake against a real WHEP server + real media) is owed an
-//! on-network validation, like `WebRtcSink`; the sandbox blocks the ports.
-//! v1 is video-only (H.264); an Opus audio track is a follow-up.
+//! (ICE/DTLS/SRTP handshake against a real WHEP server + real media, and the
+//! TURN relay) is owed an on-network validation, like `WebRtcSink`; the sandbox
+//! blocks the ports.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -37,13 +44,52 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, VideoCodec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming,
+    G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
+use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
+
+/// Which media this source subscribes to. WHEP offers one recv-only m-line, and
+/// a `SourceLoop` has one output pad, so the source carries a single track; the
+/// kind is chosen up front (video by default, audio via [`WebRtcWhepSrc::audio`]
+/// or `media=audio`). This is the receive-side mirror of the sink's `Track`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Media {
+    /// H.264 video.
+    Video,
+    /// Opus audio.
+    Audio,
+}
+
+impl Media {
+    fn media_kind(self) -> MediaKind {
+        match self {
+            Media::Video => MediaKind::Video,
+            Media::Audio => MediaKind::Audio,
+        }
+    }
+
+    /// The caps this source produces for the chosen media. Video geometry is
+    /// unknown until the in-band SPS (a downstream parser recovers it); Opus is
+    /// the WebRTC default stereo 48 kHz.
+    fn caps(self) -> Caps {
+        match self {
+            Media::Video => Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            },
+            Media::Audio => {
+                Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+            }
+        }
+    }
+}
 
 /// WHEP-subscribing WebRTC ingest source. See the module docs.
 pub struct WebRtcWhepSrc {
@@ -52,6 +98,13 @@ pub struct WebRtcWhepSrc {
     /// STUN server (`host:port`) for ICE NAT traversal toward a cloud SFU.
     /// `None` = host candidate only (LAN / self-hosted same network).
     stun_server: Option<String>,
+    /// TURN relay (`host:port`) + long-term credentials for the NAT cases a
+    /// server-reflexive candidate cannot punch through. `None` = no relay.
+    turn_server: Option<String>,
+    turn_user: String,
+    turn_pass: String,
+    /// Which track to subscribe to (H.264 video by default, or Opus audio).
+    media: Media,
     /// Stop after this many access units and emit EOS (0 = unbounded). The
     /// bounded path is for tests / smoke runs.
     frame_limit: u64,
@@ -75,6 +128,10 @@ impl WebRtcWhepSrc {
             whep_url: whep_url.into(),
             bearer: None,
             stun_server: None,
+            turn_server: None,
+            turn_user: String::new(),
+            turn_pass: String::new(),
+            media: Media::Video,
             frame_limit: 0,
             configured: false,
         }
@@ -95,21 +152,38 @@ impl WebRtcWhepSrc {
         self
     }
 
+    /// Set a TURN relay (`host:port`) with long-term credentials, the fallback
+    /// for NAT/firewall situations a STUN server-reflexive candidate cannot
+    /// traverse. Composes with [`Self::with_stun_server`]; ICE prefers the
+    /// direct paths and falls back to the relay only if they fail.
+    pub fn with_turn_server(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.turn_server = Some(server.into());
+        self.turn_user = username.into();
+        self.turn_pass = password.into();
+        self
+    }
+
+    /// Subscribe to the Opus audio track instead of H.264 video. The source
+    /// then produces `Caps::Audio { Opus }` and forwards each Opus packet.
+    pub fn audio(mut self) -> Self {
+        self.media = Media::Audio;
+        self
+    }
+
     /// Stop after `n` access units (then EOS). For tests / bounded runs.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
     }
 
-    /// The produced caps: H.264 with geometry unknown until the in-band SPS, so
-    /// a downstream parser / decoder recovers the real dimensions.
+    /// The produced caps for the configured track (see [`Media::caps`]).
     fn caps(&self) -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        }
+        self.media.caps()
     }
 }
 
@@ -143,7 +217,7 @@ impl SourceLoop for WebRtcWhepSrc {
         ElementMetadata::new(
             "WebRTC source",
             "Source/Network/WebRTC",
-            "Subscribes to a WHEP server over WebRTC and emits H.264 (str0m: ICE/DTLS/SRTP)",
+            "Subscribes to a WHEP server over WebRTC and emits H.264 or Opus (str0m: ICE/DTLS/SRTP)",
             "g2g",
         )
     }
@@ -174,6 +248,28 @@ impl SourceLoop for WebRtcWhepSrc {
                 self.stun_server = if s.is_empty() { None } else { Some(s.into()) };
                 Ok(())
             }
+            "turn-server" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.turn_server = if s.is_empty() { None } else { Some(s.into()) };
+                Ok(())
+            }
+            "turn-user" => {
+                self.turn_user = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            "turn-pass" => {
+                self.turn_pass = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            // `video` / `audio` pick the subscribed track; default is video.
+            "media" => {
+                self.media = match value.as_str().ok_or(PropError::Type)? {
+                    "audio" => Media::Audio,
+                    "video" => Media::Video,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -183,6 +279,16 @@ impl SourceLoop for WebRtcWhepSrc {
             "location" | "whep-url" => Some(PropValue::Str(self.whep_url.clone())),
             "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
             "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
+            "turn-server" => Some(PropValue::Str(self.turn_server.clone().unwrap_or_default())),
+            "turn-user" => Some(PropValue::Str(self.turn_user.clone())),
+            "turn-pass" => Some(PropValue::Str(self.turn_pass.clone())),
+            "media" => Some(PropValue::Str(
+                match self.media {
+                    Media::Video => "video",
+                    Media::Audio => "audio",
+                }
+                .into(),
+            )),
             _ => None,
         }
     }
@@ -199,19 +305,34 @@ impl SourceLoop for WebRtcWhepSrc {
             let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
             let local = socket.local_addr().map_err(io_err)?;
 
-            let mut rtc = RtcConfig::new()
+            let media = self.media;
+            let config = RtcConfig::new()
                 .set_crypto_provider(alloc::sync::Arc::new(from_feature_flags()))
-                .clear_codecs()
-                .enable_h264(true)
-                .build(Instant::now());
+                .clear_codecs();
+            let config = match media {
+                Media::Video => config.enable_h264(true),
+                Media::Audio => config.enable_opus(true),
+            };
+            let mut rtc = config.build(Instant::now());
             // Host candidate, plus a STUN server-reflexive candidate when set
             // (needed to reach a cloud SFU across NAT).
             add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
 
-            // WHEP: offer a single recv-only H.264 m-line, POST it, apply answer.
+            // TURN relay candidate when configured (fallback for NATs STUN
+            // cannot traverse); allocation failure degrades to host/srflx.
+            let mut turn: Option<TurnClient> = match &self.turn_server {
+                Some(server) => {
+                    turn::setup(&mut rtc, &socket, server, &self.turn_user, &self.turn_pass).await
+                }
+                None => None,
+            };
+            let mut refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
+
+            // WHEP: offer a single recv-only m-line for the chosen track, POST
+            // it, apply the answer.
             let (offer_sdp, pending) = {
                 let mut api = rtc.sdp_api();
-                api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+                api.add_media(media.media_kind(), Direction::RecvOnly, None, None, None);
                 let (offer, pending) = api.apply().ok_or_else(hw)?;
                 (offer.to_sdp_string(), pending)
             };
@@ -219,7 +340,7 @@ impl SourceLoop for WebRtcWhepSrc {
             let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| hw())?;
             rtc.sdp_api().accept_answer(pending, answer).map_err(|_| hw())?;
 
-            // Announce the H.264 caps before the first frame.
+            // Announce the produced caps before the first frame.
             out.push(PipelinePacket::CapsChanged(self.caps())).await?;
 
             let mut buf = alloc::vec![0u8; 2000];
@@ -232,7 +353,18 @@ impl SourceLoop for WebRtcWhepSrc {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
                         Ok(Output::Transmit(t)) => {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
+                            // Relay-sourced datagrams go through TURN; direct ones
+                            // (host / srflx) go straight out.
+                            match turn.as_mut() {
+                                Some(tc) if t.source == tc.relay_addr() => {
+                                    let _ = tc.ensure_permission(&socket, t.destination).await;
+                                    let wrapped = tc.wrap_send(t.destination, &t.contents);
+                                    let _ = socket.send_to(&wrapped, tc.server_addr()).await;
+                                }
+                                _ => {
+                                    let _ = socket.send_to(&t.contents, t.destination).await;
+                                }
+                            }
                         }
                         Ok(Output::Event(Event::MediaData(d))) => {
                             // d.time is the RTP MediaTime (90 kHz for H.264);
@@ -256,7 +388,12 @@ impl SourceLoop for WebRtcWhepSrc {
                 };
 
                 for (pts_ns, data) in frames {
-                    let keyframe = crate::h264util::h264_au_is_keyframe(&data);
+                    // Video keyframe = IDR (the sink/parser cares); every Opus
+                    // packet is independently decodable, so the flag is moot.
+                    let keyframe = match media {
+                        Media::Video => crate::h264util::h264_au_is_keyframe(&data),
+                        Media::Audio => false,
+                    };
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -287,13 +424,37 @@ impl SourceLoop for WebRtcWhepSrc {
                             out.push(PipelinePacket::Eos).await?;
                             return Ok(seq);
                         };
-                        if let Ok(contents) = (&buf[..n]).try_into() {
+                        let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
+                        if from_turn {
+                            // Unwrap a relayed Data indication and feed str0m as
+                            // if it arrived on the relay candidate; control
+                            // responses parse to None and are discarded.
+                            if let Some(tc) = turn.as_mut() {
+                                if let Some((peer, payload)) = tc.parse_data(&buf[..n]) {
+                                    let relay = tc.relay_addr();
+                                    if let Ok(contents) = payload.as_slice().try_into() {
+                                        let input = Input::Receive(
+                                            Instant::now(),
+                                            Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
+                                        );
+                                        let _ = rtc.handle_input(input);
+                                    }
+                                }
+                            }
+                        } else if let Ok(contents) = (&buf[..n]).try_into() {
                             let input = Input::Receive(
                                 Instant::now(),
                                 Receive { proto: Protocol::Udp, source, destination: local, contents },
                             );
                             let _ = rtc.handle_input(input);
                         }
+                    }
+                    // Keep the TURN allocation + permissions alive.
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
+                        if let Some(tc) = turn.as_mut() {
+                            let _ = tc.refresh(&socket).await;
+                        }
+                        refresh_at = Instant::now() + turn::REFRESH_INTERVAL;
                     }
                     _ = tokio::time::sleep(timeout) => {
                         let _ = rtc.handle_input(Input::Timeout(Instant::now()));
@@ -314,6 +475,14 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "STUN server host:port for ICE NAT traversal to a cloud SFU (empty = host-only)",
     ),
+    PropertySpec::new(
+        "turn-server",
+        PropKind::Str,
+        "TURN relay host:port for the NAT cases STUN cannot traverse (empty = no relay)",
+    ),
+    PropertySpec::new("turn-user", PropKind::Str, "TURN long-term credential username"),
+    PropertySpec::new("turn-pass", PropKind::Str, "TURN long-term credential password"),
+    PropertySpec::new("media", PropKind::Str, "track to subscribe to: video (H.264) or audio (Opus)"),
 ];
 
 #[cfg(test)]
@@ -342,6 +511,41 @@ mod tests {
         assert_eq!(src.stun_server.as_deref(), Some("stun.l.google.com:19302"));
         assert_eq!(src.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
         assert_eq!(src.set_property("location", PropValue::Int(1)), Err(PropError::Type));
+    }
+
+    #[test]
+    fn turn_builder_and_properties() {
+        let src = WebRtcWhepSrc::new("http://h/whep").with_turn_server("turn:3478", "u", "p");
+        assert_eq!(src.turn_server.as_deref(), Some("turn:3478"));
+        assert_eq!(src.turn_user, "u");
+        assert_eq!(src.turn_pass, "p");
+
+        let mut src = WebRtcWhepSrc::new("http://h/whep");
+        src.set_property("turn-server", PropValue::Str("relay:3478".into())).unwrap();
+        src.set_property("turn-user", PropValue::Str("user".into())).unwrap();
+        src.set_property("turn-pass", PropValue::Str("secret".into())).unwrap();
+        assert_eq!(src.turn_server.as_deref(), Some("relay:3478"));
+        assert_eq!(src.get_property("turn-user"), Some(PropValue::Str("user".into())));
+        // Empty turn-server clears the relay (host/srflx only).
+        src.set_property("turn-server", PropValue::Str(String::new())).unwrap();
+        assert_eq!(src.turn_server, None);
+    }
+
+    #[test]
+    fn audio_selects_opus_track_and_caps() {
+        let src = WebRtcWhepSrc::new("http://h/whep").audio();
+        assert_eq!(src.media, Media::Audio);
+        assert!(matches!(src.caps(), Caps::Audio { format: AudioFormat::Opus, .. }));
+
+        // Default is video; the `media` property flips it and rejects garbage.
+        let mut src = WebRtcWhepSrc::new("http://h/whep");
+        assert_eq!(src.media, Media::Video);
+        src.set_property("media", PropValue::Str("audio".into())).unwrap();
+        assert_eq!(src.media, Media::Audio);
+        assert_eq!(src.get_property("media"), Some(PropValue::Str("audio".into())));
+        src.set_property("media", PropValue::Str("video".into())).unwrap();
+        assert_eq!(src.media, Media::Video);
+        assert_eq!(src.set_property("media", PropValue::Str("subtitle".into())), Err(PropError::Value));
     }
 
     #[test]

@@ -189,6 +189,8 @@ pub mod udpsink;
 // WHEP ingest; webrtc_util holds the shared ICE/SDP-POST helpers. Distinct from
 // the wasm-only data-channel webrtcsrc.
 #[cfg(feature = "webrtc")]
+mod turn;
+#[cfg(feature = "webrtc")]
 mod webrtc_util;
 #[cfg(feature = "webrtc")]
 pub mod webrtcsink;

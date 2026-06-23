@@ -138,15 +138,18 @@ leverage first:
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
-  Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264) — egress + ingress both exist,
-  with shared ICE/SDP helpers (`webrtc_util`), STUN server-reflexive candidate
-  gathering (`stun-server`, reaches cloud SFUs across NAT), a WHEP player +
-  ignored `webrtc_whip_smoke` + `webrtc_whip_to_whep_loopback` harness.
-  Compile-validated against str0m 0.20. Remaining: on-network validation against
-  a real WHIP/WHEP server (mediamtx / LiveKit) + browser playback; TURN relay
-  (symmetric NAT) + IPv6 reflexive; Opus *ingest* on `WebRtcWhepSrc`;
-  simultaneous A/V over one PeerConnection (a `MultiInputElement`, not
-  one-track-per-element); non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` +
+  Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264 *or* Opus via `media=audio`) —
+  egress + ingress both exist, with shared ICE/SDP helpers (`webrtc_util`), STUN
+  server-reflexive candidate gathering (`stun-server`) and a hand-rolled TURN
+  relay client (`turn-server` + `turn-user` / `turn-pass`, RFC 5766/8656: Allocate
+  with long-term auth, Send/Data indications, CreatePermission, Refresh) so the
+  elements reach cloud SFUs through symmetric NAT, a WHEP player + ignored
+  `webrtc_whip_smoke` + `webrtc_whip_to_whep_loopback` harness. Compile-validated
+  against str0m 0.20. Remaining: on-network validation against a real WHIP/WHEP
+  server (mediamtx / LiveKit) + browser playback, including a real TURN relay run;
+  IPv6 reflexive + TURN channel binding (lower overhead than Send/Data
+  indications); simultaneous A/V over one PeerConnection (a `MultiInputElement`,
+  not one-track-per-element); non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` +
   graceful flush on EOS; keyframe-request (PLI) handling.
   The browser data-channel `WebRtcSrc` stays wasm-only. A full
   `WebRtcBin`-equivalent sendrecv media engine is the larger track this seeds.

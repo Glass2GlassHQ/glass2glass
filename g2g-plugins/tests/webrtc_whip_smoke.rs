@@ -30,6 +30,11 @@
 //!
 //! A green run means the WHIP handshake (ICE/DTLS/SRTP via str0m) completed and
 //! frames were published without error; visual confirmation is the WHEP player.
+//!
+//! NAT traversal for a cloud SFU (LiveKit, etc.): set `G2G_STUN_SERVER`
+//! (`host:port`) for a server-reflexive candidate, and/or `G2G_TURN_SERVER` +
+//! `G2G_TURN_USER` + `G2G_TURN_PASS` for the relay fallback. Both are applied to
+//! the sink (and, in the loopback, the source) when present.
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
@@ -57,6 +62,38 @@ fn h264_caps() -> Caps {
     }
 }
 
+/// Apply `G2G_STUN_SERVER` / `G2G_TURN_SERVER`+`G2G_TURN_USER`+`G2G_TURN_PASS`
+/// to a sink, so a cloud-SFU run picks them up without code changes.
+fn with_ice_env_sink(mut sink: WebRtcSink) -> WebRtcSink {
+    if let Ok(stun) = std::env::var("G2G_STUN_SERVER") {
+        sink = sink.with_stun_server(stun);
+    }
+    if let (Ok(server), Ok(user), Ok(pass)) = (
+        std::env::var("G2G_TURN_SERVER"),
+        std::env::var("G2G_TURN_USER"),
+        std::env::var("G2G_TURN_PASS"),
+    ) {
+        eprintln!("using TURN relay {server}");
+        sink = sink.with_turn_server(server, user, pass);
+    }
+    sink
+}
+
+/// Same for a WHEP source.
+fn with_ice_env_src(mut src: WebRtcWhepSrc) -> WebRtcWhepSrc {
+    if let Ok(stun) = std::env::var("G2G_STUN_SERVER") {
+        src = src.with_stun_server(stun);
+    }
+    if let (Ok(server), Ok(user), Ok(pass)) = (
+        std::env::var("G2G_TURN_SERVER"),
+        std::env::var("G2G_TURN_USER"),
+        std::env::var("G2G_TURN_PASS"),
+    ) {
+        src = src.with_turn_server(server, user, pass);
+    }
+    src
+}
+
 #[tokio::test]
 #[ignore = "needs a WHIP server (G2G_WHIP_URL) + an H.264 fixture (G2G_H264_FIXTURE)"]
 async fn webrtcsink_publishes_h264_to_whip() {
@@ -70,7 +107,7 @@ async fn webrtcsink_publishes_h264_to_whip() {
 
     let mut src = FileSrc::new(&fixture, h264_caps());
     let mut parse = H264Parse::new();
-    let mut sink = WebRtcSink::new(whip_url);
+    let mut sink = with_ice_env_sink(WebRtcSink::new(whip_url));
     let clock = ZeroClock;
 
     let stats = tokio::time::timeout(
@@ -125,13 +162,13 @@ async fn webrtc_whip_to_whep_loopback() {
     let publisher = async move {
         let mut src = FileSrc::new(&fixture, h264_caps());
         let mut parse = H264Parse::new();
-        let mut sink = WebRtcSink::new(whip);
+        let mut sink = with_ice_env_sink(WebRtcSink::new(whip));
         let clock = ZeroClock;
         let _ = run_source_transform_sink(&mut src, &mut parse, &mut sink, &clock, 4).await;
     };
     let subscriber = async {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let mut rsrc = WebRtcWhepSrc::new(whep).with_frame_limit(30);
+        let mut rsrc = with_ice_env_src(WebRtcWhepSrc::new(whep).with_frame_limit(30));
         let mut rparse = H264Parse::new();
         let mut rsink = FakeSink::new();
         let clock = ZeroClock;
