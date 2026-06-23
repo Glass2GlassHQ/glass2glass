@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M221: RTMP egress (`rtmpsink`) - the publish side of RTMP
+
+Opens the egress / transport track (the ingest side is done). `rtmpsink` is the
+inverse of `rtmpsrc`: it connects out to an RTMP server and *publishes* an FLV
+byte stream, so `... ! flvmux ! rtmpsink location=rtmp://host/app/key` streams to
+an RTMP endpoint (mediamtx / nginx-rtmp / YouTube / Twitch).
+
+- **Sans-IO publisher** (`g2g-plugins::rtmp`, always compiled, `no_std`):
+  `RtmpPublisher` is the client/publisher state machine, the mirror of the
+  existing server-side `RtmpSession`. It queues the C0/C1 handshake on
+  construction, then drives the `connect` -> `createStream` -> `publish` AMF0
+  command ladder off the server's `_result` / `onStatus` replies; once
+  `Publish.Start` lands, an FLV byte stream fed to `push_flv` is split back into
+  tags and reframed into RTMP audio/video/data messages (an FLV tag body *is* the
+  RTMP message payload). One stream, H.264 + AAC, simple handshake, AMF0.
+- **Shared `ChunkReader`.** The intricate RTMP chunk-stream reassembly (fmt 0/1/2/3
+  headers, extended timestamps, fragmentation, `Set Chunk Size`) was extracted
+  from `RtmpSession` into a `ChunkReader` now shared by both directions, so the
+  parser is not duplicated. This surfaced and fixed a latent server bug: replies
+  larger than the chunk size (the `connect` `_result`) were emitted as a single
+  non-spec chunk; both sides now fragment through one `write_message` writer.
+- **Element** (`g2g-plugins`, `rtmp` feature): `RtmpSink` (`AsyncElement` sink)
+  accepts `Caps::ByteStream{Flv}`, parses the `rtmp://host[:port]/app/streamkey`
+  URL, opens the TCP connection lazily on the first buffer (so `flvmux`'s header
+  is ready), drives the publish ladder, then streams media. Registered as the
+  `rtmpsink` launch element with a `location` property. Incoming server control
+  messages are drained and ignored (acknowledgement back to the server is a
+  follow-up).
+- **Tested with no network** (the sandbox blocks live RTMP): the new publisher is
+  pitted against the existing server session sans-IO (`rtmp` unit tests) - the
+  handshake + publish ladder completes and a published access unit survives the
+  full RTMP round trip back into an FLV stream, including a >chunk-size payload
+  that must fragment and reassemble. Live publish to a real server is user-side.
+
 ### M220 (Stage 1): CUDA->wgpu zero-copy bridge (`CudaToWgpu`) - GPU keep-on-GPU pillar complete
 
 Joins the NVDEC decode side to the wgpu preprocess / inference side with no PCIe

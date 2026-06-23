@@ -338,10 +338,13 @@ new platforms; the rest of each platform's elements are owed.
   `PipeWireSink` + `PipeWireSrc` on Linux, `MfVideoSrc` on Windows. Remaining
   depth: PipeWire video / screen capture, DMABUF zero-copy out of the sinks.
 
-**2. Egress / transports** (ingest side done). RTMP egress (`rtmpsink`), SRT
-(both directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588)
-+ FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP
-entries under `### High`.
+**2. Egress / transports** (ingest side done; egress track now open). RTMP egress
+(`rtmpsink`) **landed M221** -- the `RtmpPublisher` client mirrors the server-side
+`RtmpSession` (shared `ChunkReader`), publishing an FLV byte stream to an RTMP
+endpoint (`flvmux ! rtmpsink`); validated sans-IO against the server session, live
+publish is user-side. Remaining: SRT (both directions), RTSP server + `ANNOUNCE` /
+`RECORD` egress, RTP RTX (RFC 4588) + FEC (jitter buffer / RTCP / NACK already
+done). See the RTMP/SRT and RTP entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
@@ -568,13 +571,15 @@ Production-shape needs that block specific real-world use cases.
   done), `SegmentList`/`SegmentBase` byte-range, multi-period, and
   throughput-driven ABR.
 
-- **SRT / RTMP transports.** RTMP **ingest is DONE**: `RtmpSrc` (`rtmp` feature) +
-  the sans-IO `rtmp::RtmpSession` accept a publisher (handshake, chunk stream,
-  AMF0 publish flow) and emit `ByteStream{Flv}` for `flvdemux`, documented in
-  DESIGN.md §4.12b. Remaining: RTMP **egress** (`rtmpsink` publish-out, the
-  inverse), the complex HMAC handshake, multiple streams; and **SRT** ingest +
-  egress for low-latency contribution (a sans-IO protocol layer + tokio I/O,
-  paralleling the RTP/UDP split).
+- **SRT / RTMP transports.** RTMP **ingest and egress are DONE**: `RtmpSrc`
+  (`rtmp` feature) + sans-IO `rtmp::RtmpSession` accept a publisher and emit
+  `ByteStream{Flv}` for `flvdemux`; `RtmpSink` (M221) + sans-IO
+  `rtmp::RtmpPublisher` are the inverse, publishing an FLV byte stream out to an
+  RTMP server (`flvmux ! rtmpsink`). Both share the `ChunkReader` reassembly.
+  Documented in DESIGN.md §4.12b. Remaining RTMP: the complex (HMAC digest)
+  handshake some CDNs require, multiple streams, server-acknowledgement back-
+  pressure. **SRT** ingest + egress for low-latency contribution is still open
+  (a sans-IO protocol layer + tokio I/O, paralleling the RTP/UDP split).
 
 - **RTP receive-side stack.** Largely **done**; RTX/FEC remain. The reordering
   jitter buffer (M94: `rtpjitter::RtpJitterBuffer`), the RTCP control protocol

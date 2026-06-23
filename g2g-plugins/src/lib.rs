@@ -236,8 +236,11 @@ pub mod hlssrc;
 #[cfg(feature = "hls")]
 pub mod sampleaesdecrypt;
 
-// RTMP ingest: the sans-IO protocol (always compiled) and the tokio TCP source.
+// RTMP: the sans-IO protocol (always compiled) and the tokio TCP source (ingest)
+// + sink (egress).
 pub mod rtmp;
+#[cfg(feature = "rtmp")]
+pub mod rtmpsink;
 #[cfg(feature = "rtmp")]
 pub mod rtmpsrc;
 

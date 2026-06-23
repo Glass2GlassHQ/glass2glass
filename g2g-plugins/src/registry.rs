@@ -87,6 +87,8 @@ use crate::hlssrc::HlsSrc;
 #[cfg(feature = "dash")]
 use crate::dashsrc::DashSrc;
 #[cfg(feature = "rtmp")]
+use crate::rtmpsink::RtmpSink;
+#[cfg(feature = "rtmp")]
 use crate::rtmpsrc::RtmpSrc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
@@ -245,6 +247,8 @@ pub fn default_registry() -> Registry {
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
+    #[cfg(feature = "rtmp")]
+    reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));
 
     register_feature_gated(&mut reg);
     register_aliases(&mut reg);

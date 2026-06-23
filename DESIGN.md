@@ -769,8 +769,24 @@ emits the Window-Ack / Set-Peer-Bandwidth / `_result` / `onStatus` replies). An
 RTMP audio/video message payload is exactly an FLV tag *body*, so the session
 reframes the messages into an FLV byte stream that the existing `flvdemux` (§4.17)
 recovers the H.264 / AAC access units from. Scope is one publisher / one stream,
-H.264 + AAC, AMF0; the RTMP egress (`rtmpsink` publish-out), SRT, the complex
-HMAC handshake, and multiple streams are follow-ups (DESIGN_TODO).
+H.264 + AAC, AMF0.
+
+**RTMP egress.** `RtmpSink` (`rtmpsink.rs`, `rtmp` feature) is the inverse:
+it connects out to an RTMP server and *publishes* an incoming FLV byte stream, so
+the chain is `... -> flvmux -> RtmpSink location=rtmp://host/app/key`. The
+protocol is Sans-IO (`rtmp.rs`, `RtmpPublisher`), the mirror of `RtmpSession`: it
+sends C0/C1, drives the `connect` / `createStream` / `publish` command ladder off
+the server's `_result` / `onStatus` replies, then splits the FLV stream back into
+tags and reframes each as an RTMP audio/video/data message (the tag body is the
+message payload). Both directions share one `ChunkReader` (the chunk-stream
+reassembly) and one fragmenting `write_message` writer, so the publisher and the
+session are true inverses rather than parallel re-implementations. The element
+opens the socket lazily on the first buffer (after `flvmux`'s header) and drives
+the publish ladder before sending media. Validated sans-IO by pitting the
+publisher against the server session (an access unit survives the RTMP round
+trip); live publish to a real endpoint is operator-validated. SRT, the complex
+(HMAC digest) handshake some CDNs require, and multiple streams are follow-ups
+(DESIGN_TODO).
 
 The remaining capture/ingress breadth — a `uridecodebin`-equivalent URI → source
 layer over the autoplug registry — is tracked in DESIGN_TODO.
