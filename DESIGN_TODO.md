@@ -300,55 +300,77 @@ not one tensor. The zero-copy win is real but bounded to layout-preserving ops
   view (clean-win, no subsampling); planar video plane-LIST
   (`SmallVec<TensorView>`); text-as-embedding once an embedding element lands.
 
-## Gap analysis to 80% parity (post-M167, 2026-06-20)
+## Gap analysis to 80% parity (updated 2026-06-22, post-M217)
 
-The honest read after M167: the ~80% / "credible GStreamer replacement" bar is
-**essentially reached**. The two hardest tracks (CSP negotiation, the DAG
-runner) and the full lifecycle spine (state machine + preroll, seek + SEGMENT,
-auto-plug / decodebin / playbin) were done by M96. M107-M167 then filled the
-breadth that bar called for: containers (MP4 / MPEG-TS / Matroska-WebM / FLV /
-Ogg / fMP4-CMAF demux + mux), multi-codec ffmpeg decode (H.264/265, VP8/9, AV1),
-encoders (AV1 / VP8-9 / MJPEG), codec parsers (opus / vp8 / vp9 / av1), the tag
-system across all containers, the property system + `gst-launch` text DSL +
-`gst-inspect`, seek depth (Mp4Src reposition, accurate clip), and adaptive
-streaming (HttpSrc, HLS with live reload + AES-128 / SAMPLE-AES, DASH static +
-live, RTMP ingest). What remains is breadth and platform integration, not
-structural runtime work. Grouped by category, in rough priority order:
+The honest read: the ~80% / "credible GStreamer replacement" bar is **reached**
+for the Linux / Windows ingest / transcode / stream / display paths. The two
+hardest tracks (CSP negotiation, the DAG runner) and the full lifecycle spine
+(state machine + preroll, seek + SEGMENT, auto-plug / decodebin / playbin) were
+done by M96. M107-M167 filled codec / container / streaming breadth (containers
+MP4 / MPEG-TS / Matroska-WebM / FLV / Ogg / fMP4-CMAF, multi-codec ffmpeg decode,
+AV1 / VP8-9 / MJPEG encode, the tag system, property system + `gst-launch` DSL +
+`gst-inspect`, HLS / DASH / RTMP ingest). M168-M210 then closed the remaining
+*structural* parity items: PTS-ordered muxer fan-in (M204), multi-output demuxer
+/ bounded-N dynamic pads (M205), gst-launch mux fan-in (M208) + demux fan-out
+(M210), flattening bins + ghost pads (M209). M211-M217 added reverse (M212) +
+non-flushing accumulating (M211) seek and the zero-copy keep-on-GPU branch
+(M213-M217). Element breadth is essentially done (~122 plugins).
 
-**Platforms (the biggest real gap).**
+**The structural runtime is finished. What remains is platform integration,
+transports, and depth, not core runtime work.** Grouped by how much each moves a
+parity claim, highest leverage first:
+
+**1. Platforms -- the only high-fixed-cost gap, and the biggest honest hole.**
 - macOS: zero element coverage (VideoToolbox decode/encode, AVFoundation
   capture, Core Audio, Metal present). 5-8 sessions; see `### Platform: macOS`.
-- Android: zero coverage (MediaCodec, Camera2, AAudio, Surface). 5-8 sessions.
-- **Linux audio out + modern capture -- DONE.** `AlsaSink` (`alsa-sink`),
-  `PulseSink` (`pulse-sink`), and `PipeWireSink` + `PipeWireSrc` (`pipewire`) on
-  Linux, plus `MfVideoSrc` (`mf-video-src`) on Windows, closed the host-audio /
-  modern-capture gap (WASAPI previously covered Windows audio only). See
-  `### Sinks` and `### Capture sources`. Remaining depth: PipeWire video / screen
-  capture, DMABUF zero-copy out of the sinks, and the Linux smoke-test pass on a
-  host with a real device (the unit tests cover caps mapping / pad templates; the
-  device path needs a manual run, like `wayland_smoke`).
+- Android: zero coverage (MediaCodec, Camera2, AAudio, Surface). 5-8 sessions;
+  see `### Platform: Android`.
+- Linux and Windows are covered; if "parity" means cross-platform like
+  GStreamer, this is the gap that matters. Validated on-device by the user, not
+  in CI (the established pattern for the target-gated `mf-decode` Windows path).
+- **Linux audio out + modern capture -- DONE.** `AlsaSink` / `PulseSink` /
+  `PipeWireSink` + `PipeWireSrc` on Linux, `MfVideoSrc` on Windows. Remaining
+  depth: PipeWire video / screen capture, DMABUF zero-copy out of the sinks.
 
-**Egress / transports.** RTMP egress (`rtmpsink`, ingest done), SRT (both
-directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588) +
-FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP entries
-under `### High`.
+**2. Allocation re-cascade beta -- the one structural item still open.**
+`propose_allocation` is startup-only ([[architecture_m16_negotiation_parity]]
+item 1). The coordinator restructure that fixes it is the single biggest
+*structural* lever left: it unlocks GPU buffer pools, dmabuf chains, and cleanly
+enables full multi-element mid-stream re-solve. The only remaining item that is
+"runtime structural" rather than "add an element / add a platform."
 
-**Codecs.** Opus encode + decode is **DONE** (M177, `opus` feature: `OpusEnc` /
-`OpusDec` via libopus through `audiopus`). Remaining: pure-Rust / wasm decode
-paths (dav1d/rav1d, vpx) to drop the ffmpeg FFI dependency. See `### Codecs`.
+**3. Egress / transports** (ingest side done). RTMP egress (`rtmpsink`), SRT
+(both directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588)
++ FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP
+entries under `### High`.
 
-**Depth (works today, not yet future-proof).** Negotiation: forward re-solve
-walk, dynamic / request pads, zero-copy tee, PTS-ordered fan-in for
-frame-accurate mixing (see `## Negotiation`). Seek: reverse / trick mode,
-non-flushing accumulating seek, more seekable sources (see Seek depth under
-`### Critical`). Overlays / subtitles: the CPU `textoverlay` with SRT + WebVTT
-parsing is done (M171, DESIGN.md §4.18); a mixed-case TrueType `vello` GPU
-backend and `clockoverlay` / `timeoverlay` siblings remain. Generic EGL
-`GlSink`, GPU compositor companion.
+**4. Depth (works today, not yet future-proof).**
+- Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
+  multi-element subgraph mid-stream re-solve (1-link done), the
+  `scale_then_convert` geometry-pin known limit.
+- Seek: trick-mode KEY_UNIT frame selection (needs a per-frame keyframe flag,
+  deferred to its first consumer), segment seeks (CMAF / DASH), re-preroll after
+  a flushing seek when paused, more seekable sources. (reverse + non-flushing
+  done, M211/M212.)
+- Codecs: pure-Rust / wasm decode (dav1d / rav1d, vpx) to drop the ffmpeg FFI.
 
-The remaining items are mostly "add an element" breadth plus the two whole-
-platform integrations (macOS / Android), which are the only items with high
-fixed cost. The structural runtime is finished.
+**5. GPU keep-on-GPU pillar.** M213-M217 closed zero-copy GPU fan-out, the
+GPU-resident tensor domain, the GPU-tensor inference consumer (`WgpuInference`),
+and input-side NV12 surface-import. Remaining: CUDA<->wgpu interop to join the
+NVDEC decode side to the wgpu inference / preprocess side. (ML-pillar work,
+orthogonal to gst parity.)
+
+**6. Niche / small.** Subtitle depth, controllers (animated properties),
+clock/timeoverlay, generic EGL `GlSink`, compositor GPU companion + NV12 mixing,
+audio-mixer rate / layout reconciliation, the last three bus messages
+(segment-done / stream-status / clock-lost, each gated on a subsystem not present).
+
+Only items 1 (platforms) and 2 (allocation re-cascade beta) are large or
+structural; everything else is "add an element / add a transport," which the
+codebase does cheaply and repeatably. The open decision is which definition of
+done applies: credible Linux/Windows replacement (reached now), cross-platform
+parity (gated on macOS / Android, item 1), or architecturally future-proof
+(allocation re-cascade beta, item 2).
 
 ## GStreamer parity gaps
 

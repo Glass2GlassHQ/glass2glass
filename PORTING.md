@@ -245,8 +245,16 @@ g2g binary it ships — remains available and needs no ABI match.
 
 ---
 
-## 8. Known gaps (as of M200)
+## 8. Known gaps (as of M217)
 
+- **Platform coverage: Linux and Windows only.** macOS (VideoToolbox /
+  AVFoundation / Core Audio / Metal) and Android (MediaCodec / Camera2 / AAudio /
+  Surface) have no elements yet, so a pipeline that relies on platform-native
+  decode / capture / present will not build on those targets. The cross-platform
+  software path (parsers, container mux/demux, SW transforms, ffmpeg, `gst-launch`
+  DSL) works everywhere. See DESIGN_TODO.md "Gap analysis to 80% parity".
+- Other structural / transport gaps (allocation re-cascade, RTMP/SRT egress,
+  RTSP server, RTP RTX/FEC) are catalogued in DESIGN_TODO.md.
 - No quoted property values with spaces in the launch DSL (v1).
 - No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
 - Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
