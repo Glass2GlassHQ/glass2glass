@@ -22,7 +22,7 @@ use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec, RawVideoFormat};
-use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
+use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
 
 #[derive(Default)]
 struct Collect {
@@ -61,7 +61,35 @@ async fn ffmpeg_vp9_decodes_fixture() {
     decode_fixture(VideoCodec::Vp9, "G2G_VP9_FIXTURE", OutputFormat::I420).await;
 }
 
+// M(vaapi): VAAPI hardware decode through ffmpeg. Same fixture + assertion as
+// the software path, but `Backend::Vaapi` pinned to a render node (default
+// `/dev/dri/renderD128`, overridable via `G2G_VAAPI_DEVICE`). Validates the
+// libavcodec VAAPI hwaccel path on AMD / Intel where cros-codecs `VaapiH264Dec`
+// is blocked. `configure_pipeline` fails loud if the libavcodec build lacks the
+// VAAPI hwaccel or the render node isn't libva-capable, so a green run is a
+// real end-to-end hardware-decode signal.
+#[tokio::test]
+#[ignore = "requires libav* with VAAPI, a libva render node, and a G2G_H264_FIXTURE path"]
+async fn ffmpeg_h264_decodes_fixture_vaapi() {
+    let device = std::env::var("G2G_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+    let dec = FfmpegVideoDec::new()
+        .with_output_format(OutputFormat::Nv12)
+        .with_backend(Backend::Vaapi)
+        .with_vaapi_device(Some(&device));
+    decode_fixture_with(dec, VideoCodec::H264, "G2G_H264_FIXTURE", OutputFormat::Nv12).await;
+}
+
 async fn decode_fixture(codec: VideoCodec, env_var: &str, output: OutputFormat) {
+    let dec = FfmpegVideoDec::new().with_output_format(output);
+    decode_fixture_with(dec, codec, env_var, output).await;
+}
+
+async fn decode_fixture_with(
+    mut dec: FfmpegVideoDec,
+    codec: VideoCodec,
+    env_var: &str,
+    output: OutputFormat,
+) {
     let Some(path) = std::env::var_os(env_var) else {
         eprintln!("skipping: set {env_var}=/path/to/clip to run");
         return;
@@ -69,7 +97,6 @@ async fn decode_fixture(codec: VideoCodec, env_var: &str, output: OutputFormat) 
     let bitstream = std::fs::read(&path).expect("read fixture");
     assert!(!bitstream.is_empty(), "fixture is empty");
 
-    let mut dec = FfmpegVideoDec::new().with_output_format(output);
     let upstream = Caps::CompressedVideo {
         codec,
         width: Dim::Any,

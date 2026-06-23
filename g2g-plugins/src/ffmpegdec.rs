@@ -31,10 +31,15 @@
 //! (Fedora `ffmpeg-free` includes it; check `ffmpeg -decoders | grep cuvid`)
 //! and a working NVIDIA driver + `libnvcuvid.so` at runtime.
 //!
-//! VAAPI hwaccel through ffmpeg (`h264_vaapi` + `AV_HWDEVICE_TYPE_VAAPI`)
-//! follows the same pattern as a future fourth backend variant, but does
-//! need an `AVHWDeviceContext` and a `get_format` hook (it is a true
-//! hwaccel, not a standalone codec like cuvid).
+//! [`Backend::Vaapi`] is the Linux AMD / Intel hardware path. It attaches an
+//! `AV_HWDEVICE_TYPE_VAAPI` device to the generic decoder and a `get_format`
+//! hook selecting `AV_PIX_FMT_VAAPI` (a true hwaccel, not a standalone codec
+//! like cuvid), decodes on the GPU, then `av_hwframe_transfer_data`s the
+//! surface into system memory (NV12 on radeonsi / Intel) and packs it like the
+//! software path. Unlike `VaapiH264Dec` (cros-codecs, blocked on Mesa
+//! `radeonsi` GBM surface allocation), it uses libavcodec's own hwframe pool,
+//! so it works on AMD desktop / iGPU. Pin the render node with
+//! [`FfmpegH264Dec::with_vaapi_device`] on multi-GPU hosts.
 //!
 //! [`Backend::NvdecCuda`] (C3) is that true-hwaccel path for NVIDIA: instead
 //! of the standalone `h264_cuvid` codec (which copies NV12 back to system
@@ -70,11 +75,6 @@
 //! interleave of the U/V planes after the YUV420P decode (no swscale).
 //!
 //! Deferred:
-//! - VAAPI hwaccel: open `h264_vaapi` codec with an attached
-//!   `AVHWDeviceContext(VAAPI)`, register `get_format` to claim
-//!   `AV_PIX_FMT_VAAPI`, and `av_hwframe_transfer_data` the decoded surface
-//!   into System memory. This stays inside this module — public shape
-//!   (`AsyncElement`, input/output caps) doesn't change.
 //! - 10-bit pixel formats (`YUV420P10` / `P010`). Mainline H.264 cameras emit
 //!   8-bit YUV420P; `YUV444P` is now accepted (chroma box-averaged to 4:2:0),
 //!   but 10-bit and other formats are still rejected with `CapsMismatch`.
@@ -83,6 +83,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use ffmpeg_next as ffmpeg;
@@ -144,6 +145,18 @@ pub enum Backend {
     /// at configure time. Requires libavcodec built with the CUDA hwaccel
     /// and a working NVIDIA driver at runtime.
     NvdecCuda,
+    /// VAAPI hardware decode via the generic decoder with an attached
+    /// `AV_HWDEVICE_TYPE_VAAPI` device and a `get_format` hook selecting
+    /// `AV_PIX_FMT_VAAPI`. The decoded surface is downloaded to system memory
+    /// with `av_hwframe_transfer_data` (radeonsi / Intel transfer to NV12),
+    /// then packed into the element's `OutputFormat` like the software path, so
+    /// frames are emitted as `MemoryDomain::System`. This is the Linux AMD /
+    /// Intel hardware path: unlike `VaapiH264Dec` (cros-codecs), it allocates
+    /// surfaces through libavcodec's hwframe pool rather than GBM, so it works
+    /// on Mesa `radeonsi` where cros-codecs 0.0.6 cannot. Pin the render node
+    /// with [`FfmpegH264Dec::with_vaapi_device`] on multi-GPU hosts. Requires
+    /// libavcodec built with the VAAPI hwaccel and a libva-capable render node.
+    Vaapi,
 }
 
 /// One decoded picture. Either the pixels already copied out of the
@@ -214,6 +227,11 @@ pub struct FfmpegH264Dec {
     /// open time: the runner's M12 allocation query now runs before
     /// `configure_pipeline`, so this is recorded by the time the decoder opens.
     requested_alloc: Option<AllocationParams>,
+    /// DRM render node the `Vaapi` backend opens its hwdevice on (e.g.
+    /// `/dev/dri/renderD128`). `None` lets libva pick its default device, which
+    /// on a multi-GPU host may not be the intended GPU. Ignored by the other
+    /// backends.
+    vaapi_device: Option<String>,
 }
 
 /// Preferred name now that this element decodes more than H.264 (also H.265 /
@@ -257,6 +275,7 @@ impl FfmpegH264Dec {
             pts_to_arrival: alloc::collections::BTreeMap::new(),
             cuda_context: 0,
             requested_alloc: None,
+            vaapi_device: None,
         }
     }
 
@@ -319,12 +338,34 @@ impl FfmpegH264Dec {
                 self.low_delay = true;
                 self.output_format = OutputFormat::Nv12;
             }
+            Backend::Vaapi => {
+                // The downloaded surface is packed by `copy_yuv420` like the
+                // software path, so either output layout works (no forced
+                // format). cuvid's `surfaces` knob doesn't apply; leave
+                // `low_delay` off so B-frame reorder stays correct (VAAPI has
+                // no cuvid-style deep internal pipeline to flatten).
+                self.cuvid_surfaces = None;
+                self.low_delay = false;
+            }
         }
         self
     }
 
     pub fn backend(&self) -> Backend {
         self.backend
+    }
+
+    /// Pin the DRM render node the `Backend::Vaapi` hwdevice opens, e.g.
+    /// `/dev/dri/renderD128`. `None` (the default) lets libva choose, which on
+    /// a multi-GPU host may not select the intended GPU. Only consulted by the
+    /// `Vaapi` backend.
+    pub fn with_vaapi_device(mut self, path: Option<&str>) -> Self {
+        self.vaapi_device = path.map(String::from);
+        self
+    }
+
+    pub fn vaapi_device(&self) -> Option<&str> {
+        self.vaapi_device.as_deref()
     }
 
     /// Override the `h264_cuvid` `surfaces` AVOption. Higher = more
@@ -389,6 +430,7 @@ impl FfmpegH264Dec {
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         let format = self.output_format;
         let outputs_cuda = self.outputs_cuda();
+        let transfers_from_hw = matches!(self.backend, Backend::Vaapi);
         let cuda_context = self.cuda_context;
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
         loop {
@@ -416,6 +458,13 @@ impl FfmpegH264Dec {
                         DecodedPayload::Cuda(unsafe {
                             cuda_buffer_from_frame(frame, cuda_context)?
                         })
+                    } else if transfers_from_hw {
+                        // VAAPI: the decoded frame is a GPU surface
+                        // (AV_PIX_FMT_VAAPI). Download it into a system-memory
+                        // frame (NV12 on radeonsi / Intel), then pack like the
+                        // software path.
+                        let sw = transfer_hw_to_sw(&frame)?;
+                        DecodedPayload::System(copy_yuv420(&sw, format)?)
                     } else {
                         DecodedPayload::System(copy_yuv420(&frame, format)?)
                     };
@@ -545,9 +594,11 @@ impl AsyncElement for FfmpegH264Dec {
         }
 
         let codec = match self.backend {
-            // The generic decoder hosts the CUDA hwaccel; NvdecCuda attaches a
-            // CUDA device + get_format hook to it below.
-            Backend::Software | Backend::NvdecCuda => codec::decoder::find(codec_id(codec_kind)),
+            // The generic decoder hosts the CUDA / VAAPI hwaccel; NvdecCuda and
+            // Vaapi attach a device + get_format hook to it below.
+            Backend::Software | Backend::NvdecCuda | Backend::Vaapi => {
+                codec::decoder::find(codec_id(codec_kind))
+            }
             // The `*_cuvid` decoders are standalone codec entries, not hwaccel
             // hooks, so they're found by name rather than by AVCodecID. If absent,
             // the libavcodec build wasn't compiled with `--enable-cuvid` or
@@ -632,6 +683,48 @@ impl AsyncElement for FfmpegH264Dec {
 
                 // The codec now owns a ref; release ours so only the decoder
                 // keeps the device alive.
+                ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx);
+            }
+        }
+
+        // Vaapi: create a VAAPI hwdevice (optionally pinned to a render node)
+        // and hand the generic decoder a reference plus a get_format hook
+        // selecting AV_PIX_FMT_VAAPI, so decode runs on the GPU. The decoded
+        // surface is downloaded to system memory per frame in `drain_frames`;
+        // we keep no device handle on the element (unlike NvdecCuda's
+        // CUcontext), the decoder's own ref keeps the device alive.
+        if self.backend == Backend::Vaapi {
+            // A non-empty device string must be a valid C string; an interior
+            // NUL is a caller error, surfaced loud rather than truncating.
+            let device = match self.vaapi_device.as_deref() {
+                Some(path) => Some(
+                    alloc::ffi::CString::new(path)
+                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?,
+                ),
+                None => None,
+            };
+            let device_ptr = device.as_ref().map_or(core::ptr::null(), |c| c.as_ptr());
+            // SAFETY: standard ffmpeg hwaccel init on a freshly-allocated,
+            // not-yet-opened context, mirroring the NvdecCuda path above.
+            // `av_hwdevice_ctx_create` initialises `hw_device_ctx`; we hand the
+            // codec its own ref, install the get_format callback, then drop our
+            // ref. `device_ptr` is either null or points into `device`, which
+            // outlives the create call.
+            unsafe {
+                let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
+                let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
+                    &mut hw_device_ctx,
+                    ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                    device_ptr,
+                    core::ptr::null_mut(), // no options
+                    0,
+                );
+                if ret < 0 || hw_device_ctx.is_null() {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+                let raw = decoder_ctx.as_mut_ptr();
+                (*raw).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(hw_device_ctx);
+                (*raw).get_format = Some(get_vaapi_format);
                 ffmpeg::ffi::av_buffer_unref(&mut hw_device_ctx);
             }
         }
@@ -992,7 +1085,38 @@ enum SourceLayout {
 /// by `AV_PIX_FMT_NONE`. We only read the array.
 unsafe extern "C" fn get_cuda_format(
     _ctx: *mut ffmpeg::ffi::AVCodecContext,
+    formats: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    // SAFETY: `formats` is null or an AV_PIX_FMT_NONE-terminated array per the
+    // get_format contract; `pick_hw_format` only reads it.
+    unsafe { pick_hw_format(formats, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA) }
+}
+
+/// `get_format` hook for the `Vaapi` backend: pick `AV_PIX_FMT_VAAPI` so the
+/// decoder produces GPU surfaces (downloaded to system memory after decode),
+/// else `AV_PIX_FMT_NONE` to fail the selection loud rather than silently fall
+/// back to software under a hwaccel backend.
+///
+/// # Safety
+/// Called by libavcodec with a valid `*ctx` and an `AV_PIX_FMT_NONE`-terminated
+/// `formats` array. We only read the array.
+unsafe extern "C" fn get_vaapi_format(
+    _ctx: *mut ffmpeg::ffi::AVCodecContext,
+    formats: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    // SAFETY: see get_cuda_format.
+    unsafe { pick_hw_format(formats, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI) }
+}
+
+/// Walk libavcodec's `AV_PIX_FMT_NONE`-terminated offered-format list and return
+/// `wanted` if present, else `AV_PIX_FMT_NONE` so the codec fails the format
+/// selection loud rather than silently picking a software fallback.
+///
+/// # Safety
+/// `formats` must be null or a valid `AV_PIX_FMT_NONE`-terminated array.
+unsafe fn pick_hw_format(
     mut formats: *const ffmpeg::ffi::AVPixelFormat,
+    wanted: ffmpeg::ffi::AVPixelFormat,
 ) -> ffmpeg::ffi::AVPixelFormat {
     if formats.is_null() {
         return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE;
@@ -1001,13 +1125,32 @@ unsafe extern "C" fn get_cuda_format(
     // get_format contract; we walk it without passing the terminator.
     unsafe {
         while *formats != ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            if *formats == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA {
-                return ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
+            if *formats == wanted {
+                return wanted;
             }
             formats = formats.add(1);
         }
     }
     ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NONE
+}
+
+/// Download a decoded hardware surface (e.g. `AV_PIX_FMT_VAAPI`) into a freshly
+/// allocated system-memory frame. The destination format is left unset so
+/// libavcodec picks the surface's preferred transfer format (NV12 on radeonsi /
+/// Intel VAAPI); [`copy_yuv420`] then packs NV12 or planar into the element's
+/// `OutputFormat`. Geometry and plane data come from the surface; the caller
+/// reads pts / width / height off the source frame before this call.
+fn transfer_hw_to_sw(hw: &FfVideo) -> Result<FfVideo, G2gError> {
+    let mut sw = FfVideo::empty();
+    // SAFETY: `hw` is a decoded hardware-surface frame from a VAAPI-configured
+    // decoder; `sw` is a freshly allocated empty frame. av_hwframe_transfer_data
+    // allocates sw's buffers and downloads the surface. A non-negative return
+    // means sw holds valid system-memory planes read by `copy_yuv420`.
+    let ret = unsafe { ffmpeg::ffi::av_hwframe_transfer_data(sw.as_mut_ptr(), hw.as_ptr(), 0) };
+    if ret < 0 {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    Ok(sw)
 }
 
 /// Read the NV12 plane device pointers out of a decoded `AV_PIX_FMT_CUDA`
@@ -1245,6 +1388,31 @@ mod tests {
     fn with_backend_overrides_default() {
         let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuvid);
         assert_eq!(dec.backend(), Backend::NvdecCuvid);
+    }
+
+    #[test]
+    fn vaapi_backend_selectable_and_keeps_output_format() {
+        // Unlike NvdecCuda, the VAAPI path downloads to system memory and packs
+        // via copy_yuv420, so it honours either output layout (no forced NV12).
+        let dec = FfmpegH264Dec::new()
+            .with_output_format(OutputFormat::I420)
+            .with_backend(Backend::Vaapi);
+        assert_eq!(dec.backend(), Backend::Vaapi);
+        assert_eq!(dec.output_format(), OutputFormat::I420);
+        // VAAPI has no cuvid-style deep pipeline, so low-delay stays off for
+        // B-frame reorder correctness, and the cuvid surface knob is unset.
+        assert!(!dec.low_delay());
+        assert_eq!(dec.cuvid_surfaces(), None);
+    }
+
+    #[test]
+    fn with_vaapi_device_stores_render_node() {
+        let dec = FfmpegH264Dec::new()
+            .with_backend(Backend::Vaapi)
+            .with_vaapi_device(Some("/dev/dri/renderD128"));
+        assert_eq!(dec.vaapi_device(), Some("/dev/dri/renderD128"));
+        // Default is None (libva picks its default device).
+        assert_eq!(FfmpegH264Dec::new().vaapi_device(), None);
     }
 
     #[test]

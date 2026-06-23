@@ -103,10 +103,11 @@ leverage first:
 
 ## Receive / decode
 
-- **`VaapiH264Dec` on AMD.** cros-codecs hard-codes ChromeOS GBM flags that fail
-  on Mesa `radeonsi`; clean fix is an upstream libva (`vaCreateSurfaces`)
-  surface backend. ffmpeg is the AMD path until then.
-- ffmpeg VAAPI hwaccel (`h264_vaapi` + `AVHWDeviceContext`, transfer to System).
+- **`VaapiH264Dec` on AMD** (cros-codecs path). Hard-codes ChromeOS GBM flags
+  that fail on Mesa `radeonsi`; the clean fix is an upstream libva
+  (`vaCreateSurfaces`) surface backend. The ffmpeg `Backend::Vaapi` hwaccel path
+  is the working AMD / Intel decode route in the meantime (validated on a
+  Rembrandt 680M); this item is only for reviving the pure cros-codecs backend.
 - Zero-copy `MemoryDomain::DmaBuf` from `VaapiH264Dec` (needs a surface-keepalive
   refcount).
 - H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
