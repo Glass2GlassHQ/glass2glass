@@ -86,3 +86,24 @@ async fn avdec_h264_alias_resolves_to_ffmpegdec() {
         assert!(!msg.contains("avdec_h264"), "avdec_h264 must resolve to ffmpegdec: {msg}");
     }
 }
+
+/// M237: the ffmpeg VAAPI hwaccel backend is launch-parsable under its own name
+/// and the gst VA-API names resolve to it (preferred over the cros-codecs
+/// `vaapidec`, which is blocked on Mesa radeonsi). Like the avdec_h264 test we
+/// only assert the names resolve (construct) — a real decode needs an H.264
+/// source and a libva render node (see `ffmpeg_smoke::*_vaapi`).
+#[cfg(feature = "ffmpeg")]
+#[tokio::test]
+async fn vaapi_hwaccel_names_resolve_to_ffmpegvaapidec() {
+    let reg = default_registry();
+    for name in ["ffmpegvaapidec", "vaapih264dec", "vah264dec"] {
+        let line = format!("videotestsrc num-buffers=1 ! {name} ! fakesink");
+        // The decoder rejects raw video at negotiation; parsing must still
+        // succeed (the name resolved). A parse error naming the element is the
+        // bug we're guarding against.
+        if let Err(e) = parse_launch(&reg, &line) {
+            let msg = format!("{e}");
+            assert!(!msg.contains(name), "{name} must resolve to ffmpegvaapidec: {msg}");
+        }
+    }
+}

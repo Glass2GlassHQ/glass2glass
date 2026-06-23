@@ -109,7 +109,7 @@ use crate::v4l2src::V4l2Src;
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]
 use crate::kmssink::KmsSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-use crate::ffmpegdec::FfmpegH264Dec;
+use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 use crate::vaapidec::VaapiH264Dec;
 
@@ -333,6 +333,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| Box::new(MjpegDec::new())));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |_| Box::new(FfmpegH264Dec::new())));
+    // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
+    // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
+    // to the VA display's choice (a `device=` property is a follow-up).
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", |_| {
+        Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
+    }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register(ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())));
 }
@@ -351,10 +358,13 @@ fn register_aliases(reg: &mut Registry) {
     for name in ["xvimagesink", "ximagesink", "glimagesink"] {
         reg.register_alias(name, &["waylandsink", "kmssink", "fakesink"]);
     }
-    // Decoders: GStreamer's libav / VA-API names -> the g2g decoders.
+    // Decoders: GStreamer's libav / VA-API names -> the g2g decoders. The VA-API
+    // names prefer the ffmpeg VAAPI hwaccel (`ffmpegvaapidec`, works on Mesa
+    // radeonsi) and fall back to the cros-codecs `vaapidec` when only that
+    // feature is on; the alias resolves to the first registered target.
     reg.register_alias("avdec_h264", &["ffmpegdec"]);
-    reg.register_alias("vaapih264dec", &["vaapidec"]);
-    reg.register_alias("vah264dec", &["vaapidec"]);
+    reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
+    reg.register_alias("vah264dec", &["ffmpegvaapidec", "vaapidec"]);
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
@@ -475,6 +485,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
         Box::new(FfmpegH264Dec::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
+        Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
     }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
