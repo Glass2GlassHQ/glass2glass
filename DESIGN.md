@@ -801,6 +801,22 @@ handshakes and recovers every streamed access unit). Scope is one client / one
 session / unicast UDP / the PLAY direction; multi-client, TCP-interleaved
 transport, and the ANNOUNCE/RECORD source element are follow-ups (DESIGN_TODO).
 
+**SRT (Secure Reliable Transport).** `SrtSink` (caller, egress) and `SrtSrc`
+(listener, ingress, `srt` feature) carry an MPEG-TS byte stream over UDP with
+SRT's reliable-but-low-latency ARQ — the contribution-link transport. The
+protocol is Sans-IO (`srt.rs`): the 16-byte packet header + data/control wire
+codec (HSv5 HANDSHAKE with the HSREQ-latency and Stream-ID extensions,
+ACK / NAK loss-report / ACKACK / KEEPALIVE / SHUTDOWN), the caller/listener
+handshake driver (`SrtHandshake`, induction → conclusion with a listener cookie
+challenge), and the ARQ pair `SrtSender` / `SrtReceiver` (the sender buffers and
+resends on NAK with the retransmit flag; the receiver reorders by wrap-aware
+sequence, NAKs gaps, and delivers in order) — the same shape as the RTP
+jitter/NACK path. Validated g2g↔g2g end to end over a lossy loopback (handshake +
+data + a dropped packet recovered via NAK). The wire format follows the SRT
+draft so real-peer interop is the design target; encryption (AES / KMREQ), the
+TSBPD timing model, congestion control, and libsrt/ffmpeg interop validation are
+follow-ups (DESIGN_TODO).
+
 The remaining capture/ingress breadth — a `uridecodebin`-equivalent URI → source
 layer over the autoplug registry — is tracked in DESIGN_TODO.
 

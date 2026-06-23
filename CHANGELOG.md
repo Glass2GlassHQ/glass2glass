@@ -5,6 +5,38 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M224: SRT transport (`srtsink` / `srtsrc`) - reliable low-latency contribution
+
+SRT (Secure Reliable Transport) over UDP, both directions: a caller sink that
+publishes and a listener source that ingests, carrying an MPEG-TS byte stream
+(`mpegtsmux ! srtsink`, `srtsrc ! tsdemux`). Faithful to the SRT protocol draft
+so real-peer interop is possible; proven g2g <-> g2g end to end.
+
+- **Sans-IO `srt` module** (`g2g-plugins::srt`, always compiled, `no_std`):
+  - **Wire layer**: the 16-byte SRT header and data-packet build/parse (31-bit
+    sequence, message number + position/order/retransmit flags), and the control
+    packets - HSv5 HANDSHAKE (with the HSREQ latency + Stream-ID extensions),
+    KEEPALIVE, ACK, NAK loss-report (singleton + range coding), ACKACK, SHUTDOWN.
+  - **Handshake driver** (`SrtHandshake`): caller (induction -> conclusion) and
+    listener (cookie challenge + validation) state machines reaching established
+    with the negotiated peer socket id + initial sequence.
+  - **ARQ** (`SrtSender` / `SrtReceiver`): the sender buffers and retransmits on
+    NAK (R flag set); the receiver reorders by sequence (wrap-aware), reports
+    gaps as a NAK loss list, and delivers payloads in order. Mirrors the RTP
+    jitter/NACK design.
+- **Elements** (`g2g-plugins`, new `srt` feature): `SrtSink` (caller, egress) and
+  `SrtSrc` (listener, ingress) wrap the sans-IO core in tokio UDP I/O, fragmenting
+  the byte stream to the 1316-byte SRT payload. Registered as the `srtsink` /
+  `srtsrc` launch elements.
+- **End-to-end loopback test** (`srt_loopback`): caller <-> lossy proxy <->
+  listener; the proxy drops one data packet, the listener NAKs, the caller
+  retransmits, and all 12 payloads are delivered in order across the real socket
+  path. Sans-IO unit tests cover the wire layout, the handshake (incl. cookie
+  rejection), and ARQ recovery.
+- **Scope**: one connection, cleartext, NAK-based ARQ. Encryption (AES / KMREQ),
+  TSBPD timing, congestion control, and libsrt/ffmpeg interop validation are
+  follow-ups (the wire format leaves room for them).
+
 ### M223: RTSP server (`rtspserversink`) - host an RTSP endpoint
 
 `RtspSrc` was the client; this hosts the server side, the OBS / surveillance /

@@ -162,6 +162,14 @@ pub mod rtspserver;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversink;
 
+// Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
+// compiled); the tokio caller sink / listener source sit behind the `srt` feature.
+pub mod srt;
+#[cfg(feature = "srt")]
+pub mod srtsink;
+#[cfg(feature = "srt")]
+pub mod srtsrc;
+
 // UDP egress sink (M47): drives the M46 RtpH264Packetizer and sends RTP over a
 // tokio UdpSocket, the send-side inverse of RtspSrc's receive path.
 #[cfg(feature = "udp-egress")]

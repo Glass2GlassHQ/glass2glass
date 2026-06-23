@@ -345,7 +345,9 @@ endpoint (`flvmux ! rtmpsink`); validated sans-IO against the server session, li
 publish is user-side. RTP **RTX (RFC 4588) landed M222** (`rtx` module +
 `UdpSink`/`UdpSrc` `with_rtx`). **RTSP server started M223** (`rtspserversink` +
 sans-IO `rtspserver` responder; PLAY-direction serving validated, ANNOUNCE/RECORD
-spoken by the responder). Remaining: SRT (both directions), the ANNOUNCE/RECORD
+spoken by the responder). **SRT both directions started M224** (`srtsink`/`srtsrc`
++ sans-IO `srt` module; HSv5 handshake + NAK ARQ validated g2g<->g2g). Remaining:
+SRT encryption/TSBPD/congestion + real-peer interop, the RTSP ANNOUNCE/RECORD
 *source* element, multi-client RTSP, RTP FEC (ULPFEC / FlexFEC; jitter buffer /
 RTCP / NACK / RTX already done). See the RTMP/SRT and RTP entries under `### High`.
 
@@ -581,8 +583,13 @@ Production-shape needs that block specific real-world use cases.
   RTMP server (`flvmux ! rtmpsink`). Both share the `ChunkReader` reassembly.
   Documented in DESIGN.md §4.12b. Remaining RTMP: the complex (HMAC digest)
   handshake some CDNs require, multiple streams, server-acknowledgement back-
-  pressure. **SRT** ingest + egress for low-latency contribution is still open
-  (a sans-IO protocol layer + tokio I/O, paralleling the RTP/UDP split).
+  pressure. **SRT ingest + egress STARTED (M224):** `SrtSink` (caller) + `SrtSrc`
+  (listener) + the sans-IO `srt` module (HSv5 handshake, data/control wire layer,
+  NAK-based ARQ via `SrtSender`/`SrtReceiver`) carry an MPEG-TS byte stream over
+  UDP; validated g2g<->g2g end to end (handshake + loss recovery). **Remaining
+  SRT:** encryption (AES / KMREQ), TSBPD timing, congestion control, and
+  libsrt/ffmpeg interop validation (the wire format follows the draft, so it is
+  designed to interop, but real-peer testing is operator-side).
 
 - **RTP receive-side stack.** Largely **done**; RTX/FEC remain. The reordering
   jitter buffer (M94: `rtpjitter::RtpJitterBuffer`), the RTCP control protocol

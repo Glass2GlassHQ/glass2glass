@@ -82,6 +82,10 @@ use crate::udpsrc::UdpSrc;
 use crate::udpsink::UdpSink;
 #[cfg(feature = "rtsp-server")]
 use crate::rtspserversink::RtspServerSink;
+#[cfg(feature = "srt")]
+use crate::srtsink::SrtSink;
+#[cfg(feature = "srt")]
+use crate::srtsrc::SrtSrc;
 #[cfg(feature = "http-src")]
 use crate::httpsrc::HttpSrc;
 #[cfg(feature = "hls")]
@@ -395,6 +399,16 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "rtsp-server")]
     reg.register_launch(LaunchFactory::of::<RtspServerSink>("rtspserversink", || {
         Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap()))
+    }));
+    #[cfg(feature = "srt")]
+    reg.register_source(SourceFactory::new(
+        "srtsrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(SrtSrc::new("0.0.0.0:9000".parse().unwrap())),
+    ));
+    #[cfg(feature = "srt")]
+    reg.register_launch(LaunchFactory::of::<SrtSink>("srtsink", || {
+        Box::new(SrtSink::new("127.0.0.1:9000".parse().unwrap()))
     }));
     #[cfg(feature = "http-src")]
     reg.register_source(SourceFactory::new(

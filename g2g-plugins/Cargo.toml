@@ -24,6 +24,11 @@ rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
 # is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
 rtsp-server = ["std", "tokio/net", "tokio/io-util"]
+# SRT transport: SrtSink (caller, egress) + SrtSrc (listener, ingress) carrying an
+# MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
+# `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
+# elements need this. Implies std + tokio net.
+srt = ["std", "tokio/net"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
