@@ -562,7 +562,7 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 | `Software` | `h264` | `System` | Software decode; broadest hardware coverage. |
 | `NvdecCuvid` | `h264_cuvid` | `System` | GPU decode, host copy. Pairs with CPU sinks. |
 | `NvdecCuda` | `h264` + `AV_HWDEVICE_TYPE_CUDA` | `Cuda` | Zero-copy device-memory output; see §4.11.5. |
-| `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded to system memory (`av_hwframe_transfer_data`). The Linux AMD / Intel hardware path; works on Mesa `radeonsi` where cros-codecs `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device`. |
+| `Vaapi` | `h264` + `AV_HWDEVICE_TYPE_VAAPI` | `System` | GPU decode, surface downloaded to system memory (`av_hwframe_transfer_data`). The Linux AMD / Intel hardware path; works on Mesa `radeonsi` where cros-codecs `VaapiH264Dec` cannot. Pin the render node with `with_vaapi_device` (or the `device` property; launch name `ffmpegvaapidec`). |
 
 - **Input caps:** `Caps::CompressedVideo { codec: H264, .. }`.
 - **Output caps:** `Caps::RawVideo { format: I420 | Nv12, .. }`. `I420` is the libavcodec native 8-bit 4:2:0 format; `Nv12` is selectable via `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`, produced by a U/V interleave with no swscale. `YUVJ420P` is accepted with the same plane layout; `YUV444P` / `YUVJ444P` are accepted with the chroma planes box-averaged down to 4:2:0. Other pixel formats are rejected with `CapsMismatch`.

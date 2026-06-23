@@ -107,3 +107,18 @@ async fn vaapi_hwaccel_names_resolve_to_ffmpegvaapidec() {
         }
     }
 }
+
+/// M237: the `device` property pins the VAAPI render node from a `gst-launch`
+/// line (`ffmpegvaapidec device=/dev/dri/renderD128`). Round-trips through the
+/// registry's build-by-name + set/get, the path the parser drives.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn ffmpegvaapidec_device_property_round_trips() {
+    use g2g_core::PropValue;
+    let reg = default_registry();
+    let mut dec = reg.make_element("ffmpegvaapidec").expect("ffmpegvaapidec builds by name");
+    // Unset reads back empty (libva default), then a pin round-trips.
+    assert_eq!(dec.get_property("device"), Some(PropValue::Str(String::new())));
+    dec.set_property("device", PropValue::Str("/dev/dri/renderD128".into())).unwrap();
+    assert_eq!(dec.get_property("device"), Some(PropValue::Str("/dev/dri/renderD128".into())));
+}
