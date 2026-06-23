@@ -53,7 +53,9 @@ jobs:
   # that build with stable, apt-installable system libraries. Intentionally
   # omitted (need version-pinned or proprietary deps, add separately):
   #   ffmpeg (libav* version-sensitive), vaapi (libva + GBM + bindgen),
-  #   pipewire (libpipewire version-sensitive), cuda / cuda-gl (NVIDIA driver),
+  #   pipewire (libpipewire version-sensitive), vpx (env-libvpx-sys ships
+  #   bindings only for specific libvpx versions, needs its `generate` feature +
+  #   clang against the system libvpx), cuda / cuda-gl (NVIDIA driver),
   #   ort (downloads ONNX Runtime binaries at build).
   features-linux:
     name: features (linux)
@@ -67,11 +69,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev libasound2-dev libpulse-dev \
-            libopus-dev libvpx-dev libwayland-dev libxkbcommon-dev
+            libopus-dev libwayland-dev libxkbcommon-dev
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,vpx,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
+          rtsp,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
@@ -118,4 +120,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p g2g-core --locked --target wasm32-unknown-unknown
+      # `runtime` pulls `spin` (the core's no-feature build can't compile log.rs
+      # without it); it builds on wasm32. Verified locally for the target.
+      - run: cargo check -p g2g-core --locked --target wasm32-unknown-unknown --features runtime

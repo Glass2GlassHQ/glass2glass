@@ -27,10 +27,15 @@
 //! The g2g element contract (caps, pad templates, `process` loop, `Send`) mirrors
 //! `MfDecode` and is the stable part.
 
-use core::ffi::{c_int, c_void};
+use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFRetained, OSStatus};
+use objc2_core_foundation::CFRetained;
+
+// OSStatus is `pub(crate)` in the objc2 framework crates (not importable). It is
+// a transparent `i32` alias, so a local alias matches the FFI signatures exactly.
+#[allow(non_camel_case_types)]
+type OSStatus = i32;
 use objc2_core_media::{
     CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock, CMBlockBufferFlags,
     CMBlockBufferReplaceDataBytes, CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady,
@@ -341,7 +346,8 @@ impl VtDecode {
             meta: Default::default(),
         };
         self.emitted += 1;
-        out.push(PipelinePacket::DataFrame(frame)).await
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
     }
 }
 
@@ -577,7 +583,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
             ptr::null(),
             0,
             avcc.len(),
-            CMBlockBufferFlags::empty(),
+            0, // CMBlockBufferFlags is a u32 alias, not bitflags: no empty()
             NonNull::from(&mut block),
         )
     };
@@ -590,7 +596,8 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     // SAFETY: copy our AVCC bytes into the freshly allocated block.
     let st = unsafe {
         CMBlockBufferReplaceDataBytes(
-            avcc.as_ptr() as *const c_void,
+            NonNull::new(avcc.as_ptr() as *mut c_void)
+                .ok_or(G2gError::Hardware(HardwareError::Other))?,
             &block,
             0,
             avcc.len(),
@@ -611,8 +618,10 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     let st = unsafe {
         CMSampleBufferCreateReady(
             None,
-            Some(&block),
-            Some(&state._format),
+            // CFRetained<T> -> &T explicitly: Option does not deref-coerce through
+            // the &, unlike a bare &T argument.
+            Some(&*block),
+            Some(&*state._format),
             1,
             1,
             &timing,
