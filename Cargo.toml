@@ -9,6 +9,7 @@ members = [
     "g2g-enterprise",
     "g2g-python",
     "g2g-capi",
+    "g2g-pyapi",
 ]
 # Out-of-tree dynamic-plugin example (M201): built by the plugin_loader_dlopen
 # integration test as a standalone cdylib, exactly as a third party would. Not a

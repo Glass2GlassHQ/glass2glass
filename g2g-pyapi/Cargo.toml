@@ -1,0 +1,38 @@
+[package]
+name = "g2g-pyapi"
+description = "Python (PyO3) bindings to drive glass2glass pipelines: parse_launch + run + bus + appsrc/appsink."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# `cdylib` is the importable Python extension module; `lib` (rlib) lets the
+# workspace build / test it. Without the `python` feature the lib is empty, so
+# `cargo check --workspace` needs no libpython.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+# Build the PyO3 module. Embeds CPython (auto-initialize) like g2g-python, and
+# needs the graph to be `Send` for the background run thread (multi-thread).
+# OS-coupled: needs libpython at build + run time.
+python = [
+    "dep:pyo3",
+    "dep:tokio",
+    "g2g-core/std",
+    "g2g-core/runtime",
+    "g2g-core/multi-thread",
+]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
+# Drive the run future on a single-thread runtime, like g2g-launch / g2g-capi.
+tokio = { version = "1", optional = true, features = ["rt", "time"] }
+
+[lints]
+workspace = true
