@@ -48,14 +48,14 @@ use tokio::sync::mpsc;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::format::Codec;
-use str0m::media::{Direction, MediaKind, MediaTime, Mid, Pt};
+use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, VideoCodec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -71,12 +71,64 @@ struct MediaUnit {
     data: Vec<u8>,
 }
 
+/// Which media this sink carries, chosen from the configured caps. WebRTC needs
+/// the codec, the m-line `MediaKind`, and the RTP clock to agree; one input pad
+/// means one track per sink (simultaneous A/V over one PeerConnection is a
+/// `MultiInputElement` follow-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Track {
+    /// H.264 video on a 90 kHz clock.
+    Video,
+    /// Opus audio on a 48 kHz clock.
+    Audio,
+}
+
+impl Track {
+    fn media_kind(self) -> MediaKind {
+        match self {
+            Track::Video => MediaKind::Video,
+            Track::Audio => MediaKind::Audio,
+        }
+    }
+
+    fn codec(self) -> Codec {
+        match self {
+            Track::Video => Codec::H264,
+            Track::Audio => Codec::Opus,
+        }
+    }
+
+    fn frequency(self) -> Frequency {
+        match self {
+            Track::Video => Frequency::NINETY_KHZ,
+            Track::Audio => Frequency::FORTY_EIGHT_KHZ,
+        }
+    }
+
+    fn rate_hz(self) -> u64 {
+        match self {
+            Track::Video => 90_000,
+            Track::Audio => 48_000,
+        }
+    }
+
+    /// Map a nanosecond PTS to this track's RTP `MediaTime`. `u128` intermediate
+    /// avoids overflow on large timestamps.
+    fn media_time(self, pts_ns: u64) -> MediaTime {
+        let ticks = (pts_ns as u128 * self.rate_hz() as u128 / 1_000_000_000) as u64;
+        MediaTime::new(ticks, self.frequency())
+    }
+}
+
 /// WHIP-publishing WebRTC egress sink. See the module docs.
 pub struct WebRtcSink {
     whip_url: String,
     bearer: Option<String>,
     queue_depth: usize,
     configured: bool,
+    /// The media kind, decided from the configured caps (H.264 video or Opus
+    /// audio). Defaults to video until `configure_pipeline` runs.
+    track: Track,
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
     frames_sent: u64,
@@ -101,6 +153,7 @@ impl WebRtcSink {
             bearer: None,
             queue_depth: DEFAULT_QUEUE_DEPTH,
             configured: false,
+            track: Track::Video,
             tx: None,
             frames_sent: 0,
         }
@@ -135,20 +188,24 @@ impl WebRtcSink {
         let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
         let local = socket.local_addr().map_err(io_err)?;
 
-        // rust-crypto backend (pure Rust, no OpenSSL); only H.264 offered.
-        let mut rtc = RtcConfig::new()
+        // rust-crypto backend (pure Rust, no OpenSSL); offer only this track's
+        // codec so the answer's payload type is unambiguous.
+        let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
-            .clear_codecs()
-            .enable_h264(true)
-            .build(Instant::now());
+            .clear_codecs();
+        let config = match self.track {
+            Track::Video => config.enable_h264(true),
+            Track::Audio => config.enable_opus(true),
+        };
+        let mut rtc = config.build(Instant::now());
 
         let candidate = Candidate::host(local, "udp").map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         rtc.add_local_candidate(candidate);
 
-        // Offer a single send-only H.264 video m-line.
+        // Offer a single send-only m-line for the configured track.
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
             let mut api = rtc.sdp_api();
-            let mid = api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+            let mid = api.add_media(self.track.media_kind(), Direction::SendOnly, None, None, None);
             let (offer, pending) = api.apply().ok_or(G2gError::Hardware(HardwareError::Other))?;
             (offer.to_sdp_string(), pending, mid)
         };
@@ -159,7 +216,7 @@ impl WebRtcSink {
         rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
-        tokio::spawn(run_session(rtc, socket, local, mid, rx));
+        tokio::spawn(run_session(rtc, socket, local, mid, self.track, rx));
         self.tx = Some(tx);
         Ok(())
     }
@@ -182,27 +239,39 @@ fn h264_any() -> Caps {
     }
 }
 
+/// The Opus audio caps this element accepts. Stereo 48 kHz is the WebRTC /
+/// `opusenc` default; other channel counts / rates are a follow-up (the audio
+/// `Caps` has no wildcard fields, so the declared sink caps must be concrete).
+fn opus_stereo() -> Caps {
+    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+}
+
 impl AsyncElement for WebRtcSink {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&h264_any())
+        // Accept H.264 video or Opus audio; one track per sink instance.
+        match upstream_caps {
+            Caps::CompressedVideo { codec: VideoCodec::H264, .. }
+            | Caps::Audio { format: AudioFormat::Opus, .. } => Ok(upstream_caps.clone()),
+            _ => Err(G2gError::CapsMismatch),
+        }
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(h264_any()))
+        CapsConstraint::Accepts(CapsSet::from_alternatives(Vec::from([h264_any(), opus_stereo()])))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => {
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
-        }
+        self.track = match absolute_caps {
+            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Track::Video,
+            Caps::Audio { format: AudioFormat::Opus, .. } => Track::Audio,
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -311,10 +380,12 @@ async fn run_session(
     socket: UdpSocket,
     local: SocketAddr,
     mid: Mid,
+    track: Track,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
-    // The negotiated H.264 payload type, discovered once the writer exists.
+    // The negotiated payload type for this track's codec, discovered once the
+    // writer exists.
     let mut pt: Option<Pt> = None;
 
     loop {
@@ -356,12 +427,12 @@ async fn run_session(
                     if let Some(writer) = rtc.writer(mid) {
                         pt = writer
                             .payload_params()
-                            .find(|p| p.spec().codec == Codec::H264)
+                            .find(|p| p.spec().codec == track.codec())
                             .map(|p| p.pt());
                     }
                 }
                 if let Some(p) = pt {
-                    let rtp_time = MediaTime::from_90khz(pts_ns_to_90khz(unit.pts_ns));
+                    let rtp_time = track.media_time(unit.pts_ns);
                     if let Some(writer) = rtc.writer(mid) {
                         let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
                     }
@@ -375,12 +446,6 @@ async fn run_session(
             }
         }
     }
-}
-
-/// Map a nanosecond PTS to the 90 kHz RTP video clock. `u128` intermediate to
-/// avoid overflow on large timestamps.
-fn pts_ns_to_90khz(pts_ns: u64) -> u64 {
-    ((pts_ns as u128 * 90_000) / 1_000_000_000) as u64
 }
 
 /// Pick a route-local host IP for the ICE host candidate. Connecting a UDP
@@ -455,10 +520,23 @@ mod tests {
     }
 
     #[test]
-    fn pts_maps_to_90khz() {
-        // 1 second -> 90000 ticks; 1/30 s -> 3000 ticks.
-        assert_eq!(pts_ns_to_90khz(1_000_000_000), 90_000);
-        assert_eq!(pts_ns_to_90khz(33_333_333), 2_999);
-        assert_eq!(pts_ns_to_90khz(0), 0);
+    fn media_time_uses_the_track_clock() {
+        // Video: 90 kHz. 1 s -> 90000 ticks; 1/30 s -> ~3000.
+        assert_eq!(Track::Video.media_time(1_000_000_000).numer(), 90_000);
+        assert_eq!(Track::Video.media_time(33_333_333).numer(), 2_999);
+        assert_eq!(Track::Video.frequency(), Frequency::NINETY_KHZ);
+        // Audio: 48 kHz. 1 s -> 48000 ticks; 20 ms Opus frame -> 960 samples.
+        assert_eq!(Track::Audio.media_time(1_000_000_000).numer(), 48_000);
+        assert_eq!(Track::Audio.media_time(20_000_000).numer(), 960);
+        assert_eq!(Track::Audio.frequency(), Frequency::FORTY_EIGHT_KHZ);
+    }
+
+    #[test]
+    fn accepts_opus_audio() {
+        let sink = WebRtcSink::new("http://h/whip");
+        assert!(sink.intercept_caps(&opus_stereo()).is_ok());
+        let mut s = WebRtcSink::new("http://h/whip");
+        assert!(s.configure_pipeline(&opus_stereo()).is_ok());
+        assert_eq!(s.track, Track::Audio);
     }
 }

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>g2g WHEP player</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0a0e14; color: #e2e8f0; margin: 24px; }
+    video { width: 100%; max-width: 960px; background: #000; border-radius: 8px; }
+    input { width: 28rem; padding: 6px; }
+    button { padding: 6px 14px; cursor: pointer; }
+    pre { color: #94a3b8; white-space: pre-wrap; }
+    a { color: #22d3ee; }
+  </style>
+</head>
+<body>
+  <h1>glass2glass WHEP player</h1>
+  <p>
+    Plays a WebRTC stream published by <code>WebRtcSink</code> (WHIP) via a media
+    server's WHEP endpoint. With mediamtx, the WHIP publish URL
+    <code>http://host:8889/mystream/whip</code> is played back at the WHEP URL
+    <code>http://host:8889/mystream/whep</code>.
+  </p>
+  <video id="video" autoplay muted controls playsinline></video>
+  <p>
+    WHEP URL:
+    <input id="url" value="http://localhost:8889/mystream/whep">
+    <button onclick="play()">Play</button>
+  </p>
+  <pre id="log"></pre>
+  <script>
+    function log(m) { document.getElementById('log').textContent += m + '\n'; }
+
+    async function play() {
+      const url = document.getElementById('url').value;
+      const pc = new RTCPeerConnection();
+      // WHEP: the player offers recvonly transceivers; the server answers and sends.
+      pc.addTransceiver('video', { direction: 'recvonly' });
+      pc.addTransceiver('audio', { direction: 'recvonly' });
+      pc.ontrack = (e) => { document.getElementById('video').srcObject = e.streams[0]; };
+      pc.oniceconnectionstatechange = () => log('ICE: ' + pc.iceConnectionState);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log('POST offer -> ' + url);
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      });
+      if (!resp.ok) { log('WHEP POST failed: ' + resp.status + ' ' + resp.statusText); return; }
+      const answer = await resp.text();
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+      log('answer applied; awaiting media...');
+    }
+  </script>
+</body>
+</html>
