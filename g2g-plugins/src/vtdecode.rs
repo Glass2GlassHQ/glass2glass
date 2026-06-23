@@ -37,7 +37,7 @@ use objc2_core_foundation::CFRetained;
 #[allow(non_camel_case_types)]
 type OSStatus = i32;
 use objc2_core_media::{
-    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock, CMBlockBufferFlags,
+    CMBlockBuffer, CMBlockBufferCreateWithMemoryBlock,
     CMBlockBufferReplaceDataBytes, CMFormatDescription, CMSampleBuffer, CMSampleBufferCreateReady,
     CMSampleTimingInfo, CMTime, CMTimeFlags, CMVideoFormatDescriptionCreateFromH264ParameterSets,
 };

@@ -25,7 +25,7 @@
 //! contract (caps, pad templates, `process`, `Send`) mirrors `VtDecode` /
 //! `MfEncode` and is the stable part.
 
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 use core::ptr::{self, NonNull};
 
 use objc2_core_foundation::CFRetained;
@@ -67,7 +67,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 /// H.264 codec type FourCC `'avc1'` for `VTCompressionSessionCreate`.
-const CODEC_H264: i32 = 0x6176_6331;
+const CODEC_H264: u32 = 0x6176_6331;
 /// NV12 4:2:0 bi-planar video-range `'420v'`, the pixel format we feed in.
 const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076;
 
@@ -414,20 +414,21 @@ unsafe fn sample_to_annexb(sample: &CMSampleBuffer) -> Result<(Box<[u8]>, u64, b
     // The encoded bytes live in the sample's block buffer in AVCC framing.
     let block: CFRetained<CMBlockBuffer> =
         unsafe { CMSampleBufferGetDataBuffer(sample) }.ok_or_else(hw)?;
-    let mut total_len: i32 = 0;
-    let mut len_at: i32 = 0;
-    let mut data_ptr: *mut u8 = ptr::null_mut();
+    let mut total_len: usize = 0;
+    let mut len_at: usize = 0;
+    // c_char (i8) pointer per `CMBlockBuffer::data_pointer`; cast to u8 for the slice.
+    let mut data_ptr: *mut c_char = ptr::null_mut();
     // NOTE (verify on-device): objc2 exposes this as `CMBlockBuffer::data_pointer`
-    // (associated fn taking &CMBlockBuffer); the out-params are i32 lengths.
+    // (associated fn taking &CMBlockBuffer); the out-params are usize lengths.
     let st = unsafe {
         CMBlockBuffer::data_pointer(&block, 0, &mut len_at, &mut total_len, &mut data_ptr)
     };
-    if st != 0 || data_ptr.is_null() || total_len <= 0 {
+    if st != 0 || data_ptr.is_null() || total_len == 0 {
         return Err(hw());
     }
     // SAFETY: VideoToolbox guarantees `total_len` bytes at `data_ptr` for the
     // contiguous block (the encoder output is a single contiguous block).
-    let avcc = unsafe { core::slice::from_raw_parts(data_ptr, total_len as usize) };
+    let avcc = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, total_len) };
     let mut annexb = avcc_to_annexb(avcc);
 
     let pts_ns = cmtime_to_ns(unsafe { sample_pts(sample) });
@@ -644,12 +645,9 @@ unsafe fn set_bool(
     key: &objc2_core_foundation::CFString,
     value: bool,
 ) -> Result<(), G2gError> {
-    let v = if value {
-        objc2_core_foundation::CFBoolean::r#true()
-    } else {
-        objc2_core_foundation::CFBoolean::r#false()
-    };
-    let st = unsafe { VTSessionSetProperty(session, key, Some(&v)) };
+    // `CFBoolean::new` returns the shared `&'static CFBoolean` singleton.
+    let v = objc2_core_foundation::CFBoolean::new(value);
+    let st = unsafe { VTSessionSetProperty(session, key, Some(v as &_)) };
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
