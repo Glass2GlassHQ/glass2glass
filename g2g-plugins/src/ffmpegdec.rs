@@ -762,6 +762,7 @@ impl AsyncElement for FfmpegH264Dec {
                         duration_ns: 0,
                         capture_ns: d.pts_ns,
                         arrival_ns: d.arrival_ns,
+                        keyframe: true, // raw decoded frames are each independently presentable
                     },
                     sequence: self.emitted,
                     meta: Default::default(),

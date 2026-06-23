@@ -207,6 +207,7 @@ impl SourceLoop for PipeWireSrc {
                         duration_ns: n_frames * frame_dur,
                         capture_ns: pts,
                         arrival_ns,
+                        keyframe: false, // audio: every buffer is independent
                     },
                     sequence: seq,
                     meta: Default::default(),

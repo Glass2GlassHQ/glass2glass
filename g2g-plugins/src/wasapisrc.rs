@@ -183,6 +183,7 @@ impl SourceLoop for WasapiSrc {
                         duration_ns,
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
+                        keyframe: false, // audio: every buffer is independent
                     },
                     sequence,
                     meta: Default::default(),
