@@ -407,6 +407,185 @@ fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
     }
 }
 
+/// Which caps fields a transform passes through unchanged (output field ==
+/// input field), declared alongside a
+/// [`CapsConstraint::DerivedCoupled`](crate::format_element::CapsConstraint)
+/// closure. The solver uses the declared passthrough fields to couple input and
+/// output *field by field* in both directions, so a downstream pin on a
+/// passthrough field narrows the corresponding input field (`Range ∩ Fixed =
+/// Fixed`) instead of only dropping whole alternatives. The closure stays the
+/// source of truth for the *retargeted* (non-passthrough) fields.
+///
+/// `format` covers the variant's scalar media identity:
+/// [`Caps::RawVideo`]'s `format`, [`Caps::CompressedVideo`]'s `codec`, and
+/// [`Caps::Audio`]'s `format`. The geometry / rate / channel flags apply to the
+/// matching field where the variant has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PassthroughFields {
+    pub format: bool,
+    pub width: bool,
+    pub height: bool,
+    pub framerate: bool,
+    pub channels: bool,
+    pub sample_rate: bool,
+}
+
+impl PassthroughFields {
+    /// No field coupled (everything retargeted). Build with the `with_*`
+    /// const setters: `PassthroughFields::NONE.with_format().with_framerate()`.
+    pub const NONE: Self = Self {
+        format: false,
+        width: false,
+        height: false,
+        framerate: false,
+        channels: false,
+        sample_rate: false,
+    };
+
+    pub const fn with_format(mut self) -> Self {
+        self.format = true;
+        self
+    }
+    pub const fn with_width(mut self) -> Self {
+        self.width = true;
+        self
+    }
+    pub const fn with_height(mut self) -> Self {
+        self.height = true;
+        self
+    }
+    pub const fn with_framerate(mut self) -> Self {
+        self.framerate = true;
+        self
+    }
+    pub const fn with_channels(mut self) -> Self {
+        self.channels = true;
+        self
+    }
+    pub const fn with_sample_rate(mut self) -> Self {
+        self.sample_rate = true;
+        self
+    }
+}
+
+/// Narrow `input` by intersecting each *passthrough* field against the
+/// corresponding field of `pin` (the field-level backward coupling: e.g.
+/// `Range(1..MAX) ∩ Fixed(160) = Fixed(160)`). Retarget fields (not in `mask`)
+/// are left as `input` carries them, since the transform sets them
+/// independently of its input. Same media variant required; `None` if a
+/// passthrough field has no overlap (the alternative dies) or the variants
+/// differ. Used by the solver's `DerivedCoupled` backward sweep.
+pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFields) -> Option<Caps> {
+    match (input, pin) {
+        (
+            Caps::RawVideo { format: fi, width: wi, height: hi, framerate: ri },
+            Caps::RawVideo { format: fp, width: wp, height: hp, framerate: rp },
+        ) => {
+            let format = if mask.format {
+                if fi != fp {
+                    return None;
+                }
+                *fi
+            } else {
+                *fi
+            };
+            let width = if mask.width { wi.intersect(wp)? } else { wi.clone() };
+            let height = if mask.height { hi.intersect(hp)? } else { hi.clone() };
+            let framerate = if mask.framerate { ri.intersect(rp)? } else { ri.clone() };
+            Some(Caps::RawVideo { format, width, height, framerate })
+        }
+        (
+            Caps::CompressedVideo { codec: ci, width: wi, height: hi, framerate: ri },
+            Caps::CompressedVideo { codec: cp, width: wp, height: hp, framerate: rp },
+        ) => {
+            let codec = if mask.format {
+                if ci != cp {
+                    return None;
+                }
+                *ci
+            } else {
+                *ci
+            };
+            let width = if mask.width { wi.intersect(wp)? } else { wi.clone() };
+            let height = if mask.height { hi.intersect(hp)? } else { hi.clone() };
+            let framerate = if mask.framerate { ri.intersect(rp)? } else { ri.clone() };
+            Some(Caps::CompressedVideo { codec, width, height, framerate })
+        }
+        (
+            Caps::Audio { format: fi, channels: ci, sample_rate: si },
+            Caps::Audio { format: fp, channels: cp, sample_rate: sp },
+        ) => {
+            let format = if mask.format {
+                if fi != fp {
+                    return None;
+                }
+                *fi
+            } else {
+                *fi
+            };
+            let channels = if mask.channels {
+                if ci != cp {
+                    return None;
+                }
+                *ci
+            } else {
+                *ci
+            };
+            let sample_rate =
+                if mask.sample_rate { intersect_sample_rate(*si, *sp)? } else { *si };
+            Some(Caps::Audio { format, channels, sample_rate })
+        }
+        _ => None,
+    }
+}
+
+/// Project an output-side feasible `out` onto the *input* side of a
+/// `DerivedCoupled` transform: keep passthrough fields, widen each retargeted
+/// field to "anything the transform can take" (`Dim`/`Rate` -> `Any`,
+/// `sample_rate` -> [`ANY_SAMPLE_RATE`]). Returns `None` when a retargeted field
+/// is a non-rangeable scalar (`format` / `codec` / `channels`) with no wildcard,
+/// i.e. the input feasibility can't be expressed as a single `Caps` (the solver
+/// then imposes no upstream feasibility constraint, the status quo). Used by
+/// `backward_feasible` for the mid-stream snapshot.
+#[cfg(feature = "std")]
+pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option<Caps> {
+    match out {
+        Caps::RawVideo { format, width, height, framerate } => {
+            if !mask.format {
+                return None; // retargeted format has no wildcard
+            }
+            Some(Caps::RawVideo {
+                format: *format,
+                width: if mask.width { width.clone() } else { Dim::Any },
+                height: if mask.height { height.clone() } else { Dim::Any },
+                framerate: if mask.framerate { framerate.clone() } else { Rate::Any },
+            })
+        }
+        Caps::CompressedVideo { codec, width, height, framerate } => {
+            if !mask.format {
+                return None;
+            }
+            Some(Caps::CompressedVideo {
+                codec: *codec,
+                width: if mask.width { width.clone() } else { Dim::Any },
+                height: if mask.height { height.clone() } else { Dim::Any },
+                framerate: if mask.framerate { framerate.clone() } else { Rate::Any },
+            })
+        }
+        Caps::Audio { format, channels, sample_rate } => {
+            if !mask.format || !mask.channels {
+                return None; // no format / channel wildcard
+            }
+            Some(Caps::Audio {
+                format: *format,
+                channels: *channels,
+                sample_rate: if mask.sample_rate { *sample_rate } else { ANY_SAMPLE_RATE },
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Overlap two inclusive `[min, max]` bounds, returning `None` when disjoint.
 /// Shared by [`Dim::intersect`] and [`Rate::intersect`].
 fn intersect_range((amin, amax): (u32, u32), (bmin, bmax): (u32, u32)) -> Option<(u32, u32)> {

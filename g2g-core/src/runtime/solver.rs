@@ -14,7 +14,9 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::{Caps, CapsSet};
+use crate::caps::{couple_passthrough, Caps, CapsSet, PassthroughFields};
+#[cfg(feature = "std")]
+use crate::caps::project_passthrough;
 use crate::format_element::CapsConstraint;
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 
@@ -364,7 +366,7 @@ fn forward_propagate(
             }
             Ok(out)
         }
-        CapsConstraint::DerivedOutput(f) => {
+        CapsConstraint::DerivedOutput(f) | CapsConstraint::DerivedCoupled { derive: f, .. } => {
             let fixed = upstream.fixate().ok_or(NegotiationFailure::Unfixable {
                 upstream: i - 1,
                 downstream: i,
@@ -475,6 +477,20 @@ fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<C
                 }
             }
             Some(acc)
+        }
+        // A `DerivedCoupled` transform inverts on its passthrough fields: the
+        // input feasibility is the downstream set with retargeted fields widened
+        // to anything the transform accepts (Dim/Rate -> Any, sample_rate ->
+        // ANY). `project_passthrough` returns `None` for a retargeted scalar with
+        // no wildcard (e.g. videoconvert's format), in which case the input
+        // feasibility isn't expressible as a single `Caps` and we impose none.
+        CapsConstraint::DerivedCoupled { passthrough, .. } => {
+            let d = down?;
+            let mut alts = Vec::with_capacity(d.alternatives().len());
+            for o in d.alternatives() {
+                alts.push(project_passthrough(o, *passthrough)?);
+            }
+            Some(CapsSet::from_alternatives(alts))
         }
         // Non-invertible (DerivedOutput / legacy) or non-transform shape:
         // impose no constraint on the input link.
@@ -616,6 +632,34 @@ fn apply_constraint(
             // stacked auto transforms resolve.
             if let (Some(in_set), Some(out_set)) = (links[ii].clone(), links[oi].clone()) {
                 match backward_filter_derived(f.as_ref(), &in_set, &out_set) {
+                    Ok(Some(narrowed)) => links[ii] = Some(narrowed),
+                    Ok(None) => {}
+                    Err(()) => {
+                        return Err(NegotiationFailure::EmptyLink {
+                            upstream: i - 1,
+                            downstream: i,
+                        })
+                    }
+                }
+            }
+        }
+        CapsConstraint::DerivedCoupled { derive, passthrough } => {
+            let (Some(ii), Some(oi)) = (in_idx, out_idx) else {
+                return Err(NegotiationFailure::EndpointShapeMismatch { index: i });
+            };
+            // Forward: identical to `DerivedOutput` (the closure is the source of
+            // truth for forward derivation).
+            if let Some(input_set) = &links[ii] {
+                let derived = forward_derived_union(derive.as_ref(), input_set);
+                if derived.is_empty() {
+                    return Err(NegotiationFailure::EmptyLink { upstream: i, downstream: i + 1 });
+                }
+                narrow(links, oi, &derived, i, i + 1)?;
+            }
+            // Backward: field-level coupling, narrowing passthrough fields *within*
+            // an alternative (the unblock over `DerivedOutput`'s alternative-drop).
+            if let (Some(in_set), Some(out_set)) = (links[ii].clone(), links[oi].clone()) {
+                match backward_field_narrow(derive.as_ref(), *passthrough, &in_set, &out_set) {
                     Ok(Some(narrowed)) => links[ii] = Some(narrowed),
                     Ok(None) => {}
                     Err(()) => {
@@ -1000,6 +1044,29 @@ fn apply_transform_node<E>(
             }
             Ok(())
         }
+        CapsConstraint::DerivedCoupled { derive, passthrough } => {
+            // Mirror of the linear `apply_constraint` arm on graph edges:
+            // forward via the closure, backward via field-level coupling.
+            if let Some(in_set) = edges[in_e].clone() {
+                let derived = forward_derived_union(derive.as_ref(), &in_set);
+                if derived.is_empty() {
+                    let (up, down) = edge_endpoints(graph, out_e);
+                    return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                }
+                narrow_edge(graph, edges, out_e, &derived)?;
+            }
+            if let (Some(in_set), Some(out_set)) = (edges[in_e].clone(), edges[out_e].clone()) {
+                match backward_field_narrow(derive.as_ref(), *passthrough, &in_set, &out_set) {
+                    Ok(Some(narrowed)) => edges[in_e] = Some(narrowed),
+                    Ok(None) => {}
+                    Err(()) => {
+                        let (up, down) = edge_endpoints(graph, in_e);
+                        return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+                    }
+                }
+            }
+            Ok(())
+        }
         // Legacy bridge: forward `intercept(input)` to the output once the input
         // fixates, the same single-caps forward cascade `solve_legacy_cascade`
         // runs (no backward coupling, like the mixed-cascade path).
@@ -1066,6 +1133,61 @@ fn backward_filter_derived(
         return Err(());
     }
     if kept.len() == in_set.alternatives().len() {
+        return Ok(None);
+    }
+    Ok(Some(CapsSet::from_alternatives(kept)))
+}
+
+/// Backward field-coupling for a `DerivedCoupled` transform: the primitive the
+/// alternative-dropping [`backward_filter_derived`] cannot express. For each
+/// input alternative, intersect its forward image `derive(a)` with the
+/// constrained output `out_set`; drop the alternative when nothing survives (the
+/// same as the alternative-drop walk), otherwise narrow the alternative's
+/// *passthrough* fields by intersecting each reachable output's passthrough
+/// fields back in (`couple_passthrough`), e.g. a `Range(1..MAX)` width meeting a
+/// `Fixed(160)` downstream pin collapses to `Fixed(160)`.
+///
+/// Unlike `backward_filter_derived` it runs for a single-alternative input too:
+/// narrowing a `Range` field *within* that one alternative is the whole point.
+/// Every step is an intersection (monotone shrink), so the arc-consistency loop
+/// still converges. Returns `Some(narrowed)` when it changed the set, `None`
+/// when unchanged, `Err(())` when nothing survives.
+fn backward_field_narrow(
+    derive: &dyn Fn(&Caps) -> CapsSet,
+    passthrough: PassthroughFields,
+    in_set: &CapsSet,
+    out_set: &CapsSet,
+) -> Result<Option<CapsSet>, ()> {
+    let mut kept: Vec<Caps> = Vec::new();
+    let mut changed = false;
+    for a in in_set.alternatives() {
+        let reach = derive(a).intersect(out_set);
+        if reach.is_empty() {
+            changed = true; // this input alternative can't reach the output: drop it
+            continue;
+        }
+        // Couple each reachable output's passthrough fields back into `a`.
+        let mut any = false;
+        for out_alt in reach.alternatives() {
+            if let Some(c) = couple_passthrough(a, out_alt, passthrough) {
+                if &c != a {
+                    changed = true;
+                }
+                if !kept.contains(&c) {
+                    kept.push(c);
+                }
+                any = true;
+            }
+        }
+        if !any {
+            // Reachable output exists but a passthrough field conflicts: drop.
+            changed = true;
+        }
+    }
+    if kept.is_empty() {
+        return Err(());
+    }
+    if !changed {
         return Ok(None);
     }
     Ok(Some(CapsSet::from_alternatives(kept)))
@@ -1888,5 +2010,131 @@ mod tests {
         assert_eq!(feas[0], Some(CapsSet::one(h264_any)), "pad 0 feasibility = its accept set");
         assert_eq!(feas[1], Some(CapsSet::one(h265_any)), "pad 1 feasibility = its accept set");
         assert_eq!(feas[2], None, "wildcard sink leaves the muxer output unconstrained");
+    }
+
+    // --- M227 field-level bidirectional caps coupling ---
+
+    /// A scale-like `DerivedCoupled`: passthrough format + framerate, retarget
+    /// geometry to [passthrough-input, Range 1..32768].
+    fn scale_like<'a>() -> CapsConstraint<'a> {
+        CapsConstraint::DerivedCoupled {
+            derive: Box::new(|input: &Caps| match input {
+                Caps::RawVideo { format, width, height, framerate } => {
+                    CapsSet::from_alternatives(vec![
+                        video(*format, width.clone(), height.clone(), framerate.clone()),
+                        video(
+                            *format,
+                            Dim::Range { min: 1, max: 32768 },
+                            Dim::Range { min: 1, max: 32768 },
+                            framerate.clone(),
+                        ),
+                    ])
+                }
+                _ => CapsSet::from_alternatives(vec![]),
+            }),
+            passthrough: PassthroughFields::NONE.with_format().with_framerate(),
+        }
+    }
+
+    /// A convert-like `DerivedCoupled`: passthrough geometry + framerate,
+    /// retarget format to [Rgba8, Nv12] (Rgba8 preferred).
+    fn convert_like<'a>() -> CapsConstraint<'a> {
+        CapsConstraint::DerivedCoupled {
+            derive: Box::new(|input: &Caps| match input {
+                Caps::RawVideo { width, height, framerate, .. } => {
+                    CapsSet::from_alternatives(vec![
+                        video(RawVideoFormat::Rgba8, width.clone(), height.clone(), framerate.clone()),
+                        video(RawVideoFormat::Nv12, width.clone(), height.clone(), framerate.clone()),
+                    ])
+                }
+                _ => CapsSet::from_alternatives(vec![]),
+            }),
+            passthrough: PassthroughFields::NONE.with_width().with_height().with_framerate(),
+        }
+    }
+
+    #[test]
+    fn couple_passthrough_narrows_a_range_field_within_an_alternative() {
+        // The primitive the alternative-drop walk can't express: a Range width
+        // meeting a Fixed pin collapses to Fixed, format (retargeted) untouched.
+        let mask = PassthroughFields::NONE.with_width().with_height().with_framerate();
+        let input = video(
+            RawVideoFormat::Rgba8,
+            Dim::Range { min: 1, max: 32768 },
+            Dim::Range { min: 1, max: 32768 },
+            Rate::Fixed(30 << 16),
+        );
+        let pin = fixed_video(RawVideoFormat::Nv12, 160, 120, 30);
+        let coupled = couple_passthrough(&input, &pin, mask).unwrap();
+        assert_eq!(
+            coupled,
+            fixed_video(RawVideoFormat::Rgba8, 160, 120, 30),
+            "passthrough width/height/framerate pinned, retargeted format kept"
+        );
+    }
+
+    #[test]
+    fn couple_passthrough_rejects_conflicting_passthrough_field() {
+        // A passthrough format that disagrees with the pin kills the alternative.
+        let mask = PassthroughFields::NONE.with_format();
+        let input = fixed_video(RawVideoFormat::Rgba8, 160, 120, 30);
+        let pin = fixed_video(RawVideoFormat::Nv12, 160, 120, 30);
+        assert_eq!(couple_passthrough(&input, &pin, mask), None);
+    }
+
+    #[test]
+    fn field_coupling_resolves_scale_then_convert() {
+        // The M188 KNOWN-LIMIT, now resolved: a 160x120 geometry pin sits behind
+        // the geometry-passthrough convert; coupling intersects it into the
+        // scaler's output field instead of dropping whole alternatives.
+        let src =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let scale = scale_like();
+        let convert = convert_like();
+        let sink =
+            CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 160, 120, 30)));
+        let links = solve_linear(&[&src, &scale, &convert, &sink]).unwrap();
+        assert_eq!(
+            links,
+            vec![
+                fixed_video(RawVideoFormat::Rgba8, 320, 240, 30),
+                fixed_video(RawVideoFormat::Rgba8, 160, 120, 30),
+                fixed_video(RawVideoFormat::Nv12, 160, 120, 30),
+            ],
+            "scaler reads 320x240, emits 160x120; convert changes only the format"
+        );
+    }
+
+    #[test]
+    fn field_coupling_no_pin_stays_passthrough() {
+        // No downstream pin (AcceptsAny): both transforms prefer their first
+        // (passthrough) alternative, and the solve converges (no oscillation).
+        let src =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let scale = scale_like();
+        let convert = convert_like();
+        let sink = CapsConstraint::AcceptsAny;
+        let links = solve_linear(&[&src, &scale, &convert, &sink]).unwrap();
+        assert_eq!(
+            links,
+            vec![
+                fixed_video(RawVideoFormat::Rgba8, 320, 240, 30),
+                fixed_video(RawVideoFormat::Rgba8, 320, 240, 30),
+                fixed_video(RawVideoFormat::Rgba8, 320, 240, 30),
+            ],
+            "passthrough is preferred and stable"
+        );
+    }
+
+    #[test]
+    fn field_coupling_unsatisfiable_geometry_fails_loud() {
+        // No scaler upstream: convert passes geometry through, so a 160x120 pin
+        // against a fixed 320x240 source has no solution. Loud, never silent.
+        let src =
+            CapsConstraint::Produces(CapsSet::one(fixed_video(RawVideoFormat::Rgba8, 320, 240, 30)));
+        let convert = convert_like();
+        let sink =
+            CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 160, 120, 30)));
+        assert!(solve_linear(&[&src, &convert, &sink]).is_err(), "geometry pin must fail loud");
     }
 }

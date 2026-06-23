@@ -859,8 +859,24 @@ pub enum CapsConstraint {
     IdentityAny,                                  // wildcard pass-through
     Mapping(Vec<(CapsSet, CapsSet)>),             // explicit (in, out) pairs
     DerivedOutput(Box<dyn Fn(&Caps) -> CapsSet>), // output as function of input
+    DerivedCoupled {                              // like DerivedOutput, plus a
+        derive: Box<dyn Fn(&Caps) -> CapsSet>,    //   declared passthrough-field
+        passthrough: PassthroughFields,           //   mask for bidirectional
+    },                                            //   field-level coupling
 }
 ```
+
+`DerivedOutput` is opaque: the solver can only invert it by *dropping whole
+input alternatives* whose forward image can't reach the constrained output, so
+a downstream pin on a field a transform passes through (e.g. a `160x120`
+geometry pin behind a format-only `videoconvert`) can't narrow a ranged input
+field. `DerivedCoupled` fixes that for the caps-driven transforms (videoscale /
+videoconvert / audioresample): the `passthrough` mask names the fields where
+output == input, and the backward sweep (`backward_field_narrow`) intersects a
+downstream pin *into* those input fields (`Range ∩ Fixed = Fixed`). The closure
+stays the source of truth for the retargeted fields; decoders that genuinely
+can't invert stay on `DerivedOutput`. (A closure-free `FieldTransform` that makes
+forward declarative too is a planned follow-up.)
 
 `Caps` is the *fixed* description used at runtime (carried by
 `PipelinePacket::CapsChanged`, handed to `configure_pipeline`); `CapsSet`

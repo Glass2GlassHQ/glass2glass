@@ -28,8 +28,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 const FORMATS: [RawVideoFormat; 4] = [
@@ -156,7 +156,10 @@ impl AsyncElement for VideoScale {
     /// fails loud rather than fixating impossible caps.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let (tw, th) = (self.target_w, self.target_h);
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+        // Passthrough format + framerate (retarget width/height), so a downstream
+        // geometry pin behind a format-only transform couples back to the scaler.
+        let passthrough = PassthroughFields::NONE.with_format().with_framerate();
+        let derive = Box::new(move |input: &Caps| match input {
             Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
                 if tw > 0 && th > 0 {
                     // Property-driven: fixed target geometry.
@@ -192,7 +195,8 @@ impl AsyncElement for VideoScale {
                 }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        });
+        CapsConstraint::DerivedCoupled { derive, passthrough }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -554,9 +558,12 @@ mod tests {
     #[test]
     fn derived_output_maps_to_target_dims() {
         let scaler = VideoScale::new(64, 32);
-        let CapsConstraint::DerivedOutput(f) = scaler.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
+        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
+            scaler.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
         };
+        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_framerate());
         let out = f(&rgba_caps(320, 240));
         assert_eq!(
             out.alternatives(),
@@ -580,9 +587,12 @@ mod tests {
     #[test]
     fn derived_output_rejects_odd_target_for_yuv420() {
         let scaler = VideoScale::new(63, 32);
-        let CapsConstraint::DerivedOutput(f) = scaler.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
+        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
+            scaler.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
         };
+        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_framerate());
         let nv12_in = Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(320),

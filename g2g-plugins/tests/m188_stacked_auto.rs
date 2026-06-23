@@ -28,12 +28,6 @@ async fn run_line(line: &str) -> u64 {
         .frames_consumed
 }
 
-async fn run_line_err(line: &str) {
-    let reg = default_registry();
-    let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("{line:?} should parse: {e:?}"));
-    assert!(run_graph(graph, &ZeroClock, 4).await.is_err(), "{line:?} must fail loud");
-}
-
 #[tokio::test]
 async fn convert_then_scale_before_one_caps() {
     // The M186 hard case: videoconvert(auto) ! videoscale(auto) ! caps. The NV12
@@ -46,18 +40,16 @@ async fn convert_then_scale_before_one_caps() {
 
 #[tokio::test]
 async fn scale_then_convert_before_one_caps() {
-    // KNOWN LIMIT (M188): the other order, videoscale(auto) ! videoconvert(auto)
-    // ! caps, does NOT resolve. The geometry pin (160x120) sits behind a
-    // geometry-passthrough transform (videoconvert), so back-propagating it to
-    // videoscale needs field-level bidirectional coupling, narrowing a `Range`
-    // *within* an alternative rather than dropping whole alternatives. The
-    // alternative-dropping backward walk can't express that, so videoscale stays
-    // at passthrough geometry and the run rejects at runtime (CapsMismatch). It
-    // fails loud, not silently mis-fixated. Documented in DESIGN_TODO; the fix is
-    // a larger redesign deferred past M188.
+    // M227 (field-level coupling): the other order, videoscale(auto) !
+    // videoconvert(auto) ! caps, now resolves too. The geometry pin (160x120)
+    // sits behind a geometry-passthrough transform (videoconvert); the
+    // `DerivedCoupled` backward sweep intersects the pin *into* videoconvert's
+    // input width/height fields (`Range ∩ Fixed = Fixed`) rather than only
+    // dropping alternatives, so videoscale receives a pinned 160x120 output and
+    // resizes. Was the documented M188 KNOWN-LIMIT; closed by M227.
     let line = "videotestsrc num-buffers=2 width=320 height=240 \
                 ! videoscale ! videoconvert ! video/x-raw,format=NV12,width=160,height=120 ! fakesink";
-    run_line_err(line).await;
+    assert_eq!(run_line(line).await, 2, "{line}");
 }
 
 #[tokio::test]

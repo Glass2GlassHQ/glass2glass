@@ -5,6 +5,7 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+- M227: field-level bidirectional caps coupling (`DerivedCoupled` + passthrough mask); a geometry/rate pin behind a passthrough transform now couples back (resolves the M188 `scale_then_convert` limit).
 - M226: per-frame keyframe flag + trick-mode KEY_UNIT playback (seek depth)
 - M225: RTP forward error correction (ULPFEC, RFC 5109)
 - M224: SRT transport (`srtsink` / `srtsrc`) - reliable low-latency contribution.

@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, ANY_SAMPLE_RATE,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{read_sample, sample_bytes, write_sample, PCM_FORMATS};
@@ -152,7 +152,9 @@ impl AsyncElement for AudioResample {
     /// channels at the target sample rate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target_rate = self.target_rate;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+        // Passthrough format + channels (retarget sample_rate only).
+        let passthrough = PassthroughFields::NONE.with_format().with_channels();
+        let derive = Box::new(move |input: &Caps| match input {
             Caps::Audio { format, channels, sample_rate }
                 if PCM_FORMATS.contains(format) && *channels > 0 =>
             {
@@ -173,7 +175,8 @@ impl AsyncElement for AudioResample {
                 }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        });
+        CapsConstraint::DerivedCoupled { derive, passthrough }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -422,9 +425,12 @@ mod tests {
     #[test]
     fn derived_output_retargets_rate_only() {
         let r = AudioResample::new(48_000);
-        let CapsConstraint::DerivedOutput(f) = r.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
+        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
+            r.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
         };
+        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_channels());
         // format + channels preserved, rate retargeted.
         let out = f(&audio(AudioFormat::PcmS16Le, 2, 44_100));
         assert_eq!(out.alternatives(), &[audio(AudioFormat::PcmS16Le, 2, 48_000)]);

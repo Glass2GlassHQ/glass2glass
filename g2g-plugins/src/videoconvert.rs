@@ -22,8 +22,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PassthroughFields, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Formats this element can both consume and produce. The convert `target`
@@ -160,7 +160,12 @@ impl AsyncElement for VideoConvert {
     /// format at the same dims/framerate.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let target = self.target;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+        // Passthrough geometry + framerate (retarget format only), so a downstream
+        // geometry pin couples back through this format-only converter (M188's
+        // scale_then_convert case).
+        let passthrough =
+            PassthroughFields::NONE.with_width().with_height().with_framerate();
+        let derive = Box::new(move |input: &Caps| match input {
             Caps::RawVideo { format, width, height, framerate }
                 if INPUT_FORMATS.contains(format) =>
             {
@@ -178,13 +183,13 @@ impl AsyncElement for VideoConvert {
                     // when it is itself producible. Yuyv is input-only, so a
                     // Yuyv input must convert and lists the producible set.
                     None => {
-                        let passthrough = FORMATS.contains(format);
+                        let prefer_passthrough = FORMATS.contains(format);
                         let mut alts = Vec::new();
-                        if passthrough {
+                        if prefer_passthrough {
                             alts.push(mk(*format));
                         }
                         for f in FORMATS {
-                            if !(passthrough && f == *format) {
+                            if !(prefer_passthrough && f == *format) {
                                 alts.push(mk(f));
                             }
                         }
@@ -193,7 +198,8 @@ impl AsyncElement for VideoConvert {
                 }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        });
+        CapsConstraint::DerivedCoupled { derive, passthrough }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -630,9 +636,15 @@ mod tests {
     #[test]
     fn derived_output_maps_any_supported_raw_to_target() {
         let conv = VideoConvert::new(RawVideoFormat::Nv12);
-        let CapsConstraint::DerivedOutput(f) = conv.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
+        let CapsConstraint::DerivedCoupled { derive: f, passthrough } =
+            conv.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
         };
+        assert_eq!(
+            passthrough,
+            PassthroughFields::NONE.with_width().with_height().with_framerate()
+        );
         let out = f(&rgba_caps(64, 48));
         assert_eq!(
             out.alternatives(),

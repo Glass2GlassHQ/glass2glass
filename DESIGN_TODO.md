@@ -354,21 +354,19 @@ all done now); FlexFEC + multi-level burst FEC remain. See the RTMP/SRT and RTP
 entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
-- Negotiation -- **a core-solver redesign, give it a dedicated session.** The
-  remaining items (the `scale_then_convert` geometry-pin known limit, multi-element
-  subgraph mid-stream re-solve; unbounded request pads are separate) all need the
-  same missing capability: **field-level bidirectional caps coupling** -- narrowing
-  a `Range` *within* a surviving alternative, not just dropping whole alternatives
-  (`backward_filter_derived` only drops alts; `backward_feasible()` returns `None`
-  for `DerivedOutput`). `DerivedOutput` is an opaque `Fn(&Caps)->CapsSet`, so there
-  is no analytic inverse; the fix is a new constraint variant that exposes per-field
-  passthrough / invertibility so a downstream field pin can flow back through a
-  passthrough transform. HIGH regression risk (the CSP solver underpins every
-  pipeline); today's behavior is *safe* (fails loud `CapsMismatch`, never silently
-  mis-fixates). Assessed 2026-06-23: do this as a designed, adversarially-tested
-  piece, not a tail-end change. A lower-risk adjacent win: route negotiation
-  failures (`CapsMismatch` / `EmptyLink`) through the `Bus` (not observable there
-  today).
+- Negotiation -- **field-level bidirectional caps coupling DONE (M227).** The
+  `scale_then_convert` geometry-pin known limit is resolved: the new
+  `CapsConstraint::DerivedCoupled { derive, passthrough }` declares which fields a
+  transform passes through, and `backward_field_narrow` intersects a downstream pin
+  *into* a passthrough input field (`Range ∩ Fixed = Fixed`) instead of only dropping
+  alternatives. videoscale / videoconvert / audioresample migrated. Remaining depth:
+  (a) the closure-free `FieldTransform` refactor (make forward declarative too, for a
+  `Debug`/`Copy` single-source-of-truth descriptor; gated on this being proven --
+  follow-up); (b) multi-element subgraph mid-stream re-solve (the Caps-β forward
+  coordinator walk, see the **Forward coordinator re-solve walk** item under
+  *Negotiation* below). HIGH regression risk lives in the solver, so both stay
+  designed + adversarially tested. (Negotiation failures already reach the `Bus` via
+  `BusMessage::NegotiationFailed`, M18 item 7.)
 - Seek: trick-mode KEY_UNIT frame selection **DONE (M226)** -- `FrameTiming::keyframe`
   (set by h264parse / mp4src / fmp4demux) + `Segment::key_units_only` (from a seek's
   `TRICKMODE` flag) + `SyncSink` dropping non-keyframes under it. Remaining seek:
