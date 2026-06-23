@@ -10,7 +10,10 @@
 //!
 //! Skips when no Vulkan adapter is present.
 
-use g2g_plugins::cudawgpu::{create_interop_device, cuda_roundtrip_check, export_nv12_image};
+use g2g_plugins::cudawgpu::{
+    create_interop_device, cuda_fill_xor_pattern, cuda_roundtrip_check, export_nv12_image,
+    wrap_as_texture,
+};
 
 /// Allocate a Vulkan external-memory image, export its FD, import it into CUDA,
 /// and confirm an NV12 pattern written and read back through the CUDA array
@@ -51,4 +54,76 @@ async fn cuda_shares_vulkan_external_memory() {
 
     // SAFETY: same device; the image is idle (the CUDA work was synchronized).
     unsafe { shared.destroy(&dev.device) };
+}
+
+/// The end-to-end half of the bridge transport: CUDA writes a pattern into the
+/// shared image, it is wrapped as a `wgpu::Texture`, and wgpu copies it back
+/// out. If wgpu reads what CUDA wrote, the Vulkan<->CUDA layout / visibility
+/// works and the M217 surface-import path can sample these textures directly.
+#[tokio::test]
+async fn wgpu_reads_what_cuda_wrote() {
+    let dev = match create_interop_device().await {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("skipping: no Vulkan interop device ({e:?})");
+            return;
+        }
+    };
+    let (w, h) = (320u32, 240u32);
+    let tex_h = h + h / 2;
+
+    // SAFETY: `dev.device` is the interop device.
+    let shared = unsafe { export_nv12_image(&dev.device, w, h) }.expect("export image");
+    // SAFETY: freshly exported, not yet imported.
+    unsafe { cuda_fill_xor_pattern(&shared) }.expect("CUDA fill the shared image");
+    // SAFETY: same device; consumes `shared` (freed when the texture drops).
+    let texture = unsafe { wrap_as_texture(&dev.device, shared) };
+
+    // Copy the texture to a buffer and read it back. bytes_per_row must be
+    // 256-aligned, so pad 320 -> 512.
+    let padded_bpr = w.div_ceil(256) * 256;
+    let buf = dev.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (padded_bpr * tex_h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = dev.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(tex_h),
+            },
+        },
+        wgpu::Extent3d { width: w, height: tex_h, depth_or_array_layers: 1 },
+    );
+    dev.queue.submit([enc.finish()]);
+
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    dev.device
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .expect("poll");
+    let data = slice.get_mapped_range();
+
+    let mut mismatches = 0u64;
+    for y in 0..tex_h as usize {
+        for x in 0..w as usize {
+            let got = data[y * padded_bpr as usize + x];
+            if got != (x ^ y) as u8 {
+                mismatches += 1;
+            }
+        }
+    }
+    eprintln!("wgpu read back {}x{} texels, {mismatches} mismatches", w, tex_h);
+    assert_eq!(mismatches, 0, "wgpu must read exactly the (x^y) pattern CUDA wrote");
 }

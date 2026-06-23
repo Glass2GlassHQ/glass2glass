@@ -184,7 +184,14 @@ pub unsafe fn export_nv12_image(
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            // SAMPLED: WgpuPreprocess's textureLoad. TRANSFER_SRC: lets wgpu copy
+            // the image out (the spike's readback verification). TRANSFER_DST:
+            // valid-usage completeness.
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .push_next(&mut ext_img);
@@ -257,6 +264,69 @@ impl SharedNv12Image {
             }
         }
     }
+}
+
+/// Wrap the shared image as a `wgpu::Texture` on `device` (which must be the
+/// interop device the image was allocated on). wgpu does not own the backing
+/// memory (`TextureMemory::External`); the image and its memory are freed by the
+/// texture's drop callback when wgpu drops the texture. The result is a normal
+/// R8Uint sampled texture that `WgpuPreprocess`'s M217 path consumes.
+///
+/// # Safety
+/// `device` must be the Vulkan wgpu device `shared` was created on. Consumes
+/// `shared`: its image and memory must not be freed by any other path.
+pub unsafe fn wrap_as_texture(device: &wgpu::Device, shared: SharedNv12Image) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width: shared.width,
+        height: nv12_texture_height(shared.height),
+        depth_or_array_layers: 1,
+    };
+    let image = shared.image;
+    let memory = shared.memory;
+
+    // SAFETY: `device` is the interop Vulkan device; `image` / `memory` are
+    // valid and owned here, transferred into the drop callback (fired once when
+    // wgpu drops the texture, after the GPU is done with it).
+    let hal_texture = unsafe {
+        let hal_device = device.as_hal::<wgpu_hal::api::Vulkan>().expect("vulkan wgpu device");
+        let raw = hal_device.raw_device().clone();
+        // SAFETY (closure): fired once when wgpu drops the texture, when the
+        // image is idle; covered by the enclosing unsafe block.
+        let drop_cb: wgpu_hal::DropCallback = Box::new(move || {
+            raw.destroy_image(image, None);
+            raw.free_memory(memory, None);
+        });
+        let hal_desc = wgpu_hal::TextureDescriptor {
+            label: Some("cuda-nv12"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+            memory_flags: wgpu_hal::MemoryFlags::empty(),
+            view_formats: alloc::vec::Vec::new(),
+        };
+        hal_device.texture_from_raw(
+            image,
+            &hal_desc,
+            Some(drop_cb),
+            wgpu_hal::vulkan::TextureMemory::External,
+        )
+    };
+
+    let wgpu_desc = wgpu::TextureDescriptor {
+        label: Some("cuda-nv12"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    };
+    // SAFETY: `hal_texture` was just produced by this device's hal.
+    unsafe { device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(hal_texture, &wgpu_desc) }
 }
 
 /// Import the shared image's memory into CUDA as a CUDA array, write a test NV12
@@ -388,6 +458,100 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
 
         result?;
         Ok(ok)
+    }
+}
+
+/// Import the shared image into CUDA and fill it with the `(x ^ y)` test
+/// pattern (no readback). Used by the spike that proves wgpu samples what CUDA
+/// wrote. Consumes `shared.fd` (CUDA owns an imported FD).
+///
+/// # Safety
+/// `shared` must come from [`export_nv12_image`] and not yet have been imported.
+pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gError> {
+    use cuda_ffi as c;
+    let w = shared.width as usize;
+    let tex_h = nv12_texture_height(shared.height) as usize;
+
+    // SAFETY: standard CUDA Driver API sequence; handles destroyed before return.
+    unsafe {
+        check(c::cuInit(0))?;
+        let mut dev: i32 = 0;
+        check(c::cuDeviceGet(&mut dev, 0))?;
+        let mut ctx: c::CuContext = core::ptr::null_mut();
+        check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+        check(c::cuCtxPushCurrent(ctx))?;
+
+        let import_desc = c::CudaExternalMemoryHandleDesc {
+            type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+            _pad: 0,
+            handle_fd: shared.fd,
+            _handle_rest: [0; 12],
+            size: shared.size,
+            flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
+            reserved: [0; 16],
+        };
+        let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
+        check(c::cuImportExternalMemory(&mut ext_mem, &import_desc))?;
+
+        let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
+            offset: 0,
+            array_desc: c::CudaArray3dDescriptor {
+                width: w,
+                height: tex_h,
+                depth: 0,
+                format: c::CU_AD_FORMAT_UNSIGNED_INT8,
+                num_channels: 1,
+                flags: 0,
+            },
+            num_levels: 1,
+            reserved: [0; 16],
+        };
+        let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
+        let mut array: c::CuArray = core::ptr::null_mut();
+        let mut result =
+            check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+        if result.is_ok() {
+            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+        }
+        if result.is_ok() {
+            let mut src = alloc::vec![0u8; w * tex_h];
+            for y in 0..tex_h {
+                for x in 0..w {
+                    src[y * w + x] = (x ^ y) as u8;
+                }
+            }
+            let to_array = c::CudaMemcpy2D {
+                src_x_in_bytes: 0,
+                src_y: 0,
+                src_memory_type: c::CU_MEMORYTYPE_HOST,
+                src_host: src.as_ptr().cast(),
+                src_device: 0,
+                src_array: core::ptr::null_mut(),
+                src_pitch: w,
+                dst_x_in_bytes: 0,
+                dst_y: 0,
+                dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                dst_host: core::ptr::null_mut(),
+                dst_device: 0,
+                dst_array: array,
+                dst_pitch: 0,
+                width_in_bytes: w,
+                height: tex_h,
+            };
+            result = check(c::cu_memcpy_2d(&to_array));
+            if result.is_ok() {
+                result = check(c::cuCtxSynchronize());
+            }
+        }
+
+        if !mipmap.is_null() {
+            c::cuMipmappedArrayDestroy(mipmap);
+        }
+        c::cuDestroyExternalMemory(ext_mem);
+        let mut popped: c::CuContext = core::ptr::null_mut();
+        let _ = c::cuCtxPopCurrent(&mut popped);
+        c::cuDevicePrimaryCtxRelease(dev);
+        result
     }
 }
 
