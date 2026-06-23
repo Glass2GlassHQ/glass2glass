@@ -316,35 +316,34 @@ AV1 / VP8-9 / MJPEG encode, the tag system, property system + `gst-launch` DSL +
 non-flushing accumulating (M211) seek and the zero-copy keep-on-GPU branch
 (M213-M217). Element breadth is essentially done (~122 plugins).
 
-**The structural runtime is finished. What remains is platform integration,
+**The structural runtime is finished** -- including the β allocation re-cascade
+(M18 single-hop -> M70 N-hop `GraphCoordinator` walk; DESIGN.md §4.13.3), the
+state machine, seek, and auto-plug. **What remains is platform breadth,
 transports, and depth, not core runtime work.** Grouped by how much each moves a
 parity claim, highest leverage first:
 
-**1. Platforms -- the only high-fixed-cost gap, and the biggest honest hole.**
-- macOS: zero element coverage (VideoToolbox decode/encode, AVFoundation
-  capture, Core Audio, Metal present). 5-8 sessions; see `### Platform: macOS`.
-- Android: zero coverage (MediaCodec, Camera2, AAudio, Surface). 5-8 sessions;
-  see `### Platform: Android`.
-- Linux and Windows are covered; if "parity" means cross-platform like
-  GStreamer, this is the gap that matters. Validated on-device by the user, not
-  in CI (the established pattern for the target-gated `mf-decode` Windows path).
+**1. Platforms -- the biggest remaining track.** Decode is now started on both
+new platforms; the rest of each platform's elements are owed.
+- macOS: `VtDecode` (VideoToolbox H.264) landed M218 and **compiles in CI** (the
+  native `macos` runner). Owed: vtencode, AVFoundation capture, Core Audio, Metal
+  present. See `### Platform: macOS`.
+- Android: `MediaCodecDec` (NDK MediaCodec H.264) landed M219 and
+  **cross-compiles in CI** (`aarch64-linux-android`; there is no native Android
+  runner). Owed: encode, Camera2, AAudio, Surface present. See `### Platform:
+  Android`.
+- Both new decoders compile in CI but are **not yet runtime-validated on a
+  device** (actual decode, and the Android output color-format packing). Linux
+  and Windows are fully covered.
 - **Linux audio out + modern capture -- DONE.** `AlsaSink` / `PulseSink` /
   `PipeWireSink` + `PipeWireSrc` on Linux, `MfVideoSrc` on Windows. Remaining
   depth: PipeWire video / screen capture, DMABUF zero-copy out of the sinks.
 
-**2. Allocation re-cascade beta -- the one structural item still open.**
-`propose_allocation` is startup-only ([[architecture_m16_negotiation_parity]]
-item 1). The coordinator restructure that fixes it is the single biggest
-*structural* lever left: it unlocks GPU buffer pools, dmabuf chains, and cleanly
-enables full multi-element mid-stream re-solve. The only remaining item that is
-"runtime structural" rather than "add an element / add a platform."
-
-**3. Egress / transports** (ingest side done). RTMP egress (`rtmpsink`), SRT
+**2. Egress / transports** (ingest side done). RTMP egress (`rtmpsink`), SRT
 (both directions), RTSP server + `ANNOUNCE` / `RECORD` egress, RTP RTX (RFC 4588)
 + FEC (jitter buffer / RTCP / NACK already done). See the RTMP/SRT and RTP
 entries under `### High`.
 
-**4. Depth (works today, not yet future-proof).**
+**3. Depth (works today, not yet future-proof).**
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
   multi-element subgraph mid-stream re-solve (1-link done), the
   `scale_then_convert` geometry-pin known limit.
@@ -354,23 +353,23 @@ entries under `### High`.
   done, M211/M212.)
 - Codecs: pure-Rust / wasm decode (dav1d / rav1d, vpx) to drop the ffmpeg FFI.
 
-**5. GPU keep-on-GPU pillar.** M213-M217 closed zero-copy GPU fan-out, the
+**4. GPU keep-on-GPU pillar.** M213-M217 closed zero-copy GPU fan-out, the
 GPU-resident tensor domain, the GPU-tensor inference consumer (`WgpuInference`),
 and input-side NV12 surface-import. Remaining: CUDA<->wgpu interop to join the
 NVDEC decode side to the wgpu inference / preprocess side. (ML-pillar work,
 orthogonal to gst parity.)
 
-**6. Niche / small.** Subtitle depth, controllers (animated properties),
+**5. Niche / small.** Subtitle depth, controllers (animated properties),
 clock/timeoverlay, generic EGL `GlSink`, compositor GPU companion + NV12 mixing,
 audio-mixer rate / layout reconciliation, the last three bus messages
 (segment-done / stream-status / clock-lost, each gated on a subsystem not present).
 
-Only items 1 (platforms) and 2 (allocation re-cascade beta) are large or
-structural; everything else is "add an element / add a transport," which the
-codebase does cheaply and repeatably. The open decision is which definition of
-done applies: credible Linux/Windows replacement (reached now), cross-platform
-parity (gated on macOS / Android, item 1), or architecturally future-proof
-(allocation re-cascade beta, item 2).
+Platforms (item 1) is the only large remaining track; everything else is "add an
+element / add a transport," which the codebase does cheaply and repeatably. The
+core runtime, CSP negotiation (including the allocation re-cascade), and the
+lifecycle spine are done. The open decision is which definition of done applies:
+credible Linux/Windows replacement (reached), or full cross-platform parity
+(gated on finishing macOS / Android, item 1).
 
 ## GStreamer parity gaps
 

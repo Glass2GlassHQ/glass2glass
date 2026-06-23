@@ -463,6 +463,13 @@
             <a href="https://github.com/GrokImageCompression/glass2glass" class="btn btn-outline">View on GitHub</a>
         </div>
 
+        <div style="margin-bottom: 44px;">
+            <a href="https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml">
+                <img src="https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml/badge.svg" alt="CI status" style="height: 20px; vertical-align: middle;">
+            </a>
+            <span style="font-size: 0.8rem; color: var(--text-tertiary); margin-left: 12px;">CI green across Linux &middot; Windows &middot; macOS &middot; Android &middot; wasm</span>
+        </div>
+
         <div class="hero-demo">
             <div class="demo-header">
                 <div class="demo-dots"><span></span><span></span><span></span></div>
@@ -559,12 +566,12 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-plugins</div>
                 <div class="crate-tag">mixed</div>
-                <p>The element library: RTSP / RTP / HTTP / HLS / DASH / RTMP ingest, V4L2 capture, ffmpeg (H.264/265, VP8/9, AV1) / VAAPI / MF decoders, AV1 / VP8/9 / MJPEG encoders, container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), Wayland / KMS / D3D11 / wgpu sinks, WASAPI, compositor, the <code>gst-launch</code> DSL, Embassy, web. LGPL v2.1+.</p>
+                <p>The element library: RTSP / RTP / HTTP / HLS / DASH / RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg (H.264/265, VP8/9, AV1) / VAAPI / MF / VideoToolbox (macOS) / MediaCodec (Android) decoders, AV1 / VP8/9 / MJPEG encoders, container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), Wayland / KMS / D3D11 / wgpu sinks, ALSA / PulseAudio / PipeWire / WASAPI audio, Opus, compositor, the <code>gst-launch</code> DSL, Embassy, web. LGPL v2.1+.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">std</div>
-                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, GPU tensor preprocess (<code>WgpuPreprocess</code>), classification head. LGPL v2.1+.</p>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head. LGPL v2.1+.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-bridge</div>
@@ -604,8 +611,8 @@
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
-                <h3>Decode + encode: ffmpeg / VAAPI / MF / WebCodecs</h3>
-                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code>, <code>VaapiH264Dec</code>, <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust).</p>
+                <h3>Decode + encode: ffmpeg / VAAPI / MF / VideoToolbox / MediaCodec / WebCodecs</h3>
+                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code> (Windows), <code>VaapiH264Dec</code> (Linux), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
@@ -616,8 +623,8 @@
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#129504;</span>
-                <h3>Inference: ORT + Burn + wgpu preprocess</h3>
-                <p><code>OrtInference</code> with CUDA + DirectML EPs, pure-Rust <code>BurnInference</code> on wgpu, GPU <code>WgpuPreprocess</code> (NV12 &rarr; f32 NCHW), <code>TensorBatcher</code> for N-stream fan-in.</p>
+                <h3>Inference: ORT + Burn + keep-on-GPU wgpu branch</h3>
+                <p><code>OrtInference</code> with CUDA + DirectML EPs, pure-Rust <code>BurnInference</code> on wgpu, <code>TensorBatcher</code> for N-stream fan-in. The keep-on-GPU branch (M213&ndash;217): <code>WgpuPreprocess</code> imports a GPU NV12 texture and emits a GPU-resident tensor, <code>WgpuInference</code> binds it directly &mdash; pixels never leave the GPU between preprocess and infer; zero-copy frame fan-out through a tee.</p>
                 <span class="feature-tag tag-ml">ML</span>
             </div>
             <div class="feature-card">
@@ -670,8 +677,8 @@
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#127932;</span>
-                <h3>Audio: WASAPI + AAC + fMP4</h3>
-                <p><code>WasapiSink</code> / <code>WasapiSrc</code> render + capture (incl. loopback), <code>MfAacEncode</code> / <code>MfAacDecode</code> via Media Foundation, <code>Mp4AudioSink</code> in fMP4.</p>
+                <h3>Audio: ALSA / PulseAudio / PipeWire / WASAPI + Opus + AAC</h3>
+                <p>Linux out via <code>AlsaSink</code> / <code>PulseSink</code> / <code>PipeWireSink</code> (+ <code>PipeWireSrc</code> capture), <code>WasapiSink</code> / <code>WasapiSrc</code> on Windows (incl. loopback); <code>OpusEnc</code> / <code>OpusDec</code> (libopus), <code>MfAacEncode</code> / <code>MfAacDecode</code> via Media Foundation, <code>Mp4AudioSink</code> in fMP4, <code>audiomixer</code> / <code>audioresample</code>.</p>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
@@ -750,8 +757,8 @@
             </div>
             <div class="target-card">
                 <div class="t-icon">&#128187;</div>
-                <h3>Desktop &amp; edge</h3>
-                <p>Tokio current-thread. Hardware: <code>FfmpegH264Dec</code> sw / NVDEC, <code>WaylandSink</code> / <code>KmsSink</code> / <code>D3D11Sink</code>. Pair with <code>OrtInference</code> for on-device ML.</p>
+                <h3>Desktop, mobile &amp; edge</h3>
+                <p>Tokio current-thread. Per-OS hardware decode: Linux <code>FfmpegH264Dec</code> sw / NVDEC + VAAPI, Windows <code>MfDecode</code> + <code>D3D11Sink</code>, macOS <code>VtDecode</code> (VideoToolbox), Android <code>MediaCodecDec</code> (NDK). Present via <code>WaylandSink</code> / <code>KmsSink</code>. Pair with <code>OrtInference</code> for on-device ML.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#129707;</div>

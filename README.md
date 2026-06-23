@@ -29,7 +29,7 @@ See [DESIGN.md](DESIGN.md) for the architecture specification.
 | Crate | Role | Profile |
 | :--- | :--- | :--- |
 | `g2g-core` | Traits, `Frame`/`PipelinePacket`, caps algebra, clock, runner. | `no_std + alloc` |
-| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
+| `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox (macOS), MediaCodec (Android), Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
 | `g2g-enterprise` | Multi-stream tensor batcher. | `std` |
