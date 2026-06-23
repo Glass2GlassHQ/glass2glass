@@ -5,6 +5,7 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+- M232: C ABI (`g2g-capi` crate, cdylib/staticlib + `include/g2g.h`) - the language-neutral waist over the launch DSL: `g2g_pipeline_launch` (parse + run on a background thread), `g2g_pipeline_bus_poll`, `g2g_pipeline_wait`, `g2g_pipeline_free`. Built on `g2g-core/multi-thread` so the parsed `'static` graph is `Send`. First slice of the cross-language story (Python/C#/Swift via the C header); `appsrc`/`appsink` buffer I/O is the next slice.
 - refactor: shared encoder frame-emit loop (`encoder_base::emit_packets`, used by `opusenc`/`vpxenc`/`av1enc`) and shared `pixel::is_yuv420`/`frame_byte_size` (used by `videoconvert`/`videoscale`/`videoflip`/`videocrop`); removes copy-pasted bodies.
 - M231: macOS VideoToolbox H.264 encode (`VtEncode`, `vtencode` feature) - NV12 -> Annex-B via `VTCompressionSession`, AVCC->Annex-B framing with SPS/PPS prepended on keyframes (`annexb::avcc_to_annexb`, host-tested). Compile-pending like `VtDecode`; the macOS CI job compiles the FFI, on-device validation owed.
 - M230: multi-client RTSP server (`rtspserversink` serves N players) - per-client handshake + per-client RTP session; the first buffer blocks until one player PLAYs, then every buffer also accepts new players non-blocking and broadcasts to all, reaping the disconnected.

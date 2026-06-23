@@ -2850,6 +2850,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "g2g-capi"
+version = "0.1.0"
+dependencies = [
+ "g2g-core",
+ "g2g-plugins",
+ "tokio",
+]
+
+[[package]]
 name = "g2g-core"
 version = "0.1.0"
 dependencies = [

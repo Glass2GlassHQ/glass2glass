@@ -1,0 +1,312 @@
+//! C ABI for glass2glass: the language-neutral waist over the `gst-launch`-style
+//! DSL + element registry (PORTING.md §5, DESIGN.md §4.16).
+//!
+//! A non-Rust caller (C, and through it Python/C#/Swift/...) describes a
+//! pipeline as a string, runs it, and watches the pipeline bus, without holding
+//! any typed Rust element value. This is the by-string usage model GStreamer
+//! apps reach for with `gst_parse_launch`; the typed programmatic builder stays
+//! a Rust API.
+//!
+//! Lifecycle (first slice):
+//! 1. [`g2g_pipeline_launch`] parses the description against
+//!    [`default_registry`] and starts it on a background thread (the parsed
+//!    graph is `'static` and, under the `multi-thread` feature, `Send`).
+//! 2. [`g2g_pipeline_bus_poll`] drains one [`BusMessage`] at a time, projected
+//!    into a flat [`G2gBusMessage`] (the `gst_bus_pop` analog).
+//! 3. [`g2g_pipeline_wait`] blocks for the natural end of stream and yields the
+//!    final [`RunStats`]; [`g2g_pipeline_free`] joins and releases.
+//!
+//! There is no early-cancel channel yet (the known runner gap), so `free` on a
+//! still-running pipeline waits for its natural EOS. `appsrc` / `appsink`-style
+//! buffer injection and extraction are the planned next slice.
+
+use std::ffi::{c_char, CStr, CString};
+use std::fmt::Write as _;
+use std::os::raw::c_int;
+use std::ptr;
+use std::thread::JoinHandle;
+
+use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
+use g2g_core::{Bus, BusMessage, G2gError, PipelineState};
+use g2g_plugins::clock::WallClock;
+use g2g_plugins::registry::default_registry;
+
+/// Steady-state link depth, matching `g2g-launch` (keeps latency low without
+/// starving the source; see DESIGN notes on `link_capacity`).
+const LINK_CAPACITY: usize = 4;
+/// Bus backlog. Control messages are dropped (not blocked) when full, so a slow
+/// poller never stalls the data path; this only bounds how many unread messages
+/// are retained.
+const BUS_CAPACITY: usize = 64;
+
+/// Opaque pipeline handle returned to the C caller. Never inspect its fields
+/// across the ABI; pass the pointer back to the `g2g_pipeline_*` functions.
+#[derive(Debug)]
+pub struct Pipeline {
+    /// Consumer end of the pipeline bus; the producer went to the run thread.
+    bus: Bus,
+    /// The background run thread, taken once [`g2g_pipeline_wait`] joins it.
+    join: Option<JoinHandle<Result<RunStats, G2gError>>>,
+    /// Captured run result after the thread is joined.
+    result: Option<Result<RunStats, G2gError>>,
+    /// Backing store for the most recent bus message's text, so the `text`
+    /// pointer handed out by [`g2g_pipeline_bus_poll`] stays valid until the
+    /// next poll or [`g2g_pipeline_free`].
+    last_text: Option<CString>,
+}
+
+/// Discriminant for [`G2gBusMessage::kind`]. Mirrors the common
+/// [`BusMessage`] variants; richer ones collapse to [`G2gBusKind::Other`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G2gBusKind {
+    StreamStart = 0,
+    Eos = 1,
+    Error = 2,
+    Warning = 3,
+    Info = 4,
+    StateChanged = 5,
+    Buffering = 6,
+    DurationChanged = 7,
+    Other = 99,
+}
+
+/// A flattened pipeline bus message. `text` is borrowed from the pipeline and
+/// valid only until the next [`g2g_pipeline_bus_poll`] / [`g2g_pipeline_free`];
+/// copy it if you need to keep it. The `a` / `b` fields are kind-specific:
+/// `Buffering` -> `a` = percent; `StateChanged` -> `a` = new state, `b` = old
+/// state (0 Null, 1 Ready, 2 Paused, 3 Playing); `DurationChanged` -> `a` = ns.
+#[repr(C)]
+#[derive(Debug)]
+pub struct G2gBusMessage {
+    pub kind: c_int,
+    pub text: *const c_char,
+    pub a: u64,
+    pub b: u64,
+}
+
+/// Frame counters reported by [`g2g_pipeline_wait`].
+#[repr(C)]
+#[derive(Debug)]
+pub struct G2gStats {
+    pub frames_emitted: u64,
+    pub frames_consumed: u64,
+    pub frames_dropped: u64,
+}
+
+/// Parse `description` and start it on a background thread.
+///
+/// On success returns a non-null [`Pipeline`] handle. On a null/invalid string
+/// or a parse error returns null and, when `err_out` is non-null, writes a
+/// malloc-equivalent message there (free it with [`g2g_string_free`]).
+///
+/// # Safety
+/// `description` must be a valid NUL-terminated C string. `err_out`, if
+/// non-null, must point to writable storage for one `char*`.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_launch(
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut Pipeline {
+    if !err_out.is_null() {
+        // SAFETY: caller contract: `err_out` points to writable `*mut c_char`.
+        unsafe { *err_out = ptr::null_mut() };
+    }
+    if description.is_null() {
+        set_err(err_out, "null pipeline description");
+        return ptr::null_mut();
+    }
+    // SAFETY: caller contract: `description` is a valid NUL-terminated C string,
+    // borrowed only for this call.
+    let desc = match unsafe { CStr::from_ptr(description) }.to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_err(err_out, "pipeline description is not valid UTF-8");
+            return ptr::null_mut();
+        }
+    };
+
+    let reg = default_registry();
+    let graph = match parse_launch(&reg, desc) {
+        Ok(g) => g,
+        Err(e) => {
+            set_err(err_out, &format!("parse error: {e}"));
+            return ptr::null_mut();
+        }
+    };
+    drop(reg);
+
+    let (bus, bus_handle) = Bus::new(BUS_CAPACITY);
+    let join = std::thread::Builder::new()
+        .name("g2g-capi-run".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("build tokio runtime");
+            let clock = WallClock::new();
+            rt.block_on(run_graph_with_bus(graph, &clock, LINK_CAPACITY, &bus_handle))
+        })
+        .expect("spawn g2g run thread");
+
+    let p = Box::new(Pipeline { bus, join: Some(join), result: None, last_text: None });
+    Box::into_raw(p)
+}
+
+/// Drain one bus message into `*out`. Returns 1 if a message was written, 0 if
+/// none are pending (or on a null argument).
+///
+/// # Safety
+/// `p` must be a handle from [`g2g_pipeline_launch`] not yet freed; `out` must
+/// point to writable [`G2gBusMessage`] storage.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_bus_poll(p: *mut Pipeline, out: *mut G2gBusMessage) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_mut() }) else { return 0 };
+    if out.is_null() {
+        return 0;
+    }
+    let Some(msg) = p.bus.try_recv() else { return 0 };
+
+    let (kind, text, a, b) = project(&msg);
+    p.last_text = text.and_then(|t| CString::new(t).ok());
+    let cmsg = G2gBusMessage {
+        kind: kind as c_int,
+        text: p.last_text.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+        a,
+        b,
+    };
+    // SAFETY: caller contract: `out` is writable.
+    unsafe { *out = cmsg };
+    1
+}
+
+/// Returns 1 once the run thread has finished (EOS or error), else 0.
+///
+/// # Safety
+/// `p` must be a live handle from [`g2g_pipeline_launch`].
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_is_done(p: *const Pipeline) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    match &p.join {
+        Some(j) => c_int::from(j.is_finished()),
+        None => 1,
+    }
+}
+
+/// Block until the run finishes, then write final stats to `*out` (if non-null).
+/// Returns 0 on a clean run, -1 if the pipeline errored or `p` is null.
+/// Idempotent: subsequent calls return the captured result.
+///
+/// # Safety
+/// `p` must be a live handle; `out`, if non-null, must point to writable
+/// [`G2gStats`] storage.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_wait(p: *mut Pipeline, out: *mut G2gStats) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_mut() }) else { return -1 };
+    if let Some(j) = p.join.take() {
+        // A panic in the run thread surfaces as a generic shutdown error.
+        p.result = Some(j.join().unwrap_or(Err(G2gError::Shutdown)));
+    }
+    match &p.result {
+        Some(Ok(stats)) => {
+            if !out.is_null() {
+                let c = G2gStats {
+                    frames_emitted: stats.frames_emitted,
+                    frames_consumed: stats.frames_consumed,
+                    frames_dropped: stats.frames_dropped,
+                };
+                // SAFETY: caller contract: `out` is writable.
+                unsafe { *out = c };
+            }
+            0
+        }
+        _ => -1,
+    }
+}
+
+/// Join the run thread (waiting for natural EOS, no early cancel yet) and free
+/// the handle. Passing null is a no-op.
+///
+/// # Safety
+/// `p` must be a handle from [`g2g_pipeline_launch`] not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_free(p: *mut Pipeline) {
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: caller contract: `p` came from `Box::into_raw` and is freed once.
+    let mut bx = unsafe { Box::from_raw(p) };
+    if let Some(j) = bx.join.take() {
+        let _ = j.join();
+    }
+}
+
+/// Free a string returned by this library (e.g. the `err_out` of
+/// [`g2g_pipeline_launch`]). Passing null is a no-op.
+///
+/// # Safety
+/// `s` must be a pointer this library returned and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_string_free(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    // SAFETY: caller contract: `s` came from `CString::into_raw` in this crate.
+    drop(unsafe { CString::from_raw(s) });
+}
+
+/// Project a [`BusMessage`] into the flat C shape: a kind, optional owned text,
+/// and two kind-specific numeric fields.
+fn project(msg: &BusMessage) -> (G2gBusKind, Option<String>, u64, u64) {
+    match msg {
+        BusMessage::StreamStart => (G2gBusKind::StreamStart, None, 0, 0),
+        BusMessage::Eos => (G2gBusKind::Eos, None, 0, 0),
+        BusMessage::Info(s) => (G2gBusKind::Info, Some(s.clone()), 0, 0),
+        BusMessage::Error(e) => (G2gBusKind::Error, Some(format_err(e)), 0, 0),
+        BusMessage::Warning(e) => (G2gBusKind::Warning, Some(format_err(e)), 0, 0),
+        BusMessage::StateChanged { old, new } => {
+            (G2gBusKind::StateChanged, None, state_code(*new), state_code(*old))
+        }
+        BusMessage::Buffering { percent } => (G2gBusKind::Buffering, None, u64::from(*percent), 0),
+        BusMessage::DurationChanged { duration_ns } => {
+            (G2gBusKind::DurationChanged, None, *duration_ns, 0)
+        }
+        // Qos / Tag / NegotiationFailed / AsyncDone / Custom: surfaced as Other
+        // until the C shape grows fields for them.
+        _ => (G2gBusKind::Other, None, 0, 0),
+    }
+}
+
+/// Stable small-integer code for a [`PipelineState`] (matches the doc on
+/// [`G2gBusMessage`]).
+fn state_code(s: PipelineState) -> u64 {
+    match s {
+        PipelineState::Null => 0,
+        PipelineState::Ready => 1,
+        PipelineState::Paused => 2,
+        PipelineState::Playing => 3,
+    }
+}
+
+/// Render a [`G2gError`] to a human string (the error type is `Debug`, not
+/// `Display`-rich, so debug formatting is the faithful projection).
+fn format_err(e: &G2gError) -> String {
+    let mut s = String::new();
+    let _ = write!(s, "{e:?}");
+    s
+}
+
+/// Write an owned C string to `*err_out` for the caller to free, if `err_out`
+/// is non-null.
+fn set_err(err_out: *mut *mut c_char, msg: &str) {
+    if err_out.is_null() {
+        return;
+    }
+    let c = CString::new(msg).unwrap_or_default();
+    // SAFETY: `err_out` non-null per the check; the caller owns the result and
+    // frees it with `g2g_string_free`.
+    unsafe { *err_out = c.into_raw() };
+}
