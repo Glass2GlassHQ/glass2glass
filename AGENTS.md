@@ -72,14 +72,16 @@ under test. Every test needs an assertion that fails if the feature breaks.
 
 ## Milestones
 
-Work is tracked by milestone `Mn`. The roadmap is `DESIGN.md` §4.10 (negotiation
-track M8–M12, plus the platform-element track: M5 RTSP, M13 Windows decode).
-Record each milestone in `CHANGELOG.md` under `## Unreleased`. Everything is
-pre-release `0.1.0`; nothing is published.
+Work is tracked by milestone `Mn`. The high-level roadmap is the top of
+`DESIGN_TODO.md`; `DESIGN.md` §4.10 maps the architectural tracks to their spec
+sections. Record each milestone in `CHANGELOG.md` under `## Unreleased`.
+Everything is pre-release `0.1.0`; nothing is published.
 
-`DESIGN_TODO.md` holds only outstanding tasks. When a task is done, remove it
-from `DESIGN_TODO.md` (do not leave "DONE" notes); if it established
-architecture worth keeping, document that in `DESIGN.md` instead.
+`DESIGN_TODO.md` is a terse catalogue of outstanding tasks only: no comparison
+to GStreamer, no list of historical accomplishments. When a task is done, remove
+it from `DESIGN_TODO.md` (do not leave "DONE" notes); if it established
+architecture worth keeping, document that in `DESIGN.md` instead. `DESIGN.md`
+describes only the current design.
 
 ## Platform notes
 
