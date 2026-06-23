@@ -10,6 +10,8 @@
 extern crate alloc;
 
 pub mod aacparse;
+pub mod appsink;
+pub mod appsrc;
 pub mod opusparse;
 pub mod vp8parse;
 pub mod vp9parse;

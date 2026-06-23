@@ -2942,6 +2942,7 @@ dependencies = [
  "roxmltree",
  "sha1",
  "smithay-client-toolkit",
+ "spin 0.9.8",
  "tokio",
  "url",
  "v4l",

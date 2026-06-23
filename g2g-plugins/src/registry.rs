@@ -148,6 +148,13 @@ pub fn default_registry() -> Registry {
         Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
         || Box::new(FileSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
     ));
+    // Application push source (M233): the real caps come from its `caps`
+    // property; buffers arrive from `appsrc::register_appsrc`.
+    reg.register_source(SourceFactory::new(
+        "appsrc",
+        crate::appsrc::registered_output_caps(),
+        || Box::new(crate::appsrc::AppSrc::new()),
+    ));
 
     // Video transforms.
     reg.register_launch(LaunchFactory::of::<VideoConvert>("videoconvert", || {
@@ -254,6 +261,11 @@ pub fn default_registry() -> Registry {
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));
+    // Application pull/callback sink (M233): hands buffers to a callback set via
+    // `appsink::set_appsink_callback`.
+    reg.register_launch(LaunchFactory::of::<crate::appsink::AppSink>("appsink", || {
+        Box::new(crate::appsink::AppSink::new())
+    }));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));

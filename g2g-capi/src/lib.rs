@@ -20,7 +20,7 @@
 //! still-running pipeline waits for its natural EOS. `appsrc` / `appsink`-style
 //! buffer injection and extraction are the planned next slice.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::Write as _;
 use std::os::raw::c_int;
 use std::ptr;
@@ -28,6 +28,8 @@ use std::thread::JoinHandle;
 
 use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
 use g2g_core::{Bus, BusMessage, G2gError, PipelineState};
+use g2g_plugins::appsink::{set_appsink_callback, SampleCallback};
+use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
@@ -256,6 +258,111 @@ pub unsafe extern "C" fn g2g_string_free(s: *mut c_char) {
     }
     // SAFETY: caller contract: `s` came from `CString::into_raw` in this crate.
     drop(unsafe { CString::from_raw(s) });
+}
+
+// ---- appsrc / appsink (M233) -------------------------------------------------
+
+/// Opaque application-source handle: the push end of an `appsrc channel=<name>`.
+/// Create it (and register the named feed) *before* launching the pipeline that
+/// contains the matching `appsrc`.
+#[derive(Debug)]
+pub struct AppSrc {
+    feed: AppSrcFeed,
+}
+
+/// Register an `appsrc` feed under `channel` (null -> "default") and return its
+/// push handle.
+///
+/// # Safety
+/// `channel`, if non-null, must be a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsrc_new(channel: *const c_char) -> *mut AppSrc {
+    // SAFETY: caller contract on `channel`.
+    let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
+    Box::into_raw(Box::new(AppSrc { feed: register_appsrc(name) }))
+}
+
+/// Push `len` bytes (copied) with timestamp `pts_ns`. Returns 1 if accepted, 0
+/// if the feed is full (retry) or the pipeline is gone / `p` is null.
+///
+/// # Safety
+/// `p` must be a live handle; `data` must point to `len` readable bytes (or be
+/// null with `len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsrc_push(
+    p: *const AppSrc,
+    data: *const u8,
+    len: usize,
+    pts_ns: u64,
+) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    if data.is_null() && len != 0 {
+        return 0;
+    }
+    // SAFETY: caller contract: `data` covers `len` bytes (empty when null).
+    let bytes = if len == 0 { &[][..] } else { unsafe { core::slice::from_raw_parts(data, len) } };
+    c_int::from(p.feed.push(bytes, pts_ns))
+}
+
+/// Signal end-of-stream on the feed: the `appsrc` emits a final EOS. Returns 1
+/// if delivered, 0 on a null/closed feed.
+///
+/// # Safety
+/// `p` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsrc_end_of_stream(p: *const AppSrc) -> c_int {
+    // SAFETY: caller contract: `p` is a live handle.
+    let Some(p) = (unsafe { p.as_ref() }) else { return 0 };
+    c_int::from(p.feed.end_of_stream())
+}
+
+/// Free an appsrc handle. Dropping it (without an explicit end-of-stream) also
+/// closes the feed, so the source EOSes. Null is a no-op.
+///
+/// # Safety
+/// `p` must be a handle from [`g2g_appsrc_new`], not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsrc_free(p: *mut AppSrc) {
+    if p.is_null() {
+        return;
+    }
+    // SAFETY: caller contract: `p` came from `Box::into_raw`, freed once.
+    drop(unsafe { Box::from_raw(p) });
+}
+
+/// Register the per-frame callback for `appsink channel=<name>` (null ->
+/// "default"). Call before launch. The callback fires on the pipeline's run
+/// thread with a borrowed view of each frame's bytes (copy to keep them); EOS is
+/// signalled with `data == null, len == 0`. A null `cb` clears nothing and is
+/// ignored.
+///
+/// # Safety
+/// `channel`, if non-null, must be a valid C string; `cb`/`user` must remain
+/// valid and safe to invoke from another thread until the pipeline finishes.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_appsink_set_callback(
+    channel: *const c_char,
+    cb: Option<SampleCallback>,
+    user: *mut c_void,
+) {
+    let Some(cb) = cb else { return };
+    // SAFETY: caller contract on `channel`.
+    let name = unsafe { opt_cstr(channel) }.unwrap_or("default");
+    set_appsink_callback(name, cb, user);
+}
+
+/// Borrow a C string as `&str`, or `None` if null / not UTF-8.
+///
+/// # Safety
+/// `p`, if non-null, must be a valid NUL-terminated C string living for the
+/// returned borrow.
+unsafe fn opt_cstr<'a>(p: *const c_char) -> Option<&'a str> {
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: caller contract: `p` is a valid C string.
+    unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
 /// Project a [`BusMessage`] into the flat C shape: a kind, optional owned text,

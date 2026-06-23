@@ -10,6 +10,7 @@
 #ifndef G2G_H
 #define G2G_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -76,6 +77,42 @@ void g2g_pipeline_free(G2gPipeline *p);
 
 /* Free a string returned by this library (e.g. g2g_pipeline_launch err_out). */
 void g2g_string_free(char *s);
+
+/* ---- appsrc / appsink (M233) -------------------------------------------------
+ *
+ * The application feeds buffers into an `appsrc channel=<name>` and/or receives
+ * them from an `appsink channel=<name>`. Register the feed / callback BEFORE
+ * launching the pipeline that names the matching channel (the channel name
+ * defaults to "default"). Frame bytes are copied across the boundary in v1.
+ */
+
+/* Opaque appsrc push handle. */
+typedef struct AppSrc G2gAppSrc;
+
+/* appsink per-frame callback. Invoked on the pipeline's run thread with a
+ * borrowed view of the frame bytes (copy them if you need to keep them).
+ * End-of-stream is delivered as data == NULL, len == 0. Must be thread-safe. */
+typedef void (*G2gAppSinkCallback)(const uint8_t *data, size_t len,
+                                   uint64_t pts_ns, void *user);
+
+/* Register an appsrc feed under `channel` (NULL -> "default"). */
+G2gAppSrc *g2g_appsrc_new(const char *channel);
+
+/* Push `len` bytes (copied) with timestamp `pts_ns`. 1 if accepted, 0 if the
+ * feed is full (retry) or the pipeline is gone. */
+int g2g_appsrc_push(const G2gAppSrc *src, const uint8_t *data, size_t len,
+                    uint64_t pts_ns);
+
+/* Signal end-of-stream; the appsrc emits a final EOS. */
+int g2g_appsrc_end_of_stream(const G2gAppSrc *src);
+
+/* Free an appsrc handle (also closes the feed). */
+void g2g_appsrc_free(G2gAppSrc *src);
+
+/* Register the per-frame callback for `appsink channel=<name>` (NULL ->
+ * "default"). Call before launch. A NULL callback is ignored. */
+void g2g_appsink_set_callback(const char *channel, G2gAppSinkCallback cb,
+                              void *user);
 
 #ifdef __cplusplus
 }

@@ -262,6 +262,9 @@ mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core", features = ["runtime"] }
+# no_std mutex for the appsrc/appsink named-channel globals (the app<->element
+# bridge). Same crate the core's runtime channel uses.
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 # Dynamic plugin loader (plugin-loader feature): cross-platform `dlopen`/`dlsym`
 # over the loaded `cdylib`. The host keeps each `Library` alive for the process
 # lifetime (dropping it unmaps the code the registered elements run from).
