@@ -1,0 +1,464 @@
+//! Native WebRTC egress sink (`WebRtcSink`): publishes a pipeline's encoded
+//! H.264 to a WHIP server over a WebRTC PeerConnection, built on the sans-IO
+//! [`str0m`] stack (ICE / DTLS / SRTP / RTP). This is the native counterpart of
+//! the browser-only data-channel [`crate::webrtcsrc::WebRtcSrc`], and the
+//! WebRTC analog of `RtmpSink` (publish encoded media to a server endpoint).
+//!
+//! Shape, mirroring the other tokio network sinks (`UdpSink`, `SrtSink`):
+//! - `configure_pipeline` accepts `Caps::CompressedVideo { codec: H264 }`.
+//! - On the first `DataFrame`, the sink performs the WHIP handshake: it builds a
+//!   str0m `Rtc` offering a single send-only H.264 video m-line, POSTs the SDP
+//!   offer to the WHIP endpoint (reqwest, `application/sdp`), applies the
+//!   answer, then spawns a background task that owns the `Rtc` + a tokio
+//!   `UdpSocket` and runs str0m's `poll_output` / `handle_input` loop.
+//! - Each subsequent access unit is handed to that task over a bounded channel;
+//!   the task feeds it to str0m's H.264 writer, which packetizes + SRTP-encrypts
+//!   and emits the UDP datagrams. The element itself never touches the `Rtc`
+//!   (it lives on the task), so `WebRtcSink` is naturally `Send`.
+//!
+//! str0m is sans-IO, so g2g owns the socket and the timer, exactly the contract
+//! the `srt` / `rtspserver` modules already follow. The pure-Rust `rust-crypto`
+//! backend is selected (no OpenSSL system dep). Behind the `webrtc` feature.
+//!
+//! Status: compile-validated against str0m 0.20. The live WHIP publish path
+//! (real ICE host-candidate selection, the DTLS/SRTP handshake against a real
+//! server, and browser playback) is owed an on-network validation, like the
+//! other egress elements (`rtmpsink`); the sandbox blocks the required ports.
+//!
+//! H.264 framing: the sink forwards each access unit as g2g delivers it
+//! (Annex-B, the pipeline convention); str0m's H.264 packetizer splits NAL
+//! units for RTP. Confirming the exact framing str0m expects is part of the
+//! owed runtime validation.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::time::Instant;
+
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+
+use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::crypto::from_feature_flags;
+use str0m::format::Codec;
+use str0m::media::{Direction, MediaKind, MediaTime, Mid, Pt};
+use str0m::net::{Protocol, Receive};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, VideoCodec,
+};
+
+use crate::filesink::io_err;
+
+/// Default bounded depth of the element->session media channel. Backpressures
+/// the pipeline if the session task falls behind the encoder.
+const DEFAULT_QUEUE_DEPTH: usize = 256;
+
+/// One encoded access unit handed from the element to the session task.
+#[derive(Debug)]
+struct MediaUnit {
+    pts_ns: u64,
+    data: Vec<u8>,
+}
+
+/// WHIP-publishing WebRTC egress sink. See the module docs.
+pub struct WebRtcSink {
+    whip_url: String,
+    bearer: Option<String>,
+    queue_depth: usize,
+    configured: bool,
+    /// Set on the first frame, after the WHIP handshake spawns the session task.
+    tx: Option<mpsc::Sender<MediaUnit>>,
+    frames_sent: u64,
+}
+
+impl core::fmt::Debug for WebRtcSink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WebRtcSink")
+            .field("whip_url", &self.whip_url)
+            .field("configured", &self.configured)
+            .field("frames_sent", &self.frames_sent)
+            .finish()
+    }
+}
+
+impl WebRtcSink {
+    /// Publish to the given WHIP endpoint URL (e.g.
+    /// `http://localhost:8889/mystream/whip` on a mediamtx server).
+    pub fn new(whip_url: impl Into<String>) -> Self {
+        Self {
+            whip_url: whip_url.into(),
+            bearer: None,
+            queue_depth: DEFAULT_QUEUE_DEPTH,
+            configured: false,
+            tx: None,
+            frames_sent: 0,
+        }
+    }
+
+    /// Attach a bearer token, sent as `Authorization: Bearer <token>` on the
+    /// WHIP POST (some servers require it).
+    pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
+        self.bearer = Some(token.into());
+        self
+    }
+
+    /// Override the bounded element->session media-channel depth.
+    pub fn with_queue_depth(mut self, depth: usize) -> Self {
+        self.queue_depth = depth.max(1);
+        self
+    }
+
+    /// Number of access units handed to the WebRTC session so far.
+    pub fn frames_sent(&self) -> u64 {
+        self.frames_sent
+    }
+
+    /// Build the `Rtc`, do the WHIP offer/answer exchange, and spawn the session
+    /// task. Runs on the first frame because it is async (the runner drives
+    /// `process` inside a tokio runtime, as for the other network sinks).
+    async fn start_session(&mut self) -> Result<(), G2gError> {
+        // ICE needs a routable host candidate; pick the route-local IP via the
+        // UDP connect trick (no packet is sent, the OS just resolves the source
+        // address for the route). Falls back to loopback for offline use.
+        let host_ip = select_host_ip();
+        let socket = UdpSocket::bind((host_ip, 0)).await.map_err(io_err)?;
+        let local = socket.local_addr().map_err(io_err)?;
+
+        // rust-crypto backend (pure Rust, no OpenSSL); only H.264 offered.
+        let mut rtc = RtcConfig::new()
+            .set_crypto_provider(Arc::new(from_feature_flags()))
+            .clear_codecs()
+            .enable_h264(true)
+            .build(Instant::now());
+
+        let candidate = Candidate::host(local, "udp").map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        rtc.add_local_candidate(candidate);
+
+        // Offer a single send-only H.264 video m-line.
+        let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
+            let mut api = rtc.sdp_api();
+            let mid = api.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+            let (offer, pending) = api.apply().ok_or(G2gError::Hardware(HardwareError::Other))?;
+            (offer.to_sdp_string(), pending, mid)
+        };
+
+        // WHIP: POST the offer, receive the answer SDP, apply it.
+        let answer_sdp = whip_post(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
+        let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+
+        let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
+        tokio::spawn(run_session(rtc, socket, local, mid, rx));
+        self.tx = Some(tx);
+        Ok(())
+    }
+}
+
+/// `WebRtcSink`'s settable properties: the WHIP endpoint URL and an optional
+/// bearer token, so a `gst-launch` line can target a server without the builder.
+static WEBRTCSINK_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("location", PropKind::Str, "WHIP endpoint URL to publish to"),
+    PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token for the WHIP POST"),
+];
+
+/// The H.264 sink caps this element accepts (any geometry / framerate).
+fn h264_any() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    }
+}
+
+impl AsyncElement for WebRtcSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&h264_any())
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Accepts(CapsSet::one(h264_any()))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        match absolute_caps {
+            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => {
+                self.configured = true;
+                Ok(ConfigureOutcome::Accepted)
+            }
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "WebRTC sink",
+            "Sink/Network/WebRTC",
+            "Publishes H.264 to a WHIP server over WebRTC (str0m: ICE/DTLS/SRTP)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WEBRTCSINK_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            // `location` is the gst-canonical name; `whip-url` is accepted too.
+            "location" | "whip-url" => {
+                self.whip_url = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            "bearer" => {
+                let token = value.as_str().ok_or(PropError::Type)?;
+                self.bearer = if token.is_empty() { None } else { Some(token.into()) };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
+            "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            _ => None,
+        }
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let unit =
+                        MediaUnit { pts_ns: frame.timing.pts_ns, data: slice.as_slice().to_vec() };
+                    if self.tx.is_none() {
+                        self.start_session().await?;
+                    }
+                    if let Some(tx) = &self.tx {
+                        // Bounded send: backpressures the pipeline if the session
+                        // task is behind. A closed channel means the session ended
+                        // (ICE disconnect); surface it as shutdown.
+                        tx.send(unit).await.map_err(|_| G2gError::Shutdown)?;
+                    }
+                    self.frames_sent += 1;
+                }
+                // The session keeps running on the spawned task; dropping the
+                // sender on element drop closes the channel and the task exits
+                // once the peer disconnects. (Graceful WHIP DELETE on EOS is a
+                // follow-up.)
+                PipelinePacket::Eos => {}
+                // Geometry refinement lives in the in-band SPS, not the m-line.
+                PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::Flush => {}
+                PipelinePacket::Segment(_) => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+/// POST a WHIP SDP offer and return the answer SDP. WHIP uses `application/sdp`
+/// bodies (the answer is the 201 response body).
+async fn whip_post(
+    url: &str,
+    bearer: Option<&str>,
+    offer_sdp: String,
+) -> Result<String, G2gError> {
+    let client = reqwest::Client::new();
+    let mut req = client.post(url).header("Content-Type", "application/sdp").body(offer_sdp);
+    if let Some(token) = bearer {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let resp = req.send().await.map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    if !resp.status().is_success() {
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    resp.text().await.map_err(|_| G2gError::Hardware(HardwareError::Other))
+}
+
+/// The sans-IO driving loop: owns the `Rtc` and the UDP socket, drains
+/// `poll_output` to a deadline, then waits on incoming UDP, an outgoing access
+/// unit, or the str0m timeout, whichever comes first.
+async fn run_session(
+    mut rtc: Rtc,
+    socket: UdpSocket,
+    local: SocketAddr,
+    mid: Mid,
+    mut rx: mpsc::Receiver<MediaUnit>,
+) {
+    let mut buf = alloc::vec![0u8; 2000];
+    // The negotiated H.264 payload type, discovered once the writer exists.
+    let mut pt: Option<Pt> = None;
+
+    loop {
+        // Drain pending output until str0m asks us to wait for a deadline.
+        let deadline = loop {
+            match rtc.poll_output() {
+                Ok(Output::Timeout(t)) => break t,
+                Ok(Output::Transmit(t)) => {
+                    let _ = socket.send_to(&t.contents, t.destination).await;
+                }
+                Ok(Output::Event(Event::IceConnectionStateChange(
+                    IceConnectionState::Disconnected,
+                ))) => return,
+                Ok(Output::Event(_)) => {}
+                Err(_) => return,
+            }
+        };
+
+        let timeout = deadline.saturating_duration_since(Instant::now());
+
+        tokio::select! {
+            // Incoming UDP (STUN / DTLS / RTCP from the peer).
+            r = socket.recv_from(&mut buf) => {
+                let Ok((n, source)) = r else { return };
+                if let Ok(contents) = (&buf[..n]).try_into() {
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive { proto: Protocol::Udp, source, destination: local, contents },
+                    );
+                    if rtc.handle_input(input).is_err() {
+                        return;
+                    }
+                }
+            }
+            // An encoded access unit to publish.
+            unit = rx.recv() => {
+                let Some(unit) = unit else { return };
+                if pt.is_none() {
+                    if let Some(writer) = rtc.writer(mid) {
+                        pt = writer
+                            .payload_params()
+                            .find(|p| p.spec().codec == Codec::H264)
+                            .map(|p| p.pt());
+                    }
+                }
+                if let Some(p) = pt {
+                    let rtp_time = MediaTime::from_90khz(pts_ns_to_90khz(unit.pts_ns));
+                    if let Some(writer) = rtc.writer(mid) {
+                        let _ = writer.write(p, Instant::now(), rtp_time, unit.data);
+                    }
+                }
+            }
+            // str0m's timer fired.
+            _ = tokio::time::sleep(timeout) => {
+                if rtc.handle_input(Input::Timeout(Instant::now())).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Map a nanosecond PTS to the 90 kHz RTP video clock. `u128` intermediate to
+/// avoid overflow on large timestamps.
+fn pts_ns_to_90khz(pts_ns: u64) -> u64 {
+    ((pts_ns as u128 * 90_000) / 1_000_000_000) as u64
+}
+
+/// Pick a route-local host IP for the ICE host candidate. Connecting a UDP
+/// socket sends no packet; it only makes the OS resolve the source address for
+/// the route to a public address. Falls back to loopback when offline.
+fn select_host_ip() -> IpAddr {
+    if let Ok(s) = StdUdpSocket::bind(("0.0.0.0", 0)) {
+        if s.connect(("8.8.8.8", 80)).is_ok() {
+            if let Ok(addr) = s.local_addr() {
+                return addr.ip();
+            }
+        }
+    }
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_h264_rejects_raw() {
+        let sink = WebRtcSink::new("http://localhost:8889/s/whip");
+        assert!(sink.intercept_caps(&h264_any()).is_ok());
+        let rgba = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        };
+        assert_eq!(sink.intercept_caps(&rgba), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn configure_requires_h264() {
+        let mut sink = WebRtcSink::new("http://localhost:8889/s/whip");
+        assert!(sink.configure_pipeline(&h264_any()).is_ok());
+        let mut sink2 = WebRtcSink::new("http://localhost:8889/s/whip");
+        let raw = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::I420,
+            width: Dim::Fixed(2),
+            height: Dim::Fixed(2),
+            framerate: Rate::Any,
+        };
+        assert!(matches!(sink2.configure_pipeline(&raw), Err(G2gError::CapsMismatch)));
+    }
+
+    #[test]
+    fn builders_set_fields() {
+        let sink = WebRtcSink::new("http://h/whip").with_bearer("tok").with_queue_depth(8);
+        assert_eq!(sink.bearer.as_deref(), Some("tok"));
+        assert_eq!(sink.queue_depth, 8);
+        assert_eq!(sink.frames_sent(), 0);
+    }
+
+    #[test]
+    fn location_and_bearer_properties_round_trip() {
+        let mut sink = WebRtcSink::new("http://h/whip");
+        sink.set_property("location", PropValue::Str("http://srv:8889/s/whip".into())).unwrap();
+        assert_eq!(sink.whip_url, "http://srv:8889/s/whip");
+        assert_eq!(sink.get_property("location"), Some(PropValue::Str("http://srv:8889/s/whip".into())));
+        // `whip-url` is an accepted alias for the same field.
+        sink.set_property("whip-url", PropValue::Str("http://x/whip".into())).unwrap();
+        assert_eq!(sink.whip_url, "http://x/whip");
+        sink.set_property("bearer", PropValue::Str("secret".into())).unwrap();
+        assert_eq!(sink.bearer.as_deref(), Some("secret"));
+        // Empty bearer clears it; unknown name and wrong type are distinct errors.
+        sink.set_property("bearer", PropValue::Str(String::new())).unwrap();
+        assert_eq!(sink.bearer, None);
+        assert_eq!(sink.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
+        assert_eq!(sink.set_property("location", PropValue::Int(1)), Err(PropError::Type));
+    }
+
+    #[test]
+    fn pts_maps_to_90khz() {
+        // 1 second -> 90000 ticks; 1/30 s -> 3000 ticks.
+        assert_eq!(pts_ns_to_90khz(1_000_000_000), 90_000);
+        assert_eq!(pts_ns_to_90khz(33_333_333), 2_999);
+        assert_eq!(pts_ns_to_90khz(0), 0);
+    }
+}

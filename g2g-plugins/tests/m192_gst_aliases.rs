@@ -87,6 +87,21 @@ async fn avdec_h264_alias_resolves_to_ffmpegdec() {
     }
 }
 
+/// The native WebRTC WHIP sink is launch-parsable under `webrtcsink`, with the
+/// `location` property targeting the endpoint. We only assert the name resolves
+/// (the live publish path needs a WHIP server + network); a parse error naming
+/// `webrtcsink` would be the regression we guard against.
+#[cfg(feature = "webrtc")]
+#[test]
+fn webrtcsink_resolves_from_launch() {
+    let reg = default_registry();
+    let line = "videotestsrc num-buffers=1 ! webrtcsink location=http://localhost:8889/s/whip";
+    if let Err(e) = parse_launch(&reg, line) {
+        let msg = format!("{e}");
+        assert!(!msg.contains("webrtcsink"), "webrtcsink must resolve as a launch element: {msg}");
+    }
+}
+
 /// M237: the ffmpeg VAAPI hwaccel backend is launch-parsable under its own name
 /// and the gst VA-API names resolve to it (preferred over the cros-codecs
 /// `vaapidec`, which is blocked on Mesa radeonsi). Like the avdec_h264 test we

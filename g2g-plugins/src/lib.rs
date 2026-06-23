@@ -184,6 +184,12 @@ pub mod srtsrc;
 #[cfg(feature = "udp-egress")]
 pub mod udpsink;
 
+// Native WebRTC egress sink (WebRtcSink): publishes H.264 to a WHIP server over
+// a str0m-driven PeerConnection (ICE/DTLS/SRTP). Distinct from the wasm-only
+// data-channel webrtcsrc; gated behind the std `webrtc` feature.
+#[cfg(feature = "webrtc")]
+pub mod webrtcsink;
+
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads
 // H.264 (rtpdepay) into Annex-B access units, the receive-side inverse of
 // UdpSink. Raw RTP (no RTSP/SDP); see module docs.

@@ -100,6 +100,8 @@ use crate::rtmpsink::RtmpSink;
 use crate::rtmpsrc::RtmpSrc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
+#[cfg(feature = "webrtc")]
+use crate::webrtcsink::WebRtcSink;
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 use crate::alsasink::AlsaSink;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
@@ -497,6 +499,13 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())
+    }));
+    // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
+    // defaults empty (set it via `webrtcsink location=...`); publishing starts
+    // on the first frame.
+    #[cfg(feature = "webrtc")]
+    reg.register_launch(LaunchFactory::new("webrtcsink", Vec::new(), || {
+        Box::new(WebRtcSink::new(""))
     }));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
     reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || Box::new(KmsSink::new())));

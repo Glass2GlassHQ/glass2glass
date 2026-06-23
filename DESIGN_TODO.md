@@ -136,8 +136,14 @@ leverage first:
 - **RTCP sender reports** (RFC 3550 SR) on `UdpSink`.
 - **RTSP server:** TCP-interleaved transport; RTCP / keepalive during PLAY.
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
-- **WebRTC sendrecv full-stack** (`WebRtcBin`-equivalent: ICE, DTLS-SRTP, full
-  media-engine negotiation; `WebRtcSrc` is data-channel ingest only).
+- **WebRTC.** `WebRtcSink` (WHIP egress, `webrtc` feature) publishes H.264 to a
+  WHIP server over a `str0m` PeerConnection (ICE / DTLS / SRTP, pure-Rust
+  crypto); compile-validated against str0m 0.20. Remaining: on-network
+  validation against a real WHIP server (mediamtx) + browser playback; an audio
+  (Opus) track; WHIP `DELETE` + graceful flush on EOS; keyframe-request (PLI)
+  handling; a `WebRtcSrc` / WHEP ingest sibling (also on str0m). The browser
+  data-channel `WebRtcSrc` stays wasm-only. A full `WebRtcBin`-equivalent
+  sendrecv media engine is the larger track this seeds.
 
 ## Adaptive streaming (HLS / DASH)
 

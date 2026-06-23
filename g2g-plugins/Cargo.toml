@@ -42,6 +42,15 @@ rtmp = ["std", "tokio/net", "tokio/io-util"]
 # depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
 # and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
 udp-ingress = ["std", "tokio/net"]
+# Native WebRTC egress sink (WebRtcSink): publishes a pipeline's encoded H.264 to
+# a WHIP server over a str0m-driven PeerConnection (ICE / DTLS / SRTP). str0m is a
+# sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
+# UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
+# system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
+# tokio. NOTE: str0m 0.20 needs a rustc newer than the workspace MSRV 1.75; this
+# feature is off by default, so the no_std baseline and MSRV floor are unaffected
+# (same situation noted for AudioResample / rubato).
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
@@ -294,6 +303,10 @@ audiopus = { version = "0.3.0-rc.0", optional = true }
 # default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
 # used. Runs on the caller's tokio runtime.
 reqwest = { version = "0.12", optional = true }
+# str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
+# the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
+# Drives the native WebRtcSink (the `webrtc` feature).
+str0m = { version = "0.20", optional = true, default-features = false, features = ["rust-crypto"] }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }

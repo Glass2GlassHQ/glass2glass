@@ -650,8 +650,8 @@
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
-                <h3>Egress: RTP packetize + UDP</h3>
-                <p>Sans-IO <code>RtpH264Packetizer</code> (RFC 3550 + RFC 6184) and a tokio-driven <code>UdpSink</code> with 90 kHz PTS mapping. Honors receive-side NACK by retransmitting from a bounded send history. Loopback-verified; RTSP ANNOUNCE next.</p>
+                <h3>Egress: RTP / UDP + WebRTC (WHIP)</h3>
+                <p>Sans-IO <code>RtpH264Packetizer</code> (RFC 3550 + RFC 6184) and a tokio-driven <code>UdpSink</code> with 90 kHz PTS mapping, honoring receive-side NACK from a bounded send history. <code>WebRtcSink</code> publishes H.264 to a WHIP server over a <code>str0m</code> PeerConnection (ICE / DTLS / SRTP, pure-Rust crypto) &mdash; g2g owns the socket, str0m owns the protocol.</p>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
