@@ -346,9 +346,12 @@ publish is user-side. RTP **RTX (RFC 4588) landed M222** (`rtx` module +
 `UdpSink`/`UdpSrc` `with_rtx`). **RTSP server started M223** (`rtspserversink` +
 sans-IO `rtspserver` responder; PLAY-direction serving validated, ANNOUNCE/RECORD
 spoken by the responder). **SRT both directions started M224** (`srtsink`/`srtsrc`
-+ sans-IO `srt` module; HSv5 handshake + NAK ARQ validated g2g<->g2g). Remaining:
-SRT encryption/TSBPD/congestion + real-peer interop, the RTSP ANNOUNCE/RECORD
-*source* element, multi-client RTSP. RTP **FEC (ULPFEC) landed M225** (`ulpfec`
++ sans-IO `srt` module; HSv5 handshake + NAK ARQ validated g2g<->g2g). The RTSP
+**ANNOUNCE/RECORD source landed M228** (`rtspserversrc`: accepts a publisher and
+depayloads its RTP H.264, validated g2g<->g2g over loopback). Remaining:
+SRT encryption/TSBPD/congestion + real-peer interop, multi-client RTSP (both
+`rtspserversink` serving N players and `rtspserversrc` accepting N publishers).
+RTP **FEC (ULPFEC) landed M225** (`ulpfec`
 module + `UdpSink`/`UdpSrc` `with_fec`; jitter buffer / RTCP / NACK / RTX / FEC
 all done now); FlexFEC + multi-level burst FEC remain. See the RTMP/SRT and RTP
 entries under `### High`.

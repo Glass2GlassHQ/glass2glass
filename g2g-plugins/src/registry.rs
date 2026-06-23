@@ -82,6 +82,8 @@ use crate::udpsrc::UdpSrc;
 use crate::udpsink::UdpSink;
 #[cfg(feature = "rtsp-server")]
 use crate::rtspserversink::RtspServerSink;
+#[cfg(feature = "rtsp-server")]
+use crate::rtspserversrc::RtspServerSrc;
 #[cfg(feature = "srt")]
 use crate::srtsink::SrtSink;
 #[cfg(feature = "srt")]
@@ -400,6 +402,17 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<RtspServerSink>("rtspserversink", || {
         Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap()))
     }));
+    #[cfg(feature = "rtsp-server")]
+    reg.register_source(SourceFactory::new(
+        "rtspserversrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
+    ));
     #[cfg(feature = "srt")]
     reg.register_source(SourceFactory::new(
         "srtsrc",

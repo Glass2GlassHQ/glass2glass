@@ -164,6 +164,8 @@ pub mod rtspsrc;
 pub mod rtspserver;
 #[cfg(feature = "rtsp-server")]
 pub mod rtspserversink;
+#[cfg(feature = "rtsp-server")]
+pub mod rtspserversrc;
 
 // Sans-IO SRT (Secure Reliable Transport) wire layer + handshake + ARQ (always
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.
