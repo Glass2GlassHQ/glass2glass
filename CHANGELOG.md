@@ -5,6 +5,7 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+- M230: multi-client RTSP server (`rtspserversink` serves N players) - per-client handshake + per-client RTP session; the first buffer blocks until one player PLAYs, then every buffer also accepts new players non-blocking and broadcasts to all, reaping the disconnected.
 - M229: SRT encryption (`srtsink`/`srtsrc` `with_passphrase`) - AES-128-CTR payload cipher, a PBKDF2-HMAC-SHA1 passphrase KEK, RFC 3394 key wrap, and the stream key exchanged in the handshake KM extension. New `srtcrypto` module behind the `srt` feature.
 - M228: RTSP server source (`rtspserversrc`) - accepts a publisher (ANNOUNCE/SETUP/RECORD) and depayloads its RTP H.264, the ingest inverse of `rtspserversink`.
 - M227: field-level bidirectional caps coupling (`DerivedCoupled` + passthrough mask); a geometry/rate pin behind a passthrough transform now couples back (resolves the M188 `scale_then_convert` limit).

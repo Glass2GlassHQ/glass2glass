@@ -351,10 +351,13 @@ spoken by the responder). **SRT both directions started M224** (`srtsink`/`srtsr
 depayloads its RTP H.264, validated g2g<->g2g over loopback). **SRT encryption
 landed M229** (`srtsink`/`srtsrc` `with_passphrase`: AES-128-CTR + PBKDF2 KEK +
 RFC 3394 key wrap in the KM handshake extension, `srtcrypto` module; encrypted
-round-trip incl. retransmit validated g2g<->g2g). Remaining: SRT TSBPD/congestion
-+ real-peer interop (libsrt/ffmpeg), AES-256 + key rotation, multi-client RTSP
-(both `rtspserversink` serving N players and `rtspserversrc` accepting N
-publishers). RTP **FEC (ULPFEC) landed M225** (`ulpfec`
+round-trip incl. retransmit validated g2g<->g2g). **Multi-client RTSP serving
+landed M230** (`rtspserversink` serves N players: per-client handshake + per-client
+RTP session, non-blocking accept + broadcast, validated with two players over
+loopback). Remaining: SRT TSBPD/congestion + real-peer interop (libsrt/ffmpeg),
+AES-256 + key rotation. (Multi-*publisher* `rtspserversrc` is N/A: a source emits
+one stream; multiple publishers would need a muxer in front, not a multi-accept
+source.) RTP **FEC (ULPFEC) landed M225** (`ulpfec`
 module + `UdpSink`/`UdpSrc` `with_fec`; jitter buffer / RTCP / NACK / RTX / FEC
 all done now); FlexFEC + multi-level burst FEC remain. See the RTMP/SRT and RTP
 entries under `### High`.
