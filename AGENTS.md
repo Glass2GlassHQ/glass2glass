@@ -43,6 +43,10 @@ Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
 - **Unsafe:** workspace lints set `unsafe_op_in_unsafe_fn = "deny"` and
   `undocumented_unsafe_blocks = "warn"`. Every `unsafe { }` needs a `// SAFETY:`
   comment. Types need `Debug` (`missing_debug_implementations = "warn"`).
+- **Commits:** keep messages terse, a subject line plus at most a one or two
+  line body. No `Co-Authored-By` trailer, ever: do not add Claude / Opus / any
+  AI assistant as a co-author. Same for `CHANGELOG.md`, one terse line per
+  milestone.
 
 ## Build & test (PowerShell)
 
