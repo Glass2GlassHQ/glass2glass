@@ -186,66 +186,19 @@ recorded in DESIGN.md §4.16. Remaining future work (not started):
 - Plugin signing / capability gating.
 - A C-FFI loader entry so non-cargo build systems can produce plugins.
 
-## gst-launch DSL harmonization (M182+)
+## gst-launch DSL harmonization
 
-The `parse_launch` DSL is a GStreamer-compatibility surface; its human-facing
-vocabulary is being aligned to gst so a `gst-launch` line ports with minimal
-edits (the typed core is unaffected, only the string<->enum boundary).
+The `parse_launch` DSL is aligned to GStreamer's vocabulary (format / element /
+property names, the caps grammar); that alignment is done (DESIGN.md §4.16). The
+one negotiation follow-up it surfaced is still open:
 
-- **M182 (done).** Format names uppercase (`NV12`/`RGBA`/`YUY2`/`S16LE`,
-  case-insensitive parse + old lowercase aliases); `videoflip method` uses gst
-  nicknames (`clockwise`/`counterclockwise`/`horizontal-flip`/`vertical-flip`/
-  `none`) with `FlipMethod::Identity` default; `videotestsrc pattern`
-  `bar`/`checkers-8`. Old g2g spellings remain aliases.
-
-- **Remaining gst-porting gaps (uncovered by M182, both real, both > naming):**
-  - **Format-less / partial geometry caps (DONE, M184).** `capsfilter` parses
-    `video/x-raw,width=160,height=120` (no `format`) by expanding to a `CapsSet`
-    over all raw formats at that geometry (`parse_caps_set`); the solver
-    intersects down to the upstream format. `audio/x-raw` likewise.
-  - **Caps-driven transform operation (videoscale M185, videoconvert M186).**
-    Added `AsyncElement::configure_output(output_caps)` (default no-op,
-    dyn-mirrored), delivered by the graph_runner + coordinator from the
-    already-fixated output link. `videoscale` (geometry) and `videoconvert`
-    (format) with unset props take their target from a downstream capsfilter
-    (`videoscale ! video/x-raw,width=160`, `videoconvert ! video/x-raw,format=NV12`);
-    props still override; a bare instance is a passthrough. REMAINING:
-    - **`audioresample` (rate) DONE, M187.** `Caps::Audio` gained an
-      `ANY_SAMPLE_RATE` (0) wildcard (a sentinel, not a type change, to avoid
-      rippling the bare-`u32` `sample_rate` across ~50 audio files). `intersect`
-      wildcards it and `fixate` rejects it for raw PCM only; compressed audio
-      keeps `0` as its "unknown until parsed" nominal value. `audioresample`
-      (auto by default) takes its rate from a downstream capsfilter
-      (`audioresample ! audio/x-raw,rate=16000`); property still overrides.
-    - **Backward coupling through a format-changing transform.**
-      `backward_feasible()` returns `None` for `DerivedOutput`, so a downstream
-      pin behind a genuinely format-changing transform (a decoder, or a
-      convert-that-rescales) does not couple back and fails loud (`CapsMismatch`).
-      Generalize `DerivedCoupled`'s field-level inverse to the invertible fields
-      of a `DerivedOutput` when a real element drives it. (Linear passthrough
-      coupling, incl. stacked auto transforms, is done; see DESIGN.md §4.13.10.)
-    - **Mid-stream re-cascade `configure_output` DONE, M189.** A caps-driven
-      transform now re-resolves its output target on a mid-stream `CapsChanged`,
-      not only at startup: both transform-arm re-cascade paths (the linear
-      coordinator arm in `runner.rs` and the DAG `transform_arm` in
-      `graph_runner.rs`) call `configure_output(&forward_caps)` after
-      `configure_pipeline` accepts. (Startup already delivered it on both paths,
-      M185.) The remaining runners that lacked it (`run_simple_pipeline`,
-      `run_source_fanout`, `run_fanin_sink`) carry no caps-driven-transform slot
-      with a downstream link, source->sink, source->tee->sinks, and
-      sources->merger->sink respectively, so there is nothing to resolve there;
-      the transform-bearing runners (`run_source_transform_sink`,
-      `run_linear_chain`, `run_muxer_sink`) all route through the coordinator or
-      the DAG runner, which deliver it.
-  - Decided **pragmatic** (keep convenience props as extensions + make the caps
-    route work) over strict gst-only; the items above are what "make the caps
-    route work" actually requires.
-
-- **M183 (done): videocrop / videobox property-model alignment.** `videocrop`
-  now uses gst's per-edge insets `top/bottom/left/right` (was `x/y/width/height`);
-  `videobox` uses gst's signed `top/bottom/left/right` (>0 crop, <0 border) +
-  `fill` (added `yellow`), replacing the unsigned `border-*`. Old names replaced,
-  not aliased (pre-release).
+- **Backward coupling through a format-changing transform.**
+  `backward_feasible()` returns `None` for `DerivedOutput`, so a downstream pin
+  behind a genuinely format-changing transform (a decoder, or a
+  convert-that-rescales) does not couple back and fails loud (`CapsMismatch`).
+  Generalize `DerivedCoupled`'s field-level inverse to the invertible fields of a
+  `DerivedOutput` when a real element drives it. (Linear passthrough coupling,
+  incl. stacked auto transforms, is done; see DESIGN.md §4.13.10.)
 
 ## Tensor substrate / zero-copy layout transforms (M180+)
 
@@ -256,13 +209,6 @@ zero-copy. Tensor is the substrate *beneath* the semantic `Caps`, not a
 replacement for them; planar/subsampled video (NV12, I420) is a *list* of views,
 not one tensor. The zero-copy win is real but bounded to layout-preserving ops
 (decode / colorspace / normalize / resample are arithmetic and copy regardless).
-
-- **M180 (done).** `g2g-core::tensor::TensorView {dtype, shape, signed byte
-  strides, offset}` (fixed-rank, `Copy`, heap-free) + `MemoryDomain::SystemView`
-  (`Arc<[u8]>` backing + view). `VideoFlip` flips packed RGBA/BGRA zero-copy by
-  composing strides on the same `Arc`; planar / owned-buffer inputs keep the copy
-  path. Proven by `m180_zerocopy_flip` (source buffer pointer reaches the sink
-  *through* the flip = zero copies).
 
 - **M181: deferred orientation descriptor + sink-capability negotiation.** An
   *eagerly-applied* strided view defeats hardware flip silicon: DRM/KMS
@@ -696,10 +642,6 @@ Smaller-scope items, mostly orthogonal to the architecture.
   `gst-controller`-equivalent for animating properties over time
   (zoom 1.0 → 2.0 over 5 seconds). Niche but real for production
   graphics.
-- **`gst-launch` text DSL — DONE (M106).** `runtime::parse_launch` takes
-  `"videotestsrc num-buffers=3 ! videoflip method=rotate-180 ! fakesink"` and
-  builds a runnable `Graph` (caps-filter syntax landed M117, branching M118).
-  See the property-system entry above and DESIGN.md §4.16.
 
 ### What we already do better
 
