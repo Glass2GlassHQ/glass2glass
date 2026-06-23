@@ -5,6 +5,29 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M219: Android platform track begins -- NDK MediaCodec H.264 decode (`MediaCodecDec`)
+
+The Android counterpart of M218's `VtDecode`. `MediaCodecDec` (`mediacodec`
+feature, Android-only) decodes Annex-B H.264 to NV12 `MemoryDomain::System` via
+the NDK `AMediaCodec` through the safe `ndk` crate (no JNI), establishing the
+Android platform plumbing (the `mediacodec` feature + the `ndk` dep with the
+`media` feature under `[target.'cfg(target_os = "android")']`).
+
+- Unlike VideoToolbox (AVCC + out-of-band parameter sets), MediaCodec takes
+  Annex-B access units directly and the SPS/PPS as `csd-0` / `csd-1` in the
+  `MediaFormat`, so the element reuses `annexb::h264_parameter_sets` but feeds
+  each frame's bytes unchanged. Drives the codec synchronously (queue one input
+  buffer, drain ready output buffers) and packs the output to NV12 honoring the
+  codec's reported `color-format` / `stride` / `slice-height` (semi-planar and
+  planar handled; vendor / `COLOR_FormatYUV420Flexible` via `AImageReader` is a
+  follow-up). Mirrors `VtDecode` / `MfDecode`'s `AsyncElement` contract (caps,
+  `DerivedOutput` H.264->NV12, pad templates, `Send`-under-single-thread).
+- **CI cross-compiles it.** There is no native Android GitHub runner, so the new
+  `features (android)` CI job runs `cargo check --target aarch64-linux-android
+  --features mediacodec` (ndk-sys ships pregenerated bindings, so a check needs
+  only the rustup target, no NDK install). That gives the same compiler feedback
+  the macOS job gives `VtDecode`; actual decode is validated on a device.
+
 ### M218: macOS platform track begins -- VideoToolbox H.264 decode (`VtDecode`)
 
 The first element of the macOS platform integration (the biggest remaining

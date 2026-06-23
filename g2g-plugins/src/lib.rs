@@ -177,6 +177,13 @@ pub mod mfdecode;
 #[cfg(all(target_os = "macos", feature = "vtdecode"))]
 pub mod vtdecode;
 
+// NDK MediaCodec H.264 decode is Android-only, the Android counterpart of
+// vtdecode / mfdecode. The `ndk` dependency is target-gated, so the module only
+// exists when building for Android with the `mediacodec` feature; enabling it on
+// other platforms is a no-op (first element of the Android platform track, M219).
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+pub mod mediacodecdec;
+
 // Media Foundation H.264 encode, the encode-side mirror of mfdecode. Same
 // Windows-only target gate; enabling the feature elsewhere is a no-op.
 #[cfg(all(target_os = "windows", feature = "mf-encode"))]

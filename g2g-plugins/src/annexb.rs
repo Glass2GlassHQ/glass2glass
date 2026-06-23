@@ -117,7 +117,11 @@ pub(crate) fn nal_units_any(data: &[u8]) -> NalUnitsAny<'_> {
 }
 
 /// H.264 NAL unit type: the low 5 bits of the first NAL header byte.
-#[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
+#[cfg(any(
+    all(target_os = "macos", feature = "vtdecode"),
+    all(target_os = "android", feature = "mediacodec"),
+    test
+))]
 pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1F)
 }
@@ -127,7 +131,11 @@ pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
 /// frames. VideoToolbox builds its `CMVideoFormatDescription` from the parameter
 /// sets (supplied out of band), not from NALs inside the decode sample, so the
 /// decoder pulls these out and feeds only the VCL NALs to each frame.
-#[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
+#[cfg(any(
+    all(target_os = "macos", feature = "vtdecode"),
+    all(target_os = "android", feature = "mediacodec"),
+    test
+))]
 pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut sps = Vec::new();
     let mut pps = Vec::new();
@@ -147,6 +155,7 @@ pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 /// VCL (+ SEI) NALs length-prefixed; the parameter sets live in the format
 /// description (see [`h264_parameter_sets`]), so the decoder excludes SPS / PPS /
 /// AUD via `keep`. The inverse of [`avcc_nal_units`] for the kept NALs.
+// AVCC framing is VideoToolbox-specific; MediaCodec takes Annex-B directly.
 #[cfg(any(all(target_os = "macos", feature = "vtdecode"), test))]
 pub(crate) fn to_avcc<F: Fn(&[u8]) -> bool>(au: &[u8], keep: F) -> Vec<u8> {
     let mut out = Vec::with_capacity(au.len() + 16);

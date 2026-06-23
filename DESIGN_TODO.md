@@ -959,9 +959,24 @@ the work and only pays off once (M218 paid most of it for the decode side).
 
 ### Platform: Android
 
-Another platform gap. Andoird's `MediaCodec` + `SurfaceTexture` for
+Another platform gap. Android's `MediaCodec` + `SurfaceTexture` for
 hardware decode, `Camera2` for capture, `AAudio` for audio, `Surface` for
 presentation. Similar 5–8 session shape to macOS.
+
+- **`mediacodec` — STARTED (M219).** NDK MediaCodec H.264 decode (`MediaCodecDec`,
+  `mediacodec` feature), the Android counterpart of `VtDecode` / `MfDecode`:
+  Annex-B H.264 in, NV12 `System` out, via the `ndk` crate's `AMediaCodec`
+  (no JNI). Feeds Annex-B access units directly and the SPS/PPS as `csd-0` /
+  `csd-1` (reuses `annexb::h264_parameter_sets`); drives the codec synchronously
+  and packs the output (semi-planar / planar) to NV12 honoring the codec's
+  stride / slice-height. Establishes the Android plumbing: `mediacodec` feature +
+  the `ndk` (feature `media`) dep under `[target.'cfg(target_os = "android")']`.
+  **No native Android CI runner**, so the `features (android)` job
+  *cross-compiles* (`cargo check --target aarch64-linux-android`) — the same
+  compiler feedback the macOS job gives, but actual decode is validated on a
+  device. Output color-format handling beyond semi-planar / planar (vendor /
+  `COLOR_FormatYUV420Flexible`, via `AImageReader`), HEVC, a zero-copy
+  `AHardwareBuffer` domain, and the `Surface` present sink are the next steps.
 
 ### Other
 

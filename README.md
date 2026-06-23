@@ -53,7 +53,8 @@ OS-coupled elements live behind cargo features:
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda`) | `ffmpeg` | Linux + libavcodec |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
-| `VtDecode` (H.264; on-device build pending) | `vtdecode` | macOS + VideoToolbox |
+| `VtDecode` (H.264; CI-compiled, on-device decode pending) | `vtdecode` | macOS + VideoToolbox |
+| `MediaCodecDec` (H.264; CI cross-compiled, on-device decode pending) | `mediacodec` | Android + NDK MediaCodec |
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |

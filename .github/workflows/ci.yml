@@ -108,6 +108,26 @@ jobs:
       - name: check g2g-ml (wgpu + burn, Metal)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
 
+  # Android platform build. There is no native Android runner, so this is a
+  # cross-compile check (aarch64-linux-android): it compiles the NDK MediaCodec
+  # element (the same compiler feedback the macOS job gives VtDecode). ndk-sys
+  # ships pregenerated bindings, so `cargo check` needs only the rustup target,
+  # not a full NDK install (linking / running on a device is validated
+  # separately). Mirrors the macOS decode track for Android.
+  features-android:
+    name: features (android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (mediacodec)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features mediacodec
+
   # The no_std + wasm pillar: the core builds for the browser target. (A bare-
   # metal target like thumbv7em needs the critical-section feature + a CS impl, so
   # it is left to a dedicated embedded job.)

@@ -49,6 +49,12 @@ vtdecode = [
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
 ]
+# Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
+# `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
+# "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
+# first element of the Android platform track. See DESIGN_TODO.md "Platform:
+# Android".
+mediacodec = ["std", "dep:ndk"]
 # Windows H.264 encode via the Media Foundation H.264 Encoder MFT
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.
@@ -354,6 +360,13 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
     "CFNumber",
     "CFDictionary",
 ] }
+
+# NDK MediaCodec bindings are Android-only; target-gate so other platforms never
+# attempt to resolve the ndk crate. Drives the `mediacodec` element. The `media`
+# feature pulls AMediaCodec / AMediaFormat (ndk-sys ships pregenerated bindings,
+# so a cross-compile `cargo check` needs only the rustup android target, no NDK).
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", optional = true, default-features = false, features = ["media"] }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
 # to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).
