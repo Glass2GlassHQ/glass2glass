@@ -32,6 +32,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -54,7 +55,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    PropKind, PropValue, PropertySpec, Rate, Reconfigure, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -140,6 +141,11 @@ pub struct WebRtcSink {
     track: Track,
     /// Set on the first frame, after the WHIP handshake spawns the session task.
     tx: Option<mpsc::Sender<MediaUnit>>,
+    /// Set by the session task when the remote sends a PLI (keyframe request);
+    /// read + cleared by `take_reconfigure`, which forwards a
+    /// `Reconfigure::ForceKeyframe` up the reverse channel to the encoder. Shared
+    /// because the str0m loop lives on a separate task.
+    keyframe_requested: Arc<AtomicBool>,
     frames_sent: u64,
 }
 
@@ -168,6 +174,7 @@ impl WebRtcSink {
             configured: false,
             track: Track::Video,
             tx: None,
+            keyframe_requested: Arc::new(AtomicBool::new(false)),
             frames_sent: 0,
         }
     }
@@ -266,7 +273,8 @@ impl WebRtcSink {
         rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
-        tokio::spawn(run_session(rtc, socket, local, mid, self.track, turn, rx));
+        let keyframe_requested = Arc::clone(&self.keyframe_requested);
+        tokio::spawn(run_session(rtc, socket, local, mid, self.track, turn, keyframe_requested, rx));
         self.tx = Some(tx);
         Ok(())
     }
@@ -395,6 +403,16 @@ impl AsyncElement for WebRtcSink {
         }
     }
 
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        // The session task set this on a remote PLI; clear and forward it as a
+        // keyframe request to the upstream encoder.
+        if self.keyframe_requested.swap(false, Ordering::Relaxed) {
+            Some(Reconfigure::ForceKeyframe)
+        } else {
+            None
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -440,6 +458,7 @@ impl AsyncElement for WebRtcSink {
 /// The sans-IO driving loop: owns the `Rtc` and the UDP socket, drains
 /// `poll_output` to a deadline, then waits on incoming UDP, an outgoing access
 /// unit, or the str0m timeout, whichever comes first.
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     mut rtc: Rtc,
     socket: UdpSocket,
@@ -447,6 +466,7 @@ async fn run_session(
     mid: Mid,
     track: Track,
     mut turn: Option<TurnClient>,
+    keyframe_requested: Arc<AtomicBool>,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
@@ -478,6 +498,12 @@ async fn run_session(
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 ))) => return,
+                // Remote PLI: the peer lost data and needs a fresh keyframe.
+                // Flag it; the element's `take_reconfigure` forwards a
+                // `ForceKeyframe` up the reverse channel to the encoder.
+                Ok(Output::Event(Event::KeyframeRequest(_))) => {
+                    keyframe_requested.store(true, Ordering::Relaxed);
+                }
                 Ok(Output::Event(_)) => {}
                 Err(_) => return,
             }
@@ -638,6 +664,19 @@ mod tests {
         assert_eq!(Track::Audio.media_time(1_000_000_000).numer(), 48_000);
         assert_eq!(Track::Audio.media_time(20_000_000).numer(), 960);
         assert_eq!(Track::Audio.frequency(), Frequency::FORTY_EIGHT_KHZ);
+    }
+
+    #[test]
+    fn keyframe_request_flag_surfaces_as_force_keyframe() {
+        let sink = WebRtcSink::new("http://h/whip");
+        // No PLI yet: nothing to forward.
+        let mut s = sink;
+        assert_eq!(s.take_reconfigure(), None);
+        // Session task observed a remote PLI -> sets the shared flag.
+        s.keyframe_requested.store(true, Ordering::Relaxed);
+        assert_eq!(s.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
+        // Consumed: a second poll yields nothing until the next PLI.
+        assert_eq!(s.take_reconfigure(), None);
     }
 
     #[test]

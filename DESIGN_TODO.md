@@ -145,14 +145,45 @@ leverage first:
   with long-term auth, Send/Data indications, CreatePermission, Refresh) so the
   elements reach cloud SFUs through symmetric NAT, a WHEP player + ignored
   `webrtc_whip_smoke` + `webrtc_whip_to_whep_loopback` harness. Compile-validated
-  against str0m 0.20. Remaining: on-network validation against a real WHIP/WHEP
-  server (mediamtx / LiveKit) + browser playback, including a real TURN relay run;
-  IPv6 reflexive + TURN channel binding (lower overhead than Send/Data
-  indications); simultaneous A/V over one PeerConnection (a `MultiInputElement`,
-  not one-track-per-element); non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` +
-  graceful flush on EOS; keyframe-request (PLI) handling.
-  The browser data-channel `WebRtcSrc` stays wasm-only. A full
-  `WebRtcBin`-equivalent sendrecv media engine is the larger track this seeds.
+  against str0m 0.20. The browser data-channel `WebRtcSrc` stays wasm-only.
+
+  Roadmap toward GStreamer (`webrtcbin` / `gst-plugins-rs` `webrtcsink`) parity,
+  staying sans-IO + pure-Rust (str0m does the engine work, so no libnice /
+  OpenSSL). Two enablers already exist: `MultiInputElement` / `MultiOutputElement`
+  (M199) make a multi-track session expressible, and the `Reconfigure` /
+  `QosMessage` reverse channel (M174/M175) already walks upstream to the source.
+  str0m already emits `Event::KeyframeRequest` and `Event::EgressBitrateEstimate`;
+  most feedback work is wiring those onto the reverse channel, not new engines.
+  - **T0 (precondition).** On-network validation of the existing elements against
+    a real WHIP/WHEP server + browser, including a real TURN relay run. Nothing
+    below is trustworthy until this passes (sandbox blocks the ports).
+  - **T1 (keystone): unified `WebRtcBin`-equivalent session element.** One element
+    owning one `Rtc` with N tracks, on the multi-pad traits, so BUNDLE / A-V on one
+    PeerConnection / sendrecv / data channels all hang off it; subsumes the
+    one-track-per-element sink/src. Design call (given the Option-A flattening
+    decision): fixed-arity-from-caps tracks declared at negotiation, *not* webrtcbin
+    dynamic request pads. Mid-session transceiver add/remove (renegotiation) is a
+    later, harder step.
+  - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
+    `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
+    `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`
+    originates PLI on mid-GOP join. Remaining: VP8/VP9 force-keyframe (needs a
+    libvpx flag path `vpx-encode` does not expose) and `ForceKeyframe` relay
+    through an intervening transform; adaptive bitrate / congestion control (map
+    `Event::EgressBitrateEstimate` -> a bitrate-target reverse message -> a
+    runtime-bitrate encoder; str0m runs the GCC/TWCC estimator); NACK / RTX
+    (str0m-internal, enable by offering the RTX payload type).
+  - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
+    Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
+    TURN servers, 438 stale-nonce retry, trickle ICE (WHIP/WHEP `PATCH`), ICE
+    restart. Incremental on the M242 `turn.rs`.
+  - **T4: signalling ecosystem.** Native LiveKit signaller (websocket + protocol),
+    then Janus / Kinesis as wanted, layered over the T1 engine like
+    `gst-plugins-rs` layers signallers over `webrtcbin`.
+  - **T5: advanced.** Native data-channel source/sink on str0m SCTP (unifying the
+    wasm-only `WebRtcSrc`); simulcast (encoder fan-out); FEC; full renegotiation.
+  Smaller loose ends: non-stereo / non-48 kHz Opus; WHIP/WHEP `DELETE` + graceful
+  flush on EOS. Recommended order: T0 -> T1 -> T2 (PLI first) -> T3 -> T4.
 
 ## Adaptive streaming (HLS / DASH)
 

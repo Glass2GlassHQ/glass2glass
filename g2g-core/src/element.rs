@@ -35,6 +35,12 @@ pub enum Reconfigure {
     /// the upstream element picks freely. Equivalent to GStreamer's
     /// bare RECONFIGURE event.
     Renegotiate,
+    /// Downstream needs a keyframe now (no caps change): an encoder should emit
+    /// an IDR / key frame on its next output. Originated by a WebRTC egress sink
+    /// on a remote PLI (Picture Loss Indication) and carried up the reverse
+    /// channel to the encoder. The GStreamer `GstForceKeyUnit` upstream-event
+    /// analog.
+    ForceKeyframe,
 }
 
 /// Downstream-originated quality-of-service signal: a synchronising sink is
@@ -162,6 +168,17 @@ pub trait AsyncElement: ElementBound {
     /// producer observes it as [`PushOutcome::Qos`]. Called by the runner after
     /// each `process`. Default: nothing to send.
     fn take_qos(&mut self) -> Option<QosMessage> {
+        None
+    }
+
+    /// Take any [`Reconfigure`] this element wants to send upstream, consuming
+    /// it. The sink/transform analog of [`Self::take_qos`]: the runner forwards
+    /// it onto the element's incoming link, where the producer observes it as
+    /// [`PushOutcome::Reconfigure`]. The keyframe-request path uses this: a
+    /// WebRTC egress sink that received a remote PLI returns
+    /// [`Reconfigure::ForceKeyframe`] so the upstream encoder emits an IDR.
+    /// Called by the runner after each `process`. Default: nothing to send.
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
         None
     }
 
@@ -329,6 +346,12 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::take_reconfigure`], so an erased sink
+    /// can request a keyframe / renegotiation upstream. Defaults to nothing.
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        None
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -428,6 +451,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::take_qos(self)
     }
 
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        AsyncElement::take_reconfigure(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -513,6 +540,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn take_qos(&mut self) -> Option<QosMessage> {
         (**self).take_qos()
+    }
+
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        (**self).take_reconfigure()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

@@ -30,13 +30,14 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use core::time::Duration;
 use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, MediaKind};
+use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
@@ -52,6 +53,10 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
 use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
+
+/// Minimum gap between keyframe (PLI) requests while waiting for the first one,
+/// so a slow producer is not spammed every frame period.
+const PLI_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Which media this source subscribes to. WHEP offers one recv-only m-line, and
 /// a `SourceLoop` has one output pad, so the source carries a single track; the
@@ -345,6 +350,12 @@ impl SourceLoop for WebRtcWhepSrc {
 
             let mut buf = alloc::vec![0u8; 2000];
             let mut seq = 0u64;
+            // Mid-GOP join recovery (video): until the first keyframe arrives, ask
+            // the remote for one (PLI) on a coarse interval so playback starts
+            // without waiting for the next natural IDR. See [[rtsp_first_keyframe]].
+            let mut seen_keyframe = false;
+            let mut last_pli: Option<Instant> = None;
+            let mut media_mid: Option<Mid> = None;
             loop {
                 // Drain str0m's output to a deadline, collecting decoded access
                 // units to push after (poll_output is sync; pushes are async).
@@ -371,6 +382,7 @@ impl SourceLoop for WebRtcWhepSrc {
                             // map its rational value to nanoseconds.
                             let denom = d.time.denom().max(1) as u128;
                             let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
+                            media_mid = Some(d.mid);
                             frames.push((pts_ns, d.data.to_vec()));
                         }
                         Ok(Output::Event(Event::IceConnectionStateChange(
@@ -394,6 +406,7 @@ impl SourceLoop for WebRtcWhepSrc {
                         Media::Video => crate::h264util::h264_au_is_keyframe(&data),
                         Media::Audio => false,
                     };
+                    seen_keyframe |= keyframe;
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             data.into_boxed_slice(),
@@ -414,6 +427,21 @@ impl SourceLoop for WebRtcWhepSrc {
                     if self.frame_limit != 0 && seq >= self.frame_limit {
                         out.push(PipelinePacket::Eos).await?;
                         return Ok(seq);
+                    }
+                }
+
+                // Ask the remote for a keyframe while we are still waiting for the
+                // first one (video only; Opus has no keyframes). PLI, rate-limited.
+                if media == Media::Video && !seen_keyframe {
+                    if let Some(mid) = media_mid {
+                        let now = Instant::now();
+                        let due = last_pli.is_none_or(|t| now.duration_since(t) >= PLI_INTERVAL);
+                        if due {
+                            if let Some(rx) = rtc.direct_api().stream_rx_by_mid(mid, None) {
+                                rx.request_keyframe(KeyframeRequestKind::Pli);
+                                last_pli = Some(now);
+                            }
+                        }
                     }
                 }
 

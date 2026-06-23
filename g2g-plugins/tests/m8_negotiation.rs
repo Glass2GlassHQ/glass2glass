@@ -408,7 +408,9 @@ impl SourceLoop for ReconfigurableTestSrc {
         match request {
             // For test determinism we accept whatever the sink proposed.
             Reconfigure::Propose(c) => Ok(c),
-            Reconfigure::Renegotiate => Err(G2gError::FixationFailed),
+            Reconfigure::Renegotiate | Reconfigure::ForceKeyframe => {
+                Err(G2gError::FixationFailed)
+            }
         }
     }
 

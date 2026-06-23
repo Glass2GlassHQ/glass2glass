@@ -1225,6 +1225,12 @@ async fn sink_arm<'a>(
                 if let Some(qos) = elem.take_qos() {
                     in_rx.request_qos(qos);
                 }
+                // Keyframe-request / renegotiation a sink originates (WebRTC PLI);
+                // store it on the input link, where the upstream encoder/transform
+                // observes it as `PushOutcome::Reconfigure`.
+                if let Some(reconf) = elem.take_reconfigure() {
+                    in_rx.request_reconfigure(reconf);
+                }
                 // M78: the first buffer in non-live `Paused` is this sink's
                 // preroll frame; mark this arm prerolled so the gate flips to a
                 // hold, and report it so the pipeline preroll aggregates toward

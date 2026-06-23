@@ -26,7 +26,8 @@ use g2g_core::{
 };
 
 use rav1e::prelude::{
-    ChromaSampling, Config, Context, EncoderConfig, EncoderStatus, SpeedSettings,
+    ChromaSampling, Config, Context, EncoderConfig, EncoderStatus, FrameParameters,
+    FrameTypeOverride, SpeedSettings,
 };
 
 /// rav1e speed preset (0 slowest/best .. 10 fastest); 9 is a fast default for a
@@ -44,6 +45,9 @@ pub struct Av1Enc {
     pts_by_frameno: Vec<u64>,
     emitted: u64,
     caps_sent: bool,
+    /// A downstream element (e.g. a WebRTC sink on a remote PLI) asked for a
+    /// keyframe; the next `encode` overrides the frame type to Key and clears it.
+    force_keyframe: bool,
     configured: bool,
 }
 
@@ -77,6 +81,7 @@ impl Av1Enc {
             pts_by_frameno: Vec::new(),
             emitted: 0,
             caps_sent: false,
+            force_keyframe: false,
             configured: false,
         }
     }
@@ -135,6 +140,16 @@ impl Av1Enc {
             return Err(G2gError::CapsMismatch);
         }
         self.pts_by_frameno.push(pts_ns);
+        // A pending keyframe request (downstream PLI) overrides this frame's type
+        // to Key; consume the flag now. `FrameParameters` is not `Clone`, so it is
+        // rebuilt per `send_frame` attempt below (the loop retries on EnoughData).
+        let force_keyframe = core::mem::take(&mut self.force_keyframe);
+        let frame_params = || {
+            force_keyframe.then(|| FrameParameters {
+                frame_type_override: FrameTypeOverride::Key,
+                ..Default::default()
+            })
+        };
         let raw = {
             let ctx = self.ctx.as_mut().ok_or(G2gError::NotConfigured)?;
             let mut frame = ctx.new_frame();
@@ -145,7 +160,7 @@ impl Av1Enc {
             let mut packets = Vec::new();
             // send_frame asks us to drain (EnoughData) when its lookahead is full.
             loop {
-                match ctx.send_frame(Some(arc.clone())) {
+                match ctx.send_frame((arc.clone(), frame_params())) {
                     Ok(()) => break,
                     Err(EncoderStatus::EnoughData) => packets.extend(drain_ready(ctx)),
                     Err(_) => break,
@@ -181,14 +196,20 @@ impl Av1Enc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
-        crate::encoder_base::emit_packets(
+        // A downstream keyframe request (PLI) latches here; the next `encode`
+        // forces a Key frame.
+        if crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
             packets,
             &caps,
             out,
         )
-        .await
+        .await?
+        {
+            self.force_keyframe = true;
+        }
+        Ok(())
     }
 }
 

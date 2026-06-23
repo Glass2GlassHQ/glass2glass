@@ -614,6 +614,12 @@ where
                     if let Some(qos) = sink.take_qos() {
                         link_rx.request_qos(qos);
                     }
+                    // Keyframe-request / renegotiation a sink originates (e.g. a
+                    // WebRTC sink on a remote PLI): forward it up the same reverse
+                    // channel, where the encoder sees it as `PushOutcome::Reconfigure`.
+                    if let Some(reconf) = sink.take_reconfigure() {
+                        link_rx.request_reconfigure(reconf);
+                    }
                     // M77: the first buffer in non-live `Paused` is the preroll
                     // frame; mark this arm prerolled so the gate flips from
                     // preroll-grant to hold, and report it for aggregation.
@@ -1300,6 +1306,11 @@ where
                     // one hop further upstream (see `relay_qos_to` above).
                     if let Some(qos) = sink.take_qos() {
                         link2_rx.request_qos(qos);
+                    }
+                    // Keyframe-request / renegotiation up the reverse channel; the
+                    // transform's output adapter relays it one hop toward the encoder.
+                    if let Some(reconf) = sink.take_reconfigure() {
+                        link2_rx.request_reconfigure(reconf);
                     }
                 }
                 None => return Ok(consumed),

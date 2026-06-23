@@ -187,6 +187,10 @@ impl VpxEnc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
+        // A downstream keyframe request (PLI) is dropped: the `vpx-encode` 0.6
+        // wrapper does not expose libvpx's per-frame VPX_EFLAG_FORCE_KF, so VP8/VP9
+        // force-keyframe is owed (needs the env-libvpx-sys flag path). av1enc
+        // (rav1e) honors it.
         crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
@@ -195,6 +199,7 @@ impl VpxEnc {
             out,
         )
         .await
+        .map(|_force_keyframe| ())
     }
 }
 

@@ -160,6 +160,7 @@ impl OpusEnc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
+        // Audio has no keyframes, so a downstream keyframe request is ignored.
         crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
@@ -168,6 +169,7 @@ impl OpusEnc {
             out,
         )
         .await
+        .map(|_force_keyframe| ())
     }
 }
 
