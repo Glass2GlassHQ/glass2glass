@@ -31,7 +31,7 @@ use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, MediaKind};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -43,12 +43,15 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::webrtc_util::{post_sdp, select_host_ip};
+use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
 
 /// WHEP-subscribing WebRTC ingest source. See the module docs.
 pub struct WebRtcWhepSrc {
     whep_url: String,
     bearer: Option<String>,
+    /// STUN server (`host:port`) for ICE NAT traversal toward a cloud SFU.
+    /// `None` = host candidate only (LAN / self-hosted same network).
+    stun_server: Option<String>,
     /// Stop after this many access units and emit EOS (0 = unbounded). The
     /// bounded path is for tests / smoke runs.
     frame_limit: u64,
@@ -68,13 +71,27 @@ impl WebRtcWhepSrc {
     /// Subscribe to the given WHEP endpoint URL (e.g.
     /// `http://localhost:8889/mystream/whep` on a mediamtx server).
     pub fn new(whep_url: impl Into<String>) -> Self {
-        Self { whep_url: whep_url.into(), bearer: None, frame_limit: 0, configured: false }
+        Self {
+            whep_url: whep_url.into(),
+            bearer: None,
+            stun_server: None,
+            frame_limit: 0,
+            configured: false,
+        }
     }
 
     /// Attach a bearer token, sent as `Authorization: Bearer <token>` on the
     /// WHEP POST.
     pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
         self.bearer = Some(token.into());
+        self
+    }
+
+    /// Set a STUN server (`host:port`, e.g. `stun.l.google.com:19302`) for ICE
+    /// NAT traversal. Required to reach a cloud SFU from behind NAT; unset means
+    /// host candidate only (works on a LAN).
+    pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
+        self.stun_server = Some(server.into());
         self
     }
 
@@ -152,6 +169,11 @@ impl SourceLoop for WebRtcWhepSrc {
                 self.bearer = if token.is_empty() { None } else { Some(token.into()) };
                 Ok(())
             }
+            "stun-server" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.stun_server = if s.is_empty() { None } else { Some(s.into()) };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -160,6 +182,7 @@ impl SourceLoop for WebRtcWhepSrc {
         match name {
             "location" | "whep-url" => Some(PropValue::Str(self.whep_url.clone())),
             "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
             _ => None,
         }
     }
@@ -181,7 +204,9 @@ impl SourceLoop for WebRtcWhepSrc {
                 .clear_codecs()
                 .enable_h264(true)
                 .build(Instant::now());
-            rtc.add_local_candidate(Candidate::host(local, "udp").map_err(|_| hw())?);
+            // Host candidate, plus a STUN server-reflexive candidate when set
+            // (needed to reach a cloud SFU across NAT).
+            add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
 
             // WHEP: offer a single recv-only H.264 m-line, POST it, apply answer.
             let (offer_sdp, pending) = {
@@ -284,6 +309,11 @@ impl SourceLoop for WebRtcWhepSrc {
 static WEBRTCSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "WHEP endpoint URL to subscribe to"),
     PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token for the WHEP POST"),
+    PropertySpec::new(
+        "stun-server",
+        PropKind::Str,
+        "STUN server host:port for ICE NAT traversal to a cloud SFU (empty = host-only)",
+    ),
 ];
 
 #[cfg(test)]
@@ -308,6 +338,8 @@ mod tests {
         assert_eq!(src.get_property("location"), Some(PropValue::Str("http://srv/whep".into())));
         src.set_property("bearer", PropValue::Str("tok".into())).unwrap();
         assert_eq!(src.bearer.as_deref(), Some("tok"));
+        src.set_property("stun-server", PropValue::Str("stun.l.google.com:19302".into())).unwrap();
+        assert_eq!(src.stun_server.as_deref(), Some("stun.l.google.com:19302"));
         assert_eq!(src.set_property("nope", PropValue::Str("x".into())), Err(PropError::Unknown));
         assert_eq!(src.set_property("location", PropValue::Int(1)), Err(PropError::Type));
     }

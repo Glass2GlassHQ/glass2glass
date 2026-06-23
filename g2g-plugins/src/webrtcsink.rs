@@ -49,7 +49,7 @@ use str0m::crypto::from_feature_flags;
 use str0m::format::Codec;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -58,7 +58,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::webrtc_util::{post_sdp, select_host_ip};
+use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
 
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
@@ -124,6 +124,9 @@ impl Track {
 pub struct WebRtcSink {
     whip_url: String,
     bearer: Option<String>,
+    /// STUN server (`host:port`) for ICE NAT traversal toward a cloud SFU.
+    /// `None` = host candidate only (LAN / self-hosted same network).
+    stun_server: Option<String>,
     queue_depth: usize,
     configured: bool,
     /// The media kind, decided from the configured caps (H.264 video or Opus
@@ -151,6 +154,7 @@ impl WebRtcSink {
         Self {
             whip_url: whip_url.into(),
             bearer: None,
+            stun_server: None,
             queue_depth: DEFAULT_QUEUE_DEPTH,
             configured: false,
             track: Track::Video,
@@ -169,6 +173,14 @@ impl WebRtcSink {
     /// Override the bounded element->session media-channel depth.
     pub fn with_queue_depth(mut self, depth: usize) -> Self {
         self.queue_depth = depth.max(1);
+        self
+    }
+
+    /// Set a STUN server (`host:port`, e.g. `stun.l.google.com:19302`) for ICE
+    /// NAT traversal. Required to reach a cloud SFU (LiveKit Cloud, etc.) from
+    /// behind NAT; unset means host candidate only (works on a LAN).
+    pub fn with_stun_server(mut self, server: impl Into<String>) -> Self {
+        self.stun_server = Some(server.into());
         self
     }
 
@@ -199,8 +211,9 @@ impl WebRtcSink {
         };
         let mut rtc = config.build(Instant::now());
 
-        let candidate = Candidate::host(local, "udp").map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        rtc.add_local_candidate(candidate);
+        // Host candidate, plus a STUN-discovered server-reflexive candidate when
+        // a STUN server is set (needed to reach a cloud SFU across NAT).
+        add_ice_candidates(&mut rtc, &socket, self.stun_server.as_deref()).await?;
 
         // Offer a single send-only m-line for the configured track.
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
@@ -227,6 +240,11 @@ impl WebRtcSink {
 static WEBRTCSINK_PROPS: &[PropertySpec] = &[
     PropertySpec::new("location", PropKind::Str, "WHIP endpoint URL to publish to"),
     PropertySpec::new("bearer", PropKind::Str, "optional Authorization: Bearer token for the WHIP POST"),
+    PropertySpec::new(
+        "stun-server",
+        PropKind::Str,
+        "STUN server host:port for ICE NAT traversal to a cloud SFU (empty = host-only)",
+    ),
 ];
 
 /// The H.264 sink caps this element accepts (any geometry / framerate).
@@ -299,6 +317,11 @@ impl AsyncElement for WebRtcSink {
                 self.bearer = if token.is_empty() { None } else { Some(token.into()) };
                 Ok(())
             }
+            "stun-server" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.stun_server = if s.is_empty() { None } else { Some(s.into()) };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -307,6 +330,7 @@ impl AsyncElement for WebRtcSink {
         match name {
             "location" | "whip-url" => Some(PropValue::Str(self.whip_url.clone())),
             "bearer" => Some(PropValue::Str(self.bearer.clone().unwrap_or_default())),
+            "stun-server" => Some(PropValue::Str(self.stun_server.clone().unwrap_or_default())),
             _ => None,
         }
     }
@@ -479,6 +503,8 @@ mod tests {
         assert_eq!(sink.whip_url, "http://x/whip");
         sink.set_property("bearer", PropValue::Str("secret".into())).unwrap();
         assert_eq!(sink.bearer.as_deref(), Some("secret"));
+        sink.set_property("stun-server", PropValue::Str("stun.l.google.com:19302".into())).unwrap();
+        assert_eq!(sink.stun_server.as_deref(), Some("stun.l.google.com:19302"));
         // Empty bearer clears it; unknown name and wrong type are distinct errors.
         sink.set_property("bearer", PropValue::Str(String::new())).unwrap();
         assert_eq!(sink.bearer, None);
