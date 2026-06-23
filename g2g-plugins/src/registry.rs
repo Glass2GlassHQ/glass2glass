@@ -102,6 +102,8 @@ use crate::rtmpsrc::RtmpSrc;
 use crate::waylandsink::WaylandSink;
 #[cfg(feature = "webrtc")]
 use crate::webrtcsink::WebRtcSink;
+#[cfg(feature = "webrtc")]
+use crate::webrtcwhepsrc::WebRtcWhepSrc;
 #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
 use crate::alsasink::AlsaSink;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
@@ -417,6 +419,20 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
         },
         || Box::new(UdpSrc::new("0.0.0.0:5004".parse().unwrap())),
+    ));
+    // WebRTC WHEP ingest; the `location` property targets the endpoint. The URL
+    // defaults empty (set it via `webrtcsrc location=...`); the handshake runs
+    // when the source starts.
+    #[cfg(feature = "webrtc")]
+    reg.register_source(SourceFactory::new(
+        "webrtcsrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(WebRtcWhepSrc::new("")),
     ));
     #[cfg(feature = "udp-egress")]
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {

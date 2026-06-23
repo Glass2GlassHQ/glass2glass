@@ -136,17 +136,18 @@ leverage first:
 - **RTCP sender reports** (RFC 3550 SR) on `UdpSink`.
 - **RTSP server:** TCP-interleaved transport; RTCP / keepalive during PLAY.
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
-- **WebRTC.** `WebRtcSink` (WHIP egress, `webrtc` feature) publishes H.264 *or*
-  Opus to a WHIP server over a `str0m` PeerConnection (ICE / DTLS / SRTP,
-  pure-Rust crypto); compile-validated against str0m 0.20, with a WHEP player +
-  ignored `webrtc_whip_smoke` harness for on-network validation. Remaining:
-  on-network validation against a real WHIP server (mediamtx) + browser
-  playback; simultaneous A/V over one PeerConnection (a `MultiInputElement`,
-  not one-track-per-sink); non-stereo / non-48 kHz Opus; WHIP `DELETE` +
-  graceful flush on EOS; keyframe-request (PLI) handling; a `WebRtcSrc` / WHEP
-  ingest sibling (also on str0m). The browser data-channel `WebRtcSrc` stays
-  wasm-only. A full `WebRtcBin`-equivalent sendrecv media engine is the larger
-  track this seeds.
+- **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
+  crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
+  Opus) and `WebRtcWhepSrc` (WHEP ingest, H.264) — egress + ingress both exist,
+  with shared ICE/SDP helpers (`webrtc_util`), a WHEP player + ignored
+  `webrtc_whip_smoke` harness. Compile-validated against str0m 0.20. Remaining:
+  on-network validation against a real WHIP/WHEP server (mediamtx) + browser
+  playback (incl. a g2g↔g2g sink→src loopback); Opus *ingest* on
+  `WebRtcWhepSrc`; simultaneous A/V over one PeerConnection (a
+  `MultiInputElement`, not one-track-per-element); non-stereo / non-48 kHz Opus;
+  WHIP/WHEP `DELETE` + graceful flush on EOS; keyframe-request (PLI) handling.
+  The browser data-channel `WebRtcSrc` stays wasm-only. A full
+  `WebRtcBin`-equivalent sendrecv media engine is the larger track this seeds.
 
 ## Adaptive streaming (HLS / DASH)
 

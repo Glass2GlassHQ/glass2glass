@@ -102,6 +102,22 @@ fn webrtcsink_resolves_from_launch() {
     }
 }
 
+/// The native WebRTC WHEP ingest source is registered as `webrtcsrc` and takes
+/// its endpoint via the `location` property (the build-by-name + set path the
+/// parser drives). Live subscribe needs a WHEP server + network.
+#[cfg(feature = "webrtc")]
+#[test]
+fn webrtcsrc_resolves_and_takes_location() {
+    use g2g_core::PropValue;
+    let reg = default_registry();
+    let mut src = reg.make_source("webrtcsrc").expect("webrtcsrc builds by name");
+    src.set_property("location", PropValue::Str("http://localhost:8889/s/whep".into())).unwrap();
+    assert_eq!(
+        src.get_property("location"),
+        Some(PropValue::Str("http://localhost:8889/s/whep".into()))
+    );
+}
+
 /// M237: the ffmpeg VAAPI hwaccel backend is launch-parsable under its own name
 /// and the gst VA-API names resolve to it (preferred over the cros-codecs
 /// `vaapidec`, which is blocked on Mesa radeonsi). Like the avdec_h264 test we

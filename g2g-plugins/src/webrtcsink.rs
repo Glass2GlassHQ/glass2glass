@@ -34,12 +34,11 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::SocketAddr;
 use std::time::Instant;
 
 use tokio::net::UdpSocket;
@@ -59,6 +58,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
+use crate::webrtc_util::{post_sdp, select_host_ip};
 
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
@@ -211,7 +211,7 @@ impl WebRtcSink {
         };
 
         // WHIP: POST the offer, receive the answer SDP, apply it.
-        let answer_sdp = whip_post(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
+        let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
         let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
@@ -353,25 +353,6 @@ impl AsyncElement for WebRtcSink {
     }
 }
 
-/// POST a WHIP SDP offer and return the answer SDP. WHIP uses `application/sdp`
-/// bodies (the answer is the 201 response body).
-async fn whip_post(
-    url: &str,
-    bearer: Option<&str>,
-    offer_sdp: String,
-) -> Result<String, G2gError> {
-    let client = reqwest::Client::new();
-    let mut req = client.post(url).header("Content-Type", "application/sdp").body(offer_sdp);
-    if let Some(token) = bearer {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-    let resp = req.send().await.map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    if !resp.status().is_success() {
-        return Err(G2gError::Hardware(HardwareError::Other));
-    }
-    resp.text().await.map_err(|_| G2gError::Hardware(HardwareError::Other))
-}
-
 /// The sans-IO driving loop: owns the `Rtc` and the UDP socket, drains
 /// `poll_output` to a deadline, then waits on incoming UDP, an outgoing access
 /// unit, or the str0m timeout, whichever comes first.
@@ -446,20 +427,6 @@ async fn run_session(
             }
         }
     }
-}
-
-/// Pick a route-local host IP for the ICE host candidate. Connecting a UDP
-/// socket sends no packet; it only makes the OS resolve the source address for
-/// the route to a public address. Falls back to loopback when offline.
-fn select_host_ip() -> IpAddr {
-    if let Ok(s) = StdUdpSocket::bind(("0.0.0.0", 0)) {
-        if s.connect(("8.8.8.8", 80)).is_ok() {
-            if let Ok(addr) = s.local_addr() {
-                return addr.ip();
-            }
-        }
-    }
-    IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
 #[cfg(test)]
