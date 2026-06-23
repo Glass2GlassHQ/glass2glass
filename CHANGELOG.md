@@ -5,6 +5,37 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M220 (Stage 0): CUDA<->wgpu keep-on-GPU correctness scaffold
+
+Stage 0 of joining the NVDEC decode side to the wgpu preprocess / inference side
+(the last GPU keep-on-GPU piece, DESIGN_TODO.md "GPU keep-on-GPU pillar"). Before
+the zero-copy `CudaToWgpu` bridge (Stage 1) exists, this validates the *whole*
+chain composes and is numerically correct on real hardware, and establishes the
+latency baseline the zero-copy version must beat:
+
+```text
+H.264 -> FfmpegVideoDec(NvdecCuda) -> CudaDownload -> WgpuPreprocess -> WgpuInference
+         (MemoryDomain::Cuda)         (-> System NV12)  (-> GPU tensor)   (-> logits)
+```
+
+- New `g2g-enterprise` feature `cuda-wgpu-e2e` forwards `g2g-ml/wgpu` +
+  `g2g-plugins/{cuda,ffmpeg}` into one build. `g2g-enterprise` is the only crate
+  that depends on both `g2g-ml` and `g2g-plugins` as normal deps, so it is the
+  only place this cross-crate chain can be wired (dev-dependency features can't
+  be toggled per-feature).
+- New gated integration test `cuda_wgpu_scaffold` drives the chain on a Linux +
+  NVIDIA + wgpu host and asserts each decoded frame's logits match a full CPU
+  reference (`nv12_to_rgb_tensor` -> `linear_reference`) computed from the
+  *same* downloaded NV12 bytes, pinning the path numerically end to end. Skips
+  (does not fail) when `G2G_H264_FIXTURE` is unset or no wgpu adapter is present.
+- Validated on the RTX 3060: 30/30 frames matched; baseline p50 device->host
+  download ~0.2 ms, preprocess+infer ~23 ms. The download (and the CPU re-upload
+  inside `WgpuPreprocess`'s System path) is exactly the PCIe round-trip Stage 1
+  deletes.
+- This is composition only: every link (`NvdecCuda`, `CudaDownload`,
+  `WgpuPreprocess`/`WgpuInference`) is already independently tested; the new test
+  is the integration signal across all of them on a real GPU.
+
 ### M219: Android platform track begins -- NDK MediaCodec H.264 decode (`MediaCodecDec`)
 
 The Android counterpart of M218's `VtDecode`. `MediaCodecDec` (`mediacodec`
