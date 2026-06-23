@@ -44,9 +44,12 @@ pub const CTRL_ACKACK: u16 = 0x0006;
 // SRT handshake extension command types (the extension TLV "type").
 pub const EXT_HSREQ: u16 = 1;
 pub const EXT_HSRSP: u16 = 2;
+pub const EXT_KMREQ: u16 = 3;
+pub const EXT_KMRSP: u16 = 4;
 pub const EXT_SID: u16 = 5;
 // Extension Field flag (in the handshake CIF) signalling HSREQ/KMREQ/CONFIG present.
 pub const HS_EXT_FLAG_HSREQ: u16 = 0x0001;
+pub const HS_EXT_FLAG_KMREQ: u16 = 0x0002;
 pub const HS_EXT_FLAG_CONFIG: u16 = 0x0004;
 
 /// Whether a packet is a control packet (the top bit of the first word).
@@ -61,6 +64,7 @@ pub fn build_data_packet(
     seq: u32,
     msg_no: u32,
     retransmit: bool,
+    kk: u8,
     timestamp: u32,
     dst_socket_id: u32,
     payload: &[u8],
@@ -68,8 +72,9 @@ pub fn build_data_packet(
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     // word0: F=0 then the 31-bit sequence number.
     out.extend_from_slice(&(seq & 0x7FFF_FFFF).to_be_bytes());
-    // word1: PP(2)=11 | O(1)=1 | KK(2)=00 | R(1) | MsgNo(26).
-    let mut word1 = (0b11u32 << 30) | (1u32 << 29);
+    // word1: PP(2)=11 | O(1)=1 | KK(2) | R(1) | MsgNo(26). KK=00 cleartext,
+    // 01 even key (the only encrypted case here).
+    let mut word1 = (0b11u32 << 30) | (1u32 << 29) | ((kk as u32 & 0b11) << 27);
     if retransmit {
         word1 |= 1 << 26;
     }
@@ -86,6 +91,8 @@ pub fn build_data_packet(
 pub struct DataPacket {
     pub seq: u32,
     pub retransmit: bool,
+    /// Encryption key flag (KK): 0 cleartext, 1 even key.
+    pub kk: u8,
     pub timestamp: u32,
     pub dst_socket_id: u32,
     pub payload: Vec<u8>,
@@ -99,9 +106,10 @@ pub fn parse_data_packet(buf: &[u8]) -> Option<DataPacket> {
     let seq = u32::from_be_bytes(buf[0..4].try_into().ok()?) & 0x7FFF_FFFF;
     let word1 = u32::from_be_bytes(buf[4..8].try_into().ok()?);
     let retransmit = word1 & (1 << 26) != 0;
+    let kk = ((word1 >> 27) & 0b11) as u8;
     let timestamp = u32::from_be_bytes(buf[8..12].try_into().ok()?);
     let dst_socket_id = u32::from_be_bytes(buf[12..16].try_into().ok()?);
-    Some(DataPacket { seq, retransmit, timestamp, dst_socket_id, payload: buf[HEADER_LEN..].to_vec() })
+    Some(DataPacket { seq, retransmit, kk, timestamp, dst_socket_id, payload: buf[HEADER_LEN..].to_vec() })
 }
 
 /// The control packets this implementation builds / parses.
@@ -138,6 +146,10 @@ pub struct Handshake {
     pub latency_ms: Option<u16>,
     /// Stream-ID extension (the SRT `streamid`), present when set.
     pub stream_id: Option<String>,
+    /// KMREQ/KMRSP extension: the Keying Material message bytes (the wrapped
+    /// stream key + salt), present when the stream is encrypted. Opaque here;
+    /// [`crate::srtcrypto`] builds and interprets it.
+    pub km: Option<Vec<u8>>,
 }
 
 impl Handshake {
@@ -156,6 +168,7 @@ impl Handshake {
             peer_ip: [0; 16],
             latency_ms: None,
             stream_id: None,
+            km: None,
         }
     }
 }
@@ -238,6 +251,17 @@ fn build_handshake_cif(hs: &Handshake) -> Vec<u8> {
         // recv TSBPD delay (high 16) | send TSBPD delay (low 16).
         cif.extend_from_slice(&((latency as u32) << 16 | latency as u32).to_be_bytes());
     }
+    // KMREQ extension: the opaque Keying Material blob, padded to a 32-bit
+    // boundary. Same TLV shape both directions (a listener echoes it as its
+    // KMRSP); the parser accepts either command type.
+    if let Some(km) = &hs.km {
+        let words = km.len().div_ceil(4);
+        cif.extend_from_slice(&EXT_KMREQ.to_be_bytes());
+        cif.extend_from_slice(&(words as u16).to_be_bytes());
+        let mut padded = km.clone();
+        padded.resize(words * 4, 0);
+        cif.extend_from_slice(&padded);
+    }
     // Stream-ID extension: the ASCII id, padded to a 32-bit boundary. SRT stores
     // it in 32-bit little-endian words; we emit byte order and pad with zeros
     // (decoders that byte-swap see the same bytes for our loopback peer).
@@ -275,6 +299,7 @@ fn parse_handshake_cif(cif: &[u8]) -> Option<Handshake> {
         peer_ip,
         latency_ms: None,
         stream_id: None,
+        km: None,
     };
 
     // Walk the extension TLVs that follow the fixed CIF.
@@ -291,6 +316,9 @@ fn parse_handshake_cif(cif: &[u8]) -> Option<Handshake> {
             EXT_HSREQ | EXT_HSRSP if words >= 3 => {
                 let tsbpd = u32::from_be_bytes(cif[body + 8..body + 12].try_into().unwrap());
                 hs.latency_ms = Some((tsbpd >> 16) as u16);
+            }
+            EXT_KMREQ | EXT_KMRSP => {
+                hs.km = Some(cif[body..end].to_vec());
             }
             EXT_SID => {
                 let raw = &cif[body..end];
@@ -387,10 +415,24 @@ pub struct SrtHandshake {
     peer_socket_id: u32,
     peer_init_seq: u32,
     established: bool,
+    /// Keying Material this side advertises (the caller's wrapped key; the
+    /// listener echoes the caller's). Opaque bytes; the element builds/parses it.
+    km: Option<Vec<u8>>,
+    /// Keying Material received from the peer (the caller's KM, read by the
+    /// listener to derive the shared key).
+    peer_km: Option<Vec<u8>>,
 }
 
 impl SrtHandshake {
-    pub fn new_caller(socket_id: u32, init_seq: u32, latency_ms: u16, stream_id: Option<String>) -> Self {
+    /// `km` is the caller's Keying Material blob (from
+    /// [`crate::srtcrypto`]) for an encrypted stream, or `None` for cleartext.
+    pub fn new_caller(
+        socket_id: u32,
+        init_seq: u32,
+        latency_ms: u16,
+        stream_id: Option<String>,
+        km: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             role: Role::Caller,
             socket_id,
@@ -401,6 +443,8 @@ impl SrtHandshake {
             peer_socket_id: 0,
             peer_init_seq: 0,
             established: false,
+            km,
+            peer_km: None,
         }
     }
 
@@ -417,7 +461,15 @@ impl SrtHandshake {
             peer_socket_id: 0,
             peer_init_seq: 0,
             established: false,
+            km: None,
+            peer_km: None,
         }
+    }
+
+    /// The Keying Material received from the peer, if the stream is encrypted.
+    /// The listener parses this (with its passphrase) to recover the stream key.
+    pub fn peer_km(&self) -> Option<&[u8]> {
+        self.peer_km.as_deref()
     }
 
     pub fn is_established(&self) -> bool {
@@ -480,6 +532,10 @@ impl SrtHandshake {
                 if let Some(l) = hs.latency_ms {
                     self.latency_ms = self.latency_ms.max(l);
                 }
+                // Echo the caller's Keying Material as our KMRSP, and keep it for
+                // the element to derive the shared key from.
+                self.peer_km = hs.km.clone();
+                self.km = hs.km;
                 self.established = true;
                 let concl = self.conclusion();
                 HandshakeStep {
@@ -493,6 +549,7 @@ impl SrtHandshake {
                 if let Some(l) = hs.latency_ms {
                     self.latency_ms = self.latency_ms.max(l);
                 }
+                self.peer_km = hs.km; // the listener's KMRSP (our echoed KM)
                 self.established = true;
                 HandshakeStep { reply: None, established: true }
             }
@@ -502,10 +559,13 @@ impl SrtHandshake {
 
     /// Build this side's conclusion handshake (carries HSREQ latency + SID).
     fn conclusion(&self) -> Handshake {
+        let ext_field = HS_EXT_FLAG_HSREQ
+            | if self.stream_id.is_some() { HS_EXT_FLAG_CONFIG } else { 0 }
+            | if self.km.is_some() { HS_EXT_FLAG_KMREQ } else { 0 };
         Handshake {
             version: HS_VERSION_5,
-            encryption: 0,
-            ext_field: HS_EXT_FLAG_HSREQ | if self.stream_id.is_some() { HS_EXT_FLAG_CONFIG } else { 0 },
+            encryption: if self.km.is_some() { 1 } else { 0 },
+            ext_field,
             init_seq: self.init_seq,
             mtu: 1500,
             flow_window: 8192,
@@ -515,6 +575,7 @@ impl SrtHandshake {
             peer_ip: [0; 16],
             latency_ms: Some(self.latency_ms),
             stream_id: self.stream_id.clone(),
+            km: self.km.clone(),
         }
     }
 }
@@ -526,9 +587,15 @@ pub struct SrtSender {
     dst_socket_id: u32,
     next_seq: u32,
     msg_no: u32,
+    /// Buffered packets keyed by sequence (post-encryption bytes, so a NAK
+    /// resends the same ciphertext under the same sequence/IV).
     buffer: alloc::collections::VecDeque<(u32, Vec<u8>)>,
     capacity: usize,
     retransmits: u64,
+    /// Stream cipher once the KM is negotiated (encrypted stream); `None` is
+    /// cleartext.
+    #[cfg(feature = "srt")]
+    crypto: Option<crate::srtcrypto::SrtCrypto>,
 }
 
 impl SrtSender {
@@ -540,7 +607,42 @@ impl SrtSender {
             buffer: alloc::collections::VecDeque::new(),
             capacity: capacity.max(1),
             retransmits: 0,
+            #[cfg(feature = "srt")]
+            crypto: None,
         }
+    }
+
+    /// Encrypt outgoing payloads with the negotiated stream key.
+    #[cfg(feature = "srt")]
+    pub fn set_crypto(&mut self, crypto: crate::srtcrypto::SrtCrypto) {
+        self.crypto = Some(crypto);
+    }
+
+    /// The KK key flag to stamp on packets (0 cleartext, 1 even key).
+    fn kk(&self) -> u8 {
+        #[cfg(feature = "srt")]
+        {
+            if self.crypto.is_some() {
+                return 1;
+            }
+        }
+        0
+    }
+
+    /// Wire-encode `payload` for sequence `seq`: encrypt when the stream is
+    /// keyed, else pass through. Returns the bytes to put on the wire (and to
+    /// buffer for retransmit).
+    #[cfg(feature = "srt")]
+    fn encode_payload(&self, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut data = payload.to_vec();
+        if let Some(c) = &self.crypto {
+            c.process(seq, &mut data);
+        }
+        data
+    }
+    #[cfg(not(feature = "srt"))]
+    fn encode_payload(&self, _seq: u32, payload: &[u8]) -> Vec<u8> {
+        payload.to_vec()
     }
 
     pub fn retransmits(&self) -> u64 {
@@ -553,11 +655,12 @@ impl SrtSender {
         self.next_seq = (self.next_seq + 1) & 0x7FFF_FFFF;
         let msg_no = self.msg_no;
         self.msg_no = self.msg_no.wrapping_add(1) & 0x03FF_FFFF;
-        let pkt = build_data_packet(seq, msg_no, false, timestamp, self.dst_socket_id, payload);
+        let data = self.encode_payload(seq, payload);
+        let pkt = build_data_packet(seq, msg_no, false, self.kk(), timestamp, self.dst_socket_id, &data);
         if self.buffer.len() >= self.capacity {
             self.buffer.pop_front();
         }
-        self.buffer.push_back((seq, payload.to_vec()));
+        self.buffer.push_back((seq, data));
         pkt
     }
 
@@ -567,9 +670,10 @@ impl SrtSender {
         match ctrl {
             Control::Nak { loss } => {
                 let mut out = Vec::new();
+                let kk = self.kk();
                 for &seq in loss {
                     if let Some((_, payload)) = self.buffer.iter().find(|(s, _)| *s == seq) {
-                        out.push(build_data_packet(seq, 0, true, timestamp, self.dst_socket_id, payload));
+                        out.push(build_data_packet(seq, 0, true, kk, timestamp, self.dst_socket_id, payload));
                         self.retransmits += 1;
                     }
                 }
@@ -593,6 +697,10 @@ pub struct SrtReceiver {
     have_base: bool,
     pending: alloc::collections::BTreeMap<u32, Vec<u8>>,
     max_seen: u32,
+    /// Stream cipher once the KM is negotiated (encrypted stream); `None` is
+    /// cleartext.
+    #[cfg(feature = "srt")]
+    crypto: Option<crate::srtcrypto::SrtCrypto>,
 }
 
 impl Default for SrtReceiver {
@@ -603,10 +711,24 @@ impl Default for SrtReceiver {
 
 impl SrtReceiver {
     pub fn new() -> Self {
-        Self { next_deliver: 0, have_base: false, pending: alloc::collections::BTreeMap::new(), max_seen: 0 }
+        Self {
+            next_deliver: 0,
+            have_base: false,
+            pending: alloc::collections::BTreeMap::new(),
+            max_seen: 0,
+            #[cfg(feature = "srt")]
+            crypto: None,
+        }
     }
 
-    /// Buffer a received data packet.
+    /// Decrypt incoming payloads with the negotiated stream key.
+    #[cfg(feature = "srt")]
+    pub fn set_crypto(&mut self, crypto: crate::srtcrypto::SrtCrypto) {
+        self.crypto = Some(crypto);
+    }
+
+    /// Buffer a received data packet, decrypting its payload in place (keyed by
+    /// its sequence) when the stream is encrypted.
     pub fn on_data(&mut self, pkt: DataPacket) {
         if !self.have_base {
             self.next_deliver = pkt.seq;
@@ -617,7 +739,17 @@ impl SrtReceiver {
             if seq_gt(pkt.seq, self.max_seen) {
                 self.max_seen = pkt.seq;
             }
-            self.pending.entry(pkt.seq).or_insert(pkt.payload);
+            let payload = pkt.payload;
+            // Decrypt in place when the stream is keyed (a no-op rebind otherwise).
+            #[cfg(feature = "srt")]
+            let payload = {
+                let mut p = payload;
+                if let Some(c) = &self.crypto {
+                    c.process(pkt.seq, &mut p);
+                }
+                p
+            };
+            self.pending.entry(pkt.seq).or_insert(payload);
         }
     }
 
@@ -672,11 +804,12 @@ mod tests {
 
     #[test]
     fn data_packet_round_trips_and_sets_header_bits() {
-        let pkt = build_data_packet(0x1234, 7, true, 99, 0xABCD_0123, b"hello");
+        let pkt = build_data_packet(0x1234, 7, true, 0, 99, 0xABCD_0123, b"hello");
         assert!(!is_control(&pkt), "data packets clear the control bit");
         let d = parse_data_packet(&pkt).expect("parse");
         assert_eq!(d.seq, 0x1234);
         assert!(d.retransmit, "retransmit flag set");
+        assert_eq!(d.kk, 0, "cleartext key flag");
         assert_eq!(d.timestamp, 99);
         assert_eq!(d.dst_socket_id, 0xABCD_0123);
         assert_eq!(d.payload, b"hello");
@@ -699,6 +832,7 @@ mod tests {
             peer_ip: [1; 16],
             latency_ms: Some(120),
             stream_id: Some("live/cam0".into()),
+            km: Some(vec![0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]),
         };
         let bytes = build_control(&Control::Handshake(hs.clone()), 42, 99);
         assert!(is_control(&bytes), "control bit set");
@@ -711,6 +845,11 @@ mod tests {
         assert_eq!(parsed.syn_cookie, 0x0BAD_F00D);
         assert_eq!(parsed.latency_ms, Some(120), "HSREQ latency survives");
         assert_eq!(parsed.stream_id.as_deref(), Some("live/cam0"), "stream id survives");
+        assert_eq!(
+            parsed.km.as_deref(),
+            Some(&[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44][..]),
+            "KM extension bytes survive the cif round trip"
+        );
     }
 
     #[test]
@@ -740,7 +879,7 @@ mod tests {
 
     #[test]
     fn caller_and_listener_complete_the_handshake() {
-        let mut caller = SrtHandshake::new_caller(0x0A0A_0A0A, 1000, 120, Some("live".into()));
+        let mut caller = SrtHandshake::new_caller(0x0A0A_0A0A, 1000, 120, Some("live".into()), None);
         let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80);
 
         // Caller induction -> listener induction response -> caller conclusion ->

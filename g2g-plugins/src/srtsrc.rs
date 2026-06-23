@@ -12,6 +12,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
@@ -20,11 +21,12 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket,
 };
 
 use crate::filesink::io_err;
 use crate::srt::{self, Control, SrtHandshake, SrtReceiver};
+use crate::srtcrypto::SrtCrypto;
 
 /// Our SRT socket id (listener).
 const LISTENER_SOCKET_ID: u32 = 0x6732_736C; // "g2sl"
@@ -44,6 +46,7 @@ pub struct SrtSrc {
     bind: SocketAddr,
     latency_ms: u16,
     frame_limit: u64,
+    passphrase: Option<String>,
     std_socket: Option<StdUdpSocket>,
     configured: bool,
 }
@@ -55,6 +58,7 @@ impl SrtSrc {
             bind,
             latency_ms: DEFAULT_LATENCY_MS,
             frame_limit: 0,
+            passphrase: None,
             std_socket: None,
             configured: false,
         }
@@ -70,6 +74,14 @@ impl SrtSrc {
     /// Stop after `n` payloads and emit EOS (the bounded / test path).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
+        self
+    }
+
+    /// Decrypt an encrypted stream using a key derived from `passphrase`. The
+    /// caller's wrapped stream key arrives in the handshake KM extension; the
+    /// passphrase must match the caller's or the connection fails.
+    pub fn with_passphrase(mut self, passphrase: impl Into<String>) -> Self {
+        self.passphrase = Some(passphrase.into());
         self
     }
 
@@ -156,6 +168,13 @@ impl SourceLoop for SrtSrc {
             out.push(PipelinePacket::CapsChanged(ts_bytestream())).await?;
 
             let mut receiver = SrtReceiver::new();
+            // Derive the shared stream key from the caller's KM and our passphrase.
+            if let Some(pass) = &self.passphrase {
+                let km = hs.peer_km().ok_or(G2gError::Hardware(HardwareError::Other))?;
+                let crypto =
+                    SrtCrypto::from_km(km, pass).ok_or(G2gError::Hardware(HardwareError::Other))?;
+                receiver.set_crypto(crypto);
+            }
             let limit = self.frame_limit;
             let mut emitted = 0u64;
             let mut last_nack_ns = 0u64;

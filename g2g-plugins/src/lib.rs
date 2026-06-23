@@ -171,6 +171,8 @@ pub mod rtspserversrc;
 // compiled); the tokio caller sink / listener source sit behind the `srt` feature.
 pub mod srt;
 #[cfg(feature = "srt")]
+pub mod srtcrypto;
+#[cfg(feature = "srt")]
 pub mod srtsink;
 #[cfg(feature = "srt")]
 pub mod srtsrc;

@@ -28,7 +28,7 @@ rtsp-server = ["std", "tokio/net", "tokio/io-util"]
 # MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
 # elements need this. Implies std + tokio net.
-srt = ["std", "tokio/net"]
+srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:sha1", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
@@ -289,6 +289,16 @@ roxmltree = { version = "0.21", optional = true }
 # / aes 0.9 need rustc 1.85, above the workspace MSRV 1.75.
 aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
+# SRT encryption (srt feature): AES-CTR payload cipher, a passphrase-derived KEK
+# (PBKDF2-HMAC-SHA1), and RFC 3394 AES key wrap for the stream key exchanged in
+# the KM handshake extension. Same cipher-0.4 line as the HLS aes/cbc above.
+ctr = { version = "0.9", optional = true }
+sha1 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+pbkdf2 = { version = "0.12", optional = true, default-features = false }
+aes-kw = { version = "0.2", optional = true, features = ["alloc"] }
+# OS RNG for the random stream key + salt the SRT caller generates.
+getrandom = { version = "0.2", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }

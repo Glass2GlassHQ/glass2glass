@@ -29,6 +29,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes-kw"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69fa2b352dcefb5f7f3a5fb840e02665d311d878955380515e4fd50095dd3d8c"
+dependencies = [
+ "aes",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1470,6 +1479,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctr"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
+dependencies = [
+ "cipher",
+]
+
+[[package]]
 name = "cubecl"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2875,6 +2893,7 @@ name = "g2g-plugins"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aes-kw",
  "alsa",
  "ash",
  "audiopus",
@@ -2882,6 +2901,7 @@ dependencies = [
  "cbc",
  "critical-section",
  "cros-codecs",
+ "ctr",
  "drm 0.15.0",
  "drm-fourcc",
  "embassy-futures",
@@ -2890,7 +2910,9 @@ dependencies = [
  "ffmpeg-next",
  "futures-util",
  "g2g-core",
+ "getrandom 0.2.17",
  "glow",
+ "hmac",
  "jpeg-encoder",
  "js-sys",
  "khronos-egl",
@@ -2903,11 +2925,13 @@ dependencies = [
  "objc2-core-media",
  "objc2-core-video",
  "objc2-video-toolbox",
+ "pbkdf2 0.12.2",
  "pipewire",
  "rav1e",
  "reqwest",
  "retina",
  "roxmltree",
+ "sha1",
  "smithay-client-toolkit",
  "tokio",
  "url",
@@ -4976,6 +5000,15 @@ dependencies = [
  "hmac",
  "password-hash",
  "sha2",
+]
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -8313,7 +8346,7 @@ dependencies = [
  "crossbeam-utils",
  "flate2",
  "hmac",
- "pbkdf2",
+ "pbkdf2 0.11.0",
  "sha1",
  "time",
  "zstd",

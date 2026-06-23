@@ -25,6 +25,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::srt::{self, SrtHandshake, SrtSender};
+use crate::srtcrypto::SrtCrypto;
 
 /// Max SRT payload bytes per packet: 7 x 188-byte TS packets, the SRT default.
 const SRT_PAYLOAD: usize = 1316;
@@ -46,6 +47,7 @@ pub struct SrtSink {
     dest: SocketAddr,
     latency_ms: u16,
     stream_id: Option<String>,
+    passphrase: Option<String>,
     socket: Option<tokio::net::UdpSocket>,
     sender: Option<SrtSender>,
     configured: bool,
@@ -62,6 +64,7 @@ impl SrtSink {
             dest,
             latency_ms: DEFAULT_LATENCY_MS,
             stream_id: None,
+            passphrase: None,
             socket: None,
             sender: None,
             configured: false,
@@ -81,6 +84,15 @@ impl SrtSink {
     /// Set the advertised target latency (ms).
     pub fn with_latency(mut self, latency_ms: u16) -> Self {
         self.latency_ms = latency_ms;
+        self
+    }
+
+    /// Encrypt the stream with AES-CTR under a key derived from `passphrase`. A
+    /// fresh random stream key is generated per connection and exchanged
+    /// (wrapped) in the handshake KM extension; the listener needs the same
+    /// passphrase to decrypt.
+    pub fn with_passphrase(mut self, passphrase: impl Into<String>) -> Self {
+        self.passphrase = Some(passphrase.into());
         self
     }
 
@@ -106,7 +118,21 @@ impl SrtSink {
         let socket = tokio::net::UdpSocket::bind(("0.0.0.0", 0)).await.map_err(io_err)?;
         socket.connect(self.dest).await.map_err(io_err)?;
 
-        let mut hs = SrtHandshake::new_caller(CALLER_SOCKET_ID, INIT_SEQ, self.latency_ms, self.stream_id.clone());
+        // For an encrypted stream, generate a fresh key + salt, advertise the
+        // wrapped key in the handshake KM extension, and arm the sender's cipher.
+        let crypto = self.passphrase.as_ref().map(|_| SrtCrypto::generate());
+        let km = crypto
+            .as_ref()
+            .zip(self.passphrase.as_ref())
+            .map(|(c, pass)| c.build_km(pass));
+
+        let mut hs = SrtHandshake::new_caller(
+            CALLER_SOCKET_ID,
+            INIT_SEQ,
+            self.latency_ms,
+            self.stream_id.clone(),
+            km,
+        );
         if let Some(first) = hs.start() {
             socket.send(&first).await.map_err(io_err)?;
         }
@@ -122,7 +148,11 @@ impl SrtSink {
                 socket.send(&reply).await.map_err(io_err)?;
             }
         }
-        self.sender = Some(SrtSender::new(hs.peer_socket_id(), INIT_SEQ, SEND_CAPACITY));
+        let mut sender = SrtSender::new(hs.peer_socket_id(), INIT_SEQ, SEND_CAPACITY);
+        if let Some(c) = crypto {
+            sender.set_crypto(c);
+        }
+        self.sender = Some(sender);
         self.socket = Some(socket);
         Ok(())
     }
