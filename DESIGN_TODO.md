@@ -217,23 +217,13 @@ edits (the typed core is unaffected, only the string<->enum boundary).
       keeps `0` as its "unknown until parsed" nominal value. `audioresample`
       (auto by default) takes its rate from a downstream capsfilter
       (`audioresample ! audio/x-raw,rate=16000`); property still overrides.
-    - **Stacked auto transforms (M188, partial).** Two auto transforms before
-      one far capsfilter now back-propagate the pin: the solver evaluates each
-      `DerivedOutput`'s forward image per input alternative and drops the inputs
-      whose image can't reach the constrained output
-      (`backward_filter_derived`), while the forward pass narrows the output by
-      the union of `f` over the surviving inputs (`forward_derived_union`).
-      `videoconvert ! videoscale ! video/x-raw,format=NV12,width=160,height=120`
-      resolves; a bare `videoconvert ! videoscale` stays passthrough.
-      RESOLVED by M227 (field-level bidirectional coupling, `DerivedCoupled`):
-      the reverse order `videoscale ! videoconvert ! caps`, a *geometry* pin
-      behind a geometry-passthrough transform, now couples the pin back within an
-      alternative (`Range ∩ Fixed = Fixed`), through any number of passthrough
-      hops. Remaining gap: `backward_feasible()` still returns `None` for
-      `DerivedOutput`, so a pin behind a genuinely format-changing (non-passthrough)
-      transform (a decoder, or a convert-that-rescales) does not couple back;
-      deferred until a real element needs it. See DESIGN.md §4.13.10 for the full
-      current-limits list.
+    - **Backward coupling through a format-changing transform.**
+      `backward_feasible()` returns `None` for `DerivedOutput`, so a downstream
+      pin behind a genuinely format-changing transform (a decoder, or a
+      convert-that-rescales) does not couple back and fails loud (`CapsMismatch`).
+      Generalize `DerivedCoupled`'s field-level inverse to the invertible fields
+      of a `DerivedOutput` when a real element drives it. (Linear passthrough
+      coupling, incl. stacked auto transforms, is done; see DESIGN.md §4.13.10.)
     - **Mid-stream re-cascade `configure_output` DONE, M189.** A caps-driven
       transform now re-resolves its output target on a mid-stream `CapsChanged`,
       not only at startup: both transform-arm re-cascade paths (the linear

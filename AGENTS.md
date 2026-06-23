@@ -77,6 +77,10 @@ track M8–M12, plus the platform-element track: M5 RTSP, M13 Windows decode).
 Record each milestone in `CHANGELOG.md` under `## Unreleased`. Everything is
 pre-release `0.1.0`; nothing is published.
 
+`DESIGN_TODO.md` holds only outstanding tasks. When a task is done, remove it
+from `DESIGN_TODO.md` (do not leave "DONE" notes); if it established
+architecture worth keeping, document that in `DESIGN.md` instead.
+
 ## Platform notes
 
 - **Windows decode (`mf-decode`):** `MfDecode` wraps the Media Foundation H.264
