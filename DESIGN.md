@@ -22,10 +22,14 @@ The project is structured as a Cargo Workspace to enforce clean boundaries betwe
 | Crate Name | Purpose | Target Profile | Licensing |
 | :--- | :--- | :--- | :--- |
 | `g2g-core` | Core traits, `Frame` definitions, buffer pool allocators, clock model. | `no_std + alloc` | LGPL v2.1+ |
+| `g2g-plugin` | SDK for dynamically loadable plugins (the `declare_plugin!` macro + ABI tag, §4.16). | `no_std + alloc` | LGPL v2.1+ |
 | `g2g-plugins` | Standard collection of source/sink/transform elements (`rtsp`, `wgpu`, `v4l2`). | `no_std + alloc` / `std` mixed | LGPL v2.1+ |
 | `g2g-ml` | ML inference elements built on `burn` (Wasm/embedded) and `ort` (server). | `std` | LGPL v2.1+ |
 | `g2g-bridge` | C-FFI dynamic library to embed `g2g` sub-graphs inside GStreamer pipelines. | `std` (`cdylib`) | LGPL v2.1+ |
 | `g2g-enterprise` | High-value multi-stream async ML batchers and tensor schedulers. | `std` | AGPL v3 |
+| `g2g-python` | Hosts gst-python-ml elements as first-class `g2g` elements (embedded CPython via pyo3). | `std` | LGPL v2.1+ |
+| `g2g-capi` | C ABI (cdylib/staticlib + `g2g.h`) to drive pipelines from any language: `parse_launch` + run + bus + appsrc/appsink. | `std` (`cdylib`) | LGPL v2.1+ |
+| `g2g-pyapi` | Python (pyo3) bindings to drive pipelines: `parse_launch` + run + bus + appsrc/appsink (the inverse of `g2g-python`). | `std` | LGPL v2.1+ |
 
 The `no_std + alloc` baseline is deliberate: it admits cooperative async executors (which need a heap for futures) and `Arc` reference counting, while still excluding the OS-dependent surface of `std`. Targets requiring strict no-heap allocation use the static `BufferPool` (§3.3) and avoid the `dyn`-safe element wrappers (§4.3).
 

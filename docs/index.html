@@ -551,10 +551,11 @@
 <section id="crates">
     <div class="section-inner">
         <span class="section-label">Workspace</span>
-        <h2 class="section-title">Five crates. Clean boundaries.</h2>
+        <h2 class="section-title">Nine crates. Clean boundaries.</h2>
         <p class="section-desc">
             A cargo workspace, MSRV 1.75, edition 2021. OS-coupled elements live
             behind cargo features so the baseline compiles for bare-metal targets.
+            A C ABI and Python bindings drive the same graphs from any language.
         </p>
 
         <div class="crates-grid">
@@ -562,6 +563,11 @@
                 <div class="crate-name">g2g-core</div>
                 <div class="crate-tag">no_std + alloc</div>
                 <p>Traits (<code>AsyncElement</code>, <code>SourceLoop</code>), <code>Frame</code>/<code>PipelinePacket</code>, <code>Caps</code> algebra, buffer pools, the pipeline clock, the CSP solver, and the runner. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-plugin</div>
+                <div class="crate-tag">no_std + alloc</div>
+                <p>SDK for dynamically loadable plugins: the <code>declare_plugin!</code> macro + an ABI version tag, loaded at runtime via <code>--plugin</code> / <code>$G2G_PLUGIN_PATH</code>. LGPL v2.1+.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-plugins</div>
@@ -582,6 +588,21 @@
                 <div class="crate-name">g2g-enterprise</div>
                 <div class="crate-tag">std</div>
                 <p>Lock-free multi-channel tensor batcher that fans N camera streams into a single GPU tensor execution array. AGPL v3.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-python</div>
+                <div class="crate-tag">std</div>
+                <p>Hosts <code>gst-python-ml</code> elements as first-class g2g elements via embedded CPython (pyo3): transform / source / aggregator, zero-copy frames, GIL offload, analytics metadata. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-capi</div>
+                <div class="crate-tag">std, cdylib</div>
+                <p>C ABI (<code>include/g2g.h</code>) to drive whole pipelines from any language: <code>parse_launch</code> + run + bus poll, plus <code>appsrc</code> / <code>appsink</code> buffer I/O with a zero-copy lend. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-pyapi</div>
+                <div class="crate-tag">std, pyo3</div>
+                <p>Python bindings (the inverse of g2g-python): <code>g2g.Pipeline(desc)</code> runs a graph on a background thread, <code>AppSrc.push</code> / <code>AppSink.pull</code> feed and drain it, <code>bus_poll</code> watches it. LGPL v2.1+.</p>
             </div>
             <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
                 <div class="crate-name" style="color: var(--text-primary);">designed for replacement</div>
@@ -612,7 +633,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
                 <h3>Decode + encode: ffmpeg / VAAPI / MF / VideoToolbox / MediaCodec / WebCodecs</h3>
-                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda backends; <code>MfDecode</code> (Windows), <code>VaapiH264Dec</code> (Linux), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust).</p>
+                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda / VAAPI backends (the VAAPI hwaccel is the Linux AMD / Intel path, <code>ffmpegvaapidec</code>); <code>MfDecode</code> (Windows), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust), <code>VtEncode</code> (macOS), <code>MfEncode</code> (Windows).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
@@ -667,6 +688,12 @@
                 <span class="f-icon">&#128221;</span>
                 <h3>gst-launch DSL + introspection</h3>
                 <p><code>parse_launch("a key=v ! caps ! tee ! ...")</code> builds a runnable <code>Graph</code> from text against a <code>Registry</code>: properties (<code>set_property</code> / <code>get_property</code>), caps-filter grammar, <code>tee</code> branching, and muxer fan-in. <code>inspect(name)</code> is the <code>gst-inspect</code> analog.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#129513;</span>
+                <h3>Language bindings: C ABI + Python</h3>
+                <p>The launch DSL is the cross-language waist. <code>g2g-capi</code> exposes a C ABI (<code>g2g.h</code>) to parse + run a pipeline and poll its bus; <code>g2g-pyapi</code> wraps it for Python. <code>appsrc</code> / <code>appsink</code> feed and drain frames across the boundary, with a zero-copy buffer lend so an app pointer reaches the graph without a copy.</p>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
@@ -791,8 +818,8 @@
         <h2 class="section-title">Six lines from clone to live pixels.</h2>
         <p class="section-desc">
             Pick a pipeline shape, enable the right cargo features, and run.
-            Detailed Fedora + CUDA + Rembrandt iGPU recipes in the
-            <a href="https://github.com/GrokImageCompression/glass2glass#testing-on-fedora-rembrandt-igpu--nvidia-cuda" style="color: var(--accent);">README</a>.
+            Detailed smoke-test recipes (RTSP feed, NVDEC, KMS, VAAPI, ML) in the
+            <a href="https://github.com/GrokImageCompression/glass2glass#running-smoke-tests" style="color: var(--accent);">README</a>.
         </p>
 
         <div class="code-block">
@@ -849,17 +876,16 @@ g2g-ml      = { git = <span class="str">"..."</span>, features = [<span class="s
 <span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> dec, &amp;<span class="kw">mut</span> pre, &amp;<span class="kw">mut</span> infer, &amp;<span class="kw">mut</span> post],
                  <span class="ty">FakeSink</span>::<span class="fn">new</span>(), &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
 
-<div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; RTCP + RTSP ANNOUNCE on the roadmap.</span>
+<div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; honors receive-side NACK by retransmit.</span>
 [dependencies]
 g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
 
 <span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
 
-<span class="kw">let</span> src  = <span class="ty">VideoTestSrc</span>::<span class="fn">new</span>(<span class="ty">RawVideoFormat</span>::<span class="ty">Nv12</span>, <span class="num">1920</span>, <span class="num">1080</span>, <span class="num">30.0</span>);
-<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new_low_latency</span>();                          <span class="cmt">// no B-frames</span>
-<span class="kw">let</span> sink = <span class="ty">UdpSink</span>::<span class="fn">bind</span>(<span class="str">"0.0.0.0:0"</span>)?
-            .<span class="fn">with_remote</span>(<span class="str">"239.0.0.1:5004"</span>)
-            .<span class="fn">with_rtp</span>(<span class="num">96</span>, <span class="num">0x12345678</span>);                       <span class="cmt">// payload type, SSRC</span>
+<span class="kw">let</span> src  = <span class="ty">VideoTestSrc</span>::<span class="fn">new</span>(<span class="num">1920</span>, <span class="num">1080</span>, <span class="num">30</span>, <span class="num">0</span>);              <span class="cmt">// RGBA test pattern</span>
+<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new_low_latency</span>();                       <span class="cmt">// Windows; on Linux use the bridge</span>
+<span class="kw">let</span> sink = <span class="ty">UdpSink</span>::<span class="fn">new</span>(<span class="str">"239.0.0.1:5004"</span>.<span class="fn">parse</span>()?)
+            .<span class="fn">with_rtp</span>(<span class="num">96</span>, <span class="num">0x1234_5678</span>);                     <span class="cmt">// payload type, SSRC</span>
 
 <span class="fn">run_source_transform_sink</span>(src, enc, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
 

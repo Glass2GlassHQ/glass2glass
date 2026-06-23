@@ -29,10 +29,14 @@ See [DESIGN.md](DESIGN.md) for the architecture specification.
 | Crate | Role | Profile |
 | :--- | :--- | :--- |
 | `g2g-core` | Traits, `Frame`/`PipelinePacket`, caps algebra, clock, runner. | `no_std + alloc` |
+| `g2g-plugin` | SDK for dynamically loadable plugins (`declare_plugin!` + ABI tag). | `no_std + alloc` |
 | `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox (macOS), MediaCodec (Android), Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
 | `g2g-enterprise` | Multi-stream tensor batcher. | `std` |
+| `g2g-python` | Hosts gst-python-ml elements in-process (embedded CPython via pyo3). | `std` |
+| `g2g-capi` | C ABI (cdylib/staticlib + `g2g.h`): launch pipelines + bus + appsrc/appsink from any language. | `std` |
+| `g2g-pyapi` | Python (pyo3) bindings: drive pipelines + bus + appsrc/appsink. | `std` |
 
 ## Build
 
@@ -50,7 +54,7 @@ OS-coupled elements live behind cargo features:
 | :--- | :--- | :--- |
 | `RtspSrc` | `rtsp` | retina |
 | `H264Parse` | (default) | — |
-| `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda`) | `ffmpeg` | Linux + libavcodec |
+| `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` (H.264; CI-compiled, on-device decode pending) | `vtdecode` | macOS + VideoToolbox |
@@ -400,17 +404,20 @@ package it.
 
 ```
 g2g-core/        # traits, runner, solver, frame, caps, clock
+g2g-plugin/      # dynamic-plugin SDK (declare_plugin! + ABI tag)
 g2g-plugins/     # all source/sink/transform elements
 g2g-ml/          # ORT, Burn, WgpuPreprocess, batcher
 g2g-bridge/      # GStreamer C-FFI bridge (libgstglass2glass.so)
 g2g-enterprise/  # multi-stream tensor batcher
+g2g-python/      # gst-python-ml element host (embedded CPython)
+g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h)
+g2g-pyapi/       # Python (pyo3) bindings
 DESIGN.md        # architecture specification
 docs/            # GitHub Pages site
 ```
 
 ## License
 
-`g2g-core`, `g2g-plugins`, `g2g-ml`, `g2g-bridge`: LGPL v2.1+.
-`g2g-enterprise`: AGPL v3.
+All crates are LGPL v2.1+ except `g2g-enterprise`, which is AGPL v3.
 
 See [LICENSE](LICENSE).
