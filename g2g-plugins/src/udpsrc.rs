@@ -31,6 +31,7 @@ use crate::filesink::io_err;
 use crate::rtcp::{self, ReceptionStats, RtcpPacket};
 use crate::rtpdepay::RtpH264Depayloader;
 use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
+use crate::rtx;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -62,6 +63,10 @@ pub struct UdpSrc {
     rtcp_rr_interval_ms: u64,
     /// Emit RTPFB Generic NACK for detected gaps (requests retransmission).
     nack_enabled: bool,
+    /// RFC 4588 RTX: when set, packets on this `(rtx payload type, apt)` are
+    /// reconstructed to the original stream before reordering. `apt` is the
+    /// associated (original) payload type the rebuilt packet is restamped with.
+    rtx: Option<(u8, u8)>,
     /// Bound synchronously in `configure_pipeline` (or supplied pre-bound via
     /// `from_socket`); promoted to a tokio socket in `run`, where a runtime
     /// context is guaranteed.
@@ -81,6 +86,7 @@ impl UdpSrc {
             jitter: JitterConfig::default(),
             rtcp_rr_interval_ms: DEFAULT_RR_INTERVAL_MS,
             nack_enabled: true,
+            rtx: None,
             std_socket: None,
             configured: false,
         }
@@ -133,6 +139,15 @@ impl UdpSrc {
     pub fn with_rtcp(mut self, rr_interval_ms: u64, nack: bool) -> Self {
         self.rtcp_rr_interval_ms = rr_interval_ms;
         self.nack_enabled = nack;
+        self
+    }
+
+    /// Reconstruct RFC 4588 RTX packets: those whose payload type is
+    /// `rtx_payload_type` carry an original packet (sequence prepended) of
+    /// payload type `apt`. The rebuilt original is fed to the jitter buffer like
+    /// any other packet, so a retransmission fills its gap.
+    pub fn with_rtx(mut self, rtx_payload_type: u8, apt: u8) -> Self {
+        self.rtx = Some((rtx_payload_type & 0x7F, apt & 0x7F));
         self
     }
 
@@ -219,6 +234,9 @@ impl SourceLoop for UdpSrc {
             // RTP timestamps start at a random offset; rebase so downstream
             // sees PTS near zero.
             let mut ts_base: Option<u32> = None;
+            // The original media stream's SSRC, learned from the first non-RTX
+            // packet; an RFC 4588 RTX resend is restamped back onto it.
+            let mut media_ssrc_seen: Option<u32> = None;
 
             // RTCP feedback state (RTP/RTCP-muxed on this socket): the peer to
             // report to (learned from the first datagram) and report timers.
@@ -321,12 +339,32 @@ impl SourceLoop for UdpSrc {
                 // RTP media: account it for reception stats, buffer it for
                 // reordering, and remember the peer for feedback.
                 if n >= 12 {
-                    let media_ssrc = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
-                    let pkt_seq = u16::from_be_bytes([buf[2], buf[3]]);
-                    let rtp_ts = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    // RFC 4588: a packet on the RTX payload type carries an
+                    // original packet (sequence prepended); rebuild it onto the
+                    // media stream's SSRC before reordering, so the resend simply
+                    // fills its gap. Drop it if no original SSRC is known yet.
+                    let pt = buf[1] & 0x7F;
+                    let is_rtx = self.rtx.is_some_and(|(rtx_pt, _)| pt == rtx_pt);
+                    let reconstructed = match (is_rtx, self.rtx, media_ssrc_seen) {
+                        (true, Some((_, apt)), Some(ssrc)) => {
+                            rtx::parse_rtx_packet(&buf[..n], apt, ssrc)
+                        }
+                        _ => None,
+                    };
+                    if is_rtx && reconstructed.is_none() {
+                        continue; // unusable RTX packet (no media SSRC yet / malformed)
+                    }
+                    let pkt: &[u8] = reconstructed.as_deref().unwrap_or(&buf[..n]);
+
+                    let media_ssrc = u32::from_be_bytes([pkt[8], pkt[9], pkt[10], pkt[11]]);
+                    let pkt_seq = u16::from_be_bytes([pkt[2], pkt[3]]);
+                    let rtp_ts = u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]);
+                    if !is_rtx {
+                        media_ssrc_seen = Some(media_ssrc);
+                    }
                     stats.on_rtp(media_ssrc, pkt_seq, rtp_ts, now);
                     peer = Some(from);
-                    jitter.push(&buf[..n], now);
+                    jitter.push(pkt, now);
 
                     // Request retransmission of any open gaps, rate-limited.
                     if self.nack_enabled && now.saturating_sub(last_nack_ns) >= NACK_MIN_INTERVAL_NS {

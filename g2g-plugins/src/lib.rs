@@ -71,6 +71,9 @@ pub mod rtpjitter;
 // Sans-IO RTCP (RFC 3550 SR/RR/BYE + RFC 4585 Generic NACK) and RFC 3550
 // reception statistics: the RTP control / feedback channel.
 pub mod rtcp;
+// Sans-IO RFC 4588 RTP retransmission (RTX) framing: wraps a resent packet in a
+// distinct payload type with the original sequence number prepended.
+pub mod rtx;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.

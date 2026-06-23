@@ -5,6 +5,31 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M222: RFC 4588 RTP retransmission (RTX)
+
+Upgrades the NACK recovery loop (M96) from plain same-stream resends to proper
+RFC 4588 RTX, so a retransmission is unambiguous under heavy loss and accountable
+separately from the original flow.
+
+- **Sans-IO `rtx` module** (`g2g-plugins::rtx`, always compiled, `no_std`):
+  `build_rtx_packet` wraps an original RTP packet in a distinct payload type / SSRC
+  / sequence number with the 2-byte original sequence (OSN) prepended;
+  `parse_rtx_packet` reconstructs the byte-exact original (restoring PT / SSRC /
+  seq, stripping the OSN). The RTX packet keeps the original marker bit, timestamp,
+  and CSRCs - the marker is *not* carried by the OSN, so a faithful reconstruct
+  rebuilds it from the RTX header. `rtp_payload_offset` honors CSRC count + the
+  extension header. Round-trip + offset tests.
+- **`UdpSink::with_rtx(rtx_pt, rtx_ssrc)`**: NACK resends are emitted as RTX
+  packets on their own sequence space instead of a plain resend.
+- **`UdpSrc::with_rtx(rtx_pt, apt)`**: packets on the RTX payload type are
+  reconstructed onto the media stream's SSRC (learned from the first non-RTX
+  packet) before the jitter buffer, so a resend simply fills its gap. Both
+  SSRC-multiplexed and session-multiplexed RTX work.
+- **End-to-end loopback test** (`udp_loopback::rtx_resends_recover_dropped_packets`):
+  a lossy proxy drops three AUs once; with RTX on both ends the only recovery path
+  is PT-distinct RTX packets the receiver must reconstruct, and all 30 AUs arrive
+  in order. (ULPFEC / FlexFEC remain a separate, NACK-independent track.)
+
 ### M221: RTMP egress (`rtmpsink`) - the publish side of RTMP
 
 Opens the egress / transport track (the ingest side is done). `rtmpsink` is the

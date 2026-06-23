@@ -342,9 +342,10 @@ new platforms; the rest of each platform's elements are owed.
 (`rtmpsink`) **landed M221** -- the `RtmpPublisher` client mirrors the server-side
 `RtmpSession` (shared `ChunkReader`), publishing an FLV byte stream to an RTMP
 endpoint (`flvmux ! rtmpsink`); validated sans-IO against the server session, live
-publish is user-side. Remaining: SRT (both directions), RTSP server + `ANNOUNCE` /
-`RECORD` egress, RTP RTX (RFC 4588) + FEC (jitter buffer / RTCP / NACK already
-done). See the RTMP/SRT and RTP entries under `### High`.
+publish is user-side. RTP **RTX (RFC 4588) landed M222** (`rtx` module +
+`UdpSink`/`UdpSrc` `with_rtx`). Remaining: SRT (both directions), RTSP server +
+`ANNOUNCE` / `RECORD` egress, RTP FEC (ULPFEC / FlexFEC; jitter buffer / RTCP /
+NACK / RTX already done). See the RTMP/SRT and RTP entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
@@ -587,12 +588,12 @@ Production-shape needs that block specific real-world use cases.
   reception stats), and the feedback loop (M96: `UdpSrc` sends RR + NACK,
   `UdpSink` honors NACK by retransmitting from a bounded history, RTP/RTCP muxed
   per RFC 5761) all shipped. Remaining:
-  - **RFC 4588 RTX.** Today a retransmit is a plain same-stream resend (the
-    jitter buffer dedups and reorders it). RTX wraps the retransmission in a
-    distinct payload type with the original sequence (OSN) prepended, so it is
-    distinguishable for stats and unambiguous under heavy loss. The marker bit is
-    not carried by OSN alone, so a faithful RTX apply must reconstruct the
-    original header; that subtlety is why plain resend was chosen first.
+  - **RFC 4588 RTX -- DONE (M222).** `g2g-plugins::rtx` (`build_rtx_packet` /
+    `parse_rtx_packet`, `no_std`) wraps a resend in a distinct payload type / SSRC
+    / sequence with the original sequence (OSN) prepended and reconstructs the
+    byte-exact original (marker bit rebuilt from the RTX header, not the OSN).
+    `UdpSink::with_rtx` / `UdpSrc::with_rtx` opt in; validated end-to-end over the
+    lossy-proxy loopback. SSRC- and session-multiplexed RTX both supported.
   - **FEC** (ULPFEC / FlexFEC). Forward error correction trades bandwidth for
     latency-free recovery (no round-trip), the better fit when RTT is high or the
     path is one-way; a separate track from NACK/RTX.

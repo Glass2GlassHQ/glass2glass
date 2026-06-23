@@ -27,6 +27,7 @@ use g2g_core::{
 use crate::filesink::io_err;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
+use crate::rtx;
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -63,6 +64,11 @@ pub struct UdpSink {
     socket: Option<tokio::net::UdpSocket>,
     /// Honor RTPFB NACK by resending from the retransmission history.
     retransmit: bool,
+    /// RFC 4588 RTX: when set, NACK resends are wrapped in this `(payload type,
+    /// SSRC)` with the original sequence prepended, instead of a plain resend.
+    rtx: Option<(u8, u32)>,
+    /// Sequence counter for the RTX stream (its own numbering space).
+    rtx_seq: u16,
     /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
     retx_buf: VecDeque<(u16, Vec<u8>)>,
@@ -85,6 +91,8 @@ impl UdpSink {
             std_socket: None,
             socket: None,
             retransmit: true,
+            rtx: None,
+            rtx_seq: 0,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
             packets_sent: 0,
@@ -114,6 +122,14 @@ impl UdpSink {
     pub fn with_retransmit(mut self, enabled: bool, capacity: usize) -> Self {
         self.retransmit = enabled;
         self.retx_cap = capacity.max(1);
+        self
+    }
+
+    /// Send NACK resends as RFC 4588 RTX packets on `rtx_payload_type` /
+    /// `rtx_ssrc` (the original sequence is prepended) instead of a plain
+    /// same-stream resend. The receiver must be told the same `apt` mapping.
+    pub fn with_rtx(mut self, rtx_payload_type: u8, rtx_ssrc: u32) -> Self {
+        self.rtx = Some((rtx_payload_type & 0x7F, rtx_ssrc));
         self
     }
 
@@ -181,6 +197,15 @@ impl UdpSink {
             }
         }
         for pkt in &to_resend {
+            // RFC 4588: wrap the resend in an RTX packet (own sequence space),
+            // else resend the original packet verbatim.
+            if let Some((rtx_pt, rtx_ssrc)) = self.rtx {
+                if let Some(wrapped) = rtx::build_rtx_packet(pkt, rtx_pt, rtx_ssrc, self.rtx_seq) {
+                    self.rtx_seq = self.rtx_seq.wrapping_add(1);
+                    socket.send(&wrapped).await.map_err(io_err)?;
+                    continue;
+                }
+            }
             socket.send(pkt).await.map_err(io_err)?;
         }
         Ok(to_resend.len() as u64)
