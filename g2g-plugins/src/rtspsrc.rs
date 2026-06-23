@@ -454,6 +454,9 @@ async fn run_session(
         session_max_pts = session_max_pts.max(pts_ns);
 
         let bytes = vf.into_data().into_boxed_slice();
+        // IDR NAL => independently-decodable unit. H.265 streams report false
+        // (the helper is H.264-specific), which matches the safe default.
+        let keyframe = crate::h264util::h264_au_is_keyframe(&bytes);
 
         let frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
@@ -463,6 +466,7 @@ async fn run_session(
                 duration_ns: 0,
                 capture_ns: pts_ns,
                 arrival_ns: g2g_core::metrics::monotonic_ns(),
+                keyframe,
             },
             sequence: *total_emitted,
             meta: Default::default(),

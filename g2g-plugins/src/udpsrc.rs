@@ -272,6 +272,8 @@ impl SourceLoop for UdpSrc {
                     let rel = au.rtp_timestamp.wrapping_sub(base) as u64;
                     let pts = rel * 1_000_000_000 / RTP_CLOCK_HZ;
                     let arrival_ns = g2g_core::metrics::monotonic_ns();
+                    // IDR NAL => keyframe; false (the safe default) otherwise.
+                    let keyframe = crate::h264util::h264_au_is_keyframe(&au.data);
                     let frame = Frame {
                         domain: MemoryDomain::System(SystemSlice::from_boxed(
                             au.data.into_boxed_slice(),
@@ -282,6 +284,7 @@ impl SourceLoop for UdpSrc {
                             duration_ns: 0,
                             capture_ns: pts,
                             arrival_ns,
+                            keyframe,
                         },
                         sequence: seq,
                         meta: Default::default(),
@@ -325,12 +328,10 @@ impl SourceLoop for UdpSrc {
                 let recv = socket.recv_from(&mut buf);
                 let received = match timeout {
                     Some(delay) if delay > 0 => {
-                        match tokio::time::timeout(core::time::Duration::from_nanos(delay), recv).await
-                        {
-                            Ok(r) => Some(r),
-                            // Deadline elapsed with no packet: loop to flush / report.
-                            Err(_) => None,
-                        }
+                        // Err (deadline elapsed, no packet) => None: loop to flush / report.
+                        tokio::time::timeout(core::time::Duration::from_nanos(delay), recv)
+                            .await
+                            .ok()
                     }
                     Some(_) => Some(recv.await),
                     None => Some(recv.await),

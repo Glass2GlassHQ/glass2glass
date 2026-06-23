@@ -64,7 +64,7 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -609,7 +609,7 @@ fn copy_nv12(src: &[u8], width: u32, height: u32, pitch: u32, dst: &mut [u8]) ->
 mod tests {
     use super::*;
     use alloc::vec;
-    use g2g_core::Rate;
+    use g2g_core::{Rate, VideoCodec};
 
     #[test]
     fn intercept_passes_through_any_format() {
