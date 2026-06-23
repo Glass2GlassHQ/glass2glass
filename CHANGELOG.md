@@ -5,6 +5,40 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M216: GPU-resident tensor inference consumer (`WgpuInference`)
+
+The consumer half of the keep-on-GPU inference branch M215 opened: a wgpu matmul
+compute element that binds `WgpuPreprocess`'s GPU-resident output tensor directly
+and runs the inference on the GPU, so the tensor never makes the GPU->CPU->GPU
+round-trip an opaque-backend consumer would force. With M215 this closes the
+`preprocess -> infer` segment with the tensor never leaving the device.
+
+- **`WgpuInference::linear(width, height, weights, bias)`** (g2g-ml, `wgpu`
+  feature): the same deterministic linear layer (`output = input . W + b`) as
+  `BurnInference`, run as a wgpu compute pass. Input is `Caps::Tensor{F32,
+  [1,3,H,W],Nchw}` in `MemoryDomain::WgpuBuffer` (a `System` frame is rejected as
+  `UnsupportedDomain`, the CPU path's job); output is the `[1, N]` logits, read
+  back to `System` by default or left GPU-resident with `with_gpu_output()`.
+- **Zero-copy via device identity.** A `wgpu::Buffer` is bindable only on the
+  device that created it, so the element owns no device: it adopts the producer's
+  device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame,
+  binds the input buffer directly, and submits its compute on the producer's
+  queue, which orders it after the producer's already-submitted work with no
+  fence or read-back. This is why a raw-wgpu element, not burn: burn's `Tensor`
+  is opaque (no foreign-buffer adopt) and runs on its own device, so a burn
+  consumer would force exactly the read-back + re-upload M215 deleted.
+- **`WgpuBufferOwner`** (g2g-ml) is now the shared owner for any GPU-resident
+  linear tensor (gains `new` + `device()` / `queue()` accessors), so the
+  downstream downcast is identical whether the buffer came from the preprocess
+  stage or the inference stage.
+- Test (`wgpu_inference`, real RTX 3060): chains NV12 -> `WgpuPreprocess`
+  (GPU-output) -> `WgpuInference` and asserts the logits, read back only at the
+  very end, match a full CPU reference (the exact GPU tensor fed through the same
+  linear math) in both System and GPU-output modes. Skips with no wgpu adapter.
+- Remaining for the full decode->display loop: input-side surface-import
+  (preprocess consuming a GPU NV12 texture, killing the upload copy too) and
+  CUDA<->wgpu interop to join the NVDEC decode side.
+
 ### M215: GPU-resident tensor output for `WgpuPreprocess`
 
 `WgpuPreprocess` can now keep its output tensor on the GPU instead of reading it

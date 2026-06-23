@@ -281,21 +281,25 @@ impl WgpuPreprocess {
         encoder.copy_buffer_to_buffer(&gpu.out_buf, 0, &frame_buf, 0, gpu.out_bytes as u64);
         gpu.queue.submit([encoder.finish()]);
 
-        let owner = WgpuBufferOwner {
-            device: gpu.device.clone(),
-            queue: gpu.queue.clone(),
-            buffer: frame_buf,
-            len: gpu.out_bytes,
-        };
+        let owner =
+            WgpuBufferOwner::new(gpu.device.clone(), gpu.queue.clone(), frame_buf, gpu.out_bytes);
         Ok(OwnedWgpuBuffer::new(gpu.out_bytes, std::sync::Arc::new(owner)))
     }
 }
 
-/// Owns a GPU-resident tensor buffer produced by [`WgpuPreprocess`] in GPU-output
-/// mode (M215): the `wgpu::Buffer` holding the f32 NCHW tensor, plus the device /
-/// queue needed to read it back. Boxed as the [`WgpuBufferKeepAlive`] of a
-/// [`MemoryDomain::WgpuBuffer`]; a downstream GPU consumer downcasts to bind the
-/// buffer directly, or calls [`read_back`](Self::read_back) for the CPU bytes.
+/// Owns a GPU-resident linear tensor buffer: the `wgpu::Buffer` holding an f32
+/// tensor, plus the device / queue that produced it (needed to read it back or
+/// to keep submitting work on the same device). Boxed as the
+/// [`WgpuBufferKeepAlive`] of a [`MemoryDomain::WgpuBuffer`]; a downstream GPU
+/// consumer downcasts to bind the buffer directly, or calls
+/// [`read_back`](Self::read_back) for the CPU bytes.
+///
+/// First produced by [`WgpuPreprocess`] in GPU-output mode (M215, the f32 NCHW
+/// RGB tensor); it is also the owner `WgpuInference` emits for its GPU-resident
+/// logits, so the same downcast recovers either producer's buffer. A consumer
+/// that adopts [`device`](Self::device) / [`queue`](Self::queue) keeps the
+/// tensor on the same device, so its work serializes after the producer's on the
+/// shared queue with no CPU round-trip (M216).
 #[derive(Debug)]
 pub struct WgpuBufferOwner {
     device: wgpu::Device,
@@ -305,9 +309,30 @@ pub struct WgpuBufferOwner {
 }
 
 impl WgpuBufferOwner {
+    /// Wrap a GPU buffer with the device / queue that produced it, for handing
+    /// downstream as a [`MemoryDomain::WgpuBuffer`]. `len` is the valid f32
+    /// payload length in bytes.
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, buffer: wgpu::Buffer, len: usize) -> Self {
+        Self { device, queue, buffer, len }
+    }
+
     /// The backing GPU buffer, for a downstream GPU consumer to bind directly.
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer
+    }
+
+    /// The device that produced the buffer, so a downstream GPU consumer can
+    /// adopt it and bind the buffer (a `wgpu::Buffer` is bindable only on its
+    /// own device) rather than reading back to the CPU.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue paired with [`device`](Self::device). Submitting the consumer's
+    /// work here orders it after the producer's already-submitted work, so the
+    /// buffer is ready without an explicit fence or read-back.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Copy the tensor back to the CPU (the deferred read-back a CPU consumer

@@ -28,6 +28,13 @@ pub mod detect;
 #[cfg(feature = "wgpu")]
 pub mod wgpupreprocess;
 
+// GPU-resident tensor inference (DESIGN.md §5.2, M216): a wgpu matmul compute
+// pass that binds WgpuPreprocess's GPU-resident output tensor directly, so the
+// tensor never leaves the GPU between preprocess and inference. The consumer
+// half of the keep-on-GPU branch with_gpu_output (M215) opened.
+#[cfg(feature = "wgpu")]
+pub mod wgpuinfer;
+
 // Pure-Rust Burn inference element (DESIGN.md §5.2): a linear layer run on
 // burn's wgpu backend, the no-C++ counterpart of OrtInference. The module is
 // `burninfer` (not `burn`) so in-crate paths can't collide with the dependency.
