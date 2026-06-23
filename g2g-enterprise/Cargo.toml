@@ -17,7 +17,7 @@ std = ["g2g-core/std", "g2g-plugins/std", "g2g-ml/std"]
 # NvdecCuda -> CudaDownload -> WgpuPreprocess -> WgpuInference. g2g-enterprise is
 # the only crate that depends on both g2g-ml and g2g-plugins as normal deps, so
 # it is the only place this chain can be wired. Linux + NVIDIA + a wgpu adapter.
-cuda-wgpu-e2e = ["g2g-ml/wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
+cuda-wgpu-e2e = ["g2g-ml/wgpu", "g2g-ml/cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }

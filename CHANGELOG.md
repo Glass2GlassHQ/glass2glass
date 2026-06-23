@@ -5,6 +5,48 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M220 (Stage 1): CUDA->wgpu zero-copy bridge (`CudaToWgpu`) - GPU keep-on-GPU pillar complete
+
+Joins the NVDEC decode side to the wgpu preprocess / inference side with no PCIe
+round-trip, closing the last GPU keep-on-GPU gap (DESIGN_TODO.md). The full chain
+now runs entirely GPU-resident, pixels never touching the CPU:
+
+```text
+H.264 -> FfmpegVideoDec(NvdecCuda) -> CudaToWgpu -> WgpuPreprocess -> WgpuInference
+         (MemoryDomain::Cuda)         (-> WgpuTexture)  (-> tensor)     (-> logits)
+```
+
+- **Transport** (`g2g-plugins`, new `cuda-wgpu` feature pulling wgpu-hal + ash):
+  there is no portable CUDA<->wgpu share, so the bridge is built on Vulkan
+  external memory (`VK_KHR_external_memory_fd`). New `cudawgpu` module:
+  - `create_interop_device()`: a wgpu Vulkan device with the FD external-memory
+    extension, via wgpu-hal `open_with_callback` (wgpu's safe `request_device`
+    can't add extensions). Forces the `HighPerformance` adapter, else wgpu may
+    pick a non-NVIDIA Vulkan device whose memory CUDA can't import.
+  - `export_nv12_image()`: self-allocates an exportable R8Uint NV12 image
+    (`width x height*3/2`) + dedicated memory and exports an opaque FD.
+  - `cuda_copy_nv12_planes()`: imports the FD into CUDA (in the decoder's
+    context), maps a CUDA array, and copies the NVDEC Y / interleaved-CbCr planes
+    device->device into it. External-memory CUDA FFI verified against `cuda.h`.
+  - `wrap_as_texture()`: wraps the shared `VkImage` as a `wgpu::Texture`
+    (`texture_from_raw` + `TextureMemory::External`); the image / memory are
+    freed by the texture's drop callback. The `UNDEFINED->COPY_SRC/SAMPLED`
+    transition preserves CUDA's writes on this driver, so no external semaphore
+    is needed yet.
+- **Element** (`g2g-ml`, new `cuda-wgpu` feature): `CudaToWgpu` consumes
+  `MemoryDomain::Cuda` and emits `MemoryDomain::WgpuTexture` owned by a
+  `WgpuNv12Texture` on the interop device, which `WgpuPreprocess` adopts (the
+  M217 device-identity pattern) and samples via its surface-import path. Caps are
+  `Identity(NV12)` (only the domain changes). g2g-plugins becomes an optional
+  normal dep of g2g-ml for this (acyclic; it does not depend on g2g-ml). v1
+  allocates a shared image per frame; a reuse pool is a follow-up.
+- **Validated on the RTX 3060.** Three on-hardware spike tests
+  (`cudawgpu_spike`) prove the Vulkan/CUDA/wgpu plumbing in isolation, and the
+  end-to-end test (`cuda_wgpu_e2e`) runs NvdecCuda -> CudaToWgpu ->
+  WgpuPreprocess -> WgpuInference and matches the CPU reference on all 30 frames
+  with no download (each frame shared M213-style so one copy is downloaded only
+  to derive the reference). Workspace builds unaffected; clippy clean.
+
 ### M220 (Stage 0): CUDA<->wgpu keep-on-GPU correctness scaffold
 
 Stage 0 of joining the NVDEC decode side to the wgpu preprocess / inference side

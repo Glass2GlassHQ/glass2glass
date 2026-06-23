@@ -23,6 +23,11 @@ burn = ["std", "dep:burn"]
 # NV12 frame to a normalized f32 NCHW RGB tensor in a wgpu compute shader.
 # Pulls wgpu (any D3D12/Vulkan/Metal GPU); implies std.
 wgpu = ["std", "dep:wgpu"]
+# CUDA->wgpu zero-copy bridge element (CudaToWgpu, M220). Joins NVDEC CUDA NV12
+# to WgpuPreprocess's surface-import path via g2g-plugins's Vulkan/CUDA
+# external-memory interop, no PCIe round-trip. Implies wgpu; pulls
+# g2g-plugins/cuda-wgpu (wgpu-hal + ash + libcuda FFI). Linux + NVIDIA only.
+cuda-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/cuda-wgpu"]
 # ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).
@@ -46,6 +51,11 @@ ort = { version = "2.0.0-rc.12", optional = true }
 wgpu = { version = "29", optional = true }
 # Pure-Rust Burn deep-learning framework, wgpu backend (burn feature, §5.2).
 burn = { version = "0.21", optional = true, default-features = false, features = ["std", "wgpu"] }
+# CUDA<->wgpu interop primitives (cuda-wgpu feature, M220). Optional NORMAL dep
+# (acyclic: g2g-plugins does not depend on g2g-ml) so the CudaToWgpu element can
+# reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally
+# pulls it (default features) for the end-to-end tests.
+g2g-plugins = { path = "../g2g-plugins", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }

@@ -555,6 +555,136 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
     }
 }
 
+/// Copy a decoded NV12 frame's two planes from CUDA device memory into the
+/// shared image's CUDA array, device->device (no PCIe). The Y plane fills rows
+/// `0..height`, the interleaved CbCr plane rows `height..height + height/2`,
+/// matching the packed-NV12 layout `WgpuPreprocess` samples.
+///
+/// Runs in `context` (the decoder's `CUcontext`, where the plane pointers are
+/// valid), imports the shared FD there, maps the array, copies, synchronizes,
+/// and tears down the CUDA import (the Vulkan allocation persists). Consumes
+/// `shared.fd`.
+///
+/// # Safety
+/// `shared` must come from [`export_nv12_image`] (matching `width`/`height`) and
+/// not yet be imported. The plane pointers / pitches must describe valid NV12
+/// device memory in `context`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cuda_copy_nv12_planes(
+    shared: &SharedNv12Image,
+    context: u64,
+    luma_ptr: u64,
+    luma_pitch: u32,
+    chroma_ptr: u64,
+    chroma_pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), G2gError> {
+    use cuda_ffi as c;
+    let w = width as usize;
+    let h = height as usize;
+
+    // SAFETY: CUDA Driver API sequence in the decoder's context; the import and
+    // mapping are destroyed before return.
+    unsafe {
+        check(c::cuInit(0))?;
+        check(c::cuCtxPushCurrent(context as c::CuContext))?;
+
+        let import_desc = c::CudaExternalMemoryHandleDesc {
+            type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+            _pad: 0,
+            handle_fd: shared.fd,
+            _handle_rest: [0; 12],
+            size: shared.size,
+            flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
+            reserved: [0; 16],
+        };
+        let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
+        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
+
+        let tex_h = nv12_texture_height(height) as usize;
+        let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
+            offset: 0,
+            array_desc: c::CudaArray3dDescriptor {
+                width: w,
+                height: tex_h,
+                depth: 0,
+                format: c::CU_AD_FORMAT_UNSIGNED_INT8,
+                num_channels: 1,
+                flags: 0,
+            },
+            num_levels: 1,
+            reserved: [0; 16],
+        };
+        let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
+        let mut array: c::CuArray = core::ptr::null_mut();
+        if result.is_ok() {
+            result =
+                check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+        }
+        if result.is_ok() {
+            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+        }
+        if result.is_ok() {
+            // Y plane -> array rows 0..h.
+            let luma = c::CudaMemcpy2D {
+                src_x_in_bytes: 0,
+                src_y: 0,
+                src_memory_type: c::CU_MEMORYTYPE_DEVICE,
+                src_host: core::ptr::null(),
+                src_device: luma_ptr,
+                src_array: core::ptr::null_mut(),
+                src_pitch: luma_pitch as usize,
+                dst_x_in_bytes: 0,
+                dst_y: 0,
+                dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                dst_host: core::ptr::null_mut(),
+                dst_device: 0,
+                dst_array: array,
+                dst_pitch: 0,
+                width_in_bytes: w,
+                height: h,
+            };
+            result = check(c::cu_memcpy_2d(&luma));
+            if result.is_ok() {
+                // Interleaved CbCr plane (w bytes/row, h/2 rows) -> array rows h..
+                let chroma = c::CudaMemcpy2D {
+                    src_x_in_bytes: 0,
+                    src_y: 0,
+                    src_memory_type: c::CU_MEMORYTYPE_DEVICE,
+                    src_host: core::ptr::null(),
+                    src_device: chroma_ptr,
+                    src_array: core::ptr::null_mut(),
+                    src_pitch: chroma_pitch as usize,
+                    dst_x_in_bytes: 0,
+                    dst_y: h,
+                    dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                    dst_host: core::ptr::null_mut(),
+                    dst_device: 0,
+                    dst_array: array,
+                    dst_pitch: 0,
+                    width_in_bytes: w,
+                    height: h / 2,
+                };
+                result = check(c::cu_memcpy_2d(&chroma));
+            }
+            if result.is_ok() {
+                result = check(c::cuCtxSynchronize());
+            }
+        }
+
+        if !mipmap.is_null() {
+            c::cuMipmappedArrayDestroy(mipmap);
+        }
+        if !ext_mem.is_null() {
+            c::cuDestroyExternalMemory(ext_mem);
+        }
+        let mut popped: c::CuContext = core::ptr::null_mut();
+        let _ = c::cuCtxPopCurrent(&mut popped);
+        result
+    }
+}
+
 /// Map a `CUresult` to a `Result`, carrying the raw code on failure.
 fn check(code: i32) -> Result<(), G2gError> {
     if code == 0 {
@@ -579,6 +709,7 @@ mod cuda_ffi {
     pub type CuArray = *mut c_void;
 
     pub const CU_MEMORYTYPE_HOST: u32 = 0x01;
+    pub const CU_MEMORYTYPE_DEVICE: u32 = 0x02;
     pub const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
     pub const CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD: u32 = 1;
     pub const CUDA_EXTERNAL_MEMORY_DEDICATED: u32 = 0x1;
