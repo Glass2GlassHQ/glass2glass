@@ -111,6 +111,14 @@ cuda = ["std"]
 # PCIe round-trip and CPU colour convert. Pulls khronos-egl (EGL), glow (GL
 # ES), wayland-egl (wl_egl_window), and SCTK (windowing). Linux + NVIDIA only.
 cuda-gl = ["cuda", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+# CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar). `CudaToWgpu`
+# imports a Vulkan external-memory image into CUDA, copies the NVDEC NV12 planes
+# device->device into it, and hands it downstream as MemoryDomain::WgpuTexture
+# for WgpuPreprocess's surface-import path, so decode -> preprocess -> infer stay
+# on the GPU with no PCIe round-trip. Needs raw Vulkan: wgpu-hal (to get a device
+# with VK_KHR_external_memory_fd and wrap a self-allocated VkImage) + ash. Linux
+# + NVIDIA only, implies std.
+cuda-wgpu = ["cuda", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);
@@ -283,6 +291,13 @@ vello = { version = "0.9", optional = true }
 # wgpu for the GpuContext + WgpuSink (and shared with vello, which re-exports the
 # same crate). Optional; pulled by vello-overlay / wgpu-sink.
 wgpu = { version = "29", optional = true }
+# Raw Vulkan escape hatch for CUDA<->wgpu interop (cuda-wgpu feature, M220). The
+# Vulkan backend of wgpu, used to create a device with VK_KHR_external_memory_fd
+# and to wrap a self-allocated, externally-shared VkImage as a wgpu texture
+# (texture_from_raw + TextureMemory::External). ash is the Vulkan FFI; its
+# version is pinned to the one wgpu-hal 29 links so vk::Image handles match.
+wgpu-hal = { version = "29", optional = true, default-features = false, features = ["vulkan"] }
+ash = { version = "0.38", optional = true }
 # Embassy RTOS clock backend (embassy feature, M43). no_std; embassy-time needs
 # a HAL-provided time driver registered at link (owed to hardware).
 embassy-time = { version = "0.5", optional = true, default-features = false }

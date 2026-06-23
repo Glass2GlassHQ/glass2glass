@@ -2876,6 +2876,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "alsa",
+ "ash",
  "audiopus",
  "bytes",
  "cbc",
@@ -2918,6 +2919,7 @@ dependencies = [
  "wayland-egl",
  "web-sys",
  "wgpu",
+ "wgpu-hal",
  "windows",
  "zune-jpeg",
 ]

@@ -337,6 +337,11 @@ pub mod cuda;
 #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
 pub mod cudaglsink;
 
+// CUDA<->wgpu zero-copy interop: imports a Vulkan external-memory image into
+// CUDA so NVDEC NV12 reaches WgpuPreprocess on the GPU. Linux + NVIDIA.
+#[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
+pub mod cudawgpu;
+
 // Browser / WebAssembly target (DESIGN.md §6.3), behind the `web` feature:
 // WasmClock (performance.now + setTimeout), WebSocketSrc ingest, and a
 // spawn_local browser entry. The wasm bindings are target-gated to wasm32, so
