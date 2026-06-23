@@ -5,6 +5,32 @@ Nothing is published yet; all versions are `0.1.0`.
 
 ## Unreleased
 
+### M223: RTSP server (`rtspserversink`) - host an RTSP endpoint
+
+`RtspSrc` was the client; this hosts the server side, the OBS / surveillance /
+contribution-server shape. A player connects, runs OPTIONS / DESCRIBE / SETUP /
+PLAY, and `rtspserversink` streams the pipeline's H.264 to it as RTP/UDP.
+
+- **Sans-IO responder** (`g2g-plugins::rtspserver`, always compiled, `no_std`):
+  `RtspRequest::parse` (request line + CSeq / Transport / Content-Length headers,
+  waiting for a full body) and `RtspResponder`, the per-session state machine
+  answering OPTIONS / DESCRIBE / SETUP / PLAY / PAUSE / TEARDOWN and the publisher
+  path ANNOUNCE / RECORD. `handle_request` returns the response bytes plus an
+  `RtspEvent` (`Setup{client_rtp_port}` / `Play` / `Record` / `Teardown`) telling
+  the I/O layer what to do. `sdp_h264` builds the offered SDP; SETUP parses the
+  `client_port` range and echoes a `server_port` + `ssrc`.
+- **Element** (`g2g-plugins`, new `rtsp-server` feature): `RtspServerSink`
+  (`AsyncElement` sink) binds an RTSP TCP listener, accepts one player on the first
+  buffer, drives the handshake to PLAY, then packetizes each access unit with the
+  existing `RtpH264Packetizer` and sends RTP to the player's negotiated UDP port.
+  Registered as the `rtspserversink` launch element (default `0.0.0.0:8554`).
+- **End-to-end loopback test** (`rtsp_server_loopback`): a minimal in-test RTSP
+  player connects, handshakes, and recovers every streamed access unit in order
+  via `RtpH264Depayloader` - the full control + RTP transport path with no
+  external client. One client / one session / unicast UDP / PLAY direction;
+  multi-client, TCP-interleaved transport, and the ANNOUNCE/RECORD source element
+  are follow-ups (the responder already speaks ANNOUNCE/RECORD).
+
 ### M222: RFC 4588 RTP retransmission (RTX)
 
 Upgrades the NACK recovery loop (M96) from plain same-stream resends to proper

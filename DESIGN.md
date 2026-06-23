@@ -788,6 +788,19 @@ trip); live publish to a real endpoint is operator-validated. SRT, the complex
 (HMAC digest) handshake some CDNs require, and multiple streams are follow-ups
 (DESIGN_TODO).
 
+**RTSP server.** `RtspServerSink` (`rtspserversink.rs`, `rtsp-server` feature)
+hosts the server side of RTSP: a player connects over TCP, runs OPTIONS /
+DESCRIBE / SETUP / PLAY, and the sink streams the pipeline's H.264 to the
+player's negotiated UDP port as RTP, reusing the `RtpH264Packetizer`. The
+protocol is Sans-IO (`rtspserver.rs`, `RtspResponder` + `RtspRequest::parse` +
+`sdp_h264`): a per-session state machine answering each method and returning an
+`RtspEvent` (`Setup{client_rtp_port}` / `Play` / `Record` / `Teardown`) that the
+element acts on. It also speaks the publisher path (ANNOUNCE / RECORD) for a
+future receive-side source. Validated end-to-end over loopback (an in-test player
+handshakes and recovers every streamed access unit). Scope is one client / one
+session / unicast UDP / the PLAY direction; multi-client, TCP-interleaved
+transport, and the ANNOUNCE/RECORD source element are follow-ups (DESIGN_TODO).
+
 The remaining capture/ingress breadth — a `uridecodebin`-equivalent URI → source
 layer over the autoplug registry — is tracked in DESIGN_TODO.
 

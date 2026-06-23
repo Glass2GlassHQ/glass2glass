@@ -20,6 +20,10 @@ multi-thread = ["g2g-core/multi-thread"]
 plugin-loader = ["std", "dep:libloading"]
 # RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
 rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
+# RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
+# serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
+# is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
+rtsp-server = ["std", "tokio/net", "tokio/io-util"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.

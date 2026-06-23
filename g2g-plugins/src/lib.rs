@@ -156,6 +156,12 @@ pub mod wavsink;
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
 
+// Sans-IO RTSP 1.0 server responder (always compiled) and the tokio TCP serving
+// sink (egress: hosts a pipeline's H.264 as an RTSP endpoint).
+pub mod rtspserver;
+#[cfg(feature = "rtsp-server")]
+pub mod rtspserversink;
+
 // UDP egress sink (M47): drives the M46 RtpH264Packetizer and sends RTP over a
 // tokio UdpSocket, the send-side inverse of RtspSrc's receive path.
 #[cfg(feature = "udp-egress")]

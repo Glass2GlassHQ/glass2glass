@@ -80,6 +80,8 @@ use crate::rtspsrc::RtspSrc;
 use crate::udpsrc::UdpSrc;
 #[cfg(feature = "udp-egress")]
 use crate::udpsink::UdpSink;
+#[cfg(feature = "rtsp-server")]
+use crate::rtspserversink::RtspServerSink;
 #[cfg(feature = "http-src")]
 use crate::httpsrc::HttpSrc;
 #[cfg(feature = "hls")]
@@ -389,6 +391,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "udp-egress")]
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
+    }));
+    #[cfg(feature = "rtsp-server")]
+    reg.register_launch(LaunchFactory::of::<RtspServerSink>("rtspserversink", || {
+        Box::new(RtspServerSink::new("0.0.0.0:8554".parse().unwrap()))
     }));
     #[cfg(feature = "http-src")]
     reg.register_source(SourceFactory::new(

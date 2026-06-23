@@ -343,9 +343,11 @@ new platforms; the rest of each platform's elements are owed.
 `RtmpSession` (shared `ChunkReader`), publishing an FLV byte stream to an RTMP
 endpoint (`flvmux ! rtmpsink`); validated sans-IO against the server session, live
 publish is user-side. RTP **RTX (RFC 4588) landed M222** (`rtx` module +
-`UdpSink`/`UdpSrc` `with_rtx`). Remaining: SRT (both directions), RTSP server +
-`ANNOUNCE` / `RECORD` egress, RTP FEC (ULPFEC / FlexFEC; jitter buffer / RTCP /
-NACK / RTX already done). See the RTMP/SRT and RTP entries under `### High`.
+`UdpSink`/`UdpSrc` `with_rtx`). **RTSP server started M223** (`rtspserversink` +
+sans-IO `rtspserver` responder; PLAY-direction serving validated, ANNOUNCE/RECORD
+spoken by the responder). Remaining: SRT (both directions), the ANNOUNCE/RECORD
+*source* element, multi-client RTSP, RTP FEC (ULPFEC / FlexFEC; jitter buffer /
+RTCP / NACK / RTX already done). See the RTMP/SRT and RTP entries under `### High`.
 
 **3. Depth (works today, not yet future-proof).**
 - Negotiation: dynamic / *unbounded* request pads (bounded-N done M205/M210),
@@ -989,9 +991,13 @@ presentation. Similar 5–8 session shape to macOS.
   `moving-bar` plus `smpte` (75% colour bars), `checker`, `ball` (bouncing), and
   `zone-plate` (integer concentric-ring chirp). Integer-only, `no_std`-safe. A
   sinusoidal (vs square-wave) zone plate would need `libm`; deferred.
-- **RTSP server (`rtsp-server`).** 4–5 sessions. `RtspSrc` is the client;
-  hosting RTSP endpoints (one per pipeline, dynamic client connect) is the
-  OBS / surveillance / contribution-server shape.
+- **RTSP server (`rtsp-server`) -- STARTED (M223).** `RtspServerSink` + the
+  sans-IO `rtspserver::RtspResponder` host an RTSP endpoint: a player runs
+  OPTIONS / DESCRIBE / SETUP / PLAY and the sink streams the pipeline's H.264 as
+  RTP/UDP (validated end-to-end over loopback). The responder also speaks the
+  publisher path (ANNOUNCE / RECORD). **Remaining:** multiple concurrent clients,
+  TCP-interleaved transport, RTCP/keepalive during PLAY, and the receive-side
+  (ANNOUNCE/RECORD) *source* element that ingests a pushing publisher.
 - **WebRTC sendrecv full-stack.** 5+ sessions. `WebRtcSrc` is data-channel
   ingest only; a complete `WebRtcBin`-equivalent with ICE, DTLS-SRTP, full
   media-engine negotiation is its own track.
