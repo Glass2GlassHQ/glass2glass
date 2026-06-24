@@ -1004,6 +1004,20 @@ failure policy is strict: a branch whose constraint rejects the new caps
 fails the fan-out loud (`CapsMismatch`); a future `FanOutPolicy::AllowBranchDrop`
 opt-in is anticipated for graceful degradation.
 
+A tee broadcast is **zero-copy** (M213, M250). Before fanning out, the runner
+calls `MemoryDomain::make_shareable` once, which turns the frame's memory into a
+refcounted handle; each branch then gets a second handle via `MemoryDomain::share`,
+a refcount bump rather than a copy. The GPU domains and the shared-CPU
+`SystemView` are handle-shared by construction; owned-CPU `System` bytes are made
+shareable by *moving* the `Box<[u8]>` into an `Arc<Box<[u8]>>` (a move, not a
+re-copy, which `Arc<[u8]>` would force), and a pooled buffer into an
+`Arc<PooledBuffer>` that returns to its pool once the last branch drops. The
+share is read-only: a branch that mutates pays copy-on-write
+(`SystemSlice::as_mut_slice` reclaims a uniquely-held `Arc` without a copy, else
+deep-copies), so siblings never alias a mutation. So a decoded frame, on CPU or
+GPU, fans out to several consumers (e.g. inference + display) with no per-branch
+copy, where `System` previously deep-copied per branch and a GPU frame failed loud.
+
 `run_muxer_sink` solves each `source ↔ muxer-input` pair at startup,
 per-input re-solves on mid-stream change, and eagerly re-emits the muxer's
 output `CapsChanged` downstream when the merged output caps change as a

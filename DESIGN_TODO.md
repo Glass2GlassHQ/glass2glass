@@ -49,9 +49,6 @@ leverage first:
   declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
 - **Dynamic pads / request pads.** `tee` / `mux` runtime branch/input addition;
   both are static today.
-- **Zero-copy tee.** `run_graph`'s tee deep-copies `System` frames and fails on
-  a GPU domain (`PipelinePacket` isn't `Clone`). Needs a refcounted shareable
-  frame.
 - **Graceful per-branch drop on fan-out** (`FanOutPolicy::AllowBranchDrop`); a
   rejecting branch fails the run loud today.
 - **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad

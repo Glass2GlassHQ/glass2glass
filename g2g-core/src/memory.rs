@@ -94,22 +94,22 @@ impl MemoryDomain {
     }
 
     /// Produce a second handle to this frame's memory for a fan-out branch
-    /// (M213). For the GPU domains and the shared-CPU [`SystemView`] this is a
-    /// **zero-copy** reference-count bump: both branches read the same device
-    /// memory / texture / allocation. For owned-CPU [`System`](Self::System)
-    /// bytes there is nothing to refcount, so it deep-copies (the one domain a
-    /// tee cannot share for free); a stride-aware producer can use `SystemView`
-    /// to avoid even that.
+    /// (M213, M250). A **zero-copy** reference-count bump for every domain: the
+    /// GPU domains and the shared-CPU [`SystemView`] are handle-shared; owned-CPU
+    /// [`System`](Self::System) bytes are too, **provided** [`make_shareable`]
+    /// has run first (the tee does this once before fanning out). Without that
+    /// pre-share, `System` falls back to a deep copy (nothing to refcount yet).
     ///
     /// Read-only fan-out: branches must treat the shared memory as immutable. A
     /// branch that needs to mutate copies first (as the per-frame metadata does
-    /// copy-on-write), so the shares never alias a mutation.
+    /// copy-on-write, and `SystemSlice::as_mut_slice` does for shared bytes), so
+    /// the shares never alias a mutation.
+    ///
+    /// [`make_shareable`]: Self::make_shareable
     pub fn share(&self) -> MemoryDomain {
         match self {
-            // Owned CPU bytes: deep-copy (nothing to refcount).
-            MemoryDomain::System(s) => {
-                MemoryDomain::System(SystemSlice::from_boxed(s.as_slice().to_vec().into_boxed_slice()))
-            }
+            // CPU bytes: a refcount bump if pre-shared, else a deep copy.
+            MemoryDomain::System(s) => MemoryDomain::System(s.share_handle()),
             // Everything else is refcounted/handle-shared: clone is cheap.
             MemoryDomain::SystemView(v) => MemoryDomain::SystemView(v.clone()),
             MemoryDomain::DmaBuf(d) => MemoryDomain::DmaBuf(d.clone()),
@@ -122,6 +122,18 @@ impl MemoryDomain {
             }
             MemoryDomain::WgpuTexture(t) => MemoryDomain::WgpuTexture(t.clone()),
             MemoryDomain::WgpuBuffer(b) => MemoryDomain::WgpuBuffer(b.clone()),
+        }
+    }
+
+    /// Prepare this frame's memory to be fanned out zero-copy (M250): convert
+    /// owned-CPU [`System`](Self::System) bytes into a refcounted shareable handle
+    /// once, so the subsequent per-branch [`share`](Self::share) calls are
+    /// refcount bumps rather than deep copies. The other domains are already
+    /// handle-shared, so this is a no-op for them. Called once by the tee before
+    /// it broadcasts.
+    pub fn make_shareable(&mut self) {
+        if let MemoryDomain::System(s) = self {
+            s.make_shared();
         }
     }
 }
@@ -145,6 +157,21 @@ enum SystemSliceInner {
     // Foreign-owned CPU bytes lent to the pipeline zero-copy (M234), e.g. an
     // application buffer through the C ABI. Freed via the callback on drop.
     Foreign(ForeignSlice),
+    // Refcounted owned bytes shared across tee branches (M250). `Arc<Box<[u8]>>`
+    // (not `Arc<[u8]>`) so `make_shared` *moves* the existing `Box` in with no
+    // byte copy; `share_handle` then hands each branch a refcount bump. Read-only
+    // while shared: `as_mut_slice` copies out first (copy-on-write).
+    Shared(Arc<Box<[u8]>>),
+    // The pooled analog: a shared pooled buffer, returned to its pool once the
+    // last branch drops.
+    #[cfg(feature = "runtime")]
+    SharedPooled { buffer: Arc<PooledBuffer<Box<[u8]>>>, len: usize },
+}
+
+/// An empty owned boxed slice, used as a `mem::replace` placeholder while an
+/// inner buffer is moved out.
+fn empty_boxed() -> Box<[u8]> {
+    alloc::vec::Vec::new().into_boxed_slice()
 }
 
 impl SystemSlice {
@@ -193,24 +220,95 @@ impl SystemSlice {
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &buffer.as_ref()[..*len],
             SystemSliceInner::Foreign(f) => f.as_slice(),
+            SystemSliceInner::Shared(arc) => arc,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::SharedPooled { buffer, len } => &buffer.as_ref().as_ref()[..*len],
         }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        // A lent foreign buffer is read-only: copy it out (returning the lend to
-        // its owner via the free callback when the old inner drops) and continue
-        // with owned bytes, so an in-place transform never writes the lender's
-        // memory.
-        if matches!(self.inner, SystemSliceInner::Foreign(_)) {
-            let owned = self.as_slice().to_vec().into_boxed_slice();
+        // A lent or tee-shared buffer is read-only: copy-on-write to owned bytes
+        // first, so an in-place transform never writes the lender's memory or a
+        // sibling branch's shared frame. A uniquely-held `Shared` Arc is
+        // reclaimed without a copy.
+        let needs_cow = matches!(
+            self.inner,
+            SystemSliceInner::Foreign(_) | SystemSliceInner::Shared(_)
+        ) || {
+            #[cfg(feature = "runtime")]
+            {
+                matches!(self.inner, SystemSliceInner::SharedPooled { .. })
+            }
+            #[cfg(not(feature = "runtime"))]
+            {
+                false
+            }
+        };
+        if needs_cow {
+            let taken = core::mem::replace(&mut self.inner, SystemSliceInner::Owned(empty_boxed()));
+            let owned: Box<[u8]> = match taken {
+                SystemSliceInner::Foreign(f) => f.as_slice().to_vec().into_boxed_slice(),
+                // Unique share: reclaim the boxed bytes with no copy; otherwise
+                // (a sibling branch still holds it) deep-copy.
+                SystemSliceInner::Shared(arc) => match Arc::try_unwrap(arc) {
+                    Ok(b) => b,
+                    Err(arc) => arc.as_ref().clone(),
+                },
+                #[cfg(feature = "runtime")]
+                SystemSliceInner::SharedPooled { buffer, len } => {
+                    buffer.as_ref().as_ref()[..len].to_vec().into_boxed_slice()
+                }
+                _ => unreachable!("needs_cow only set for Foreign / Shared / SharedPooled"),
+            };
             self.inner = SystemSliceInner::Owned(owned);
         }
         match &mut self.inner {
             SystemSliceInner::Owned(b) => b,
             #[cfg(feature = "runtime")]
             SystemSliceInner::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
-            SystemSliceInner::Foreign(_) => unreachable!("converted to Owned above"),
+            _ => unreachable!("Foreign / Shared / SharedPooled converted to Owned above"),
         }
+    }
+
+    /// Convert this slice into a refcounted shareable handle in place (M250), so
+    /// a tee can hand each branch a second handle via [`share_handle`] with no
+    /// byte copy. Owned bytes (and a pooled buffer) *move* into an `Arc`; a
+    /// foreign lent buffer is copied out first (the lend stays single-owner,
+    /// read-only). Already-shared slices are a no-op. Idempotent.
+    pub(crate) fn make_shared(&mut self) {
+        match &self.inner {
+            SystemSliceInner::Shared(_) => return,
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::SharedPooled { .. } => return,
+            _ => {}
+        }
+        let taken = core::mem::replace(&mut self.inner, SystemSliceInner::Owned(empty_boxed()));
+        self.inner = match taken {
+            SystemSliceInner::Owned(b) => SystemSliceInner::Shared(Arc::new(b)),
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::Pooled { buffer, len } => {
+                SystemSliceInner::SharedPooled { buffer: Arc::new(buffer), len }
+            }
+            SystemSliceInner::Foreign(f) => {
+                SystemSliceInner::Shared(Arc::new(f.as_slice().to_vec().into_boxed_slice()))
+            }
+            already => already,
+        };
+    }
+
+    /// A second handle to this slice for a fan-out branch. Zero-copy (an `Arc`
+    /// refcount bump) when [`make_shared`] has run; a deep copy otherwise (the
+    /// caller did not pre-share, so there is nothing to refcount).
+    pub(crate) fn share_handle(&self) -> SystemSlice {
+        let inner = match &self.inner {
+            SystemSliceInner::Shared(arc) => SystemSliceInner::Shared(arc.clone()),
+            #[cfg(feature = "runtime")]
+            SystemSliceInner::SharedPooled { buffer, len } => {
+                SystemSliceInner::SharedPooled { buffer: buffer.clone(), len: *len }
+            }
+            _ => SystemSliceInner::Owned(self.as_slice().to_vec().into_boxed_slice()),
+        };
+        SystemSlice { inner }
     }
 }
 
@@ -800,6 +898,47 @@ mod tests {
         assert!(!dropped.load(Ordering::SeqCst), "still held by the original");
         drop(original);
         assert!(dropped.load(Ordering::SeqCst), "released once the last share drops");
+    }
+
+    #[test]
+    fn sharing_system_bytes_after_make_shareable_is_zero_copy() {
+        // M250: once made shareable, a tee hands each branch a handle to the SAME
+        // backing bytes (a refcount bump), not a copy: identical data pointers.
+        let mut original =
+            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![9u8; 64].into_boxed_slice()));
+        let orig_ptr = match &original {
+            MemoryDomain::System(s) => s.as_slice().as_ptr(),
+            _ => unreachable!(),
+        };
+        original.make_shareable();
+        let branch = original.share();
+        let (a, b) = match (&original, &branch) {
+            (MemoryDomain::System(a), MemoryDomain::System(b)) => (a, b),
+            _ => panic!("share preserves the domain"),
+        };
+        assert_eq!(a.as_slice().as_ptr(), b.as_slice().as_ptr(), "branches share one buffer");
+        // The move into the Arc preserved the original allocation (no copy).
+        assert_eq!(a.as_slice().as_ptr(), orig_ptr, "make_shareable moved, did not copy");
+        assert_eq!(b.as_slice(), &[9u8; 64], "shared bytes intact");
+    }
+
+    #[test]
+    fn mutating_a_shared_branch_copies_on_write() {
+        // A branch that mutates must not write the sibling's bytes: as_mut_slice
+        // copies out first while the share is still held.
+        let mut original =
+            MemoryDomain::System(SystemSlice::from_boxed(alloc::vec![1u8; 8].into_boxed_slice()));
+        original.make_shareable();
+        let mut branch = original.share();
+        let MemoryDomain::System(branch_slice) = &mut branch else { unreachable!() };
+        branch_slice.as_mut_slice()[0] = 42;
+        assert_eq!(branch_slice.as_slice()[0], 42, "branch sees its own write");
+        match &original {
+            MemoryDomain::System(o) => {
+                assert_eq!(o.as_slice()[0], 1, "original untouched by the branch's write");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

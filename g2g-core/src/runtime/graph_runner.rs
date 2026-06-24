@@ -1300,9 +1300,14 @@ async fn demux_arm<'a>(
     }
 }
 
-/// Send `packet` to every tee branch. Clones it to all but the last branch and
-/// moves the original into the last, so a fan-out of `n` makes `n - 1` copies.
-async fn broadcast(senders: &mut [SenderSink], packet: PipelinePacket) -> Result<(), G2gError> {
+/// Send `packet` to every tee branch. The frame's memory is made shareable once
+/// (a zero-copy refcount handle, M250), so the per-branch clones below are
+/// refcount bumps, not deep copies; the original is then moved into the last
+/// branch. A fan-out of `n` makes zero byte copies of a `System` / GPU frame.
+async fn broadcast(senders: &mut [SenderSink], mut packet: PipelinePacket) -> Result<(), G2gError> {
+    if let PipelinePacket::DataFrame(frame) = &mut packet {
+        frame.domain.make_shareable();
+    }
     let last = senders.len() - 1;
     for s in senders[..last].iter_mut() {
         s.push(try_clone_packet(&packet)?).await?;
@@ -1442,12 +1447,13 @@ async fn muxer_arm<'a>(
     }
 }
 
-/// Clone a packet for a tee branch (M213). Control packets clone trivially; a
-/// data frame's memory is shared via [`MemoryDomain::share`]: a zero-copy
-/// refcount bump for the GPU domains and the shared-CPU `SystemView`, a deep
-/// copy only for owned-CPU `System` bytes. So a GPU-decoded frame now fans out
-/// to several consumers (eg inference + display) with no device-to-host copy,
-/// where it previously failed loud.
+/// Clone a packet for a tee branch (M213, M250). Control packets clone trivially;
+/// a data frame's memory is shared via [`MemoryDomain::share`]: a zero-copy
+/// refcount bump for the GPU domains, the shared-CPU `SystemView`, and (once
+/// `broadcast` has called `make_shareable`) owned-CPU `System` bytes too. So a
+/// GPU-decoded or CPU frame fans out to several consumers (eg inference +
+/// display) with no copy, where `System` previously deep-copied per branch and a
+/// GPU frame failed loud.
 fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError> {
     Ok(match packet {
         PipelinePacket::CapsChanged(caps) => PipelinePacket::CapsChanged(caps.clone()),
