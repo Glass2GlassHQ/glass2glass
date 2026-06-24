@@ -497,7 +497,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             report_nego_failure(bus, f);
             G2gError::CapsMismatch
         })?;
-        let feasibility = graph_downstream_feasibility(&vg, &constraints);
+        let feasibility = graph_downstream_feasibility(&vg, &constraints, &solution);
         (solution, feasibility)
     };
 

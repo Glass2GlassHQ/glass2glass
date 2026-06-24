@@ -450,17 +450,26 @@ pub(crate) fn downstream_feasibility(constraints: &[&CapsConstraint<'_>]) -> Vec
         _ => None,
     };
     // Propagate upstream through each interior transform: the element at
-    // position k+1 sits between link k and link k+1.
+    // position k+1 sits between link k and link k+1. No startup input sample is
+    // threaded here (this test-only sweep pins the Identity / Mapping / coupled
+    // hops); the real graph path supplies it from the solved edge sets.
     for k in (0..n_links - 1).rev() {
-        feas[k] = backward_feasible(constraints[k + 1], feas[k + 1].as_ref());
+        feas[k] = backward_feasible(constraints[k + 1], feas[k + 1].as_ref(), None);
     }
     feas
 }
 
 /// One reverse hop of [`downstream_feasibility`]: given the feasible set on
-/// an element's output link, the set its input link can carry.
+/// an element's output link, the set its input link can carry. `in_sample` is
+/// a representative input alternative the element fixated to at startup,
+/// available for the closure-probing constraints (`DerivedOutput`) that need a
+/// concrete input to discover their invertible fields; `None` for the others.
 #[cfg(feature = "std")]
-fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<CapsSet> {
+fn backward_feasible(
+    c: &CapsConstraint<'_>,
+    down: Option<&CapsSet>,
+    in_sample: Option<&Caps>,
+) -> Option<CapsSet> {
     match c {
         CapsConstraint::Identity(s) => Some(match down {
             Some(d) => s.intersect(d),
@@ -494,8 +503,34 @@ fn backward_feasible(c: &CapsConstraint<'_>, down: Option<&CapsSet>) -> Option<C
             }
             Some(CapsSet::from_alternatives(alts))
         }
-        // Non-invertible (DerivedOutput / legacy) or non-transform shape:
-        // impose no constraint on the input link.
+        // A plain `DerivedOutput` (decoder / rescaler) declares no passthrough
+        // mask, but M257's `discover_passthrough` recovers its invertible fields
+        // by probing the closure on a concrete input. Mid-stream the snapshot has
+        // only the output set; the startup-fixated `in_sample` supplies that probe
+        // (and the input variant / scalar identity to couple onto, which the output
+        // alone can't give across a decoder's variant change). With a non-empty
+        // mask the input feasibility is the downstream set's passthrough fields
+        // coupled back onto the sample (`couple_passthrough_derived`, the same
+        // primitive the full-chain solve uses); an empty mask or no sample imposes
+        // none, the prior behavior.
+        CapsConstraint::DerivedOutput(f) => {
+            let (d, sample) = (down?, in_sample?);
+            let mask = discover_passthrough(f, sample);
+            if mask == PassthroughFields::NONE {
+                return None;
+            }
+            let mut alts = Vec::with_capacity(d.alternatives().len());
+            for o in d.alternatives() {
+                if let Some(c) = couple_passthrough_derived(sample, o, mask) {
+                    if !alts.contains(&c) {
+                        alts.push(c);
+                    }
+                }
+            }
+            (!alts.is_empty()).then(|| CapsSet::from_alternatives(alts))
+        }
+        // Non-invertible (legacy) or non-transform shape: impose no constraint
+        // on the input link.
         _ => None,
     }
 }
@@ -824,6 +859,7 @@ pub fn solve_graph<E>(
 pub(crate) fn graph_downstream_feasibility<E>(
     graph: &ValidatedGraph<E>,
     constraints: &[NodeConstraint<'_>],
+    solution: &[Caps],
 ) -> Vec<Option<CapsSet>> {
     let ne = graph.edge_count();
     let mut feas: Vec<Option<CapsSet>> = alloc::vec![None; ne];
@@ -844,7 +880,9 @@ pub(crate) fn graph_downstream_feasibility<E>(
                 let ie = graph.in_edges(node)[0];
                 let oe = graph.out_edges(node)[0];
                 if let NodeConstraint::Element(c) = &constraints[idx] {
-                    feas[ie] = backward_feasible(c, feas[oe].as_ref());
+                    // The element's startup-fixated input, for the closure probe a
+                    // `DerivedOutput` backward hop needs (see `backward_feasible`).
+                    feas[ie] = backward_feasible(c, feas[oe].as_ref(), solution.get(ie));
                 }
             }
             NodeKind::Tee(_) => {
@@ -2048,7 +2086,8 @@ mod tests {
         g.link(tee.out(1), b).unwrap();
         let v = g.finish().unwrap();
 
-        let feas = graph_downstream_feasibility(&v, &cs);
+        let sol = solve_graph(&v, &cs).expect("tee branches solve");
+        let feas = graph_downstream_feasibility(&v, &cs, &sol);
         // edge 0 = src->tee, edge 1 = tee.out0->a, edge 2 = tee.out1->b.
         let tee_in = feas[0].as_ref().expect("tee input has feasibility");
         assert!(tee_in.intersect(&CapsSet::one(nv12_fixed.clone())).fixate().is_some());
@@ -2093,11 +2132,59 @@ mod tests {
         g.link(mux.output(), sink).unwrap();
         let v = g.finish().unwrap();
 
-        let feas = graph_downstream_feasibility(&v, &cs);
+        let sol = solve_graph(&v, &cs).expect("muxer graph solves");
+        let feas = graph_downstream_feasibility(&v, &cs, &sol);
         // edges: 0 = s0->in0, 1 = s1->in1, 2 = mux.out->sink.
         assert_eq!(feas[0], Some(CapsSet::one(h264_any)), "pad 0 feasibility = its accept set");
         assert_eq!(feas[1], Some(CapsSet::one(h265_any)), "pad 1 feasibility = its accept set");
         assert_eq!(feas[2], None, "wildcard sink leaves the muxer output unconstrained");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn graph_feasibility_couples_pin_back_through_a_decoder() {
+        // M258: src(H264, open geometry) -> decoder(DerivedOutput, geometry
+        // passthrough) -> sink pinned to Nv12 1280x720. The decoder's INPUT edge
+        // snapshot used to be `None` (a plain `DerivedOutput` had no input to probe
+        // mid-stream), so a mid-stream re-solve couldn't steer the source back to
+        // the pinned geometry. With the startup-fixated input threaded in, the
+        // discovered passthrough fields couple the pin onto the H264 input edge.
+        let dec_closure = |input: &Caps| match input {
+            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        };
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(compressed(
+                VideoCodec::H264, Dim::Any, Dim::Any, Rate::Fixed(30 << 16),
+            )))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(dec_closure))),
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(fixed_video(
+                RawVideoFormat::Nv12, 1280, 720, 30,
+            )))),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let dec = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, dec).unwrap();
+        g.link(dec, sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("decoder graph solves");
+        let feas = graph_downstream_feasibility(&v, &cs, &sol);
+        // edge 0 = src->dec (the decoder input), edge 1 = dec->sink.
+        let dec_in = feas[0].as_ref().expect("decoder input edge is now constrained");
+        assert!(
+            dec_in.intersect(&CapsSet::one(fixed_compressed(VideoCodec::H264, 1280, 720, 30))).fixate().is_some(),
+            "pinned 1280x720 couples back onto the H264 input edge",
+        );
+        let off = fixed_compressed(VideoCodec::H264, 640, 480, 30);
+        assert!(dec_in.intersect(&CapsSet::one(off)).is_empty(), "off-geometry input is rejected by the snapshot");
     }
 
     // --- M227 field-level bidirectional caps coupling ---

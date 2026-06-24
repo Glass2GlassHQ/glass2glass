@@ -898,11 +898,16 @@ RawVideo`), coupling the geometry / framerate both carry (`format` is retargeted
 across a codec boundary, so probing never marks it passthrough). Discovery is
 conservative, a field that the closure fixes or that fails either probe stays
 non-passthrough, so a genuinely non-invertible closure falls back to the
-alternative-drop walk unchanged. This is the full-chain solve; the mid-stream
-`backward_feasible` snapshot still imposes no upstream constraint for a
-`DerivedOutput` (it has only the output set, no input to probe), tied to the
-Caps-β re-solve item. (A closure-free `FieldTransform` that makes forward
-declarative too is a planned follow-up.)
+alternative-drop walk unchanged. The mid-stream `backward_feasible` snapshot now
+recovers the same coupling (M258): the per-edge sweep is threaded the element's
+startup-fixated input caps (from the solved edge set), which supplies the concrete
+probe a `DerivedOutput` needs and the input variant / scalar identity to couple
+the downstream pin's passthrough fields onto (`couple_passthrough_derived` again,
+since the snapshot crosses the same decoder variant change). A decoder below a
+geometry pin therefore exposes a constrained input edge to the mid-stream
+re-solve, instead of `None`; an empty discovered mask or a missing sample still
+imposes none. (A closure-free `FieldTransform` that makes forward declarative too
+is a planned follow-up.)
 
 `Caps` is the *fixed* description used at runtime (carried by
 `PipelinePacket::CapsChanged`, handed to `configure_pipeline`); `CapsSet`
