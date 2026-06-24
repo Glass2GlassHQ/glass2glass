@@ -103,7 +103,7 @@ pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
 pub use state::{PipelineState, StateChangeReturn};
-pub use staticpool::{StaticAcquire, StaticBufferPool, StaticPooled};
+pub use staticpool::{RingSlot, StaticAcquire, StaticBufferPool, StaticLendRing, StaticPooled};
 pub use tag::{Tag, TagList};
 
 #[cfg(feature = "runtime")]

@@ -76,6 +76,11 @@ jobs:
           rtsp,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+      # Embedded / no_std path: the embassy-sync stack channel + the no-alloc
+      # StaticLendRing DMA capture ring run on the host under block_on (no HAL
+      # time-driver needed), so CI guards the embedded story (M45 / M260).
+      - name: test g2g-plugins (embassy-link, no-alloc embedded path)
+        run: cargo test -p g2g-plugins --locked --features embassy-link --test m45_embassy_link --test m260_dma_ring
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no

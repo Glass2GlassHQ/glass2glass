@@ -10,11 +10,16 @@
 //! `acquire` parks a single waiter; a multi-consumer pool must poll
 //! `try_acquire` instead.
 
-use core::cell::RefCell;
+use core::cell::{RefCell, UnsafeCell};
+use core::ffi::c_void;
+use core::fmt;
 use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
+
+use crate::memory::SystemSlice;
 
 #[derive(Debug)]
 pub struct StaticBufferPool<T, const N: usize> {
@@ -146,6 +151,164 @@ impl<'a, T, const N: usize> Future for StaticAcquire<'a, T, N> {
     }
 }
 
+/// A fixed, heap-free ring of byte buffers that lends each slot to the pipeline
+/// *zero-copy* as a [`SystemSlice`], the capture-side sibling of
+/// [`StaticBufferPool`] (which moves an owned buffer out; this keeps the bytes in
+/// place and lends a borrow). It models a DMA capture ring: `N` slots of `BYTES`
+/// bytes live inline (no `alloc`), the producer fills the next free slot and
+/// [`publish`](RingSlot::publish)es it as a frame that *borrows* the slot, and the
+/// slot is reclaimed when that frame is dropped downstream (the lend's free
+/// callback clears the lease). A slot is never reused while still lent, so the
+/// producer stalls when every slot is in flight, the genuine ring back-pressure.
+///
+/// The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses
+/// the `OutputSink` / stack-channel boundary by value (`'static`), so the lent
+/// slice is the `'static` foreign-lend ([`SystemSlice::from_foreign`]) with the
+/// lease standing in for the borrow. `new()` is not `const`; place the ring in a
+/// `StaticCell` (or a `static` via a const-init wrapper) on real hardware, or keep
+/// it alive on the stack for the duration of a `block_on` pipeline.
+pub struct StaticLendRing<const N: usize, const BYTES: usize> {
+    slots: [UnsafeCell<[u8; BYTES]>; N],
+    leased: [AtomicBool; N],
+}
+
+// SAFETY: interior mutability of `slots` is guarded by the per-slot `leased`
+// flags. A slot is written only through the unique `RingSlot` that holds its
+// lease (between acquire and publish) and is read-only once published until its
+// lease clears, so there is never an aliasing `&`/`&mut` to the same slot. The
+// flags are independent atomics written with plain store (no RMW), so a
+// DMA-completion ISR clearing one slot's lease never races a store to another and
+// the type builds on targets without atomic CAS (eg `thumbv6m`). Acquire's
+// scan-then-set is not atomic, so the single-executor capture contract holds: one
+// task *sets* leases; only *clears* (a frame drop, or an ISR) may come from
+// elsewhere.
+unsafe impl<const N: usize, const BYTES: usize> Sync for StaticLendRing<N, BYTES> {}
+
+impl<const N: usize, const BYTES: usize> StaticLendRing<N, BYTES> {
+    /// Build a ring of `N` zeroed `BYTES`-sized slots.
+    pub fn new() -> Self {
+        Self {
+            slots: core::array::from_fn(|_| UnsafeCell::new([0u8; BYTES])),
+            leased: core::array::from_fn(|_| AtomicBool::new(false)),
+        }
+    }
+
+    /// Slot count (the const `N`).
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// Per-slot byte capacity (the const `BYTES`).
+    pub const fn slot_bytes(&self) -> usize {
+        BYTES
+    }
+
+    /// Slots currently lent and not yet reclaimed.
+    pub fn leased_count(&self) -> usize {
+        self.leased.iter().filter(|f| f.load(Ordering::Acquire)).count()
+    }
+
+    /// Reserve a free slot for capture, or `None` if all `N` are still in flight
+    /// (ring full: the producer must wait for a downstream drop). Fill the
+    /// returned handle, then [`publish`](RingSlot::publish) it as a frame slice.
+    pub fn acquire(&self) -> Option<RingSlot<'_, N, BYTES>> {
+        for idx in 0..N {
+            if !self.leased[idx].load(Ordering::Acquire) {
+                self.leased[idx].store(true, Ordering::Release);
+                return Some(RingSlot { ring: self, idx });
+            }
+        }
+        None
+    }
+
+    /// True if `ptr` points inside one of this ring's slots, the zero-copy witness
+    /// a test uses to prove a received frame aliases the ring (no copy).
+    pub fn contains(&self, ptr: *const u8) -> bool {
+        let p = ptr as usize;
+        self.slots.iter().any(|s| {
+            let base = s.get() as usize;
+            p >= base && p < base + BYTES
+        })
+    }
+}
+
+impl<const N: usize, const BYTES: usize> Default for StaticLendRing<N, BYTES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize, const BYTES: usize> fmt::Debug for StaticLendRing<N, BYTES> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StaticLendRing")
+            .field("capacity", &N)
+            .field("slot_bytes", &BYTES)
+            .field("leased", &self.leased_count())
+            .finish()
+    }
+}
+
+/// An exclusive lease on one [`StaticLendRing`] slot: fill it via
+/// [`buf_mut`](Self::buf_mut), then [`publish`](Self::publish) it as a zero-copy
+/// frame slice. Dropping it without publishing releases the lease (the slot was
+/// reserved for a capture that never happened).
+pub struct RingSlot<'r, const N: usize, const BYTES: usize> {
+    ring: &'r StaticLendRing<N, BYTES>,
+    idx: usize,
+}
+
+impl<const N: usize, const BYTES: usize> RingSlot<'_, N, BYTES> {
+    /// The slot's backing bytes, for the capture (DMA target / test fill) to write.
+    pub fn buf_mut(&mut self) -> &mut [u8] {
+        // SAFETY: this `RingSlot` is the unique holder of slot `idx`'s lease and the
+        // slot is not yet published, so this is the only reference to those bytes.
+        let arr: &mut [u8; BYTES] = unsafe { &mut *self.ring.slots[self.idx].get() };
+        arr.as_mut_slice()
+    }
+
+    /// Publish the first `len` captured bytes as a zero-copy [`SystemSlice`] that
+    /// borrows this slot; the slot is reclaimed for reuse when the returned slice
+    /// (the frame carrying it) is dropped downstream.
+    ///
+    /// # Safety
+    /// The ring must outlive the returned `SystemSlice` and any frame holding it.
+    /// On a `static` / `StaticCell` ring this is automatic; a stack ring must be
+    /// kept alive until the pipeline drains.
+    pub unsafe fn publish(self, len: usize) -> SystemSlice {
+        debug_assert!(len <= BYTES, "published len exceeds slot capacity");
+        let ptr = self.ring.slots[self.idx].get() as *const u8;
+        let flag = &self.ring.leased[self.idx] as *const AtomicBool as *mut c_void;
+        // Hand lease-clearing from this handle's `Drop` to the lend's free callback,
+        // so the slot stays leased until the published frame is dropped.
+        core::mem::forget(self);
+        // SAFETY: `ptr` covers `len <= BYTES` bytes in a slot valid for the ring's
+        // lifetime (caller's contract); the slot is read-only while lent and is not
+        // reused until `release_slot` clears its lease on the frame's drop.
+        unsafe { SystemSlice::from_foreign(ptr, len, Some(release_slot), flag) }
+    }
+}
+
+impl<const N: usize, const BYTES: usize> fmt::Debug for RingSlot<'_, N, BYTES> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RingSlot").field("idx", &self.idx).finish()
+    }
+}
+
+impl<const N: usize, const BYTES: usize> Drop for RingSlot<'_, N, BYTES> {
+    fn drop(&mut self) {
+        // Acquired but never published: release the lease so the slot is reusable.
+        self.ring.leased[self.idx].store(false, Ordering::Release);
+    }
+}
+
+/// Free callback for a published [`RingSlot`]: clears the slot's lease flag so the
+/// ring can hand it out again. `user` is the slot's `&AtomicBool` lease flag.
+unsafe extern "C" fn release_slot(user: *mut c_void) {
+    // SAFETY: `user` is the lease-flag pointer `RingSlot::publish` passed; it is
+    // valid for the ring's lifetime (the publish contract) and only stored to here.
+    unsafe { (*(user as *const AtomicBool)).store(false, Ordering::Release) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +382,56 @@ mod tests {
         assert_eq!(pool.available(), 0, "the resolved acquire holds the buffer");
         drop(buf);
         assert_eq!(pool.available(), 1, "dropping it returns the buffer");
+    }
+
+    // --- StaticLendRing (zero-copy DMA ring) ---
+
+    #[test]
+    fn lend_ring_publish_borrows_slot_and_drop_reclaims() {
+        let ring: StaticLendRing<2, 8> = StaticLendRing::new();
+        assert_eq!((ring.capacity(), ring.slot_bytes(), ring.leased_count()), (2, 8, 0));
+
+        let mut slot = ring.acquire().expect("free slot");
+        slot.buf_mut()[..3].copy_from_slice(&[1, 2, 3]);
+        assert_eq!(ring.leased_count(), 1, "acquire leases the slot");
+        // SAFETY: `ring` outlives `frame` (both drop at end of scope, frame first).
+        let frame = unsafe { slot.publish(3) };
+        assert_eq!(ring.leased_count(), 1, "publish keeps the lease until the frame drops");
+        // Zero-copy witness: the published bytes alias the ring slot, not a copy.
+        assert_eq!(frame.as_slice(), &[1, 2, 3]);
+        assert!(ring.contains(frame.as_slice().as_ptr()), "frame bytes live in the ring");
+
+        drop(frame);
+        assert_eq!(ring.leased_count(), 0, "dropping the frame reclaims the slot");
+    }
+
+    #[test]
+    fn lend_ring_acquired_but_unpublished_slot_is_released_on_drop() {
+        let ring: StaticLendRing<1, 4> = StaticLendRing::new();
+        {
+            let _slot = ring.acquire().expect("free slot");
+            assert!(ring.acquire().is_none(), "ring full while the lease is held");
+        }
+        assert_eq!(ring.leased_count(), 0, "dropping an unpublished lease frees the slot");
+        assert!(ring.acquire().is_some(), "slot reusable again");
+    }
+
+    #[test]
+    fn lend_ring_full_when_all_slots_in_flight_then_recycles() {
+        let ring: StaticLendRing<2, 4> = StaticLendRing::new();
+        // SAFETY: the ring outlives every published frame in this scope. (len 1 so
+        // the slice pointer is the slot base, not the empty-slice sentinel.)
+        let f0 = unsafe { ring.acquire().unwrap().publish(1) };
+        let f1 = unsafe { ring.acquire().unwrap().publish(1) };
+        let p0 = f0.as_slice().as_ptr();
+        assert!(ring.acquire().is_none(), "both slots lent: ring is full (back-pressure)");
+
+        drop(f0); // a downstream drop frees one slot
+        let f2 = unsafe { ring.acquire().expect("slot freed by the drop").publish(1) };
+        // The recycled frame reuses slot 0's physical buffer: no fresh allocation.
+        assert_eq!(f2.as_slice().as_ptr(), p0, "the freed slot's buffer is recycled");
+        drop(f1);
+        drop(f2);
+        assert_eq!(ring.leased_count(), 0);
     }
 }

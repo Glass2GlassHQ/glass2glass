@@ -356,9 +356,9 @@ leverage first:
   in place).
 - Full `embassy-executor` multi-task integration (pipelines run under
   `block_on` today).
-- A fixed DMA-ring capture `SourceLoop` (no-alloc end-to-end, a
-  lifetime-carrying `SystemSlice` wiring `StaticBufferPool` into the zero-copy
-  path).
+- A real HAL-backed DMA capture: wire a DMA-completion ISR into the
+  `StaticLendRing` (M260 proved the no-alloc lend path on the host via a fill
+  stand-in; the ISR / vendor HAL plug-in is hardware-gated).
 
 ## Browser / Wasm
 
