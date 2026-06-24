@@ -15,12 +15,19 @@
 //! directly, and submits its compute on the producer's queue, which orders it
 //! after the producer's already-submitted work with no fence or read-back.
 //!
-//! Input is `Caps::Tensor{F32,[1,3,H,W],Nchw}` in `MemoryDomain::WgpuBuffer`
-//! (anything else is `UnsupportedDomain`); output is the `[1, N]` logits, read
-//! back to `MemoryDomain::System` by default or left GPU-resident with
+//! Input is `Caps::Tensor{F32,[1,C,H,W],Nchw}` in `MemoryDomain::WgpuBuffer`
+//! (anything else is `UnsupportedDomain`); output is read back to
+//! `MemoryDomain::System` by default or left GPU-resident with
 //! [`with_gpu_output`](WgpuInference::with_gpu_output) for a downstream GPU
-//! consumer. Richer layers and a trained-weight loader are follow-ups, same as
-//! the burn path; the `AsyncElement` / caps contract here is what they slot into.
+//! consumer, so a stack of these elements runs a small CNN entirely on-device.
+//!
+//! Beyond the matmul `linear`, the element offers a small op zoo, each a compute
+//! pass on the producer's device: `conv2d` (the keystone, M261), the weightless
+//! activations `relu` / `sigmoid`, and `maxpool2d` / `avgpool2d`. The weighted
+//! ops bind (meta, input, weights, bias, out); the weightless ones bind only
+//! (meta, input, out). Chaining them GPU-resident (conv -> relu -> pool -> ...)
+//! is a real CNN body with no GPU->CPU round-trip between layers. Trained weights
+//! load via `conv2d_from_safetensors` (M262).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -109,6 +116,81 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Activation kind tag in the [`ACT_SHADER`] meta uniform.
+const ACT_RELU: u32 = 0;
+const ACT_SIGMOID: u32 = 1;
+
+/// An elementwise activation over the flat `n`-length tensor, shape-preserving:
+/// `kind` 0 is ReLU (`max(x, 0)`), 1 is the logistic sigmoid. A weightless op,
+/// so it binds only (meta, input, out), not the conv/linear weight + bias. ReLU
+/// is the nonlinearity that keeps a stack of conv layers from collapsing into a
+/// single linear map, the reason a multi-layer CNN needs it between layers.
+const ACT_SHADER: &str = r#"
+struct Act { n: u32, kind: u32, _p0: u32, _p1: u32 };
+
+@group(0) @binding(0) var<uniform> a: Act;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= a.n) { return; }
+    let x = input[i];
+    if (a.kind == 1u) {
+        out[i] = 1.0 / (1.0 + exp(-x));
+    } else {
+        out[i] = max(x, 0.0);
+    }
+}
+"#;
+
+/// Pooling kind tag in the [`POOL_SHADER`] meta uniform.
+const POOL_MAX: u32 = 0;
+const POOL_AVG: u32 = 1;
+
+/// A `KH x KW` spatial pool with stride `(SH, SW)`, no padding, over the
+/// `[Cin, H, W]` NCHW tensor: `kind` 0 is max-pool, 1 is average-pool. Output is
+/// `[Cin, OH, OW]` with `OH = (H - KH) / SH + 1`, `OW = (W - KW) / SW + 1` (the
+/// host computes them and passes them in). One invocation per output element,
+/// reducing over its `KH x KW` window. The downsampler that shrinks the feature
+/// map between CNN stages; a weightless op like the activation.
+const POOL_SHADER: &str = r#"
+struct Pool { c: u32, h: u32, w: u32, kh: u32, kw: u32, sh: u32, sw: u32, oh: u32, ow: u32, kind: u32, _p0: u32, _p1: u32 };
+
+@group(0) @binding(0) var<uniform> p: Pool;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = p.c * p.oh * p.ow;
+    if (idx >= total) { return; }
+    let ox = idx % p.ow;
+    let oy = (idx / p.ow) % p.oh;
+    let ch = idx / (p.ow * p.oh);
+    // Top-left of the window is always in-bounds, so it seeds the max reduction.
+    let base = (ch * p.h + oy * p.sh) * p.w + ox * p.sw;
+    var m = input[base];
+    var acc = 0.0;
+    for (var ky = 0u; ky < p.kh; ky = ky + 1u) {
+        let iy = oy * p.sh + ky;
+        for (var kx = 0u; kx < p.kw; kx = kx + 1u) {
+            let ix = ox * p.sw + kx;
+            let v = input[(ch * p.h + iy) * p.w + ix];
+            m = max(m, v);
+            acc = acc + v;
+        }
+    }
+    if (p.kind == 1u) {
+        out[idx] = acc / f32(p.kh * p.kw);
+    } else {
+        out[idx] = m;
+    }
+}
+"#;
+
 /// The host reference matching `SHADER`, kept public so the test (and a CPU
 /// caller) can compare against the GPU output. `input` is the flat `K`-length
 /// f32 tensor; returns the `[N]` logits.
@@ -171,6 +253,85 @@ pub fn conv2d_reference(
     out
 }
 
+/// Host reference for [`ACT_SHADER`] ReLU: `max(x, 0)` elementwise. Public so the
+/// chaining test can fold it into a CPU reference.
+pub fn relu_reference(input: &[f32]) -> Vec<f32> {
+    input.iter().map(|&x| x.max(0.0)).collect()
+}
+
+/// Host reference for [`ACT_SHADER`] sigmoid: `1 / (1 + e^-x)` elementwise.
+pub fn sigmoid_reference(input: &[f32]) -> Vec<f32> {
+    input.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect()
+}
+
+/// Shared host pooling reference: a `kh x kw` window, stride `(sh, sw)`, no pad,
+/// over the `[c, h, w]` NCHW tensor, reducing each window by max (`is_max`) or
+/// mean. Returns `[c, oh, ow]`.
+#[allow(clippy::too_many_arguments)]
+fn pool_reference(
+    is_max: bool,
+    input: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    sh: usize,
+    sw: usize,
+) -> Vec<f32> {
+    let oh = (h - kh) / sh + 1;
+    let ow = (w - kw) / sw + 1;
+    let mut out = vec![0f32; c * oh * ow];
+    for ch in 0..c {
+        for oy in 0..oh {
+            for ox in 0..ow {
+                let mut m = f32::NEG_INFINITY;
+                let mut acc = 0f32;
+                for ky in 0..kh {
+                    for kx in 0..kw {
+                        let v = input[(ch * h + oy * sh + ky) * w + ox * sw + kx];
+                        m = m.max(v);
+                        acc += v;
+                    }
+                }
+                out[(ch * oh + oy) * ow + ox] =
+                    if is_max { m } else { acc / (kh * kw) as f32 };
+            }
+        }
+    }
+    out
+}
+
+/// Host reference matching [`POOL_SHADER`] max-pool. Public for the chaining test.
+#[allow(clippy::too_many_arguments)]
+pub fn maxpool2d_reference(
+    input: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    sh: usize,
+    sw: usize,
+) -> Vec<f32> {
+    pool_reference(true, input, c, h, w, kh, kw, sh, sw)
+}
+
+/// Host reference matching [`POOL_SHADER`] average-pool.
+#[allow(clippy::too_many_arguments)]
+pub fn avgpool2d_reference(
+    input: &[f32],
+    c: usize,
+    h: usize,
+    w: usize,
+    kh: usize,
+    kw: usize,
+    sh: usize,
+    sw: usize,
+) -> Vec<f32> {
+    pool_reference(false, input, c, h, w, kh, kw, sh, sw)
+}
+
 /// f32 slice as little-endian bytes, for `queue.write_buffer` (no bytemuck dep).
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
@@ -190,8 +351,10 @@ struct Gpu {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     meta_buf: wgpu::Buffer,
-    weight_buf: wgpu::Buffer,
-    bias_buf: wgpu::Buffer,
+    /// `Some` for the weighted ops (linear / conv2d), `None` for the weightless
+    /// ones (activation / pooling), whose shader binds only (meta, input, out).
+    weight_buf: Option<wgpu::Buffer>,
+    bias_buf: Option<wgpu::Buffer>,
 }
 
 #[derive(Debug)]
@@ -343,6 +506,135 @@ impl WgpuInference {
         Self::conv2d(cin, cout, kh, kw, height, width, weights, bias)
     }
 
+    /// Shared builder for the weightless ops (activation, pooling): no weight /
+    /// bias tensor, so `ensure_gpu` skips those buffers and `dispatch` binds the
+    /// 3-entry (meta, input, out) layout. Byte sizes and the dispatch count come
+    /// from the shapes (`product` of the dims).
+    fn new_weightless(
+        in_shape: Vec<u32>,
+        out_shape: Vec<u32>,
+        shader: &'static str,
+        meta: Vec<u8>,
+    ) -> Self {
+        let in_elems: u32 = in_shape.iter().product();
+        let out_elems: u32 = out_shape.iter().product();
+        Self {
+            in_shape,
+            out_shape,
+            weights: Vec::new(),
+            bias: Vec::new(),
+            in_bytes: in_elems as usize * 4,
+            out_bytes: out_elems as usize * 4,
+            dispatch_n: out_elems,
+            shader,
+            meta,
+            configured: false,
+            gpu: None,
+            last_caps: None,
+            emitted: 0,
+            gpu_output: false,
+        }
+    }
+
+    /// An elementwise activation (`kind`) over the `[1, C, H, W]` tensor,
+    /// shape-preserving. Runs [`ACT_SHADER`] on the producer's device.
+    fn activation(kind: u32, channels: u32, height: u32, width: u32) -> Result<Self, G2gError> {
+        if channels == 0 || height == 0 || width == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        let n = channels * height * width;
+        let mut meta = vec![0u8; 16];
+        meta[0..4].copy_from_slice(&n.to_le_bytes());
+        meta[4..8].copy_from_slice(&kind.to_le_bytes());
+        let shape = vec![1, channels, height, width];
+        Ok(Self::new_weightless(shape.clone(), shape, ACT_SHADER, meta))
+    }
+
+    /// A ReLU activation over the `[1, C, H, W]` tensor (`max(x, 0)`,
+    /// elementwise). The nonlinearity that goes between conv layers so a stack of
+    /// them does not collapse into a single linear map. Weightless: no upload.
+    pub fn relu(channels: u32, height: u32, width: u32) -> Result<Self, G2gError> {
+        Self::activation(ACT_RELU, channels, height, width)
+    }
+
+    /// A logistic-sigmoid activation over the `[1, C, H, W]` tensor
+    /// (`1 / (1 + e^-x)`, elementwise).
+    pub fn sigmoid(channels: u32, height: u32, width: u32) -> Result<Self, G2gError> {
+        Self::activation(ACT_SIGMOID, channels, height, width)
+    }
+
+    /// A `kh x kw` spatial pool (`kind`), stride `(sh, sw)`, no padding, over the
+    /// `[1, C, H, W]` tensor, leaving `[1, C, OH, OW]` on the GPU. Runs
+    /// [`POOL_SHADER`]. Fails loud on a zero dim or a window larger than the input.
+    #[allow(clippy::too_many_arguments)]
+    fn pool(
+        kind: u32,
+        channels: u32,
+        height: u32,
+        width: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+    ) -> Result<Self, G2gError> {
+        if channels == 0 || height == 0 || width == 0 || kh == 0 || kw == 0 || sh == 0 || sw == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if kh > height || kw > width {
+            return Err(G2gError::CapsMismatch);
+        }
+        let oh = (height - kh) / sh + 1;
+        let ow = (width - kw) / sw + 1;
+        let dims = [channels, height, width, kh, kw, sh, sw, oh, ow, kind];
+        let mut meta = vec![0u8; 48];
+        for (i, d) in dims.iter().enumerate() {
+            meta[i * 4..i * 4 + 4].copy_from_slice(&d.to_le_bytes());
+        }
+        Ok(Self::new_weightless(
+            vec![1, channels, height, width],
+            vec![1, channels, oh, ow],
+            POOL_SHADER,
+            meta,
+        ))
+    }
+
+    /// A `kh x kw` stride-`(sh, sw)` max-pool over the `[1, C, H, W]` tensor (the
+    /// CNN downsampler), output `[1, C, OH, OW]`. `maxpool2d_reference` matches it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn maxpool2d(
+        channels: u32,
+        height: u32,
+        width: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+    ) -> Result<Self, G2gError> {
+        Self::pool(POOL_MAX, channels, height, width, kh, kw, sh, sw)
+    }
+
+    /// A `kh x kw` stride-`(sh, sw)` average-pool over the `[1, C, H, W]` tensor,
+    /// output `[1, C, OH, OW]`. `avgpool2d_reference` matches it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn avgpool2d(
+        channels: u32,
+        height: u32,
+        width: u32,
+        kh: u32,
+        kw: u32,
+        sh: u32,
+        sw: u32,
+    ) -> Result<Self, G2gError> {
+        Self::pool(POOL_AVG, channels, height, width, kh, kw, sh, sw)
+    }
+
+    /// Whether the active op uploads a weight + bias tensor (linear / conv2d) or
+    /// is weightless (activation / pooling). Drives the buffer set and bind-group
+    /// layout.
+    fn is_weighted(&self) -> bool {
+        !self.weights.is_empty()
+    }
+
     /// Emit the logits GPU-resident (`MemoryDomain::WgpuBuffer`) instead of
     /// reading them back to system memory, so a downstream GPU consumer (a GPU
     /// softmax / argmax, say) reads them on-device. Default off.
@@ -387,21 +679,28 @@ impl WgpuInference {
         });
         queue.write_buffer(&meta_buf, 0, &self.meta);
 
-        let weight_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("infer-weights"),
-            size: (self.weights.len() * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&weight_buf, 0, &f32_bytes(&self.weights));
+        // Weightless ops (activation / pooling) have no weight or bias tensor; their
+        // shader binds only (meta, input, out), so these buffers stay `None`.
+        let (weight_buf, bias_buf) = if self.is_weighted() {
+            let weight_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("infer-weights"),
+                size: (self.weights.len() * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&weight_buf, 0, &f32_bytes(&self.weights));
 
-        let bias_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("infer-bias"),
-            size: (self.bias.len() * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&bias_buf, 0, &f32_bytes(&self.bias));
+            let bias_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("infer-bias"),
+                size: (self.bias.len() * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&bias_buf, 0, &f32_bytes(&self.bias));
+            (Some(weight_buf), Some(bias_buf))
+        } else {
+            (None, None)
+        };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wgpu-infer"),
@@ -444,32 +743,39 @@ impl WgpuInference {
             mapped_at_creation: false,
         });
 
-        let layout = gpu.pipeline.get_bind_group_layout(0);
-        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("wgpu-linear-binding"),
-            layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: gpu.meta_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: input.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
+        // The bindings follow the active shader's layout: weighted ops bind
+        // (meta=0, input=1, weights=2, bias=3, out=4); weightless ops bind
+        // (meta=0, input=1, out=2). The pipeline's auto-derived layout matches.
+        let mut entries = vec![
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.meta_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: input.as_entire_binding() },
+        ];
+        match (&gpu.weight_buf, &gpu.bias_buf) {
+            (Some(weights), Some(bias)) => {
+                entries.push(wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: gpu.weight_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
+                    resource: weights.as_entire_binding(),
+                });
+                entries.push(wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: gpu.bias_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
+                    resource: bias.as_entire_binding(),
+                });
+                entries.push(wgpu::BindGroupEntry {
                     binding: 4,
                     resource: out_buf.as_entire_binding(),
-                },
-            ],
+                });
+            }
+            _ => entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: out_buf.as_entire_binding(),
+            }),
+        }
+
+        let layout = gpu.pipeline.get_bind_group_layout(0);
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("wgpu-infer-binding"),
+            layout: &layout,
+            entries: &entries,
         });
 
         let mut encoder =

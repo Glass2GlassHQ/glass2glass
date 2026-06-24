@@ -382,9 +382,12 @@ leverage first:
 - Trained-weight import now exists for the hand-rolled GPU path: a dependency-free
   `safetensors` reader (M262) loads weights at runtime into `WgpuInference`
   (`conv2d_from_safetensors`); architecture stays compiled, weights are a file.
-  Remaining: the rest of the layer zoo on the GPU path (activation, pooling,
-  multi-layer chaining, attention) so a *full* model runs, not a single conv;
-  per-tensor dtypes beyond F32 in the loader (F16 / BF16 dequant).
+  Conv / activation (`relu`, `sigmoid`) / pooling (`maxpool2d`, `avgpool2d`) and
+  GPU-resident multi-layer chaining are in place (M261/M265). Remaining: the
+  remaining ops (batch-norm, attention) and a topology that imports a whole
+  multi-layer stack from one weight file (not just a single conv) so a *full*
+  trained model runs end to end; per-tensor dtypes beyond F32 in the loader
+  (F16 / BF16 dequant).
 - ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
   graph-topology counterpart (safetensors carries weights, not the architecture).
 - A trained-weight `Module` path for `BurnInference` (conv, attention) once the

@@ -14,7 +14,10 @@ use g2g_core::{
     TensorShape,
 };
 use g2g_ml::safetensors::{serialize, SafeTensors};
-use g2g_ml::wgpuinfer::{conv2d_reference, linear_reference, WgpuInference};
+use g2g_ml::wgpuinfer::{
+    avgpool2d_reference, conv2d_reference, linear_reference, maxpool2d_reference, relu_reference,
+    sigmoid_reference, WgpuInference,
+};
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
 };
@@ -121,6 +124,26 @@ fn logits_from_system(f: &Frame) -> Vec<f32> {
         panic!("default mode must read logits back to System, got {:?}", f.domain.kind());
     };
     slice.as_slice().chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
+}
+
+fn nchw_caps(shape: Vec<u32>) -> Caps {
+    Caps::Tensor { dtype: TensorDType::F32, shape: TensorShape(shape), layout: TensorLayout::Nchw }
+}
+
+/// Configure `op` for `in_caps`, run it on `frame`, and return the single output
+/// `DataFrame`. Lets the layer-zoo tests chain ops (each one's GPU-resident
+/// output is the next one's input) without repeating the boilerplate.
+async fn run_op(mut op: WgpuInference, in_caps: Caps, frame: Frame) -> Frame {
+    op.configure_pipeline(&in_caps).expect("configure op");
+    let mut out = Collect::default();
+    op.process(PipelinePacket::DataFrame(frame), &mut out).await.expect("op process");
+    out.packets
+        .into_iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("an output frame")
 }
 
 #[tokio::test]
@@ -495,6 +518,157 @@ async fn surface_to_logits_keeps_everything_on_gpu() {
     }
 }
 
+/// The layer zoo chained on-device: NV12 -> preprocess -> conv2d -> relu ->
+/// maxpool, every stage GPU-resident (`with_gpu_output`) until the final pool is
+/// read back. A real small-CNN body: the data never leaves the GPU between
+/// layers. The result matches a CPU reference that folds the same ops over the
+/// exact tensor the GPU preprocess produced, and the relu actually clamps (the
+/// conv output has negatives), so a missing nonlinearity would be caught.
+#[tokio::test]
+async fn conv_relu_pool_chain_runs_on_gpu_and_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const CIN: u32 = 3;
+    const COUT: u32 = 2;
+    const KH: u32 = 3;
+    const KW: u32 = 3;
+    const PK: u32 = 2; // 2x2 pool, stride 2
+
+    // Weights/bias chosen so the conv produces both signs, making the relu bite.
+    let weights: Vec<f32> =
+        (0..(COUT * CIN * KH * KW)).map(|i| i as f32 * 0.05 - 0.6).collect();
+    let bias = vec![-0.3f32, 0.2];
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+
+    // conv2d -> relu -> maxpool, intermediates kept on the GPU.
+    let conv = WgpuInference::conv2d(CIN, COUT, KH, KW, H, W, weights.clone(), bias.clone())
+        .expect("valid conv")
+        .with_gpu_output();
+    let conv_out = run_op(conv, tensor_in_caps(), tensor_frame).await;
+    assert!(
+        matches!(conv_out.domain, MemoryDomain::WgpuBuffer(_)),
+        "conv output stays GPU-resident for the next layer"
+    );
+
+    let relu = WgpuInference::relu(COUT, H, W).expect("valid relu").with_gpu_output();
+    let relu_out = run_op(relu, nchw_caps(vec![1, COUT, H, W]), conv_out).await;
+    assert!(
+        matches!(relu_out.domain, MemoryDomain::WgpuBuffer(_)),
+        "relu output stays GPU-resident for the pool"
+    );
+
+    // The pool reads back to System at the end of the chain.
+    let pool = WgpuInference::maxpool2d(COUT, H, W, PK, PK, PK, PK).expect("valid pool");
+    let pool_out = run_op(pool, nchw_caps(vec![1, COUT, H, W]), relu_out).await;
+    let got = logits_from_system(&pool_out);
+
+    // CPU reference: the same ops folded over the exact preprocess tensor.
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let conv_ref = conv2d_reference(
+        &cpu_tensor,
+        CIN as usize,
+        COUT as usize,
+        KH as usize,
+        KW as usize,
+        H as usize,
+        W as usize,
+        &weights,
+        &bias,
+    );
+    let relu_ref = relu_reference(&conv_ref);
+    let expected = maxpool2d_reference(
+        &relu_ref,
+        COUT as usize,
+        H as usize,
+        W as usize,
+        PK as usize,
+        PK as usize,
+        PK as usize,
+        PK as usize,
+    );
+    // 2x2 stride-2 over [COUT, 2, 4] -> [COUT, 1, 2] = 4 values.
+    let (oh, ow) = ((H - PK) / PK + 1, (W - PK) / PK + 1);
+    assert_eq!(got.len(), (COUT * oh * ow) as usize, "[1, COUT, OH, OW] pooled map");
+    assert_eq!(expected.len(), got.len());
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-2, "chain out {i}: gpu {g} vs cpu reference {e}");
+    }
+    // The relu must have zeroed at least one conv output, else it was a no-op for
+    // this input and the test would not prove the nonlinearity ran.
+    assert!(
+        conv_ref.iter().any(|&v| v < 0.0),
+        "test setup: the conv must produce negatives for the relu to clamp"
+    );
+}
+
+/// `avgpool2d` standalone, pinning the weightless (meta, input, out) bind path
+/// and the average-pool math independently of the chain. A 2x2 stride-2 pool over
+/// the `[1, 3, 2, 4]` preprocess tensor, read back and compared to the reference.
+#[tokio::test]
+async fn avgpool2d_on_gpu_resident_tensor_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const C: u32 = 3;
+    const PK: u32 = 2;
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+
+    let pool = WgpuInference::avgpool2d(C, H, W, PK, PK, PK, PK).expect("valid avgpool");
+    let out = run_op(pool, tensor_in_caps(), tensor_frame).await;
+    let got = logits_from_system(&out);
+
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = avgpool2d_reference(
+        &cpu_tensor,
+        C as usize,
+        H as usize,
+        W as usize,
+        PK as usize,
+        PK as usize,
+        PK as usize,
+        PK as usize,
+    );
+    assert_eq!(got.len(), expected.len(), "[1, C, OH, OW] pooled map");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-3, "avgpool {i}: gpu {g} vs cpu reference {e}");
+    }
+}
+
+/// `sigmoid` standalone, pinning the activation shader's sigmoid branch (kind 1)
+/// independently of the relu the chain exercises. Monotonic and bounded in (0, 1),
+/// so a wrong formula is caught regardless of input sign.
+#[tokio::test]
+async fn sigmoid_on_gpu_resident_tensor_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+
+    let act = WgpuInference::sigmoid(3, H, W).expect("valid sigmoid");
+    let out = run_op(act, tensor_in_caps(), tensor_frame).await;
+    let got = logits_from_system(&out);
+
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = sigmoid_reference(&cpu_tensor);
+    assert_eq!(got.len(), expected.len(), "shape-preserving activation");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-3, "sigmoid {i}: gpu {g} vs cpu reference {e}");
+        assert!(*g > 0.0 && *g < 1.0, "sigmoid output {i} = {g} must lie in (0, 1)");
+    }
+}
+
 #[test]
 fn linear_validates_weight_dimensions() {
     assert!(WgpuInference::linear(2, 2, vec![0.0; 3 * 4 * 2], vec![0.0; 2]).is_ok());
@@ -503,4 +677,19 @@ fn linear_validates_weight_dimensions() {
         Some(G2gError::CapsMismatch),
         "weights must be K*N"
     );
+}
+
+#[test]
+fn pool_validates_window_and_dims() {
+    // A 2x2 pool fits a 2x4 input.
+    assert!(WgpuInference::maxpool2d(3, 2, 4, 2, 2, 2, 2).is_ok());
+    // A window larger than the input is rejected, not silently clamped.
+    assert_eq!(
+        WgpuInference::maxpool2d(3, 2, 4, 3, 2, 1, 1).err(),
+        Some(G2gError::CapsMismatch),
+        "kh > h must fail loud"
+    );
+    // Zero stride / channels are rejected.
+    assert_eq!(WgpuInference::avgpool2d(3, 2, 4, 2, 2, 0, 1).err(), Some(G2gError::CapsMismatch));
+    assert_eq!(WgpuInference::relu(0, 2, 4).err(), Some(G2gError::CapsMismatch));
 }
