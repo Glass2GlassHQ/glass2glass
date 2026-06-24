@@ -49,6 +49,7 @@ use g2g_plugins::ffmpegenc::FfmpegH264Enc;
 use g2g_plugins::filesink::FileSink;
 use g2g_plugins::gpu::GpuContext;
 use g2g_plugins::videoconvert::VideoConvert;
+use g2g_plugins::webrtcsink::WebRtcSink;
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
@@ -69,10 +70,16 @@ fn main() {
     let feed = register_appsrc(APPSRC_CHANNEL);
     let encode = std::thread::spawn(encode_pipeline);
 
+    let max_frames = std::env::var("G2G_FRAMES")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(FRAMES);
+
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)))
         .insert_resource(FrameReceiver(rx))
         .insert_resource(FrameCount(0))
+        .insert_resource(MaxFrames(max_frames))
         .insert_resource(EncodeFeed(feed))
         .init_resource::<FirstNonBlank>()
         .add_plugins(
@@ -102,9 +109,13 @@ fn main() {
 }
 
 /// Drives `AppSrc -> VideoConvert(RGBA->I420) -> FfmpegH264Enc(NVENC H.264) ->
-/// FileSink` to completion. Runs on its own thread; the `AppSrc` blocks on the
-/// feed until the main loop pushes frames, and finishes when the feed signals
+/// sink` to completion on its own thread. The sink is `WebRtcSink` (WHIP egress)
+/// when `G2G_WHIP_URL` is set, else `FileSink` (the self-contained default).
+/// `AppSrc` blocks on the feed until the main loop pushes frames and finishes on
 /// EOS. Returns the number of source frames pushed through.
+///
+/// Runs inside a tokio runtime: `WebRtcSink`'s WHIP handshake (reqwest) and
+/// session (tokio::spawn) need a reactor. `FileSink` is happy under it too.
 fn encode_pipeline() -> Result<u64, g2g_core::G2gError> {
     let mut src = AppSrc::new();
     src.set_property("channel", PropValue::Str(APPSRC_CHANNEL.into()))
@@ -120,11 +131,27 @@ fn encode_pipeline() -> Result<u64, g2g_core::G2gError> {
 
     let mut convert = VideoConvert::new(RawVideoFormat::I420);
     let mut encoder = FfmpegH264Enc::new(); // NVENC by default
-    let mut sink = FileSink::new(OUT_PATH);
     let clock = ZeroClock;
 
-    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
-    let stats = pollster::block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let stats = match std::env::var("G2G_WHIP_URL") {
+        Ok(url) => {
+            info!("streaming H.264 to WHIP endpoint: {url}");
+            let mut sink = WebRtcSink::new(url);
+            let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
+            rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
+        }
+        Err(_) => {
+            info!("G2G_WHIP_URL unset; writing H.264 to {OUT_PATH} (set it to stream over WHIP)");
+            let mut sink = FileSink::new(OUT_PATH);
+            let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
+            rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
+        }
+    };
     Ok(stats.frames_consumed)
 }
 
@@ -160,6 +187,11 @@ struct EncodeFeed(AppSrcFeed);
 
 #[derive(Resource)]
 struct FrameCount(u32);
+
+/// Frames to render before exiting; `0` means run forever (for a live stream you
+/// watch in a browser). From `G2G_FRAMES`, default `FRAMES`.
+#[derive(Resource)]
+struct MaxFrames(u32);
 
 /// Sequence of the first non-blank frame seen, or `None` until one arrives.
 /// Headless render has a few frames of pre-roll warmup where the target is still
@@ -216,6 +248,7 @@ fn spin_cube(time: Res<Time>, mut q: Query<&mut Transform, With<Spin>>) {
 fn drain_frames(
     receiver: Res<FrameReceiver>,
     feed: Res<EncodeFeed>,
+    max: Res<MaxFrames>,
     mut count: ResMut<FrameCount>,
     mut first_non_blank: ResMut<FirstNonBlank>,
     mut exit: MessageWriter<AppExit>,
@@ -245,12 +278,14 @@ fn drain_frames(
             warn!("encode feed full; dropped frame {}", count.0);
         }
         count.0 += 1;
-        if count.0 >= FRAMES {
+        // `max == 0` streams forever (watch it live); otherwise stop at the cap.
+        if max.0 != 0 && count.0 >= max.0 {
             assert!(
                 first_non_blank.0.is_some(),
-                "no non-blank frame in {FRAMES} frames: the scene never rendered onto the target"
+                "no non-blank frame in {} frames: the scene never rendered onto the target",
+                max.0
             );
-            // Signal EOS so the encoder flushes and the file is finalised, then
+            // Signal EOS so the encoder flushes and the sink finalises, then
             // exit; `main` joins the encode thread after the loop returns.
             feed.0.end_of_stream();
             info!(

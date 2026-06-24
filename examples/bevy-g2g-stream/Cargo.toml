@@ -20,11 +20,14 @@ wgpu = "29"
 
 g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
 # wgpu-sink: the `gpu` module (GpuContext::from_wgpu, texture_of, the keep-alive).
-# ffmpeg: FfmpegH264Enc (NVENC / libx264). Both imply std.
-g2g-plugins = { path = "../../g2g-plugins", features = ["std", "wgpu-sink", "ffmpeg"] }
+# ffmpeg: FfmpegH264Enc (NVENC / libx264). webrtc: WebRtcSink (WHIP egress).
+g2g-plugins = { path = "../../g2g-plugins", features = ["std", "wgpu-sink", "ffmpeg", "webrtc"] }
 
-# block_on for the g2g encode pipeline + the texture read-back.
+# block_on for the texture read-back.
 pollster = "0.4"
+# WebRtcSink does reqwest + tokio::spawn for the WHIP handshake / session, so the
+# encode pipeline runs inside a tokio runtime (not pollster) when streaming.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 # Render-world -> main-world frame hand-off (the pattern Bevy's headless_renderer
 # example uses).
 crossbeam-channel = "0.5"

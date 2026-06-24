@@ -39,21 +39,50 @@ Bevy headless render ──► wgpu::Texture ──► g2g read-back ──► A
   writing an H.264 Annex-B file of the rendered scene, NVENC-encoded. Validated on
   the RTX 3060: a 240-frame run produces a valid `h264` 640×480 stream
   (`ffprobe` confirms codec/geometry/frame count).
-- **Phase C** (next): swap `FileSink` for `WebRtcSink` / WHIP, the live
-  pixel-streaming path to a browser.
+- **Phase C** (implemented): when `G2G_WHIP_URL` is set, the sink is
+  `WebRtcSink` instead of `FileSink` — the encoded H.264 is published to a WHIP
+  endpoint over WebRTC (str0m: ICE/DTLS/SRTP) and viewable in a browser. The
+  encode pipeline runs inside a tokio runtime (the WHIP handshake + session need
+  a reactor). This is the live pixel-streaming leg, validated by a human against
+  a real WHIP server / browser (not an automated test).
 
 ## Run
 
-Needs an NVIDIA GPU (for the `h264_nvenc` encode in phase B; phase A needs any
-wgpu adapter) and a libavcodec with `h264_nvenc` (or `libx264`).
+Needs an NVIDIA GPU (for the `h264_nvenc` encode; phase A needs any wgpu adapter)
+and a libavcodec with `h264_nvenc` (or `libx264`).
+
+### Capture to a file (self-contained)
 
 ```sh
 cd examples/bevy-g2g-stream
-cargo run --release
+cargo run --release            # writes bevy_g2g.h264 (H.264 Annex-B)
+ffplay bevy_g2g.h264           # or vlc / mpv
 ```
 
-Phase A logs the first captured frame's size and a non-blank check, then exits
-after a fixed number of frames.
+### Stream live over WebRTC (WHIP)
+
+Point it at a WHIP server and watch in a browser. With
+[mediamtx](https://github.com/bluenviron/mediamtx) running locally (defaults to
+`:8889`):
+
+```sh
+G2G_WHIP_URL=http://localhost:8889/g2gbevy/whip \
+G2G_FRAMES=0 \
+  cargo run --release
+```
+
+`G2G_FRAMES=0` runs forever (until Ctrl-C) so you can watch the stream; omit it
+for the default fixed-length run. Open the bundled WHEP viewer
+`../../g2g-plugins/examples/whep-player.html` (set its URL to the WHEP endpoint,
+e.g. `http://localhost:8889/g2gbevy/whep`) to see the spinning cube, rendered on
+the server GPU and streamed by g2g.
+
+### Environment
+
+| Var | Effect |
+| :-- | :-- |
+| `G2G_WHIP_URL` | If set, stream to this WHIP endpoint; else write to `bevy_g2g.h264`. |
+| `G2G_FRAMES` | Frames to render before exit; `0` = forever. Default 240. |
 
 ## Honest caveats
 
