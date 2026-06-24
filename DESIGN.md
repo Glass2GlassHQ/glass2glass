@@ -1806,6 +1806,23 @@ picture. Two pieces, both `no_std`-friendly:
   window handle and must drive the app's event loop), so the sink presents to a
   surface the app supplies rather than opening its own window.
 
+- **Bring-your-own-device (M263).** The same `GpuContext` sharing extends one
+  step further out, to an embedding application that *already owns* a
+  `wgpu::Device` (a game engine, a Bevy / Tauri app, an editor's renderer):
+  `GpuContext::from_wgpu(instance, adapter, device, queue)` wraps the embedder's
+  device instead of opening one, so every GPU element produces textures *on that
+  device*. A decoded frame's `MemoryDomain::WgpuTexture` is then a first-class
+  object in the embedder's own render graph, recovered with `gpu::texture_of` and
+  bindable directly (sample it onto a 3D surface, composite it in the UI) with no
+  second device, no surface hand-off, and no copy, the opposite of `for_surface`
+  (where g2g opens the device). This is the integration path for the
+  lightweight-app / engine use case where the application drives rendering and
+  g2g is just the pipeline that hands it textures: validated on the RTX 3060 (a
+  texture produced through a `from_wgpu` context reads back correctly on the
+  embedder's own device handles). The frame still flows to the app through any
+  sink, including the `appsink` pull channel, which carries a GPU-domain `Frame`
+  unchanged.
+
 ---
 
 ## 6. Target Deployment Environments
