@@ -18,7 +18,7 @@ use crate::caps::{
     couple_passthrough_derived, discover_passthrough, Caps, CapsSet, PassthroughFields,
 };
 #[cfg(feature = "std")]
-use crate::caps::project_passthrough;
+use crate::caps::{project_passthrough, project_passthrough_derived};
 use crate::format_element::CapsConstraint;
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 
@@ -507,12 +507,15 @@ fn backward_feasible(
         // mask, but M257's `discover_passthrough` recovers its invertible fields
         // by probing the closure on a concrete input. Mid-stream the snapshot has
         // only the output set; the startup-fixated `in_sample` supplies that probe
-        // (and the input variant / scalar identity to couple onto, which the output
-        // alone can't give across a decoder's variant change). With a non-empty
-        // mask the input feasibility is the downstream set's passthrough fields
-        // coupled back onto the sample (`couple_passthrough_derived`, the same
-        // primitive the full-chain solve uses); an empty mask or no sample imposes
-        // none, the prior behavior.
+        // (and the input variant / scalar identity, which the output alone can't
+        // give across a decoder's variant change). With a non-empty mask the input
+        // feasibility is the downstream set's passthrough fields projected back onto
+        // the sample's variant, with every non-passthrough (re-derived) field
+        // *widened to `Any`* (`project_passthrough_derived`): the transform
+        // re-derives that field from whatever input it gets mid-stream, so the input
+        // edge stays unconstrained on it. Freezing it to the startup value (M258 v1)
+        // made the snapshot reject a legitimately re-derived mid-stream geometry
+        // (the Caps-β forward gap). An empty mask or no sample imposes none.
         CapsConstraint::DerivedOutput(f) => {
             let (d, sample) = (down?, in_sample?);
             let mask = discover_passthrough(f, sample);
@@ -521,7 +524,7 @@ fn backward_feasible(
             }
             let mut alts = Vec::with_capacity(d.alternatives().len());
             for o in d.alternatives() {
-                if let Some(c) = couple_passthrough_derived(sample, o, mask) {
+                if let Some(c) = project_passthrough_derived(sample, o, mask) {
                     if !alts.contains(&c) {
                         alts.push(c);
                     }

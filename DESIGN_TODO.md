@@ -34,16 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Forward coordinator re-solve walk (Caps-β).** Both backward halves now
-  couple a downstream pin through a `DerivedOutput` decoder / rescaler: the
-  full-chain solve (M257: `discover_passthrough` + `couple_passthrough_derived`)
-  and the mid-stream `backward_feasible` snapshot (M258: threaded the
-  startup-fixated input as the probe sample, so the decoder input edge is
-  constrained instead of `None`). The remaining gap is the *forward* direction:
-  a downstream `DerivedOutput` that must re-derive its own output on a mid-stream
-  input change isn't covered (the snapshot steers the element's output, but a
-  re-derivation cascade past it is not walked). Design settled, gated on a real
-  driver (a decoder below another format-changing transform).
 - **Closure-free `FieldTransform` refactor.** Make forward derivation
   declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
 - **Dynamic pads / request pads.** `tee` / `mux` runtime branch/input addition;

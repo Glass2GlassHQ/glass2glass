@@ -619,6 +619,49 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
     }
 }
 
+/// Project an output-side feasible `out` onto the *input* side of a plain
+/// `DerivedOutput` for the mid-stream snapshot ([`backward_feasible`]). Unlike
+/// [`couple_passthrough_derived`] (the full-chain coupling, which keeps the input
+/// sample's own value on a non-passthrough field), this *widens* every
+/// non-passthrough geometry / rate field to `Any`: the transform re-derives that
+/// field from whatever input it receives mid-stream, so the input edge must stay
+/// unconstrained on it. Freezing it to the startup sample (the M258 v1 behaviour)
+/// made the snapshot reject a legitimately re-derived mid-stream geometry, the
+/// Caps-β forward gap.
+///
+/// Same-variant transforms defer to [`project_passthrough`] (which already widens
+/// retargeted fields and rejects a non-rangeable retargeted scalar). Across the
+/// decoder / encoder variant change, the passthrough geometry / rate fields take
+/// the downstream value from `out` while the non-passthrough fields widen to
+/// `Any`; `sample` supplies the input variant and its scalar identity (codec /
+/// format), which `out` cannot give.
+#[cfg(feature = "std")]
+pub(crate) fn project_passthrough_derived(
+    sample: &Caps,
+    out: &Caps,
+    mask: PassthroughFields,
+) -> Option<Caps> {
+    match (sample, out) {
+        (Caps::RawVideo { .. }, Caps::RawVideo { .. })
+        | (Caps::CompressedVideo { .. }, Caps::CompressedVideo { .. })
+        | (Caps::Audio { .. }, Caps::Audio { .. }) => return project_passthrough(out, mask),
+        _ => {}
+    }
+    // Cross video-variant (decoder / encoder): passthrough geometry / rate take the
+    // downstream value, the rest widen to `Any`; keep `sample`'s variant + scalar id.
+    let (wp, hp, rp) = (geo_width(out)?, geo_height(out)?, geo_rate(out)?);
+    let width = if mask.width { wp.clone() } else { Dim::Any };
+    let height = if mask.height { hp.clone() } else { Dim::Any };
+    let framerate = if mask.framerate { rp.clone() } else { Rate::Any };
+    match sample {
+        Caps::RawVideo { format, .. } => Some(Caps::RawVideo { format: *format, width, height, framerate }),
+        Caps::CompressedVideo { codec, .. } => {
+            Some(Caps::CompressedVideo { codec: *codec, width, height, framerate })
+        }
+        _ => None,
+    }
+}
+
 /// The fields [`discover_passthrough`] probes for, one per [`PassthroughFields`]
 /// flag.
 #[derive(Clone, Copy)]
@@ -649,6 +692,16 @@ enum ProbeField {
 /// `Range`/`Any` input field does not confuse the equality test.
 pub(crate) fn discover_passthrough(f: &dyn Fn(&Caps) -> CapsSet, sample: &Caps) -> PassthroughFields {
     let base = concrete_probe_base(sample);
+    // Soundness gate: a field is probed by *varying* it, so a closure that is
+    // multi-valued on the sample's own identity (e.g. a converter that offers
+    // `{passthrough, retargeted}` for the sample's format but is coincidentally
+    // single-valued at the probe values) would be mis-read as passthrough. Per-
+    // field equality alone can't see that, so require the closure to be single-
+    // valued on the sample's representative input before trusting any field: a
+    // genuinely ambiguous transform has no well-defined per-field passthrough.
+    if single_out(f, &base).is_none() {
+        return PassthroughFields::NONE;
+    }
     PassthroughFields {
         width: probe_field(f, &base, ProbeField::Width),
         height: probe_field(f, &base, ProbeField::Height),
@@ -1271,5 +1324,37 @@ mod tests {
         let pt = discover_passthrough(&scale, &video(Dim::Any, Dim::Any, Rate::Any));
         assert!(pt.format && pt.framerate, "format + rate kept");
         assert!(!pt.width && !pt.height, "geometry is retargeted by the scaler");
+    }
+
+    #[test]
+    fn discover_passthrough_none_for_multivalued_closure() {
+        // A converter that offers {passthrough, retargeted-NV12} for an RGBA input
+        // is multi-valued on its own sample, but coincidentally single-valued at
+        // the format-probe values (Nv12 / I420, neither in `from`). Per-field
+        // probing alone would mis-read `format` as passthrough and then drop the
+        // RGBA input when coupling it against an NV12 pin (the M257 startup-failure
+        // bug). The single-valued gate on the sample makes discovery bail to NONE.
+        let from = [RawVideoFormat::Rgba8];
+        let conv = move |input: &Caps| {
+            let mut alts = vec![input.clone()];
+            if let Caps::RawVideo { format, width, height, framerate } = input {
+                if from.contains(format) {
+                    alts.push(Caps::RawVideo {
+                        format: RawVideoFormat::Nv12,
+                        width: width.clone(),
+                        height: height.clone(),
+                        framerate: framerate.clone(),
+                    });
+                }
+            }
+            CapsSet::from_alternatives(alts)
+        };
+        let sample = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        assert_eq!(discover_passthrough(&conv, &sample), PassthroughFields::NONE);
     }
 }

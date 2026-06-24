@@ -898,16 +898,24 @@ RawVideo`), coupling the geometry / framerate both carry (`format` is retargeted
 across a codec boundary, so probing never marks it passthrough). Discovery is
 conservative, a field that the closure fixes or that fails either probe stays
 non-passthrough, so a genuinely non-invertible closure falls back to the
-alternative-drop walk unchanged. The mid-stream `backward_feasible` snapshot now
-recovers the same coupling (M258): the per-edge sweep is threaded the element's
-startup-fixated input caps (from the solved edge set), which supplies the concrete
-probe a `DerivedOutput` needs and the input variant / scalar identity to couple
-the downstream pin's passthrough fields onto (`couple_passthrough_derived` again,
-since the snapshot crosses the same decoder variant change). A decoder below a
-geometry pin therefore exposes a constrained input edge to the mid-stream
-re-solve, instead of `None`; an empty discovered mask or a missing sample still
-imposes none. (A closure-free `FieldTransform` that makes forward declarative too
-is a planned follow-up.)
+alternative-drop walk unchanged. (Discovery is gated on the closure being
+single-valued on the sample: a multi-valued converter, e.g. one offering
+`{passthrough, retargeted}`, has no well-defined per-field passthrough, so probing
+it is unsound and yields `NONE`.) The mid-stream `backward_feasible` snapshot now
+recovers the same coupling (M258 / M259): the per-edge sweep is threaded the
+element's startup-fixated input caps (from the solved edge set), which supplies the
+concrete probe a `DerivedOutput` needs and the input variant / scalar identity. The
+passthrough fields take the downstream pin's value, but every *non-passthrough*
+(re-derived) field widens to `Any` (`project_passthrough_derived`, M259): the
+transform re-derives that field from whatever input it gets mid-stream, so the
+input edge stays unconstrained on it. Freezing it to the startup value (M258 v1)
+made the snapshot reject a legitimately re-derived mid-stream geometry, the Caps-β
+forward gap; with widening, a `DerivedOutput` stacked below another
+format-changing transform re-derives its output on a mid-stream input change and
+the runner cascades it downstream. A decoder below a geometry pin still exposes a
+constrained input edge; an empty discovered mask or a missing sample imposes none.
+(A closure-free `FieldTransform` that makes forward declarative too is a planned
+follow-up.)
 
 `Caps` is the *fixed* description used at runtime (carried by
 `PipelinePacket::CapsChanged`, handed to `configure_pipeline`); `CapsSet`
@@ -1214,15 +1222,17 @@ is not:
   passthrough field couples back through any number of passthrough transforms
   (`videoscale ! videoconvert ! caps`, and deeper). This family is closed.
 
-- **Backward coupling stops at a format-changing (`DerivedOutput`) transform.**
-  `backward_feasible()` returns `None` for `DerivedOutput`: a transform that
-  genuinely re-derives its output (a decoder, or a converter that also rescales)
-  cannot be inverted, so a downstream pin behind one does not narrow its input.
-  The `DerivedCoupled` inverse only covers the fields a transform *declares*
-  passthrough. Generalizing it (a partial inverse over the invertible fields of
-  a `DerivedOutput`) is the natural next increment, deferred until a real element
-  needs it: a wrong guess at the inverse relation is worse than the current loud
-  `CapsMismatch`.
+- **Backward coupling through a format-changing (`DerivedOutput`) transform is
+  partial, over its *invertible* fields.** A `DerivedOutput` is opaque, but its
+  invertible fields are recovered by probing (`discover_passthrough`, M257): a
+  downstream pin on a passthrough field couples back through a decoder / rescaler,
+  in both the full-chain solve and the mid-stream snapshot (M258 / M259). A field
+  the transform genuinely *re-derives* (a scaler's geometry) still cannot be
+  inverted: a downstream pin on it does not narrow the input, and the snapshot
+  leaves the upstream unconstrained on it (so a re-deriving transform mid-stream
+  picks freely and the pin is enforced loud downstream if violated). This is the
+  arc-consistency boundary, not a missing feature: a partial inverse over the
+  invertible fields is exactly what is modelled.
 
 - **Non-tree topologies are not guaranteed.** Arc consistency is incomplete on
   cyclic constraint graphs. Independent fan-out (a tee feeding unrelated sink
