@@ -79,6 +79,33 @@ impl MultiOutputSink for MultiSenderSink {
     }
 }
 
+/// A terminal multi-output *source*: 0 inputs to N outputs, driven by
+/// [`run_fanout_session`](crate::runtime::run_fanout_session). Where
+/// [`MultiOutputElement`] demultiplexes an upstream input stream, this generates
+/// its outputs itself from an external source (e.g. a WHEP session that receives
+/// video + audio over one PeerConnection and emits each on its own pad). It is
+/// the fan-out mirror of a [`MultiInputElement`] used as a terminal session sink.
+pub trait MultiOutputSource: ElementBound {
+    type RunFuture<'a>: core::future::Future<Output = Result<u64, G2gError>> + 'a
+    where
+        Self: 'a;
+
+    /// Number of output pads (one per produced track).
+    fn output_count(&self) -> usize;
+
+    /// The caps this source produces on `output`. The runner fixates each and
+    /// configures the matching downstream sink before [`Self::run`]. Geometry the
+    /// source only learns later (e.g. H.264 dimensions from the in-band SPS) is
+    /// reported as `Any`, exactly as a single-output `SourceLoop` does.
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError>;
+
+    /// Run until EOS / disconnect, pushing frames to outputs via
+    /// `out.push_to(port, ..)`. The implementation MUST push a
+    /// [`PipelinePacket::Eos`] to every output before returning `Ok`, so no
+    /// downstream branch is stranded. Returns the count of `DataFrame`s pushed.
+    fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a>;
+}
+
 /// Multi-output element trait variant: identical negotiation to
 /// [`AsyncElement`], but `process` emits into a [`MultiOutputSink`] rather
 /// than a single downstream. [`Router`] is the first implementor; user code

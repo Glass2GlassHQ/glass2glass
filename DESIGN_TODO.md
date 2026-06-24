@@ -164,10 +164,14 @@ leverage first:
     Option-A flattening decision. Egress DONE (M245): terminal fan-in runner
     `run_fanin_session` (N sources -> terminal `MultiInputElement`, no downstream
     sink) + `WebRtcSessionSink` (one `Rtc`, H.264 video + Opus audio m-lines, one
-    WHIP session). Remaining: ingress A/V (a multi-output WHEP session source);
-    per-input reverse-signal routing (PLI / BWE) through the multi-track runner;
-    launch-registry wiring; bidirectional sendrecv on one connection and
-    mid-session transceiver add/remove (renegotiation) are the later, harder steps.
+    WHIP session). Ingress DONE (M246): `MultiOutputSource` trait + terminal
+    fan-out runner `run_fanout_session` (one 0-in-N-out source -> N sinks) +
+    `WebRtcWhepSessionSrc` (one `Rtc`, WHEP recv H.264 video + Opus audio on two
+    output pads). Remaining: per-input/branch reverse-signal routing (PLI / BWE)
+    and mid-stream re-solve through the multi-track runners; launch-registry
+    wiring; bidirectional sendrecv on one connection (one element that is both
+    source and sink, not expressible in the runner model yet) and mid-session
+    transceiver add/remove (renegotiation) are the later, harder steps.
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`

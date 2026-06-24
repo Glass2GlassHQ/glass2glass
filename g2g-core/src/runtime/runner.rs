@@ -50,7 +50,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
-use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiSenderSink};
+use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink};
 #[cfg(feature = "std")]
 use crate::graph::Graph;
 #[cfg(feature = "std")]
@@ -866,6 +866,112 @@ where
     // Fan-out latency / allocation / clock election across N branches is
     // deferred (M12 covers the linear path); report neutral values rather than
     // a misleading partial one.
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        frames_dropped: 0,
+        latency: LatencyReport::ZERO,
+        allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
+        coordinator_events: 0,
+    })
+}
+
+/// Drives a terminal multi-output *source* ([`MultiOutputSource`]: 0 inputs to N
+/// outputs) into N sinks, with no upstream, the fan-out mirror of
+/// [`run_fanin_session`](crate::runtime::run_fanin_session). A WHEP session
+/// receiving A/V over one PeerConnection emits each track on its own pad. Each
+/// output's caps configure the matching sink; the session pushes via a
+/// [`MultiSenderSink`] and emits a per-output `Eos` when it ends, which the sink
+/// arms observe to finish. Per-branch mid-stream re-solve is not wired here yet
+/// (a follow-up, as for the egress session runner).
+#[cfg(feature = "std")]
+pub async fn run_fanout_session<Sess, Clk>(
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    _clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiOutputSource,
+    Clk: PipelineClock,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let branch_count = sinks.len();
+    assert!(branch_count > 0, "fan-out session needs at least one sink");
+    assert!(
+        session.output_count() == branch_count,
+        "session output count must match the number of sinks"
+    );
+
+    // Negotiate per output: the session self-fixates each output's caps and
+    // configures the matching sink (no peer narrowing, like run_fanin_session).
+    let mut sinks = sinks;
+    for (i, sink) in sinks.iter_mut().enumerate() {
+        let fixated = session.output_caps(i)?.fixate()?;
+        if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+
+    let mut branch_senders = Vec::with_capacity(branch_count);
+    let mut branch_receivers = Vec::with_capacity(branch_count);
+    for _ in 0..branch_count {
+        let (tx, rx) = link(link_capacity);
+        branch_senders.push(SenderSink::new(tx));
+        branch_receivers.push(rx);
+    }
+
+    let session_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut multi = MultiSenderSink::new(branch_senders);
+        session.run(&mut multi).await
+    });
+
+    let mut arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> = Vec::with_capacity(branch_count + 1);
+    arms.push(session_fut);
+    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+        let sink_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+            let mut null = NullSink;
+            let mut consumed: u64 = 0;
+            loop {
+                match rx.recv().await {
+                    Some(PipelinePacket::Eos) => {
+                        sink.process(PipelinePacket::Eos, &mut null).await?;
+                        return Ok::<u64, G2gError>(consumed);
+                    }
+                    Some(PipelinePacket::CapsChanged(new_caps)) => {
+                        match sink.configure_pipeline(&new_caps)? {
+                            ConfigureOutcome::Accepted => {
+                                sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
+                                    .await?;
+                            }
+                            ConfigureOutcome::ReFixate(counter) => {
+                                rx.request_reconfigure(Reconfigure::Propose(counter));
+                            }
+                        }
+                    }
+                    Some(packet) => {
+                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            consumed += 1;
+                        }
+                        sink.process(packet, &mut null).await?;
+                    }
+                    None => return Ok(consumed),
+                }
+            }
+        });
+        arms.push(sink_fut);
+    }
+
+    let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    // Arm order: [session, sink0, sink1, ...].
+    let emitted = counts[0];
+    let consumed: u64 = counts[1..].iter().copied().sum();
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
