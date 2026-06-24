@@ -61,9 +61,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 
-use glow::HasContext;
 use khronos_egl as egl;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -100,9 +99,8 @@ use g2g_core::{
     PipelinePacket, Rate, RawVideoFormat,
 };
 
-use crate::cuda::{
-    make_context_current, nv12_byte_size, CudaGlInterop, FRAGMENT_SHADER_NV12, VERTEX_SHADER,
-};
+use crate::cuda::nv12_byte_size;
+use crate::glnv12::GlState;
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:
 /// the frame in flight on the GL thread plus the one the runner link holds, so
@@ -370,23 +368,6 @@ impl AsyncElement for CudaGlSink {
 // Worker thread: Wayland window + EGL/GL + CUDA-GL upload
 // =================================================================
 
-/// GL render state, built once the EGL context is current. Holds the program,
-/// the two NV12 textures, the fullscreen-quad buffer, and (lazily, on the
-/// first frame, once the decoder's CUDA context is known) the CUDA-GL interop.
-struct GlState {
-    gl: glow::Context,
-    program: glow::Program,
-    y_tex: glow::Texture,
-    uv_tex: glow::Texture,
-    vbo: glow::Buffer,
-    width: u32,
-    height: u32,
-    /// Registered on the first frame, when `OwnedCudaBuffer::context` is known.
-    interop: Option<CudaGlInterop>,
-    /// True once the decoder's CUDA context has been pushed current here.
-    cuda_current: bool,
-}
-
 struct WorkerState {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -499,7 +480,7 @@ fn worker_main(
     };
 
     // SAFETY: `gl` wraps the GL ES 3 context made current on this thread above.
-    let gl_state = unsafe { build_gl_state(gl, width, height) }?;
+    let gl_state = unsafe { GlState::build(gl, width, height) }?;
 
     let mut state = WorkerState {
         registry_state: RegistryState::new(&globals),
@@ -539,161 +520,6 @@ fn worker_main(
     Ok(())
 }
 
-/// Compile the NV12 shaders, link the program, create the fullscreen-quad
-/// buffer and the two NV12 textures (luma `R8` full-res, chroma `RG8`
-/// half-res), allocated at the plane dimensions ready for CUDA to write.
-///
-/// # Safety
-/// `gl` must wrap a current GL ES 3 context.
-unsafe fn build_gl_state(
-    gl: glow::Context,
-    width: u32,
-    height: u32,
-) -> Result<GlState, Box<dyn std::error::Error>> {
-    // SAFETY: the caller guarantees a current GL ES 3 context (see `# Safety`).
-    unsafe {
-        let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER_NV12)?;
-
-        // Fullscreen quad: two triangles, interleaved (x, y, u, v). Flip V so
-        // the top row of the frame maps to the top of the window.
-        #[rustfmt::skip]
-        let verts: [f32; 24] = [
-            -1.0, -1.0, 0.0, 1.0,
-             1.0, -1.0, 1.0, 1.0,
-             1.0,  1.0, 1.0, 0.0,
-            -1.0, -1.0, 0.0, 1.0,
-             1.0,  1.0, 1.0, 0.0,
-            -1.0,  1.0, 0.0, 0.0,
-        ];
-        let vbo = gl.create_buffer().map_err(|e| e.to_string())?;
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        gl.buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            bytemuck_cast(&verts),
-            glow::STATIC_DRAW,
-        );
-
-        let cw = width.div_ceil(2);
-        let ch = height.div_ceil(2);
-        let y_tex = make_texture(&gl, glow::R8 as i32, glow::RED, width, height)?;
-        let uv_tex = make_texture(&gl, glow::RG8 as i32, glow::RG, cw, ch)?;
-
-        Ok(GlState {
-            gl,
-            program,
-            y_tex,
-            uv_tex,
-            vbo,
-            width,
-            height,
-            interop: None,
-            cuda_current: false,
-        })
-    }
-}
-
-/// Allocate a 2D texture with the given internal/source format at `w` x `h`,
-/// `LINEAR` filtered and clamped, with no initial pixel data (CUDA writes it).
-///
-/// # Safety
-/// A GL context must be current.
-unsafe fn make_texture(
-    gl: &glow::Context,
-    internal_format: i32,
-    format: u32,
-    w: u32,
-    h: u32,
-) -> Result<glow::Texture, Box<dyn std::error::Error>> {
-    // SAFETY: the caller guarantees a current GL context (see `# Safety`).
-    unsafe {
-        let tex = gl.create_texture().map_err(|e| e.to_string())?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MAG_FILTER,
-            glow::LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_S,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_T,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        // glow 0.17 `tex_image_2d` takes the pixel source as
-        // `PixelUnpackData::Slice(Option<&[u8]>)`; `None` allocates storage
-        // without uploading (CUDA writes the pixels).
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            internal_format,
-            w as i32,
-            h as i32,
-            0,
-            format,
-            glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(None),
-        );
-        Ok(tex)
-    }
-}
-
-/// Compile + link the vertex and fragment shaders into a program.
-///
-/// # Safety
-/// A GL context must be current.
-unsafe fn link_program(
-    gl: &glow::Context,
-    vertex_src: &str,
-    fragment_src: &str,
-) -> Result<glow::Program, Box<dyn std::error::Error>> {
-    // SAFETY: the caller guarantees a current GL context (see `# Safety`).
-    unsafe {
-        let program = gl.create_program().map_err(|e| e.to_string())?;
-        let shaders = [
-            (glow::VERTEX_SHADER, vertex_src),
-            (glow::FRAGMENT_SHADER, fragment_src),
-        ];
-        let mut compiled = alloc::vec::Vec::new();
-        for (kind, src) in shaders {
-            let shader = gl.create_shader(kind).map_err(|e| e.to_string())?;
-            gl.shader_source(shader, src);
-            gl.compile_shader(shader);
-            if !gl.get_shader_compile_status(shader) {
-                return Err(gl.get_shader_info_log(shader).into());
-            }
-            gl.attach_shader(program, shader);
-            compiled.push(shader);
-        }
-        gl.link_program(program);
-        if !gl.get_program_link_status(program) {
-            return Err(gl.get_program_info_log(program).into());
-        }
-        for shader in compiled {
-            gl.detach_shader(program, shader);
-            gl.delete_shader(shader);
-        }
-        Ok(program)
-    }
-}
-
-/// Reinterpret an `f32` slice as the `&[u8]` GL wants, without pulling in the
-/// `bytemuck` crate for one call. The vertex array is `'static`-lifetime local
-/// and tightly packed, so the cast is sound.
-fn bytemuck_cast(verts: &[f32]) -> &[u8] {
-    // SAFETY: `f32` has no padding and any bit pattern is a valid `u8`; the
-    // resulting slice covers exactly the same bytes.
-    unsafe { core::slice::from_raw_parts(verts.as_ptr() as *const u8, core::mem::size_of_val(verts)) }
-}
-
 impl WorkerState {
     /// Upload the decoded NV12 planes into the GL textures via CUDA, draw the
     /// fullscreen quad through the NV12->RGB shader, and present. Signals
@@ -717,62 +543,8 @@ impl WorkerState {
     }
 
     fn draw_inner(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
-        // Lazily make the decoder's CUDA context current on this GL thread and
-        // register the textures with CUDA, now that the context is known.
-        if !self.gl.cuda_current {
-            // SAFETY: worker owns this thread; `buf.context` is the ffmpeg
-            // CUDA context the frame's pointers are valid in.
-            unsafe { make_context_current(buf.context)? };
-            self.gl.cuda_current = true;
-        }
-        if self.gl.interop.is_none() {
-            let y = self.gl.y_tex.0.get();
-            let uv = self.gl.uv_tex.0.get();
-            // SAFETY: both textures are live GL_TEXTURE_2D names allocated in
-            // `build_gl_state`; the CUDA context is current (above).
-            self.gl.interop = Some(unsafe { CudaGlInterop::register(y, uv)? });
-        }
-
-        // SAFETY: textures registered, CUDA context current, planes valid.
-        unsafe { self.gl.interop.as_ref().unwrap().upload(buf)? };
-
-        // SAFETY: GL context is current on this thread for the worker's life.
-        unsafe {
-            let gl = &self.gl.gl;
-            gl.viewport(0, 0, self.gl.width as i32, self.gl.height as i32);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.use_program(Some(self.gl.program));
-
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.gl.y_tex));
-            if let Some(loc) = gl.get_uniform_location(self.gl.program, "y_tex") {
-                gl.uniform_1_i32(Some(&loc), 0);
-            }
-            gl.active_texture(glow::TEXTURE1);
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.gl.uv_tex));
-            if let Some(loc) = gl.get_uniform_location(self.gl.program, "uv_tex") {
-                gl.uniform_1_i32(Some(&loc), 1);
-            }
-
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.gl.vbo));
-            let pos = gl.get_attrib_location(self.gl.program, "a_pos").unwrap_or(0);
-            let uv = gl.get_attrib_location(self.gl.program, "a_uv").unwrap_or(1);
-            let stride = 4 * core::mem::size_of::<f32>() as i32;
-            gl.enable_vertex_attrib_array(pos);
-            gl.vertex_attrib_pointer_f32(pos, 2, glow::FLOAT, false, stride, 0);
-            gl.enable_vertex_attrib_array(uv);
-            gl.vertex_attrib_pointer_f32(
-                uv,
-                2,
-                glow::FLOAT,
-                false,
-                stride,
-                2 * core::mem::size_of::<f32>() as i32,
-            );
-
-            gl.draw_arrays(glow::TRIANGLES, 0, 6);
-        }
+        // CUDA upload + NV12->RGB draw (shared with the KMS sink).
+        self.gl.upload_and_draw(buf)?;
 
         // Subscribe to the next frame callback (compositor pacing) and present.
         let surface = self.window.wl_surface().clone();

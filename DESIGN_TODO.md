@@ -113,7 +113,10 @@ leverage first:
 
 ## CUDA / display
 
-- GL-on-KMS variant of `CudaGlSink` (production tty path).
+- `CudaKmsSink` on-tty validation (M255): the GL-on-KMS present path is authored
+  + compiles (render half shared with the validated `CudaGlSink`), but the
+  GBM/EGL/DRM present needs a real run from a bare VT (DRM master), which the dev
+  session's compositor holds. Verify the `// VERIFY:` spots there.
 - A real downstream consumer that re-sizes its pool on the mid-stream β
   allocation proposal (decoders record it but pools are fixed at codec open).
 

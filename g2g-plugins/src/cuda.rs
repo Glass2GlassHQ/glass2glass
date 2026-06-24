@@ -301,7 +301,7 @@ unsafe fn copy_plane(
 /// # Safety
 /// `context` must be a valid `CUcontext` and the calling thread must own the
 /// stack it is pushed onto (a dedicated worker thread).
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 pub unsafe fn make_context_current(context: u64) -> Result<(), G2gError> {
     // SAFETY: `context` is a valid CUcontext per the contract.
     unsafe { check(ffi::cu_ctx_push_current(context as ffi::CuContext)) }
@@ -523,14 +523,14 @@ void main() {
 /// context current on the calling thread, and the ffmpeg CUDA context must be
 /// current (pushed) on that same thread. The sink worker owns this on its GL
 /// thread, so the raw resource handles never cross threads.
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 #[derive(Debug)]
 pub struct CudaGlInterop {
     y_res: ffi::CuGraphicsResource,
     uv_res: ffi::CuGraphicsResource,
 }
 
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 impl CudaGlInterop {
     /// Register the luma (`y_tex`) and chroma (`uv_tex`) GL textures with CUDA
     /// (write-discard: CUDA is their sole writer).
@@ -597,7 +597,7 @@ impl CudaGlInterop {
     }
 }
 
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 impl Drop for CudaGlInterop {
     fn drop(&mut self) {
         // SAFETY: both resources were registered in `register` and not yet
@@ -614,7 +614,7 @@ impl Drop for CudaGlInterop {
 /// # Safety
 /// `resource` must be currently mapped; `src_device` must be valid device
 /// memory of at least `src_pitch * upload.height` bytes in the current context.
-#[cfg(feature = "cuda-gl")]
+#[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 unsafe fn copy_plane_to_array(
     resource: ffi::CuGraphicsResource,
     src_device: u64,

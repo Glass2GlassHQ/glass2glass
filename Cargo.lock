@@ -3266,6 +3266,7 @@ dependencies = [
  "ffmpeg-next",
  "futures-util",
  "g2g-core",
+ "gbm",
  "getrandom 0.2.17",
  "glow",
  "hmac",

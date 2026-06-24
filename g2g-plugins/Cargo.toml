@@ -139,6 +139,12 @@ cuda = ["std"]
 # PCIe round-trip and CPU colour convert. Pulls khronos-egl (EGL), glow (GL
 # ES), wayland-egl (wl_egl_window), and SCTK (windowing). Linux + NVIDIA only.
 cuda-gl = ["cuda", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+# CUDA-GL display sink on DRM/KMS (`CudaKmsSink`, M255): the tty / no-compositor
+# counterpart of cuda-gl. Same CUDA-GL interop + NV12->RGB shader, but EGL on a
+# GBM surface presented via DRM page-flips (no Wayland). Pulls khronos-egl, glow,
+# gbm (surface, no drm-support so it stays on our drm), drm + drm-fourcc.
+# Requires DRM master (tty / DRM lease). Linux + NVIDIA only.
+cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:drm-fourcc"]
 # CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar). `CudaToWgpu`
 # imports a Vulkan external-memory image into CUDA, copies the NVDEC NV12 planes
 # device->device into it, and hands it downstream as MemoryDomain::WgpuTexture
@@ -441,6 +447,10 @@ ndk = { version = "0.9", optional = true, default-features = false, features = [
 cros-codecs = { version = "0.0.6", optional = true, default-features = false, features = ["vaapi"] }
 drm = { version = "0.15", optional = true }
 drm-fourcc = { version = "2", optional = true }
+# GBM surface for the CUDA-GL-on-KMS sink (`cuda-kms`). default-features = false
+# drops gbm's `drm-support` (which pulls an older drm 0.12, incompatible with our
+# drm 0.15); we build the DRM framebuffer from the bo's gem handle ourselves.
+gbm = { version = "0.15", optional = true, default-features = false }
 # Pure-Rust V4L2 bindings (v4l2-sys-mit, no libv4l). Drives the `v4l2` capture
 # source. Linux-only target-gate; the V4L2 ioctl ABI is Linux-specific.
 v4l = { version = "0.14", optional = true }

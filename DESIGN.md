@@ -640,7 +640,14 @@ but it removes the PCIe round-trip and the CPU colour convert.
 - `CudaGlSink` (`cuda-gl` feature, Linux + NVIDIA) holds an EGL context on a
   Wayland surface (`wl_egl_window` from SCTK), a `glow` GL ES 3 program with
   the two NV12 textures, and the per-frame map/copy/unmap render loop via
-  the CUDA-GL interop entry points.
+  the CUDA-GL interop entry points. Validated on an RTX 3060 (M252/M253):
+  ~10.7x lower present latency than `NvdecCuvid -> WaylandSink` at 1080p.
+- `CudaKmsSink` (`cuda-kms` feature, Linux + NVIDIA, M255) is the tty /
+  no-compositor counterpart: the same CUDA-GL interop + NV12->RGB shader (shared
+  via the `glnv12` module), but EGL renders into a GBM surface scanned out via
+  DRM page-flips instead of a Wayland surface. Needs DRM master (a bare VT or a
+  DRM lease). The shared render half is the validated `CudaGlSink` path; the
+  GBM/EGL/DRM present is authored + compiles but its on-tty run is owed.
 
 **CUDA bindings: hand-rolled FFI.** `cudarc` has no CUDA-GL interop wrappers
 (`cuGraphicsGLRegisterImage` and friends), and its safe API assumes it owns

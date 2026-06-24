@@ -387,10 +387,20 @@ pub mod pipewiresrc;
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 pub mod cuda;
 
+// Shared NV12 GL ES render state for the CUDA-GL sinks (program + textures +
+// per-frame CUDA upload + draw); the platform present stays in each sink.
+#[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]
+pub(crate) mod glnv12;
+
 // CUDA-GL zero-copy-ish display sink: keeps decoded NV12 on the GPU and
 // presents it via CUDA-GL interop on a Wayland EGL surface. Linux + NVIDIA.
 #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
 pub mod cudaglsink;
+
+// CUDA-GL display sink on DRM/KMS: the tty / no-compositor counterpart of
+// cudaglsink, presenting via a GBM surface + page-flips. Linux + NVIDIA.
+#[cfg(all(target_os = "linux", feature = "cuda-kms"))]
+pub mod cudakmssink;
 
 // CUDA<->wgpu zero-copy interop: imports a Vulkan external-memory image into
 // CUDA so NVDEC NV12 reaches WgpuPreprocess on the GPU. Linux + NVIDIA.
