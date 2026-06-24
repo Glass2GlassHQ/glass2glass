@@ -224,7 +224,12 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
     let mut infer = WgpuInference::linear(w, h, weights.clone(), bias.clone()).expect("linear");
     infer.configure_pipeline(&tensor_caps(w, h)).expect("configure inference");
 
+    // G2G_CUDAWGPU_NOPOOL=1 drops the reuse pool before each frame, forcing the
+    // per-frame allocate + CUDA-import path, to A/B the pool against it.
+    let nopool = std::env::var_os("G2G_CUDAWGPU_NOPOOL").is_some();
+
     let mut gpu_ms = Vec::new();
+    let mut bridge_ms = Vec::new();
     let mut matched = 0usize;
 
     for frame in cuda_frames.into_iter().take(MAX_FRAMES) {
@@ -244,9 +249,14 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
         let expected = linear_reference(&cpu_tensor, &weights, &bias);
 
         // Zero-copy: bridge -> preprocess (surface-import) -> infer.
+        if nopool {
+            bridge.reset_pool();
+        }
         let t0 = Instant::now();
         let mut bout = Collect::default();
+        let tb = Instant::now();
         bridge.process(PipelinePacket::DataFrame(frame), &mut bout).await.expect("bridge");
+        bridge_ms.push(tb.elapsed().as_secs_f64() * 1e3);
         let tex_frame = data_frames(bout.packets).into_iter().next().expect("wgpu texture frame");
         assert!(
             matches!(tex_frame.domain, MemoryDomain::WgpuTexture(_)),
@@ -270,5 +280,10 @@ async fn cuda_to_wgpu_zero_copy_matches_cpu_reference() {
         "zero-copy: bridged + matched {matched} frame(s) against CPU reference; \
          p50 bridge+preprocess+infer {:.2} ms (no PCIe download)",
         p50_ms(gpu_ms),
+    );
+    eprintln!(
+        "bridge step only ({}): p50 {:.2} ms",
+        if nopool { "per-frame alloc, G2G_CUDAWGPU_NOPOOL" } else { "pooled reuse" },
+        p50_ms(bridge_ms),
     );
 }

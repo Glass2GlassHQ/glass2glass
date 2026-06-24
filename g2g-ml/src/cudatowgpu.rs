@@ -16,8 +16,13 @@
 //! (caps do not encode the domain), so the element drops into an
 //! `NvdecCuda -> WgpuPreprocess` chain without changing negotiation.
 //!
-//! Linux + NVIDIA only (`cuda-wgpu` feature). v1 allocates a fresh shared image
-//! per frame; a reuse pool is a follow-up.
+//! Linux + NVIDIA only (`cuda-wgpu` feature). Frames reuse shared images from a
+//! [`CudaWgpuPool`] (M254): the Vulkan image, its CUDA import, and the
+//! `wgpu::Texture` are allocated once and recycled when the downstream frame is
+//! released (via a drop guard on the emitted keep-alive), so per frame only the
+//! two device->device plane copies and a sync run. A recycled entry may still be
+//! sampled by an in-flight wgpu submission, so the device is drained
+//! (`Device::poll`) before its image is overwritten.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -27,11 +32,9 @@ use std::sync::Arc;
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
-use g2g_plugins::cudawgpu::{
-    create_interop_device, cuda_copy_nv12_planes, export_nv12_image, wrap_as_texture, InteropDevice,
-};
+use g2g_plugins::cudawgpu::{create_interop_device, CudaWgpuPool, InteropDevice};
 
 use crate::wgpupreprocess::WgpuNv12Texture;
 
@@ -52,6 +55,10 @@ pub struct CudaToWgpu {
     /// The Vulkan wgpu device with `VK_KHR_external_memory_fd`, built lazily on
     /// the first frame (device creation is async) and reused.
     interop: Option<InteropDevice>,
+    /// Reuse pool of shared NV12 images (allocation + CUDA import amortized).
+    pool: CudaWgpuPool,
+    /// NV12 geometry of the pooled entries; a change rebuilds the pool.
+    dims: Option<(u32, u32)>,
     /// Frames bridged CUDA -> wgpu texture.
     converted: u64,
 }
@@ -64,6 +71,13 @@ impl CudaToWgpu {
     /// Frames bridged so far. Useful in tests.
     pub fn converted(&self) -> u64 {
         self.converted
+    }
+
+    /// Drop the reuse pool's free entries, forcing the next frame to allocate +
+    /// import a fresh shared image. Exposed for benchmarks that A/B the pool
+    /// against the per-frame-allocation path; not needed in normal use.
+    pub fn reset_pool(&mut self) {
+        self.pool = CudaWgpuPool::new();
     }
 }
 
@@ -124,20 +138,45 @@ impl AsyncElement for CudaToWgpu {
                     if self.interop.is_none() {
                         self.interop = Some(create_interop_device().await?);
                     }
+                    // A geometry change invalidates pooled entries of the old size.
+                    if self.dims != Some((w, h)) {
+                        self.dims = Some((w, h));
+                        self.pool = CudaWgpuPool::new();
+                    }
                     let interop = self.interop.as_ref().unwrap();
 
-                    // SAFETY: `interop.device` has VK_KHR_external_memory_fd; the
-                    // plane pointers are valid NV12 device memory in `ctx` (the
-                    // decoder pins them via the frame's keep-alive, and `frame`
-                    // outlives this copy). `export_nv12_image` matches w/h.
-                    let texture = unsafe {
-                        let shared = export_nv12_image(&interop.device, w, h)?;
-                        cuda_copy_nv12_planes(&shared, ctx, luma, luma_p, chroma, chroma_p, w, h)?;
-                        wrap_as_texture(&interop.device, shared)
+                    // Reuse a pooled shared image, or build one. A recycled entry's
+                    // image may still be sampled by an in-flight wgpu submission, so
+                    // drain the device before its planes are overwritten.
+                    let entry = match self.pool.take_free() {
+                        Some(entry) => {
+                            interop
+                                .device
+                                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                            entry
+                        }
+                        // SAFETY: `interop.device` has VK_KHR_external_memory_fd; `ctx`
+                        // is the decoder's CUDA context where the planes are valid.
+                        None => unsafe { CudaWgpuPool::build_entry(&interop.device, ctx, w, h)? },
                     };
 
-                    let owner =
-                        WgpuNv12Texture::new(interop.device.clone(), interop.queue.clone(), texture);
+                    // Copy this frame's planes into the entry's persistent CUDA array.
+                    // SAFETY: the plane pointers are valid NV12 device memory in `ctx`
+                    // (pinned by the frame's keep-alive, and `frame` outlives this
+                    // copy); the entry was imported for (w, h) in `ctx`.
+                    unsafe { entry.copy_planes(luma, luma_p, chroma, chroma_p, w, h)? };
+
+                    // Hand a clone downstream; the entry returns to the pool when the
+                    // emitted keep-alive (and its drop guard) is released.
+                    let texture = entry.texture().clone();
+                    let guard = self.pool.in_flight(entry);
+                    let owner = WgpuNv12Texture::with_recycle(
+                        interop.device.clone(),
+                        interop.queue.clone(),
+                        texture,
+                        Box::new(guard),
+                    );
                     let domain =
                         MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, Arc::new(owner)));
                     self.converted += 1;

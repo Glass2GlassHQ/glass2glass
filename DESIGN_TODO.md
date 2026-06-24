@@ -114,9 +114,6 @@ leverage first:
 ## CUDA / display
 
 - GL-on-KMS variant of `CudaGlSink` (production tty path).
-- `CudaToWgpu` shared-image reuse pool: v1 allocates a fresh exportable Vulkan
-  image + CUDA import per frame (a chunk of the validated 31 ms p50); a per-size
-  pool keyed on the NV12 geometry amortizes it.
 - A real downstream consumer that re-sizes its pool on the mid-stream β
   allocation proposal (decoders record it but pools are fixed at codec open).
 

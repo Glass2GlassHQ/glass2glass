@@ -552,17 +552,41 @@ impl WgpuBufferKeepAlive for WgpuBufferOwner {
 /// so the NV12 pixels are sampled straight into the compute pass with no CPU
 /// upload. A real GPU NV12 decoder is the intended producer; until one lands,
 /// [`nv12_to_gpu_texture`] builds one from system bytes.
-#[derive(Debug)]
 pub struct WgpuNv12Texture {
     device: wgpu::Device,
     queue: wgpu::Queue,
     texture: wgpu::Texture,
+    /// Optional drop guard whose `Drop` recycles the backing image (e.g. a
+    /// `CudaWgpuPool` return handle from `CudaToWgpu`). Type-erased so this stays
+    /// decoupled from the producer; `None` for non-pooled producers like
+    /// `nv12_to_gpu_texture`. Held only to run its `Drop` when the frame releases.
+    _recycle: Option<Box<dyn core::any::Any + Send + Sync>>,
+}
+
+impl core::fmt::Debug for WgpuNv12Texture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WgpuNv12Texture")
+            .field("texture", &self.texture)
+            .field("pooled", &self._recycle.is_some())
+            .finish()
+    }
 }
 
 impl WgpuNv12Texture {
     /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
-        Self { device, queue, texture }
+        Self { device, queue, texture, _recycle: None }
+    }
+
+    /// Like [`new`](Self::new), but carries a drop guard recycled when the frame
+    /// is released (a pooled producer hands back a `CudaWgpuPool` return handle).
+    pub fn with_recycle(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        texture: wgpu::Texture,
+        recycle: Box<dyn core::any::Any + Send + Sync>,
+    ) -> Self {
+        Self { device, queue, texture, _recycle: Some(recycle) }
     }
 
     /// The backing NV12 texture, for the importer to sample directly.

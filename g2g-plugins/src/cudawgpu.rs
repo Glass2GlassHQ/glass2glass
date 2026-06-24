@@ -688,6 +688,318 @@ pub unsafe fn cuda_copy_nv12_planes(
     }
 }
 
+/// A persistent CUDA import of a [`SharedNv12Image`], mapped as a CUDA array
+/// ready for `cuMemcpy2D`. Created once per pooled image and reused across frames
+/// via [`cuda_copy_planes_into`], so the per-frame `cuImportExternalMemory` + map
+/// + teardown the v1 path paid (in [`cuda_copy_nv12_planes`]) is amortized.
+///
+/// Handles are stored as integers (not raw pointers), so the mapping is `Send`,
+/// the same contract as [`g2g_core::memory::OwnedCudaBuffer`]: the CUDA context
+/// is thread-floating and pushed current per use, so the handles carry no thread
+/// affinity. Dropping it destroys the import in its context.
+#[derive(Debug)]
+pub struct CudaImageMapping {
+    ext_mem: usize,
+    mipmap: usize,
+    array: usize,
+    context: u64,
+}
+
+impl Drop for CudaImageMapping {
+    fn drop(&mut self) {
+        use cuda_ffi as c;
+        if self.ext_mem == 0 {
+            return;
+        }
+        // SAFETY: the handles came from `import_image_into_cuda` in `context`; we
+        // push it current for the destroy and pop after. Only reached once (the
+        // mapping is owned, not copied).
+        unsafe {
+            if c::cuCtxPushCurrent(self.context as c::CuContext) == 0 {
+                if self.mipmap != 0 {
+                    c::cuMipmappedArrayDestroy(self.mipmap as c::CuMipmappedArray);
+                }
+                c::cuDestroyExternalMemory(self.ext_mem as c::CuExternalMemory);
+                let mut popped: c::CuContext = core::ptr::null_mut();
+                let _ = c::cuCtxPopCurrent(&mut popped);
+            }
+        }
+    }
+}
+
+/// Import `shared` into CUDA once and map it as a CUDA array, in `context` (the
+/// decoder's `CUcontext`). Consumes `shared.fd`. The returned mapping persists
+/// until dropped; frames copy into the same array with [`cuda_copy_planes_into`]
+/// without re-importing.
+///
+/// # Safety
+/// `shared` must come from [`export_nv12_image`] and not yet be imported; the
+/// plane copies later issued against the mapping must target `context`.
+pub unsafe fn import_image_into_cuda(
+    shared: &SharedNv12Image,
+    context: u64,
+) -> Result<CudaImageMapping, G2gError> {
+    use cuda_ffi as c;
+    let w = shared.width as usize;
+    let tex_h = nv12_texture_height(shared.height) as usize;
+
+    // SAFETY: CUDA Driver API import sequence in `context`. On error every handle
+    // created so far is destroyed before the context is popped, so nothing leaks.
+    unsafe {
+        check(c::cuInit(0))?;
+        check(c::cuCtxPushCurrent(context as c::CuContext))?;
+
+        let import_desc = c::CudaExternalMemoryHandleDesc {
+            type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+            _pad: 0,
+            handle_fd: shared.fd,
+            _handle_rest: [0; 12],
+            size: shared.size,
+            flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
+            reserved: [0; 16],
+        };
+        let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
+        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
+
+        let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
+            offset: 0,
+            array_desc: c::CudaArray3dDescriptor {
+                width: w,
+                height: tex_h,
+                depth: 0,
+                format: c::CU_AD_FORMAT_UNSIGNED_INT8,
+                num_channels: 1,
+                flags: 0,
+            },
+            num_levels: 1,
+            reserved: [0; 16],
+        };
+        let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
+        let mut array: c::CuArray = core::ptr::null_mut();
+        if result.is_ok() {
+            result =
+                check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
+        }
+        if result.is_ok() {
+            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+        }
+
+        if let Err(e) = result {
+            // Destroy whatever was created, while still current.
+            if !mipmap.is_null() {
+                c::cuMipmappedArrayDestroy(mipmap);
+            }
+            if !ext_mem.is_null() {
+                c::cuDestroyExternalMemory(ext_mem);
+            }
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cuCtxPopCurrent(&mut popped);
+            return Err(e);
+        }
+
+        let mut popped: c::CuContext = core::ptr::null_mut();
+        let _ = c::cuCtxPopCurrent(&mut popped);
+        Ok(CudaImageMapping {
+            ext_mem: ext_mem as usize,
+            mipmap: mipmap as usize,
+            array: array as usize,
+            context,
+        })
+    }
+}
+
+/// Copy a decoded NV12 frame's two planes device->device into a persistently
+/// imported [`CudaImageMapping`]'s array (the pooled-reuse counterpart of
+/// [`cuda_copy_nv12_planes`], which imports + tears down every call). The Y plane
+/// fills array rows `0..height`, the interleaved CbCr rows `height..`.
+///
+/// # Safety
+/// `mapping` must come from [`import_image_into_cuda`] (matching `width`/`height`)
+/// and the plane pointers / pitches must describe valid NV12 device memory in
+/// `mapping`'s context.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cuda_copy_planes_into(
+    mapping: &CudaImageMapping,
+    luma_ptr: u64,
+    luma_pitch: u32,
+    chroma_ptr: u64,
+    chroma_pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<(), G2gError> {
+    use cuda_ffi as c;
+    let w = width as usize;
+    let h = height as usize;
+    let array = mapping.array as c::CuArray;
+
+    // SAFETY: `array` is the persistent mapped array from `import_image_into_cuda`
+    // in `mapping.context`; the plane pointers are valid device NV12 there. The
+    // context is pushed for the copies and popped before return.
+    unsafe {
+        check(c::cuCtxPushCurrent(mapping.context as c::CuContext))?;
+        let luma = c::CudaMemcpy2D {
+            src_x_in_bytes: 0,
+            src_y: 0,
+            src_memory_type: c::CU_MEMORYTYPE_DEVICE,
+            src_host: core::ptr::null(),
+            src_device: luma_ptr,
+            src_array: core::ptr::null_mut(),
+            src_pitch: luma_pitch as usize,
+            dst_x_in_bytes: 0,
+            dst_y: 0,
+            dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
+            dst_host: core::ptr::null_mut(),
+            dst_device: 0,
+            dst_array: array,
+            dst_pitch: 0,
+            width_in_bytes: w,
+            height: h,
+        };
+        let mut result = check(c::cu_memcpy_2d(&luma));
+        if result.is_ok() {
+            let chroma = c::CudaMemcpy2D {
+                src_x_in_bytes: 0,
+                src_y: 0,
+                src_memory_type: c::CU_MEMORYTYPE_DEVICE,
+                src_host: core::ptr::null(),
+                src_device: chroma_ptr,
+                src_array: core::ptr::null_mut(),
+                src_pitch: chroma_pitch as usize,
+                dst_x_in_bytes: 0,
+                dst_y: h,
+                dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                dst_host: core::ptr::null_mut(),
+                dst_device: 0,
+                dst_array: array,
+                dst_pitch: 0,
+                width_in_bytes: w,
+                height: h / 2,
+            };
+            result = check(c::cu_memcpy_2d(&chroma));
+        }
+        if result.is_ok() {
+            result = check(c::cuCtxSynchronize());
+        }
+        let mut popped: c::CuContext = core::ptr::null_mut();
+        let _ = c::cuCtxPopCurrent(&mut popped);
+        result
+    }
+}
+
+/// One pooled shared image: the `wgpu::Texture` (whose drop frees the backing
+/// Vulkan image/memory) and the persistent CUDA import that writes into it. Field
+/// order matters: `mapping` is declared first so its Drop (destroy the CUDA
+/// import) runs before `texture`'s drop frees the Vulkan memory the import aliased.
+#[derive(Debug)]
+pub struct PoolEntry {
+    mapping: CudaImageMapping,
+    texture: wgpu::Texture,
+}
+
+impl PoolEntry {
+    /// The backing texture, to clone for a downstream frame.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    /// Copy this frame's NV12 planes into the entry's persistent CUDA array.
+    ///
+    /// # Safety
+    /// The plane pointers / pitches must describe valid NV12 device memory in the
+    /// entry's CUDA context (see [`cuda_copy_planes_into`]).
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn copy_planes(
+        &self,
+        luma_ptr: u64,
+        luma_pitch: u32,
+        chroma_ptr: u64,
+        chroma_pitch: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), G2gError> {
+        // SAFETY: forwarded to the documented contract of `cuda_copy_planes_into`.
+        unsafe {
+            cuda_copy_planes_into(&self.mapping, luma_ptr, luma_pitch, chroma_ptr, chroma_pitch, width, height)
+        }
+    }
+}
+
+/// A reuse pool of shared CUDA<->wgpu NV12 images, keyed externally by geometry
+/// (the owner rebuilds the pool on a size change). It is just a free list:
+/// [`take_free`](Self::take_free) pops a recycled entry (or `None` to build a
+/// fresh one), and [`in_flight`](Self::in_flight) wraps an entry so it returns to
+/// the free list when the downstream frame is released. v1 allocated + imported a
+/// fresh image per frame; this amortizes both across frames.
+///
+/// Cross-API safety: a recycled entry's image may still be sampled by an
+/// in-flight wgpu submission, so the owner must drain the device
+/// (`Device::poll(Wait)`) before overwriting a `take_free` entry.
+#[derive(Debug, Clone, Default)]
+pub struct CudaWgpuPool {
+    free: alloc::sync::Arc<std::sync::Mutex<alloc::vec::Vec<PoolEntry>>>,
+}
+
+impl CudaWgpuPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Build a fresh pooled entry: allocate an exportable Vulkan NV12 image, import
+    /// it into CUDA once, and wrap it as a `wgpu::Texture`. Used when the free list
+    /// is empty.
+    ///
+    /// # Safety
+    /// `device` must be a `VK_KHR_external_memory_fd` interop device (see
+    /// [`create_interop_device`]); `context` must be the decoder's CUDA context.
+    pub unsafe fn build_entry(
+        device: &wgpu::Device,
+        context: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<PoolEntry, G2gError> {
+        // SAFETY: `device` is an interop device per the contract; `shared` is freshly
+        // exported and imported exactly once before being wrapped as a texture (the
+        // FD is consumed by the import, the image/memory by the texture's drop).
+        unsafe {
+            let shared = export_nv12_image(device, width, height)?;
+            let mapping = import_image_into_cuda(&shared, context)?;
+            let texture = wrap_as_texture(device, shared);
+            Ok(PoolEntry { mapping, texture })
+        }
+    }
+
+    /// Pop a recycled entry, or `None` if the pool is empty. A returned entry has
+    /// been written before, so the caller must drain prior GPU reads first.
+    pub fn take_free(&self) -> Option<PoolEntry> {
+        self.free.lock().unwrap().pop()
+    }
+
+    /// Wrap an in-flight entry in a drop guard that returns it to the free list
+    /// when dropped (i.e. when the downstream frame's keep-alive is released).
+    pub fn in_flight(&self, entry: PoolEntry) -> PoolReturn {
+        PoolReturn { free: alloc::sync::Arc::clone(&self.free), entry: Some(entry) }
+    }
+}
+
+/// Drop guard that recycles a [`PoolEntry`] back into its [`CudaWgpuPool`]. Stored
+/// (type-erased) in the downstream frame's keep-alive, so dropping the frame frees
+/// the entry for reuse rather than destroying the image.
+#[derive(Debug)]
+pub struct PoolReturn {
+    free: alloc::sync::Arc<std::sync::Mutex<alloc::vec::Vec<PoolEntry>>>,
+    entry: Option<PoolEntry>,
+}
+
+impl Drop for PoolReturn {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            if let Ok(mut free) = self.free.lock() {
+                free.push(entry);
+            }
+        }
+    }
+}
+
 /// Map a `CUresult` to a `Result`, carrying the raw code on failure.
 fn check(code: i32) -> Result<(), G2gError> {
     if code == 0 {
