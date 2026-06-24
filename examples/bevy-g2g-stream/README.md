@@ -34,10 +34,12 @@ Bevy headless render ──► wgpu::Texture ──► g2g read-back ──► A
   texture, `GpuContext::from_wgpu` over Bevy's device, and a render-world system
   that reads the rendered texture back off the shared device each frame. Asserts
   the captured frame is a real (non-blank) render.
-- **Phase B** (next): feed the read-back RGBA into
-  `AppSrc → VideoConvert → FfmpegH264Enc → FileSink`, writing an H.264 Annex-B
-  file of the rendered scene. NVENC-encoded on the GPU.
-- **Phase C** (next): swap the file sink for `WebRtcSink` / WHIP, the live
+- **Phase B** (implemented): the read-back RGBA frames are pushed into a g2g
+  `AppSrc → VideoConvert → FfmpegH264Enc → FileSink` pipeline (on its own thread),
+  writing an H.264 Annex-B file of the rendered scene, NVENC-encoded. Validated on
+  the RTX 3060: a 240-frame run produces a valid `h264` 640×480 stream
+  (`ffprobe` confirms codec/geometry/frame count).
+- **Phase C** (next): swap `FileSink` for `WebRtcSink` / WHIP, the live
   pixel-streaming path to a browser.
 
 ## Run

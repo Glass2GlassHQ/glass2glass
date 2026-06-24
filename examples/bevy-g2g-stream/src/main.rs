@@ -41,20 +41,39 @@ use bevy::{
     winit::WinitPlugin,
 };
 use crossbeam_channel::{Receiver, Sender};
+use g2g_core::element::DynAsyncElement;
+use g2g_core::runtime::{run_linear_chain, SourceLoop};
+use g2g_core::{PipelineClock, PropValue, RawVideoFormat};
+use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
+use g2g_plugins::ffmpegenc::FfmpegH264Enc;
+use g2g_plugins::filesink::FileSink;
 use g2g_plugins::gpu::GpuContext;
+use g2g_plugins::videoconvert::VideoConvert;
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
+const FPS: u32 = 60;
 /// Render this many frames, then exit (a demo run, not an endless server).
-const FRAMES: u32 = 120;
+const FRAMES: u32 = 240;
+/// AppSrc feed channel name shared with the encode thread.
+const APPSRC_CHANNEL: &str = "bevy";
+/// Where the encoded H.264 Annex-B stream is written.
+const OUT_PATH: &str = "bevy_g2g.h264";
 
 fn main() {
     let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
 
-    App::new()
-        .insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)))
+    // The g2g encode pipeline runs on its own thread, fed the read-back RGBA
+    // frames through this push handle (claimed by the AppSrc inside the chain by
+    // matching channel name). Register before spawning so the source finds it.
+    let feed = register_appsrc(APPSRC_CHANNEL);
+    let encode = std::thread::spawn(encode_pipeline);
+
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)))
         .insert_resource(FrameReceiver(rx))
         .insert_resource(FrameCount(0))
+        .insert_resource(EncodeFeed(feed))
         .init_resource::<FirstNonBlank>()
         .add_plugins(
             DefaultPlugins
@@ -67,11 +86,55 @@ fn main() {
                 // window is never created and winit would only panic here.
                 .disable::<WinitPlugin>(),
         )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 60.0)))
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / FPS as f64)))
         .add_plugins(ReadbackPlugin { sender: tx })
         .add_systems(Startup, setup)
-        .add_systems(Update, (spin_cube, drain_frames))
-        .run();
+        .add_systems(Update, (spin_cube, drain_frames));
+    app.run();
+
+    // The exit system signalled EOS to the feed; wait for the encoder to flush
+    // and close the file.
+    match encode.join() {
+        Ok(Ok(stats)) => info!("encode pipeline finished: {} frames", stats),
+        Ok(Err(e)) => error!("encode pipeline failed: {e:?}"),
+        Err(_) => error!("encode thread panicked"),
+    }
+}
+
+/// Drives `AppSrc -> VideoConvert(RGBA->I420) -> FfmpegH264Enc(NVENC H.264) ->
+/// FileSink` to completion. Runs on its own thread; the `AppSrc` blocks on the
+/// feed until the main loop pushes frames, and finishes when the feed signals
+/// EOS. Returns the number of source frames pushed through.
+fn encode_pipeline() -> Result<u64, g2g_core::G2gError> {
+    let mut src = AppSrc::new();
+    src.set_property("channel", PropValue::Str(APPSRC_CHANNEL.into()))
+        .expect("appsrc channel");
+    src.set_property(
+        "caps",
+        PropValue::Str(
+            format!("video/x-raw,format=RGBA,width={WIDTH},height={HEIGHT},framerate={FPS}/1")
+                .into(),
+        ),
+    )
+    .expect("appsrc caps");
+
+    let mut convert = VideoConvert::new(RawVideoFormat::I420);
+    let mut encoder = FfmpegH264Enc::new(); // NVENC by default
+    let mut sink = FileSink::new(OUT_PATH);
+    let clock = ZeroClock;
+
+    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
+    let stats = pollster::block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?;
+    Ok(stats.frames_consumed)
+}
+
+/// Trivial clock: the sink (`FileSink`) does not pace to a clock, so the runner
+/// needs only a `now_ns`, never advanced.
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
 }
 
 /// Marks the cube so `spin_cube` can rotate it (visible motion between frames).
@@ -90,6 +153,10 @@ struct FrameReceiver(Receiver<Vec<u8>>);
 /// Render-world end of that channel.
 #[derive(Resource, Clone)]
 struct FrameSender(Sender<Vec<u8>>);
+
+/// Push handle into the g2g encode pipeline (the AppSrc feed).
+#[derive(Resource)]
+struct EncodeFeed(AppSrcFeed);
 
 #[derive(Resource)]
 struct FrameCount(u32);
@@ -148,6 +215,7 @@ fn spin_cube(time: Res<Time>, mut q: Query<&mut Transform, With<Spin>>) {
 /// is a real rendered image (not blank), and exit after `FRAMES`.
 fn drain_frames(
     receiver: Res<FrameReceiver>,
+    feed: Res<EncodeFeed>,
     mut count: ResMut<FrameCount>,
     mut first_non_blank: ResMut<FirstNonBlank>,
     mut exit: MessageWriter<AppExit>,
@@ -169,14 +237,24 @@ fn drain_frames(
                 info!("scene rendered: first non-blank frame at index {}", count.0);
             }
         }
+        // Hand the frame to the g2g encode pipeline (RGBA -> I420 -> NVENC H.264
+        // -> file). `push` returns false if the encoder is backed up; at this
+        // resolution NVENC keeps up, so a drop would be notable.
+        let pts_ns = count.0 as u64 * 1_000_000_000 / FPS as u64;
+        if !feed.0.push(&rgba, pts_ns) {
+            warn!("encode feed full; dropped frame {}", count.0);
+        }
         count.0 += 1;
         if count.0 >= FRAMES {
             assert!(
                 first_non_blank.0.is_some(),
                 "no non-blank frame in {FRAMES} frames: the scene never rendered onto the target"
             );
+            // Signal EOS so the encoder flushes and the file is finalised, then
+            // exit; `main` joins the encode thread after the loop returns.
+            feed.0.end_of_stream();
             info!(
-                "captured {} frames off the shared GPU device (first non-blank at {:?}); exiting",
+                "captured {} frames off the shared GPU device (first non-blank at {:?}); EOS sent, exiting",
                 count.0, first_non_blank.0
             );
             exit.write(AppExit::Success);
