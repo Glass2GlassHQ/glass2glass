@@ -131,6 +131,9 @@ pub mod flvmux;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;
+// Pool-backed passthrough transform whose buffer pool is rebuilt to the
+// downstream allocation proposal, including the mid-stream β re-cascade.
+pub mod poolstage;
 
 #[cfg(feature = "std")]
 extern crate std;

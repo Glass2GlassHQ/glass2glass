@@ -997,6 +997,12 @@ arms can't reach from each other:
   makes each transform arm interruptible at its `recv().await`, so a
   sink-side allocation proposal walks upstream one hop at a time via
   `CoordinatorEvent::ArmProposal` until it reaches the source.
+- **Real resizable consumer:** `PoolStage` (`g2g-plugins`) is the element that
+  acts on a mid-stream β proposal rather than only recording it (decoders fix
+  their pool at codec open): each `configure_allocation` rebuilds its
+  `BufferPool` to the proposal's `min_buffers` x `size_bytes`, and frames stage
+  through it, so a mid-stream geometry change visibly resizes a live pool
+  (`poolstage_recascade` asserts the rebuild end to end).
 
 This is the same machinery a future mid-stream clock change or latency
 adjustment uses: cross-element mid-stream coordination becomes a coordinator
