@@ -376,10 +376,14 @@ leverage first:
 
 ## ML
 
-- ONNX import via `burn-import` (build-time codegen). `WgpuInference` now runs a
-  conv2d compute pass (M261), so a stacked CNN is expressible on the GPU path; the
-  gap is *imported trained weights* (and the remaining ops: activation, pooling,
-  attention) rather than the conv primitive.
+- Trained-weight import now exists for the hand-rolled GPU path: a dependency-free
+  `safetensors` reader (M262) loads weights at runtime into `WgpuInference`
+  (`conv2d_from_safetensors`); architecture stays compiled, weights are a file.
+  Remaining: the rest of the layer zoo on the GPU path (activation, pooling,
+  multi-layer chaining, attention) so a *full* model runs, not a single conv;
+  per-tensor dtypes beyond F32 in the loader (F16 / BF16 dequant).
+- ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
+  graph-topology counterpart (safetensors carries weights, not the architecture).
 - A trained-weight `Module` path for `BurnInference` (conv, attention) once the
   codegen lands.
 - Decoder DMA-BUF / D3D11 surface import into `WgpuPreprocess` (binds the

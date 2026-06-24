@@ -13,6 +13,7 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
+use g2g_ml::safetensors::{serialize, SafeTensors};
 use g2g_ml::wgpuinfer::{conv2d_reference, linear_reference, WgpuInference};
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
@@ -38,6 +39,15 @@ fn tensor_in_caps() -> Caps {
         shape: TensorShape(vec![1, 3, H, W]),
         layout: TensorLayout::Nchw,
     }
+}
+
+/// Serialize GPU work across the parallel test tasks: creating several wgpu
+/// devices and dispatching on a single adapter concurrently can fault the driver,
+/// so each GPU test holds this lock for its device work. (CI has no adapter and
+/// skips these tests entirely.)
+fn gpu_guard() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[derive(Default)]
@@ -119,6 +129,7 @@ async fn infers_gpu_resident_tensor_and_matches_cpu_reference() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let _gpu = gpu_guard().lock().await;
     let nv12 = sample_nv12();
     let (weights, bias) = weights_bias();
 
@@ -196,6 +207,7 @@ async fn gpu_output_logits_stay_resident_and_match() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let _gpu = gpu_guard().lock().await;
     let nv12 = sample_nv12();
     let (weights, bias) = weights_bias();
     let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
@@ -249,6 +261,7 @@ async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let _gpu = gpu_guard().lock().await;
     const CIN: u32 = 3;
     const COUT: u32 = 2;
     const KH: u32 = 3;
@@ -328,6 +341,78 @@ async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
     );
 }
 
+/// M262: import trained conv weights from a safetensors file at runtime and run
+/// them on the GPU. The architecture stays our compiled `WgpuInference`; only the
+/// weights are loaded (here from an in-test safetensors blob, exactly as a real
+/// `.safetensors` from PyTorch would arrive). The GPU output of the imported
+/// layer matches the CPU conv reference fed the same decoded weights, proving the
+/// weight-file -> GPU round-trip.
+#[tokio::test]
+async fn conv2d_imports_safetensors_weights_and_runs_on_gpu() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let _gpu = gpu_guard().lock().await;
+    const CIN: u32 = 3;
+    const COUT: u32 = 2;
+    const KH: u32 = 3;
+    const KW: u32 = 3;
+    let weights: Vec<f32> =
+        (0..(COUT * CIN * KH * KW)).map(|i| (i as f32).sin() * 0.3).collect();
+    let bias = vec![0.05f32, -0.1];
+
+    // The trained-weights file, as PyTorch's safetensors.save_file would write it.
+    let blob = serialize(&[
+        ("conv.weight", &[COUT as usize, CIN as usize, KH as usize, KW as usize], &weights),
+        ("conv.bias", &[COUT as usize], &bias),
+    ]);
+    let st = SafeTensors::parse(&blob).expect("parse safetensors weights");
+
+    let mut conv = WgpuInference::conv2d_from_safetensors(&st, "conv.weight", "conv.bias", H, W)
+        .expect("build conv from imported weights");
+    conv.configure_pipeline(&tensor_in_caps()).expect("configure tensor input");
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    let mut out = Collect::default();
+    conv.process(PipelinePacket::DataFrame(tensor_frame), &mut out)
+        .await
+        .expect("gpu conv with imported weights");
+
+    let frame = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a conv output frame");
+    let got = logits_from_system(frame);
+
+    // Reference uses the weights decoded back out of the same file, so this pins
+    // the loader (shape + f32 decode) and the GPU conv together.
+    let w_ref = st.get("conv.weight").unwrap().to_f32().unwrap();
+    let b_ref = st.get("conv.bias").unwrap().to_f32().unwrap();
+    assert_eq!(w_ref, weights, "weights survive the safetensors round-trip");
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = conv2d_reference(
+        &cpu_tensor,
+        CIN as usize,
+        COUT as usize,
+        KH as usize,
+        KW as usize,
+        H as usize,
+        W as usize,
+        &w_ref,
+        &b_ref,
+    );
+    assert_eq!(got.len(), (COUT * H * W) as usize);
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-2, "conv out {i}: gpu {g} vs cpu reference {e}");
+    }
+}
+
 /// The element is GPU-input only: a System tensor frame (the CPU path's job) is
 /// rejected, not silently wrong.
 #[tokio::test]
@@ -361,6 +446,7 @@ async fn surface_to_logits_keeps_everything_on_gpu() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let _gpu = gpu_guard().lock().await;
     let nv12 = sample_nv12();
     let (weights, bias) = weights_bias();
 

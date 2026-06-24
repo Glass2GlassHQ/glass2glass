@@ -16,6 +16,11 @@ pub mod ortinfer;
 // no feature gate.
 pub mod postprocess;
 
+// Dependency-free safetensors weight reader/writer (M262): import trained
+// weights at runtime into the hand-rolled inference elements without serde or
+// the safetensors crate. Architecture stays compiled; only weights load.
+pub mod safetensors;
+
 // Detection post-processing (DESIGN.md §5.3): decode a YOLO-style model output
 // tensor into AnalyticsMeta bounding-box detections (confidence threshold + NMS),
 // attached to the frame. Gated behind `analytics` (pulls g2g-core's `metadata`).

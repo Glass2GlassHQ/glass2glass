@@ -316,6 +316,33 @@ impl WgpuInference {
         })
     }
 
+    /// Build a [`conv2d`](Self::conv2d) layer from trained weights in a parsed
+    /// safetensors file (M262): reads the `[Cout, Cin, KH, KW]` weight tensor and
+    /// the `[Cout]` bias by name, infers the kernel dimensions from the weight
+    /// shape, and takes the spatial input size (`height`, `width`) from the
+    /// runtime caps. Importing a different checkpoint is "parse a different file";
+    /// the architecture stays this compiled element. Fails loud on a missing
+    /// tensor, a non-F32 / non-4D weight, or a `[Cout]`-mismatched bias.
+    pub fn conv2d_from_safetensors(
+        st: &crate::safetensors::SafeTensors<'_>,
+        weight_key: &str,
+        bias_key: &str,
+        height: u32,
+        width: u32,
+    ) -> Result<Self, G2gError> {
+        let wt = st.get(weight_key).map_err(|_| G2gError::CapsMismatch)?;
+        let [cout, cin, kh, kw] = match wt.shape {
+            [a, b, c, d] => [*a as u32, *b as u32, *c as u32, *d as u32],
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        let weights = wt.to_f32().map_err(|_| G2gError::CapsMismatch)?;
+        let bias = st
+            .get(bias_key)
+            .and_then(|b| b.to_f32())
+            .map_err(|_| G2gError::CapsMismatch)?;
+        Self::conv2d(cin, cout, kh, kw, height, width, weights, bias)
+    }
+
     /// Emit the logits GPU-resident (`MemoryDomain::WgpuBuffer`) instead of
     /// reading them back to system memory, so a downstream GPU consumer (a GPU
     /// softmax / argmax, say) reads them on-device. Default off.
