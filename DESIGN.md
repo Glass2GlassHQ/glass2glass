@@ -499,8 +499,8 @@ follow describe each track's current architecture.
 
 | Track | Section | Summary |
 | :--- | :--- | :--- |
-| Receive | §4.11, §4.12a/b | Network + capture sources and hardware decoders (RTSP, raw RTP ingest with jitter buffer + RTCP/NACK, V4L2 capture, file, fMP4, software/VAAPI/MF/NVDEC decoders). |
-| Display & egress | §4.11.5, §4.12 | GPU-resident presentation sinks and outbound RTP packetizers. |
+| Receive | §4.11, §4.12a/b, §4.19 | Network + capture sources and hardware decoders (RTSP, raw RTP ingest with jitter buffer + RTCP/NACK, WebRTC WHEP/sendrecv, V4L2 capture, file, fMP4, software/VAAPI/MF/NVDEC decoders). |
+| Display & egress | §4.11.5, §4.12, §4.19 | GPU-resident presentation sinks and outbound RTP packetizers; WebRTC WHIP / sendrecv egress. |
 | Negotiation | §4.13 | Distributed CSP caps solver with per-link assignment and structured failure. |
 | ML | §5 | Inline GPU tensor preprocess and inference (Burn / ORT). |
 | Deployment | §6 | Cloud / embedded / browser orchestration over a single core. |
@@ -1567,6 +1567,97 @@ as `textoverlay` for the `gst-launch` text parser. This mirrors the analytics
 overlay's CPU baseline (§5): the no_std bitmap renderer is the portable path, and
 a mixed-case TrueType `vello` GPU backend (and the `clockoverlay` / `timeoverlay`
 siblings) is the planned companion.
+
+### 4.19 Native WebRTC (`str0m`)
+
+The WebRTC elements are built on **[str0m](https://github.com/algesten/str0m)**, a
+**sans-IO** WebRTC stack (ICE / DTLS / SRTP / RTP as a pure state machine): g2g
+owns the `UdpSocket` and the timer and drives str0m's `poll_output` /
+`handle_input` loop, exactly the contract the `srt` and `rtspserver` modules
+already follow. str0m's pure-Rust **`rust-crypto`** backend is selected, so there
+is no OpenSSL / libnice system dependency. Everything lives behind the opt-in
+`webrtc` feature (it raises the effective MSRV above the workspace floor, so it is
+off by default and the no_std baseline is unaffected). This is the native,
+server-grade counterpart of the browser-only data-channel `WebRtcSrc` (§6.3).
+
+**Element family.** One PeerConnection can carry one track per element or N tracks
+in a session element; the shape is chosen by which trait the element implements,
+and each maps to a terminal runner from the fan-in / fan-out family (§4.13.6):
+
+| Element | Tracks | Direction | Trait | Runner |
+| :--- | :--- | :--- | :--- | :--- |
+| `WebRtcSink` | 1 | send (WHIP) | `AsyncElement` (sink) | linear |
+| `WebRtcWhepSrc` | 1 | recv (WHEP) | `SourceLoop` | linear |
+| `WebRtcSessionSink` | N | send (WHIP) | `MultiInputElement` | `run_fanin_session` |
+| `WebRtcWhepSessionSrc` | N | recv (WHEP) | `MultiOutputSource` | `run_fanout_session` |
+| `WebRtcDuplexSession` | N | sendrecv | `MultiDuplexSession` | `run_duplex_session` |
+
+The one-track sink/source keep the `Rtc` on a spawned task and hand access units
+over a bounded channel, so the element itself never touches the `Rtc` and stays
+`Send`. The multi-track session sink is a terminal `MultiInputElement` (no
+downstream sink — the network is the destination); `run_fanin_session` fans N
+sources into it over one tagged `(input, packet)` channel. The session source is
+the mirror: a terminal `MultiOutputSource` (0 inputs → N outputs) driven by
+`run_fanout_session` into N sinks.
+
+**The duplex shape.** Bidirectional sendrecv needs an element that is *at once* a
+sink (for the tracks it publishes) and a source (for the tracks it receives) over
+**one** connection — which neither the fan-in nor the fan-out session runner could
+express. `MultiDuplexSession` is that union: N send inputs **and** M recv outputs,
+driven by `run_duplex_session` (the union of the two session runners). A single
+`run(inbound, out)` owns the connection and `select`s over the inbound send
+packets (`DuplexInbound`) and the network, pushing received frames to `out`; the
+send and recv halves therefore share `&mut self` directly with **no detached
+task**, unlike the send-only session which spawns the `Rtc` onto its own task to
+dodge `process` / run-loop aliasing.
+
+**Signaling.** WHIP (egress) and WHEP (ingress) are the same wire move — an
+`application/sdp` POST of the local offer that returns the remote answer (reqwest,
+`webrtc_util::post_sdp`); the media server is the relay in the middle, so there is
+no peer-to-peer mode for WHIP/WHEP. WHIP/WHEP are unidirectional by spec, so
+sendrecv cannot use them: the duplex session instead exchanges SDP **directly**
+between two peers over an `SdpChannel` (an in-process offer/answer transport for a
+P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same seam).
+The two roles discover their m-line `Mid`s differently and this asymmetry is
+load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
+return, while the **answerer** learns them from `Event::MediaAdded` after
+`accept_offer` (str0m does not emit `MediaAdded` for media the local side added).
+
+**ICE / NAT traversal.** `webrtc_util::add_ice_candidates` always adds the socket's
+host candidate and, when a STUN server is configured, a server-reflexive candidate
+discovered by a hand-rolled RFC 5389 Binding on the ICE socket; candidates ride in
+the SDP, so a same-host P2P pair connects over localhost with no STUN. For the NAT
+cases a reflexive candidate cannot punch through, a hand-rolled TURN client
+(`turn.rs`, RFC 5766/8656: Allocate with long-term auth, Send/Data indications,
+CreatePermission, periodic Refresh) provides a relay. str0m only offers
+`Candidate::relayed`; the data plane is the run loop's job — a relayed pair's
+transmits all carry `source == relay_addr`, which is the routing signal to wrap
+the datagram in a TURN Send indication (direct host/srflx paths are untouched).
+
+**RTCP feedback** rides the §4.13 reverse channel. A remote PLI
+(`Event::KeyframeRequest`) becomes a `Reconfigure::ForceKeyframe` walked upstream
+via `AsyncElement::take_reconfigure` to the encoder (`Av1Enc` forces a rav1e IDR);
+ingress originates PLI on a mid-GOP join. str0m's BWE (`Event::EgressBitrateEstimate`,
+TWCC/REMB) becomes `PushOutcome::Bitrate` via `take_bitrate`, and the encoder
+retargets (rav1e by a hysteresis-gated context rebuild).
+
+**Codec plumbing.** A `Track` enum unifies the per-track facts WebRTC needs to
+agree on: codec (H.264 / Opus), m-line `MediaKind`, and the RTP clock (90 kHz /
+48 kHz), with `media_time` mapping a nanosecond PTS onto the track's RTP
+timestamp. H.264 crosses the boundary as **Annex-B** (the pipeline convention,
+§4.11.4): str0m's packetizer splits NAL units and its depayloader emits start-code
+framing. A receive-side video element advertises a `Dim::Range` /  `Rate::Range`
+placeholder rather than `Dim::Any`, because geometry is only known from the in-band
+SPS and `fixate()` (§4.13) rejects `Any` at negotiation; a downstream `H264Parse`
+recovers the real dimensions.
+
+**Validation status.** On-network validated against a local mediamtx (single-track
+WHIP/WHEP and multi-track A/V) and by in-process P2P loopbacks on localhost (video
+and full A/V sendrecv); the structural `webrtcbin` parity — one connection, N
+tracks, BUNDLE, sendrecv, PLI, BWE — is in place. What remains is maturity rather
+than architecture (browser interop, real remote-NAT / TURN / LiveKit Cloud runs,
+launch-registry wiring for the session elements, renegotiation, data channels /
+simulcast / FEC); `DESIGN_TODO.md`'s "WebRTC" item carries the tiered list.
 
 ---
 
