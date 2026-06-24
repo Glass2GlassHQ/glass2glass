@@ -13,9 +13,10 @@
 //! are Annex-B from str0m's depayloader; audio is forwarded as Opus packets).
 //! STUN / TURN NAT traversal mirror [`crate::webrtcwhepsrc::WebRtcWhepSrc`].
 //!
-//! Status: compile-validated against str0m 0.20, behind the `webrtc` feature;
-//! the live subscribe path is owed an on-network validation like the other
-//! WebRTC elements.
+//! Status: on-network validated (M248) against a local mediamtx, behind the
+//! `webrtc` feature: subscribes to a WHEP session publishing both tracks
+//! (`webrtc_av_session_loopback`) and emits video + audio on its two outputs,
+//! mediamtx logging the read as `2 tracks (H264, Opus)`.
 
 use core::future::Future;
 use core::pin::Pin;

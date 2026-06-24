@@ -14,11 +14,12 @@
 //! task that owns the `Rtc` + `UdpSocket` and routes each access unit to the
 //! matching track writer. STUN / TURN NAT traversal mirror `WebRtcSink`.
 //!
-//! Status: compile-validated against str0m 0.20, behind the `webrtc` feature.
-//! Reverse signals (keyframe-request / BWE) are not yet routed per-input through
-//! the multi-track runner, and bidirectional sendrecv on one connection is a
-//! follow-up; the live publish path is owed an on-network validation like the
-//! other WebRTC elements.
+//! Status: on-network validated (M248) against a local mediamtx, behind the
+//! `webrtc` feature: A/V published over one PeerConnection and read back via
+//! `WebRtcWhepSessionSrc` (`webrtc_av_session_loopback`), mediamtx logging the
+//! path as `2 tracks (Opus, H264)`. Reverse signals (keyframe-request / BWE) are
+//! not yet routed per-input through the multi-track runner, and bidirectional
+//! sendrecv on one connection is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;

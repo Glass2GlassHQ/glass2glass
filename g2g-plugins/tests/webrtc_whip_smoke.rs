@@ -43,17 +43,25 @@ use core::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
+use g2g_core::element::DynAsyncElement;
+use g2g_core::runtime::{
+    run_fanin_session, run_fanout_session, run_simple_pipeline, run_source_transform_sink,
+    DynSourceLoop, SourceLoop,
+};
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, VideoCodec,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate,
+    VideoCodec,
 };
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::h264parse::H264Parse;
+use g2g_plugins::oggdemux::OggDemux;
+use g2g_plugins::webrtcsession::WebRtcSessionSink;
 use g2g_plugins::webrtcsink::WebRtcSink;
+use g2g_plugins::webrtcwhepsession::WebRtcWhepSessionSrc;
 use g2g_plugins::webrtcwhepsrc::WebRtcWhepSrc;
 
 /// Split an Annex-B H.264 byte stream into NAL units, each re-prefixed with a
@@ -141,6 +149,168 @@ fn paced_caps() -> Caps {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
     }
+}
+
+fn opus_caps() -> Caps {
+    Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }
+}
+
+/// Audio analog of `PacedH264Src`: loops a fixture's Opus packets in real time
+/// (one 20 ms frame per push), so the multi-track session has a live audio feed
+/// across the whole ICE/DTLS window alongside the video.
+struct PacedOpusSrc {
+    packets: Arc<std::vec::Vec<std::vec::Vec<u8>>>,
+    duration: Duration,
+}
+
+impl SourceLoop for PacedOpusSrc {
+    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+    type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        ready(Ok(opus_caps()))
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            out.push(PipelinePacket::CapsChanged(opus_caps())).await?;
+            let start = Instant::now();
+            let mut seq = 0u64;
+            let mut idx = 0usize;
+            while Instant::now().duration_since(start) < self.duration {
+                let pkt = self.packets[idx % self.packets.len()].clone();
+                idx += 1;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(pkt.into_boxed_slice())),
+                    // Opus is 20 ms per packet; the session maps PTS to a 48 kHz
+                    // RTP clock.
+                    FrameTiming { pts_ns: seq * 20_000_000, ..FrameTiming::default() },
+                    seq,
+                );
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+                seq += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(seq)
+        })
+    }
+}
+
+/// Sink that collects each `DataFrame`'s System-memory payload, used to extract
+/// the Opus elementary packets from an Ogg fixture once, before pacing them.
+struct CapturingSink {
+    out: Arc<std::sync::Mutex<std::vec::Vec<std::vec::Vec<u8>>>>,
+}
+
+impl AsyncElement for CapturingSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(frame) = packet {
+                if let MemoryDomain::System(slice) = &frame.domain {
+                    self.out.lock().unwrap().push(slice.as_slice().to_vec());
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Sink that counts `DataFrame`s into a shared atomic, used per output to assert
+/// that both video and audio arrived on the read-back session.
+struct CountingSink {
+    frames: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AsyncElement for CountingSink {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+
+    fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
+        Ok(c.clone())
+    }
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        CapsConstraint::AcceptsAny
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(_) = packet {
+                self.frames.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Extract the Opus elementary packets from an Ogg-Opus fixture by running the
+/// real `FileSrc -> OggDemux` path once (so the paced source loops genuine
+/// packets, not synthetic ones).
+async fn extract_opus_packets(ogg_path: &str) -> std::vec::Vec<std::vec::Vec<u8>> {
+    let mut src = FileSrc::new(ogg_path, Caps::ByteStream { encoding: ByteStreamEncoding::Ogg });
+    let mut demux = OggDemux::new();
+    let collected = Arc::new(std::sync::Mutex::new(std::vec::Vec::new()));
+    let mut sink = CapturingSink { out: collected.clone() };
+    let clock = ZeroClock;
+    run_source_transform_sink(&mut src, &mut demux, &mut sink, &clock, 8)
+        .await
+        .expect("ogg->opus extraction should succeed");
+    // `sink` still holds a clone of the Arc here, so take the vec out under the
+    // lock rather than unwrapping sole ownership.
+    let packets = core::mem::take(&mut *collected.lock().unwrap());
+    packets
+}
+
+/// `with_ice_env_sink` for the multi-track egress session.
+fn with_ice_env_session_sink(mut sink: WebRtcSessionSink) -> WebRtcSessionSink {
+    if let Ok(stun) = std::env::var("G2G_STUN_SERVER") {
+        sink = sink.with_stun_server(stun);
+    }
+    if let (Ok(server), Ok(user), Ok(pass)) = (
+        std::env::var("G2G_TURN_SERVER"),
+        std::env::var("G2G_TURN_USER"),
+        std::env::var("G2G_TURN_PASS"),
+    ) {
+        sink = sink.with_turn_server(server, user, pass);
+    }
+    sink
+}
+
+/// `with_ice_env_src` for the multi-track ingest session.
+fn with_ice_env_session_src(mut src: WebRtcWhepSessionSrc) -> WebRtcWhepSessionSrc {
+    if let Ok(stun) = std::env::var("G2G_STUN_SERVER") {
+        src = src.with_stun_server(stun);
+    }
+    if let (Ok(server), Ok(user), Ok(pass)) = (
+        std::env::var("G2G_TURN_SERVER"),
+        std::env::var("G2G_TURN_USER"),
+        std::env::var("G2G_TURN_PASS"),
+    ) {
+        src = src.with_turn_server(server, user, pass);
+    }
+    src
 }
 
 struct ZeroClock;
@@ -330,4 +500,89 @@ async fn webrtc_publish_paced() {
 
     eprintln!("paced publish emitted={} handed-to-session={}", stats.frames_emitted, sink.frames_sent());
     assert!(sink.frames_sent() > 100, "expected a continuous feed, got {}", sink.frames_sent());
+}
+
+/// Multi-track A/V loopback through a media server: publish H.264 video **and**
+/// Opus audio over **one** PeerConnection via [`WebRtcSessionSink`] (driven by
+/// the terminal fan-in runner), then subscribe and read both tracks back over
+/// one connection via [`WebRtcWhepSessionSrc`] (driven by the terminal fan-out
+/// runner). Proves the M245/M246 multi-track session elements on a real
+/// ICE/DTLS/SRTP network, not just compile-time: both a video frame and an audio
+/// frame must come back.
+///
+/// Recipe (host-networked mediamtx, as for the single-track loopback):
+///
+/// ```sh
+/// docker run -d --network host --name g2g-mediamtx bluenviron/mediamtx
+/// ffmpeg -f lavfi -i testsrc=size=640x480:rate=30:duration=12 \
+///        -c:v libx264 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+/// ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=12 \
+///        -c:a libopus -b:a 64k -f ogg /tmp/clip.opus.ogg
+/// G2G_H264_FIXTURE=/tmp/clip.h264 G2G_OPUS_FIXTURE=/tmp/clip.opus.ogg \
+/// G2G_WHIP_URL=http://localhost:8889/av/whip \
+/// G2G_WHEP_URL=http://localhost:8889/av/whep \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_av_session_loopback -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "needs mediamtx (WHIP+WHEP) + H.264 (G2G_H264_FIXTURE) + Ogg-Opus (G2G_OPUS_FIXTURE) fixtures"]
+async fn webrtc_av_session_loopback() {
+    let (Ok(whip), Ok(whep), Ok(h264_fixture), Ok(opus_fixture)) = (
+        std::env::var("G2G_WHIP_URL"),
+        std::env::var("G2G_WHEP_URL"),
+        std::env::var("G2G_H264_FIXTURE"),
+        std::env::var("G2G_OPUS_FIXTURE"),
+    ) else {
+        eprintln!(
+            "skipping: set G2G_WHIP_URL, G2G_WHEP_URL, G2G_H264_FIXTURE and G2G_OPUS_FIXTURE"
+        );
+        return;
+    };
+    eprintln!("A/V session loopback: publish {h264_fixture}+{opus_fixture} -> {whip} ; <- {whep}");
+
+    let h264_bytes = std::fs::read(&h264_fixture).expect("read h264 fixture");
+    let nals = Arc::new(split_annexb(&h264_bytes));
+    assert!(!nals.is_empty(), "h264 fixture had no NAL units");
+    let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
+    assert!(!opus_packets.is_empty(), "ogg fixture yielded no Opus packets");
+    eprintln!("fixtures: {} NALs, {} Opus packets", nals.len(), opus_packets.len());
+
+    // Publisher: two paced sources (video + audio) fan into the one session sink,
+    // which carries both m-lines over a single WHIP PeerConnection.
+    let publisher = async move {
+        let mut vsrc = PacedH264Src { nals, duration: Duration::from_secs(14) };
+        let mut asrc = PacedOpusSrc { packets: opus_packets, duration: Duration::from_secs(14) };
+        let mut sink = with_ice_env_session_sink(WebRtcSessionSink::new(whip));
+        let clock = ZeroClock;
+        let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
+        let _ = run_fanin_session(sources, &mut sink, &clock, 8).await;
+    };
+
+    // Subscriber: one session source reads both tracks back, fanned out to a
+    // per-track counting sink. Connects a moment after the publisher is live.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let vframes = Arc::new(AtomicU64::new(0));
+    let aframes = Arc::new(AtomicU64::new(0));
+    let (vf, af) = (vframes.clone(), aframes.clone());
+    let subscriber = async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let mut rsrc =
+            with_ice_env_session_src(WebRtcWhepSessionSrc::new(whep).with_frame_limit(120));
+        let mut vsink = CountingSink { frames: vf };
+        let mut asink = CountingSink { frames: af };
+        let clock = ZeroClock;
+        let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut vsink, &mut asink];
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_fanout_session(&mut rsrc, sinks, &clock, 4),
+        )
+        .await
+    };
+
+    let (_, sub) = tokio::join!(publisher, subscriber);
+    let stats = sub.expect("subscribe completes within 30s").expect("WHEP session subscribe ok");
+    let (v, a) = (vframes.load(Ordering::SeqCst), aframes.load(Ordering::SeqCst));
+    eprintln!("read back: {v} video frames, {a} audio frames ({} total)", stats.frames_consumed);
+    assert!(v >= 1, "expected at least one video frame back over the A/V session");
+    assert!(a >= 1, "expected at least one audio frame back over the A/V session");
 }
