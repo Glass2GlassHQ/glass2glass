@@ -79,15 +79,18 @@ impl Media {
     }
 
     /// The caps this source produces for the chosen media. Video geometry is
-    /// unknown until the in-band SPS (a downstream parser recovers it); Opus is
-    /// the WebRTC default stereo 48 kHz.
+    /// unknown until the in-band SPS, so it is advertised as a `Range`
+    /// placeholder (a downstream H.264 parser recovers the real dimensions and
+    /// re-announces them via `CapsChanged`): negotiation fixates before any data
+    /// flows and `fixate()` rejects `Dim::Any`, so a wildcard would fail startup.
+    /// Opus is the WebRTC default stereo 48 kHz.
     fn caps(self) -> Caps {
         match self {
             Media::Video => Caps::CompressedVideo {
                 codec: VideoCodec::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
+                width: Dim::Range { min: 2, max: 8192 },
+                height: Dim::Range { min: 2, max: 8192 },
+                framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
             },
             Media::Audio => {
                 Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 48_000 }

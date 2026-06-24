@@ -154,9 +154,13 @@ leverage first:
   `QosMessage` reverse channel (M174/M175) already walks upstream to the source.
   str0m already emits `Event::KeyframeRequest` and `Event::EgressBitrateEstimate`;
   most feedback work is wiring those onto the reverse channel, not new engines.
-  - **T0 (precondition).** On-network validation of the existing elements against
-    a real WHIP/WHEP server + browser, including a real TURN relay run. Nothing
-    below is trustworthy until this passes (sandbox blocks the ports).
+  - **T0 (precondition).** On-network validation against a real WHIP/WHEP server.
+    Single-track DONE (M247): WHIP egress + WHEP ingress validated end to end
+    against a local mediamtx (ICE/DTLS/SRTP completes, H.264 media flows
+    g2g->mediamtx->g2g, loopback receives frames); found + fixed the `Dim::Any`
+    fixate-failure bug. Remaining: the multi-track A/V session elements
+    (M245/M246) on-network (needs an Opus audio fixture), browser playback via the
+    WHEP player, and a real LiveKit Cloud / TURN-relay run.
   - **T1 (keystone): unified `WebRtcBin`-equivalent session element.** One element
     owning one `Rtc` with N tracks, on the multi-pad traits, so BUNDLE / A-V on one
     PeerConnection / sendrecv / data channels all hang off it. Fixed-arity-from-caps

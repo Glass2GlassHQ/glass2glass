@@ -38,13 +38,110 @@
 
 #![cfg(all(target_os = "linux", feature = "webrtc"))]
 
-use g2g_core::runtime::run_source_transform_sink;
-use g2g_core::{Caps, Dim, PipelineClock, Rate, VideoCodec};
+use core::future::{ready, Future, Ready};
+use core::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
+use g2g_core::{
+    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
+    PipelinePacket, Rate, VideoCodec,
+};
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::h264parse::H264Parse;
 use g2g_plugins::webrtcsink::WebRtcSink;
 use g2g_plugins::webrtcwhepsrc::WebRtcWhepSrc;
+
+/// Split an Annex-B H.264 byte stream into NAL units, each re-prefixed with a
+/// 4-byte start code. Used by the paced publisher to feed real NALs continuously.
+fn split_annexb(data: &[u8]) -> std::vec::Vec<std::vec::Vec<u8>> {
+    let mut starts = std::vec::Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            starts.push(i);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut nals = std::vec::Vec::new();
+    for (k, &s) in starts.iter().enumerate() {
+        let payload = s + 3;
+        let end = if k + 1 < starts.len() {
+            let next = starts[k + 1];
+            if next > 0 && data[next - 1] == 0 {
+                next - 1
+            } else {
+                next
+            }
+        } else {
+            data.len()
+        };
+        let mut nal = std::vec![0u8, 0, 0, 1];
+        nal.extend_from_slice(&data[payload..end]);
+        nals.push(nal);
+    }
+    nals
+}
+
+/// Source that loops a fixture's NALs in real time for `duration`, so a
+/// `WebRtcSink` stays alive and publishing across the whole ICE/DTLS handshake +
+/// subscriber window (the flat file dump in the other tests finishes in ~0.1 s,
+/// before ICE completes, so no media ever flows).
+struct PacedH264Src {
+    nals: Arc<std::vec::Vec<std::vec::Vec<u8>>>,
+    duration: Duration,
+}
+
+impl SourceLoop for PacedH264Src {
+    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
+    type CapsFuture<'a> = Ready<Result<Caps, G2gError>>;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        ready(Ok(paced_caps()))
+    }
+    fn configure_pipeline(&mut self, _c: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            out.push(PipelinePacket::CapsChanged(paced_caps())).await?;
+            let start = Instant::now();
+            let mut seq = 0u64;
+            let mut idx = 0usize;
+            while Instant::now().duration_since(start) < self.duration {
+                let nal = self.nals[idx % self.nals.len()].clone();
+                idx += 1;
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(nal.into_boxed_slice())),
+                    FrameTiming { pts_ns: seq * 5_000_000, ..FrameTiming::default() },
+                    seq,
+                );
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+                seq += 1;
+                // ~5 ms between NALs: a NAL-paced ~200/s feed, continuous over the
+                // whole window without flooding str0m's send buffer.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(seq)
+        })
+    }
+}
+
+fn paced_caps() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+    }
+}
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -54,11 +151,15 @@ impl PipelineClock for ZeroClock {
 }
 
 fn h264_caps() -> Caps {
+    // Concrete geometry matching the fixture: negotiation fixates before any data
+    // flows, and `fixate()` rejects `Dim::Any` / `Rate::Any` (see the
+    // intercept-caps-must-fixate note), so a source feeding the sink must
+    // advertise concrete caps, not wildcards.
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
     }
 }
 
@@ -157,14 +258,17 @@ async fn webrtc_whip_to_whep_loopback() {
     eprintln!("loopback: publish {fixture} -> {whip} ; subscribe <- {whep}");
 
     // Both pipelines run concurrently on this task (the runner futures are
-    // !Send, so `join!` rather than `spawn`). The publisher pushes the fixture;
-    // the subscriber waits a moment for the stream to come up, then reads it.
+    // !Send, so `join!` rather than `spawn`). The publisher loops the fixture's
+    // NALs in real time so the session stays alive through ICE/DTLS and the
+    // subscriber window (a flat file dump finishes before ICE completes, so no
+    // media ever reaches the server); the subscriber connects after a moment.
+    let bytes = std::fs::read(&fixture).expect("read fixture");
+    let nals = Arc::new(split_annexb(&bytes));
     let publisher = async move {
-        let mut src = FileSrc::new(&fixture, h264_caps());
-        let mut parse = H264Parse::new();
+        let mut src = PacedH264Src { nals, duration: Duration::from_secs(12) };
         let mut sink = with_ice_env_sink(WebRtcSink::new(whip));
         let clock = ZeroClock;
-        let _ = run_source_transform_sink(&mut src, &mut parse, &mut sink, &clock, 4).await;
+        let _ = run_simple_pipeline(&mut src, &mut sink, &clock, 8).await;
     };
     let subscriber = async {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -183,4 +287,47 @@ async fn webrtc_whip_to_whep_loopback() {
     let stats = sub.expect("subscribe should complete within 30s").expect("WHEP subscribe ok");
     eprintln!("subscriber received {} frames over WHEP", stats.frames_emitted);
     assert!(stats.frames_emitted >= 1, "expected to receive at least one frame published by the sink");
+}
+
+/// Paced publish: loop a fixture's NALs in real time to a WHIP server for a few
+/// seconds, so the WebRTC session stays alive across the full ICE/DTLS handshake
+/// and real media flows (unlike the flat-dump tests). A green run + the server
+/// logging the stream as published confirms the egress path end to end.
+///
+/// ```sh
+/// docker run -d --network host bluenviron/mediamtx
+/// ffmpeg -f lavfi -i testsrc=size=640x480:rate=30:duration=12 \
+///        -c:v libx264 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+/// G2G_H264_FIXTURE=/tmp/clip.h264 G2G_WHIP_URL=http://localhost:8889/pub/whip \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_publish_paced -- --ignored --nocapture
+/// # then: docker logs <mediamtx>  -> expect "is publishing to path 'pub'"
+/// ```
+#[tokio::test]
+#[ignore = "needs a WHIP server (G2G_WHIP_URL) + an H.264 fixture (G2G_H264_FIXTURE)"]
+async fn webrtc_publish_paced() {
+    let (Ok(whip), Ok(fixture)) =
+        (std::env::var("G2G_WHIP_URL"), std::env::var("G2G_H264_FIXTURE"))
+    else {
+        eprintln!("skipping: set G2G_WHIP_URL and G2G_H264_FIXTURE to run");
+        return;
+    };
+    let bytes = std::fs::read(&fixture).expect("read fixture");
+    let nals = Arc::new(split_annexb(&bytes));
+    assert!(!nals.is_empty(), "fixture had no NAL units");
+    eprintln!("paced publish: {} NALs looped -> {whip}", nals.len());
+
+    let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+    let mut sink = with_ice_env_sink(WebRtcSink::new(whip));
+    let clock = ZeroClock;
+    let stats = tokio::time::timeout(
+        Duration::from_secs(20),
+        run_simple_pipeline(&mut src, &mut sink, &clock, 8),
+    )
+    .await
+    .expect("pipeline completes within 20s")
+    .expect("paced WHIP publish succeeds");
+
+    eprintln!("paced publish emitted={} handed-to-session={}", stats.frames_emitted, sink.frames_sent());
+    assert!(sink.frames_sent() > 100, "expected a continuous feed, got {}", sink.frames_sent());
 }

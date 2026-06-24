@@ -117,11 +117,14 @@ impl WebRtcWhepSessionSrc {
 }
 
 fn video_caps() -> Caps {
+    // Geometry is unknown until the in-band SPS, so advertise a `Range`
+    // placeholder (a downstream parser recovers the real dimensions): negotiation
+    // fixates before data flows and `fixate()` rejects `Dim::Any`.
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
+        width: Dim::Range { min: 2, max: 8192 },
+        height: Dim::Range { min: 2, max: 8192 },
+        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
     }
 }
 
