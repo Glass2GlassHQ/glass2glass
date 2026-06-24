@@ -14,7 +14,9 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::{couple_passthrough, Caps, CapsSet, PassthroughFields};
+use crate::caps::{
+    couple_passthrough_derived, discover_passthrough, Caps, CapsSet, PassthroughFields,
+};
 #[cfg(feature = "std")]
 use crate::caps::project_passthrough;
 use crate::format_element::CapsConstraint;
@@ -627,11 +629,13 @@ fn apply_constraint(
                 }
                 narrow(links, oi, &derived, i, i + 1)?;
             }
-            // Backward (M188): propagate a constrained output back to an
-            // ambiguous input by dropping alternatives that can't reach it, so
-            // stacked auto transforms resolve.
+            // Backward (M188 + invertible-field coupling): probe the closure for
+            // passthrough fields and narrow the input field-by-field on them
+            // (a downstream geometry / framerate pin couples back through a
+            // decoder); otherwise drop input alternatives that can't reach the
+            // output, so stacked auto transforms resolve.
             if let (Some(in_set), Some(out_set)) = (links[ii].clone(), links[oi].clone()) {
-                match backward_filter_derived(f.as_ref(), &in_set, &out_set) {
+                match derived_backward(f.as_ref(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => links[ii] = Some(narrowed),
                     Ok(None) => {}
                     Err(()) => {
@@ -1030,10 +1034,10 @@ fn apply_transform_node<E>(
                 }
                 narrow_edge(graph, edges, out_e, &derived)?;
             }
-            // Backward (M188): propagate a constrained output back to an
-            // ambiguous input by dropping alternatives that can't reach it.
+            // Backward (M188 + invertible-field coupling): field-level narrow on
+            // the closure's probed passthrough fields, else alternative-drop.
             if let (Some(in_set), Some(out_set)) = (edges[in_e].clone(), edges[out_e].clone()) {
-                match backward_filter_derived(f.as_ref(), &in_set, &out_set) {
+                match derived_backward(f.as_ref(), &in_set, &out_set) {
                     Ok(Some(narrowed)) => edges[in_e] = Some(narrowed),
                     Ok(None) => {}
                     Err(()) => {
@@ -1138,6 +1142,32 @@ fn backward_filter_derived(
     Ok(Some(CapsSet::from_alternatives(kept)))
 }
 
+/// Backward narrowing for a `DerivedOutput` transform. The closure is not
+/// declared with a passthrough mask, so [`discover_passthrough`] probes it for
+/// its invertible fields; when any is found the input is narrowed field-by-field
+/// exactly as a declared `DerivedCoupled` mask would
+/// ([`backward_field_narrow`]), so a downstream geometry / framerate pin couples
+/// back through a decoder or a rescaling convert instead of failing loud. With no
+/// passthrough field discovered it falls back to the alternative-drop walk
+/// ([`backward_filter_derived`]), the prior behavior, so a genuinely
+/// non-invertible closure is untouched.
+fn derived_backward(
+    f: &dyn Fn(&Caps) -> CapsSet,
+    in_set: &CapsSet,
+    out_set: &CapsSet,
+) -> Result<Option<CapsSet>, ()> {
+    let mask = in_set
+        .alternatives()
+        .first()
+        .map(|sample| discover_passthrough(f, sample))
+        .unwrap_or(PassthroughFields::NONE);
+    if mask == PassthroughFields::NONE {
+        backward_filter_derived(f, in_set, out_set)
+    } else {
+        backward_field_narrow(f, mask, in_set, out_set)
+    }
+}
+
 /// Backward field-coupling for a `DerivedCoupled` transform: the primitive the
 /// alternative-dropping [`backward_filter_derived`] cannot express. For each
 /// input alternative, intersect its forward image `derive(a)` with the
@@ -1166,10 +1196,13 @@ fn backward_field_narrow(
             changed = true; // this input alternative can't reach the output: drop it
             continue;
         }
-        // Couple each reachable output's passthrough fields back into `a`.
+        // Couple each reachable output's passthrough fields back into `a`. Uses
+        // the variant-tolerant coupling so a `DerivedOutput` decoder / encoder
+        // (which changes variant) couples its shared geometry / rate fields;
+        // a same-variant `DerivedCoupled` transform gets the exact coupling.
         let mut any = false;
         for out_alt in reach.alternatives() {
-            if let Some(c) = couple_passthrough(a, out_alt, passthrough) {
+            if let Some(c) = couple_passthrough_derived(a, out_alt, passthrough) {
                 if &c != a {
                     changed = true;
                 }
@@ -1261,6 +1294,7 @@ fn apply_muxer_node<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::couple_passthrough;
     use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use alloc::boxed::Box;
     use alloc::vec;
@@ -1385,6 +1419,60 @@ mod tests {
         assert_eq!(links, vec![
             fixed_compressed(VideoCodec::H264, 1920, 1080, 60),
             fixed_video(RawVideoFormat::Nv12, 1920, 1080, 60),
+        ]);
+    }
+
+    #[test]
+    fn derived_output_couples_downstream_geometry_pin_backward() {
+        // The decoder leaves the source's geometry open and the *sink* pins it
+        // (1280x720). Before invertible-field discovery the open H264 input link
+        // could not fixate (`backward_filter_derived` only drops whole
+        // alternatives, never narrows a single one's geometry), so this failed
+        // loud. Now the closure is probed: width/height/framerate are passthrough,
+        // so the sink's pin couples back and the input fixates to H264 1280x720.
+        let src = CapsConstraint::Produces(CapsSet::one(compressed(
+            VideoCodec::H264,
+            Dim::Any,
+            Dim::Any,
+            Rate::Fixed(30 << 16),
+        )));
+        let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::CompressedVideo { width, height, framerate, .. } => CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }));
+        let sink = CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 1280, 720, 30)));
+        let links = solve_linear(&[&src, &dec, &sink]).unwrap();
+        assert_eq!(links, vec![
+            fixed_compressed(VideoCodec::H264, 1280, 720, 30),
+            fixed_video(RawVideoFormat::Nv12, 1280, 720, 30),
+        ]);
+    }
+
+    #[test]
+    fn derived_output_fixed_output_imposes_no_backward_narrowing() {
+        // A decoder whose output is fixed regardless of input (no passthrough
+        // field) must not gain spurious backward coupling: discovery finds NONE,
+        // so the input keeps its produced caps. The source pins its own geometry.
+        let src = CapsConstraint::Produces(CapsSet::one(fixed_compressed(VideoCodec::H264, 1920, 1080, 30)));
+        let dec = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::CompressedVideo { .. } => CapsSet::one(fixed_video(RawVideoFormat::Nv12, 640, 480, 30)),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }));
+        let sink = CapsConstraint::Accepts(CapsSet::one(video(
+            RawVideoFormat::Nv12,
+            Dim::Any,
+            Dim::Any,
+            Rate::Any,
+        )));
+        let links = solve_linear(&[&src, &dec, &sink]).unwrap();
+        assert_eq!(links, vec![
+            fixed_compressed(VideoCodec::H264, 1920, 1080, 30),
+            fixed_video(RawVideoFormat::Nv12, 640, 480, 30),
         ]);
     }
 

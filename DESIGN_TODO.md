@@ -34,11 +34,13 @@ leverage first:
 
 ## Negotiation
 
-- **Backward coupling through a format-changing transform.**
-  `backward_feasible()` returns `None` for `DerivedOutput`, so a downstream pin
-  behind a decoder / convert-that-rescales fails loud (`CapsMismatch`).
-  Generalize `DerivedCoupled`'s field-level inverse to the invertible fields of
-  a `DerivedOutput`. (Linear passthrough coupling is done.)
+- **Backward coupling through a format-changing transform (mid-stream half).**
+  The full-chain solve now couples a downstream pin back through a `DerivedOutput`
+  decoder / rescaler (M257: `discover_passthrough` probes the closure for its
+  invertible fields, `couple_passthrough_derived` couples them across the
+  variant change). The remaining gap is the *mid-stream* `backward_feasible`
+  snapshot, which still returns `None` for `DerivedOutput` (it has only the
+  output set, no input to probe); this overlaps the Caps-β re-solve item below.
 - **Forward coordinator re-solve walk (Caps-β).** Mid-stream re-solve uses a
   startup downstream-feasibility snapshot; a downstream `DerivedOutput` that
   must re-derive on a mid-stream input change isn't covered. Design settled,

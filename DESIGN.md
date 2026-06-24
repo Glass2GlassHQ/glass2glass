@@ -886,9 +886,23 @@ field. `DerivedCoupled` fixes that for the caps-driven transforms (videoscale /
 videoconvert / audioresample): the `passthrough` mask names the fields where
 output == input, and the backward sweep (`backward_field_narrow`) intersects a
 downstream pin *into* those input fields (`Range ∩ Fixed = Fixed`). The closure
-stays the source of truth for the retargeted fields; decoders that genuinely
-can't invert stay on `DerivedOutput`. (A closure-free `FieldTransform` that makes
-forward declarative too is a planned follow-up.)
+stays the source of truth for the retargeted fields.
+
+A plain `DerivedOutput` (a decoder that declares no mask) recovers the same
+backward coupling automatically (M257): `discover_passthrough` probes the closure
+with two distinct concrete inputs per field and marks a field passthrough when
+the single output tracks it in both, so the solver narrows those input fields via
+the same `backward_field_narrow` path. A `couple_passthrough_derived` extends the
+coupling across the variant change a decoder/encoder makes (`CompressedVideo <->
+RawVideo`), coupling the geometry / framerate both carry (`format` is retargeted
+across a codec boundary, so probing never marks it passthrough). Discovery is
+conservative, a field that the closure fixes or that fails either probe stays
+non-passthrough, so a genuinely non-invertible closure falls back to the
+alternative-drop walk unchanged. This is the full-chain solve; the mid-stream
+`backward_feasible` snapshot still imposes no upstream constraint for a
+`DerivedOutput` (it has only the output set, no input to probe), tied to the
+Caps-β re-solve item. (A closure-free `FieldTransform` that makes forward
+declarative too is a planned follow-up.)
 
 `Caps` is the *fixed* description used at runtime (carried by
 `PipelinePacket::CapsChanged`, handed to `configure_pipeline`); `CapsSet`
