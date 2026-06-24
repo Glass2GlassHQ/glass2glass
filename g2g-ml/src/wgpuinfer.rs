@@ -63,6 +63,52 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// A single same-padding, stride-1 2D convolution over the `[1, Cin, H, W]`
+/// (NCHW) f32 tensor `WgpuPreprocess` emits: `out[oc, y, x] = bias[oc] + sum over
+/// (ic, ky, kx) input[ic, y+ky-padH, x+kx-padW] * weights[oc, ic, ky, kx]`, zero
+/// outside the input (the standard same-pad convention). Weights are
+/// `[Cout, Cin, KH, KW]` row-major; output is `[1, Cout, H, W]`. One invocation
+/// per output element, accumulating over the `Cin * KH * KW` receptive field, so
+/// the whole convolution stays on the device the producer's buffer lives on. This
+/// is the keystone op that lets the GPU-resident chain run an actual CNN layer,
+/// not just the matmul `SHADER` above.
+const CONV_SHADER: &str = r#"
+struct Conv { cin: u32, cout: u32, kh: u32, kw: u32, h: u32, w: u32, _p0: u32, _p1: u32 };
+
+@group(0) @binding(0) var<uniform> c: Conv;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read> weights: array<f32>;
+@group(0) @binding(3) var<storage, read> bias: array<f32>;
+@group(0) @binding(4) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = c.cout * c.h * c.w;
+    if (idx >= total) { return; }
+    let ox = idx % c.w;
+    let oy = (idx / c.w) % c.h;
+    let oc = idx / (c.w * c.h);
+    let pad_h = c.kh / 2u;
+    let pad_w = c.kw / 2u;
+    var acc = bias[oc];
+    for (var ic = 0u; ic < c.cin; ic = ic + 1u) {
+        for (var ky = 0u; ky < c.kh; ky = ky + 1u) {
+            let iy = i32(oy) + i32(ky) - i32(pad_h);
+            if (iy < 0 || iy >= i32(c.h)) { continue; }
+            for (var kx = 0u; kx < c.kw; kx = kx + 1u) {
+                let ix = i32(ox) + i32(kx) - i32(pad_w);
+                if (ix < 0 || ix >= i32(c.w)) { continue; }
+                let in_idx = (ic * c.h + u32(iy)) * c.w + u32(ix);
+                let w_idx = ((oc * c.cin + ic) * c.kh + ky) * c.kw + kx;
+                acc = acc + input[in_idx] * weights[w_idx];
+            }
+        }
+    }
+    out[idx] = acc;
+}
+"#;
+
 /// The host reference matching `SHADER`, kept public so the test (and a CPU
 /// caller) can compare against the GPU output. `input` is the flat `K`-length
 /// f32 tensor; returns the `[N]` logits.
@@ -75,6 +121,52 @@ pub fn linear_reference(input: &[f32], weights: &[f32], bias: &[f32]) -> Vec<f32
             acc += x * weights[row * n + col];
         }
         *o = acc;
+    }
+    out
+}
+
+/// The host reference matching [`CONV_SHADER`]: a same-padding, stride-1 conv over
+/// the NCHW `input` (`[Cin, H, W]`), `weights` `[Cout, Cin, KH, KW]`, `bias`
+/// `[Cout]`, returning `[Cout, H, W]`. Public so the test compares the GPU conv
+/// against it.
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_reference(
+    input: &[f32],
+    cin: usize,
+    cout: usize,
+    kh: usize,
+    kw: usize,
+    h: usize,
+    w: usize,
+    weights: &[f32],
+    bias: &[f32],
+) -> Vec<f32> {
+    let (pad_h, pad_w) = (kh / 2, kw / 2);
+    let mut out = vec![0f32; cout * h * w];
+    for oc in 0..cout {
+        for oy in 0..h {
+            for ox in 0..w {
+                let mut acc = bias[oc];
+                for ic in 0..cin {
+                    for ky in 0..kh {
+                        let iy = oy as isize + ky as isize - pad_h as isize;
+                        if iy < 0 || iy >= h as isize {
+                            continue;
+                        }
+                        for kx in 0..kw {
+                            let ix = ox as isize + kx as isize - pad_w as isize;
+                            if ix < 0 || ix >= w as isize {
+                                continue;
+                            }
+                            let in_idx = (ic * h + iy as usize) * w + ix as usize;
+                            let w_idx = ((oc * cin + ic) * kh + ky) * kw + kx;
+                            acc += input[in_idx] * weights[w_idx];
+                        }
+                    }
+                }
+                out[(oc * h + oy) * w + ox] = acc;
+            }
+        }
     }
     out
 }
@@ -104,24 +196,34 @@ struct Gpu {
 
 #[derive(Debug)]
 pub struct WgpuInference {
-    width: u32,
-    height: u32,
-    num_outputs: usize,
-    /// Row-major `[K, N]` weight matrix, `K = 3 * W * H`.
+    /// Input tensor shape (`[1, 3, H, W]` for a linear layer, `[1, Cin, H, W]`
+    /// for a conv), the caps this element accepts.
+    in_shape: Vec<u32>,
+    /// Output tensor shape (`[1, N]` logits for linear, `[1, Cout, H, W]` for conv).
+    out_shape: Vec<u32>,
+    /// Layer weights, packed for the active `shader` (`[K, N]` linear, `[Cout, Cin,
+    /// KH, KW]` conv).
     weights: Vec<f32>,
-    /// `[N]` bias.
+    /// Layer bias (`[N]` linear, `[Cout]` conv).
     bias: Vec<f32>,
-    /// Input payload length in bytes (`K * 4`), validated against each frame.
+    /// Input payload length in bytes, validated against each frame.
     in_bytes: usize,
-    /// Output payload length in bytes (`N * 4`).
+    /// Output payload length in bytes.
     out_bytes: usize,
+    /// Output element count; the dispatch covers `ceil(dispatch_n / 64)`.
+    dispatch_n: u32,
+    /// The WGSL compute shader for the active op ([`SHADER`] or [`CONV_SHADER`]).
+    shader: &'static str,
+    /// Pre-packed bytes of the op's uniform meta buffer (`{k, n}` for linear,
+    /// `{cin, cout, kh, kw, h, w}` for conv).
+    meta: Vec<u8>,
     configured: bool,
     /// Built on the first frame from the producer's device; see [`Gpu`].
     gpu: Option<Gpu>,
     last_caps: Option<Caps>,
     emitted: u64,
-    /// When set, emit the logits GPU-resident (`MemoryDomain::WgpuBuffer`) for a
-    /// downstream GPU consumer; default reads them back to `MemoryDomain::System`.
+    /// When set, emit the output GPU-resident (`MemoryDomain::WgpuBuffer`) for a
+    /// downstream GPU consumer; default reads it back to `MemoryDomain::System`.
     gpu_output: bool,
 }
 
@@ -137,19 +239,75 @@ impl WgpuInference {
         weights: Vec<f32>,
         bias: Vec<f32>,
     ) -> Result<Self, G2gError> {
-        let num_outputs = bias.len();
+        let n = bias.len();
         let k = 3 * width as usize * height as usize;
-        if num_outputs == 0 || k == 0 || weights.len() != k * num_outputs {
+        if n == 0 || k == 0 || weights.len() != k * n {
             return Err(G2gError::CapsMismatch);
         }
+        let mut meta = vec![0u8; 16];
+        meta[0..4].copy_from_slice(&(k as u32).to_le_bytes());
+        meta[4..8].copy_from_slice(&(n as u32).to_le_bytes());
         Ok(Self {
-            width,
-            height,
-            num_outputs,
+            in_shape: vec![1, 3, height, width],
+            out_shape: vec![1, n as u32],
             weights,
             bias,
             in_bytes: k * 4,
-            out_bytes: num_outputs * 4,
+            out_bytes: n * 4,
+            dispatch_n: n as u32,
+            shader: SHADER,
+            meta,
+            configured: false,
+            gpu: None,
+            last_caps: None,
+            emitted: 0,
+            gpu_output: false,
+        })
+    }
+
+    /// A single same-padding, stride-1 2D convolution over the `[1, Cin, H, W]`
+    /// (NCHW) f32 tensor `WgpuPreprocess` emits, leaving the `[1, Cout, H, W]`
+    /// result on the GPU. `weights` is `[Cout, Cin, KH, KW]` row-major, `bias` is
+    /// `[Cout]`; the kernel runs in the [`CONV_SHADER`] compute pass on the
+    /// producer's device, no CPU upload. The keystone op for running an actual CNN
+    /// layer on the GPU-resident chain. Fails loud on a dimension mismatch.
+    /// `conv2d_reference` is the matching host check.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv2d(
+        cin: u32,
+        cout: u32,
+        kh: u32,
+        kw: u32,
+        height: u32,
+        width: u32,
+        weights: Vec<f32>,
+        bias: Vec<f32>,
+    ) -> Result<Self, G2gError> {
+        if cin == 0 || cout == 0 || kh == 0 || kw == 0 || height == 0 || width == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if bias.len() != cout as usize
+            || weights.len() != (cout * cin * kh * kw) as usize
+        {
+            return Err(G2gError::CapsMismatch);
+        }
+        let in_elems = (cin * height * width) as usize;
+        let out_elems = (cout * height * width) as usize;
+        let dims = [cin, cout, kh, kw, height, width];
+        let mut meta = vec![0u8; 32];
+        for (i, d) in dims.iter().enumerate() {
+            meta[i * 4..i * 4 + 4].copy_from_slice(&d.to_le_bytes());
+        }
+        Ok(Self {
+            in_shape: vec![1, cin, height, width],
+            out_shape: vec![1, cout, height, width],
+            weights,
+            bias,
+            in_bytes: in_elems * 4,
+            out_bytes: out_elems * 4,
+            dispatch_n: out_elems as u32,
+            shader: CONV_SHADER,
+            meta,
             configured: false,
             gpu: None,
             last_caps: None,
@@ -174,7 +332,7 @@ impl WgpuInference {
     fn supported_input(&self) -> Caps {
         Caps::Tensor {
             dtype: TensorDType::F32,
-            shape: TensorShape(vec![1, 3, self.height, self.width]),
+            shape: TensorShape(self.in_shape.clone()),
             layout: TensorLayout::Nchw,
         }
     }
@@ -182,7 +340,7 @@ impl WgpuInference {
     fn output_caps(&self) -> Caps {
         Caps::Tensor {
             dtype: TensorDType::F32,
-            shape: TensorShape(vec![1, self.num_outputs as u32]),
+            shape: TensorShape(self.out_shape.clone()),
             layout: TensorLayout::Nchw,
         }
     }
@@ -194,19 +352,13 @@ impl WgpuInference {
         if self.gpu.is_some() {
             return;
         }
-        let k = (self.in_bytes / 4) as u32;
-        let n = self.num_outputs as u32;
-
         let meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("infer-meta"),
-            size: 16,
+            size: self.meta.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut meta = [0u8; 16];
-        meta[0..4].copy_from_slice(&k.to_le_bytes());
-        meta[4..8].copy_from_slice(&n.to_le_bytes());
-        queue.write_buffer(&meta_buf, 0, &meta);
+        queue.write_buffer(&meta_buf, 0, &self.meta);
 
         let weight_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("infer-weights"),
@@ -225,11 +377,11 @@ impl WgpuInference {
         queue.write_buffer(&bias_buf, 0, &f32_bytes(&self.bias));
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("wgpu-linear"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            label: Some("wgpu-infer"),
+            source: wgpu::ShaderSource::Wgsl(self.shader.into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("wgpu-linear"),
+            label: Some("wgpu-infer"),
             layout: None,
             module: &shader,
             entry_point: Some("main"),
@@ -302,7 +454,7 @@ impl WgpuInference {
             });
             pass.set_pipeline(&gpu.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((self.num_outputs as u32).div_ceil(WORKGROUP), 1, 1);
+            pass.dispatch_workgroups(self.dispatch_n.div_ceil(WORKGROUP), 1, 1);
         }
         gpu.queue.submit([encoder.finish()]);
         Ok(out_buf)

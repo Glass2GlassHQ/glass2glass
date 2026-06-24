@@ -13,7 +13,7 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
-use g2g_ml::wgpuinfer::{linear_reference, WgpuInference};
+use g2g_ml::wgpuinfer::{conv2d_reference, linear_reference, WgpuInference};
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
 };
@@ -236,6 +236,96 @@ async fn gpu_output_logits_stay_resident_and_match() {
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
         assert!((g - e).abs() < 1e-2, "logit {i}: gpu-resident {g} vs cpu reference {e}");
     }
+}
+
+/// A real 2D convolution layer on the GPU-resident tensor: NV12 -> preprocess ->
+/// conv2d, the keystone that lets the on-device chain run an actual CNN layer (not
+/// just the matmul). 2 output channels, a 3x3 same-pad kernel over the `[1,3,2,4]`
+/// preprocess tensor; the read-back `[1,2,2,4]` map matches the CPU conv reference
+/// over the exact tensor the GPU preprocess produced.
+#[tokio::test]
+async fn conv2d_on_gpu_resident_tensor_matches_cpu_reference() {
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    const CIN: u32 = 3;
+    const COUT: u32 = 2;
+    const KH: u32 = 3;
+    const KW: u32 = 3;
+    // Deterministic, non-symmetric weights/bias so the full [Cout,Cin,KH,KW] index
+    // and the spatial accumulation are exercised, not collapsed.
+    let weights: Vec<f32> =
+        (0..(COUT * CIN * KH * KW)).map(|i| i as f32 * 0.013 - 0.25).collect();
+    let bias = vec![0.1f32, -0.2];
+
+    let nv12 = sample_nv12();
+    let tensor_frame = preprocess_to_gpu_tensor(nv12.clone()).await;
+    assert!(
+        matches!(tensor_frame.domain, MemoryDomain::WgpuBuffer(_)),
+        "preprocess must hand off a GPU buffer"
+    );
+
+    let mut conv = WgpuInference::conv2d(CIN, COUT, KH, KW, H, W, weights.clone(), bias.clone())
+        .expect("valid conv dims");
+    conv.configure_pipeline(&tensor_in_caps()).expect("configure tensor input");
+
+    let mut out = Collect::default();
+    conv.process(PipelinePacket::DataFrame(tensor_frame), &mut out)
+        .await
+        .expect("gpu conv on the resident tensor");
+
+    let caps: Vec<&Caps> = out
+        .packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::CapsChanged(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(caps.len(), 1, "conv output caps emitted once");
+    assert_eq!(
+        *caps[0],
+        Caps::Tensor {
+            dtype: TensorDType::F32,
+            shape: TensorShape(vec![1, COUT, H, W]),
+            layout: TensorLayout::Nchw,
+        },
+        "[1, Cout, H, W] feature map"
+    );
+
+    let frame = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a conv output frame");
+    let got = logits_from_system(frame);
+
+    let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
+    let expected = conv2d_reference(
+        &cpu_tensor,
+        CIN as usize,
+        COUT as usize,
+        KH as usize,
+        KW as usize,
+        H as usize,
+        W as usize,
+        &weights,
+        &bias,
+    );
+    assert_eq!(got.len(), (COUT * H * W) as usize, "[1, Cout, H, W] = 16 values");
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((g - e).abs() < 1e-2, "conv out {i}: gpu {g} vs cpu reference {e}");
+    }
+    // The kernel actually mixed inputs: a same-pad conv over a non-constant tensor
+    // does not produce a flat map.
+    assert!(
+        got.iter().any(|&v| (v - got[0]).abs() > 1e-3),
+        "the feature map must vary spatially (the conv was applied, not a constant)"
+    );
 }
 
 /// The element is GPU-input only: a System tensor frame (the CPU path's job) is

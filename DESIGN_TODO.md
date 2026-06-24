@@ -376,7 +376,10 @@ leverage first:
 
 ## ML
 
-- ONNX import via `burn-import` (build-time codegen).
+- ONNX import via `burn-import` (build-time codegen). `WgpuInference` now runs a
+  conv2d compute pass (M261), so a stacked CNN is expressible on the GPU path; the
+  gap is *imported trained weights* (and the remaining ops: activation, pooling,
+  attention) rather than the conv primitive.
 - A trained-weight `Module` path for `BurnInference` (conv, attention) once the
   codegen lands.
 - Decoder DMA-BUF / D3D11 surface import into `WgpuPreprocess` (binds the
