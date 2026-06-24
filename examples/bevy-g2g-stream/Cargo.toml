@@ -1,0 +1,30 @@
+# Standalone demo crate (M267): NOT a workspace member (see root Cargo.toml
+# `exclude`). It builds against g2g as path packages and pins its own deps in a
+# local Cargo.lock, so Bevy never enters the workspace build / CI.
+[package]
+name = "bevy-g2g-stream"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# An empty [workspace] table makes this crate its own workspace root, so cargo
+# does not try to fold it into the parent workspace (it is excluded there too).
+[workspace]
+
+[dependencies]
+# Bevy 0.19 pins wgpu 29.0.3, the exact version g2g uses, so the two share one
+# wgpu in this crate's lockfile and a `wgpu::Texture`/`Device` crosses between
+# them with no type mismatch, the prerequisite for `GpuContext::from_wgpu`.
+bevy = "0.19"
+wgpu = "29"
+
+g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
+# wgpu-sink: the `gpu` module (GpuContext::from_wgpu, texture_of, the keep-alive).
+# ffmpeg: FfmpegH264Enc (NVENC / libx264). Both imply std.
+g2g-plugins = { path = "../../g2g-plugins", features = ["std", "wgpu-sink", "ffmpeg"] }
+
+# block_on for the g2g encode pipeline + the texture read-back.
+pollster = "0.4"
+# Render-world -> main-world frame hand-off (the pattern Bevy's headless_renderer
+# example uses).
+crossbeam-channel = "0.5"

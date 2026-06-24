@@ -15,7 +15,13 @@ members = [
 # integration test as a standalone cdylib, exactly as a third party would. Not a
 # workspace member, so it builds against g2g-core/g2g-plugin as path "packages"
 # with its own target dir and feature resolution.
-exclude = ["g2g-plugins/tests/fixtures/example-plugin"]
+exclude = [
+    "g2g-plugins/tests/fixtures/example-plugin",
+    # Bevy server-side render-and-stream demo (M267): a heavy `bevy` dependency
+    # that must stay out of the normal build / CI. Standalone (its own
+    # Cargo.lock), built against g2g as path packages. See its README.
+    "examples/bevy-g2g-stream",
+]
 
 [workspace.package]
 version = "0.1.0"
