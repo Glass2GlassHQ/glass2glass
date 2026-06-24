@@ -39,8 +39,11 @@
 //! glow 0.17's `tex_image_2d` pixel-source parameter, the `eglGetProcAddress`
 //! cast) all held. On a hybrid iGPU+NVIDIA host the GL context must be forced
 //! onto the NVIDIA GPU (`__NV_PRIME_RENDER_OFFLOAD` / `__EGL_VENDOR_LIBRARY_FILENAMES`)
-//! or `cuGraphicsGLRegisterImage` fails. Still owed: a head-to-head latency
-//! benchmark vs the `NvdecCuvid -> WaylandSink` baseline.
+//! or `cuGraphicsGLRegisterImage` fails. The `cudagl_vs_wayland` A/B benchmark
+//! (M253) measured this device-resident path at **10.7x lower present latency**
+//! than the `NvdecCuvid -> WaylandSink` baseline at 1080p (p50 ~8 ms vs ~90 ms):
+//! the GPU NV12->RGB convert replaces the baseline's per-frame CPU convert +
+//! `wl_shm` upload.
 //!
 //! ## Constraints (v1)
 //!
