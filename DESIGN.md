@@ -1856,9 +1856,19 @@ The embedded surface comprises:
   the time driver at link.
 - `PacketChannel` + `EmbassySink` (`embassy-link` feature) over
   `embassy-sync`, a zero-allocation inter-task packet link — the §6.2 stack
-  channel.
-- `embassy-futures::block_on` drives a pipeline as a single task; the full
-  `embassy-executor` multi-task integration uses the same runner futures.
+  channel. `SinglePacketChannel` (`NoopRawMutex`) is the single-executor
+  default; `SharedPacketChannel` (`CriticalSectionRawMutex`, hence `Sync`) is
+  the variant that can live in a `static`, so spawned tasks reach it by
+  `&'static` (an executor's tasks take `'static` arguments).
+- Two executor models, both over the same runner / element futures:
+  `embassy-futures::block_on` drives a whole pipeline as one joined task (the
+  bare-metal `fn main` entry, used by the M43/M45/M260 host tests); a real
+  `embassy-executor` runs each element as an independently *spawned* task wired
+  by static stack channels, the scheduler interleaving them. The latter is
+  host-verified via the std platform's `Executor::run_until` (polls then
+  returns on a completion flag, instead of the diverging `run()` an embedded
+  app's `fn main() -> !` calls); a three-task source -> transform -> sink
+  pipeline runs there with no HAL time driver.
 
 `portable-atomic` backs the `metrics::LatencyHistogram` `AtomicU64` so
 `thumbv7em` (Cortex-M) and `riscv32` (which lack 64-bit atomics) compile;

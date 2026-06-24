@@ -359,8 +359,6 @@ leverage first:
 
 - `EmbassyClock` HAL tick on real hardware (host verification via `block_on` is
   in place).
-- Full `embassy-executor` multi-task integration (pipelines run under
-  `block_on` today).
 - A real HAL-backed DMA capture: wire a DMA-completion ISR into the
   `StaticLendRing` (M260 proved the no-alloc lend path on the host via a fill
   stand-in; the ISR / vendor HAL plug-in is hardware-gated).

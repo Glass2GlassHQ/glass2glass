@@ -14,7 +14,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
 
 use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
@@ -50,9 +50,16 @@ impl<M: RawMutex, const N: usize> Default for PacketChannel<M, N> {
 }
 
 /// A [`PacketChannel`] for a single Embassy executor (`NoopRawMutex`). Use a
-/// `PacketChannel<CriticalSectionRawMutex, N>` if the link is shared with an
-/// interrupt handler.
+/// [`SharedPacketChannel`] if the link is shared with an interrupt handler or
+/// must live in a `static`.
 pub type SinglePacketChannel<const N: usize> = PacketChannel<NoopRawMutex, N>;
+
+/// A [`PacketChannel`] over `CriticalSectionRawMutex`, which (unlike
+/// `NoopRawMutex`) is `Sync`. Use this when the link is shared with an interrupt
+/// handler, or when it must live in a `static` so spawned Embassy tasks reach it
+/// by `&'static` reference (an executor's tasks take `'static` arguments). Needs
+/// a `critical-section` impl at link. See `m264_embassy_multitask.rs`.
+pub type SharedPacketChannel<const N: usize> = PacketChannel<CriticalSectionRawMutex, N>;
 
 /// [`OutputSink`] over a [`PacketChannel`] sender, so an element pushes packets
 /// into the embassy-sync channel (awaiting capacity under backpressure).

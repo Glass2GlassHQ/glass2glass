@@ -513,6 +513,10 @@ cbc = { version = "0.1", features = ["alloc"] }
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
+# Real Embassy executor for the M264 multi-task integration test: the
+# `platform-std` backend runs the executor's task scheduler on a host thread, so
+# spawned tasks (not just block_on-joined futures) are verifiable without hardware.
+embassy-executor = { version = "0.10", features = ["platform-std", "executor-thread"] }
 
 # gst-launch / gst-inspect analogs over the standard registry (M107). Both need
 # the std-only registry + wall clock, so they are gated on `std`; the no_std
