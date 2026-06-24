@@ -29,13 +29,18 @@
 //!
 //! ## Verification status
 //!
-//! This module is `cuda-gl` + Linux + NVIDIA-gated and is NOT compiled on the
-//! Windows dev host, the same constraint as the rest of C3. It is a first
-//! draft owed a first compile and an e2e on the Linux+GPU box; the spots most
-//! likely to need a small adjustment to the exact crate APIs are flagged with
-//! `// VERIFY:` notes (the wl_display / wl_surface raw-pointer accessors on
-//! `wayland-client` 0.31, glow 0.17's `tex_image_2d` pixel-source parameter,
-//! and the `eglGetProcAddress` cast for glow's loader).
+//! `cuda-gl` + Linux + NVIDIA-gated. Validated on the RTX 3060 host (M252):
+//! compiles + lints clean, and the `cudagl_smoke` on-display e2e presents real
+//! `NvdecCuda` frames through the CUDA-GL path (60 frames, glass-to-glass
+//! p50 ~8 ms on a GNOME Wayland session). The off-host draft needed only two
+//! adjustments at first compile, the `khronos-egl` 6 `get_display` now being
+//! `unsafe`, and importing `alloc::string::ToString`; the crate-API spots that
+//! were flagged `// VERIFY:` (the `wayland-client` 0.31 raw-pointer accessors,
+//! glow 0.17's `tex_image_2d` pixel-source parameter, the `eglGetProcAddress`
+//! cast) all held. On a hybrid iGPU+NVIDIA host the GL context must be forced
+//! onto the NVIDIA GPU (`__NV_PRIME_RENDER_OFFLOAD` / `__EGL_VENDOR_LIBRARY_FILENAMES`)
+//! or `cuGraphicsGLRegisterImage` fails. Still owed: a head-to-head latency
+//! benchmark vs the `NvdecCuvid -> WaylandSink` baseline.
 //!
 //! ## Constraints (v1)
 //!
@@ -53,7 +58,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use glow::HasContext;
 use khronos_egl as egl;
@@ -389,7 +394,8 @@ struct WorkerState {
     egl: egl::Instance<egl::Static>,
     egl_display: egl::Display,
     egl_surface: egl::Surface,
-    egl_context: egl::Context,
+    // Kept current for the worker's life; held only as a keep-alive after setup.
+    _egl_context: egl::Context,
     _wl_egl: WlEglSurface,
     gl: GlState,
     configured: bool,
@@ -433,11 +439,14 @@ fn worker_main(
     // --- EGL on the Wayland surface ---
     let egl = egl::Instance::new(egl::Static);
 
-    // VERIFY: the wl_display raw pointer on wayland-client 0.31. The display is
-    // a special global; `backend().display_ptr()` returns the libwayland
+    // The wl_display raw pointer on wayland-client 0.31. The display is a
+    // special global; `backend().display_ptr()` returns the libwayland
     // `*mut wl_display` EGL wants as its native display handle.
     let display_ptr = conn.backend().display_ptr() as *mut core::ffi::c_void;
-    let egl_display = egl.get_display(display_ptr).ok_or("eglGetDisplay failed")?;
+    // SAFETY: `display_ptr` is the live connection's libwayland `*mut wl_display`,
+    // valid for the worker thread's lifetime (the `Connection` outlives the EGL
+    // display via `conn`); `get_display` only records the handle.
+    let egl_display = unsafe { egl.get_display(display_ptr) }.ok_or("eglGetDisplay failed")?;
     egl.initialize(egl_display)?;
     egl.bind_api(egl::OPENGL_ES_API)?;
 
@@ -462,8 +471,9 @@ fn worker_main(
     let egl_context = egl.create_context(egl_display, config, None, &context_attribs)?;
 
     // wl_egl_window from the SCTK surface; EGL window surface on top of it.
-    // VERIFY: `WlSurface::id()` -> ObjectId on wayland-client 0.31.
     let wl_egl = WlEglSurface::new(window.wl_surface().id(), width as i32, height as i32)?;
+    // SAFETY: `wl_egl.ptr()` is a live `wl_egl_window` for this display/config;
+    // `wl_egl` is moved into `WorkerState._wl_egl`, so it outlives the surface.
     let egl_surface = unsafe {
         egl.create_window_surface(egl_display, config, wl_egl.ptr() as *mut core::ffi::c_void, None)
     }?;
@@ -475,8 +485,9 @@ fn worker_main(
     )?;
 
     // glow loads GL ES entry points through eglGetProcAddress.
-    // VERIFY: get_proc_address returns Option<extern "system" fn()>; cast to
-    // the *const c_void glow's loader expects.
+    // SAFETY: `egl.get_proc_address` resolves GL ES symbols against the context
+    // just made current; glow only invokes the returned pointers as the GL
+    // entry points whose names it passed.
     let gl = unsafe {
         glow::Context::from_loader_function(|s| match egl.get_proc_address(s) {
             Some(p) => p as *const core::ffi::c_void,
@@ -484,6 +495,7 @@ fn worker_main(
         })
     };
 
+    // SAFETY: `gl` wraps the GL ES 3 context made current on this thread above.
     let gl_state = unsafe { build_gl_state(gl, width, height) }?;
 
     let mut state = WorkerState {
@@ -494,7 +506,7 @@ fn worker_main(
         egl,
         egl_display,
         egl_surface,
-        egl_context,
+        _egl_context: egl_context,
         _wl_egl: wl_egl,
         gl: gl_state,
         configured: false,
@@ -535,6 +547,7 @@ unsafe fn build_gl_state(
     width: u32,
     height: u32,
 ) -> Result<GlState, Box<dyn std::error::Error>> {
+    // SAFETY: the caller guarantees a current GL ES 3 context (see `# Safety`).
     unsafe {
         let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER_NV12)?;
 
@@ -588,6 +601,7 @@ unsafe fn make_texture(
     w: u32,
     h: u32,
 ) -> Result<glow::Texture, Box<dyn std::error::Error>> {
+    // SAFETY: the caller guarantees a current GL context (see `# Safety`).
     unsafe {
         let tex = gl.create_texture().map_err(|e| e.to_string())?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -611,9 +625,9 @@ unsafe fn make_texture(
             glow::TEXTURE_WRAP_T,
             glow::CLAMP_TO_EDGE as i32,
         );
-        // VERIFY: glow 0.17 `tex_image_2d` takes the pixel source as
-        // `PixelUnpackData::Slice(Option<&[u8]>)`; `None` = allocate storage
-        // without uploading. Older glow took `Option<&[u8]>` directly.
+        // glow 0.17 `tex_image_2d` takes the pixel source as
+        // `PixelUnpackData::Slice(Option<&[u8]>)`; `None` allocates storage
+        // without uploading (CUDA writes the pixels).
         gl.tex_image_2d(
             glow::TEXTURE_2D,
             0,
@@ -638,6 +652,7 @@ unsafe fn link_program(
     vertex_src: &str,
     fragment_src: &str,
 ) -> Result<glow::Program, Box<dyn std::error::Error>> {
+    // SAFETY: the caller guarantees a current GL context (see `# Safety`).
     unsafe {
         let program = gl.create_program().map_err(|e| e.to_string())?;
         let shaders = [

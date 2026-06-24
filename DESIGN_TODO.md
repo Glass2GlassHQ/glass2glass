@@ -113,8 +113,10 @@ leverage first:
 
 ## CUDA / display
 
-- `CudaGlSink`: first compile on Linux+NVIDIA + the `wayland_smoke`-style e2e
-  benchmark vs the `NvdecCuvid -> WaylandSink` baseline (authored off-Linux).
+- `CudaGlSink` head-to-head latency benchmark vs the `NvdecCuvid -> WaylandSink`
+  baseline (first compile + on-display e2e are done, M252: `cudagl_smoke`
+  presents real NvdecCuda frames, ~8 ms p50; the explicit A/B vs the
+  CPU-convert sink remains).
 - GL-on-KMS variant of `CudaGlSink` (production tty path).
 - `CudaToWgpu` shared-image reuse pool: v1 allocates a fresh exportable Vulkan
   image + CUDA import per frame (a chunk of the validated 31 ms p50); a per-size
