@@ -29,9 +29,12 @@
 //! `WgpuPreprocess` adopts it (the M217 device-identity pattern) and samples the
 //! shared image directly.
 //!
-//! Linux + NVIDIA only (`cuda-wgpu` feature). This module is COMPILE/RUN-pending
-//! incrementally on the RTX 3060 host; the spike below proves the Vulkan-side
-//! external-memory plumbing before the CUDA import and the full element land.
+//! Linux + NVIDIA only (`cuda-wgpu` feature). Validated on an RTX 3060 (M251):
+//! the `cudawgpu_spike` tests prove the Vulkan<->CUDA external-memory round-trip
+//! in both directions (CUDA writes / wgpu reads back, and the reverse, 0 byte
+//! mismatches), and the cross-crate `cuda_wgpu_e2e` test runs the full
+//! NVDEC -> `CudaToWgpu` -> `WgpuPreprocess` -> inference chain against a CPU
+//! reference (all frames match, no PCIe download).
 
 use alloc::boxed::Box;
 use ash::vk;

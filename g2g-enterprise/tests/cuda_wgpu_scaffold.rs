@@ -23,7 +23,9 @@
 //! Run on a Linux + NVIDIA + wgpu host:
 //!
 //! ```sh
-//! G2G_H264_FIXTURE=/path/to/clip.h264 cargo test -p g2g-enterprise \
+//! ffmpeg -f lavfi -i testsrc=size=320x240:rate=30:duration=1 -c:v libx264 \
+//!     -pix_fmt yuv420p -g 15 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+//! G2G_H264_FIXTURE=/tmp/clip.h264 cargo test -p g2g-enterprise \
 //!     --features cuda-wgpu-e2e --test cuda_wgpu_scaffold -- --nocapture
 //! ```
 //!

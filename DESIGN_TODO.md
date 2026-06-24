@@ -21,12 +21,10 @@ leverage first:
 3. **Depth.** Pure-Rust / wasm codec decode (dav1d/rav1d, vpx) to drop the
    ffmpeg FFI; negotiation backward coupling through `DerivedOutput`; seek depth
    (segment seeks, re-preroll after flushing seek when paused).
-4. **GPU keep-on-GPU.** CUDA <-> wgpu interop to join NVDEC decode to wgpu
-   inference / preprocess.
-5. **Bindings polish.** Blocking-with-timeout `appsink` pull; Python `appsink`
+4. **Bindings polish.** Blocking-with-timeout `appsink` pull; Python `appsink`
    zero-copy via the buffer protocol (memoryview, not a bytes copy); maturin
    wheel for `g2g-pyapi`; an in-tree C / Python example program.
-6. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
+5. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
    GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
@@ -118,7 +116,9 @@ leverage first:
 - `CudaGlSink`: first compile on Linux+NVIDIA + the `wayland_smoke`-style e2e
   benchmark vs the `NvdecCuvid -> WaylandSink` baseline (authored off-Linux).
 - GL-on-KMS variant of `CudaGlSink` (production tty path).
-- CUDA <-> Vulkan external memory (`cudaImportExternalMemory`).
+- `CudaToWgpu` shared-image reuse pool: v1 allocates a fresh exportable Vulkan
+  image + CUDA import per frame (a chunk of the validated 31 ms p50); a per-size
+  pool keyed on the NV12 geometry amortizes it.
 - A real downstream consumer that re-sizes its pool on the mid-stream β
   allocation proposal (decoders record it but pools are fixed at codec open).
 

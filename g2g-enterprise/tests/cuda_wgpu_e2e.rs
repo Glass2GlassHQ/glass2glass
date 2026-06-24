@@ -14,12 +14,18 @@
 //! refcount) so one copy drives this zero-copy path and one copy is downloaded
 //! purely to compute the CPU reference the logits must match.
 //!
+//! Any Annex-B H.264 elementary stream works as a fixture; generate one with:
+//!
 //! ```sh
-//! G2G_H264_FIXTURE=/path/to/clip.h264 cargo test -p g2g-enterprise \
+//! ffmpeg -f lavfi -i testsrc=size=320x240:rate=30:duration=1 -c:v libx264 \
+//!     -pix_fmt yuv420p -g 15 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+//! G2G_H264_FIXTURE=/tmp/clip.h264 cargo test -p g2g-enterprise \
 //!     --features cuda-wgpu-e2e --test cuda_wgpu_e2e -- --nocapture
 //! ```
 //!
 //! Skips when the fixture env var is unset or no wgpu adapter is present.
+//! Validated on an RTX 3060 (M251): all frames match the CPU reference, no
+//! PCIe download.
 
 use std::time::Instant;
 
