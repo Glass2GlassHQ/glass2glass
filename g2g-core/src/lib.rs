@@ -122,8 +122,8 @@ pub use pad_template::{
 
 #[cfg(feature = "runtime")]
 pub use fanout::{
-    Gate, GateHandle, Merger, MergerHandle, MultiInputElement, MultiOutputElement, MultiOutputSink,
-    MultiOutputSource, MultiSenderSink, Router, RouterHandle,
+    DuplexInbound, Gate, GateHandle, Merger, MergerHandle, MultiDuplexSession, MultiInputElement,
+    MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink, Router, RouterHandle,
 };
 
 #[cfg(feature = "dyn-slot")]

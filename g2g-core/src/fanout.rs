@@ -106,6 +106,79 @@ pub trait MultiOutputSource: ElementBound {
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a>;
 }
 
+/// Inbound side of a [`MultiDuplexSession`]: the runner hands the session a
+/// stream of `(input_index, packet)` drawn from its N send-side sources, the
+/// receive-end analog of the [`MultiOutputSink`] it pushes received tracks into.
+/// `recv` yields `None` once every send source has ended (all senders dropped),
+/// so the session can stop publishing while still draining the peer.
+pub trait DuplexInbound {
+    fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>>;
+}
+
+/// A terminal **duplex** session: N send-side inputs **and** M recv-side outputs
+/// over one connection, with no external upstream or downstream beyond itself.
+/// The union of [`MultiInputElement`] used as a terminal sink
+/// ([`run_fanin_session`](crate::runtime::run_fanin_session)) and
+/// [`MultiOutputSource`] ([`run_fanout_session`](crate::runtime::run_fanout_session)):
+/// a `WebRtcBin`-style sendrecv PeerConnection both publishes local tracks and
+/// emits the peer's tracks. Driven by
+/// [`run_duplex_session`](crate::runtime::run_duplex_session).
+///
+/// One `run` loop owns the connection and is the sole holder of `&mut self`, so
+/// (unlike the egress session, which spawns a detached task to dodge aliasing)
+/// the send and recv halves share state directly: `run` selects over the inbound
+/// packets (`inbound.recv()`) and the network, feeding the former into the
+/// connection and pushing the latter to `out`.
+pub trait MultiDuplexSession: ElementBound {
+    type RunFuture<'a>: core::future::Future<Output = Result<u64, G2gError>> + 'a
+    where
+        Self: 'a;
+
+    /// Number of send-side input pads (local tracks published to the peer).
+    fn input_count(&self) -> usize;
+
+    /// Number of recv-side output pads (peer tracks emitted locally).
+    fn output_count(&self) -> usize;
+
+    /// Phase 1 for one send-side input pad: narrow that input's proposed caps.
+    fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
+
+    /// Phase 2 for one send-side input pad: fixate and configure it (the session
+    /// reads the track kind, e.g. H.264 video vs Opus audio, from these caps).
+    fn configure_input(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError>;
+
+    /// The caps this session produces on one recv-side output pad. Geometry only
+    /// learned later (e.g. H.264 dimensions from the in-band SPS) is reported as a
+    /// `Range` placeholder, exactly as [`MultiOutputSource`] does.
+    fn output_caps(&self, output: usize) -> Result<Caps, G2gError>;
+
+    /// Declare one send input pad's negotiation-time constraint, mirroring
+    /// [`MultiInputElement::caps_constraint_as_input`].
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>
+    where
+        Self: Sized,
+    {
+        CapsConstraint::LegacySink(alloc::boxed::Box::new(move |c: &Caps| {
+            <Self as MultiDuplexSession>::intercept_caps(self, input, c)
+        }))
+    }
+
+    /// Drive the session until the connection ends: drain `inbound` (the send-side
+    /// packets, tagged with their input pad) into the connection and push received
+    /// frames to `out`. Must push a [`PipelinePacket::Eos`] to every output before
+    /// returning `Ok`, so no downstream branch is stranded. Returns the count of
+    /// received `DataFrame`s pushed to outputs.
+    fn run<'a>(
+        &'a mut self,
+        inbound: &'a mut dyn DuplexInbound,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::RunFuture<'a>;
+}
+
 /// Multi-output element trait variant: identical negotiation to
 /// [`AsyncElement`], but `process` emits into a [`MultiOutputSink`] rather
 /// than a single downstream. [`Router`] is the first implementor; user code

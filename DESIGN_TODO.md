@@ -173,11 +173,16 @@ leverage first:
     WHIP session). Ingress DONE (M246): `MultiOutputSource` trait + terminal
     fan-out runner `run_fanout_session` (one 0-in-N-out source -> N sinks) +
     `WebRtcWhepSessionSrc` (one `Rtc`, WHEP recv H.264 video + Opus audio on two
-    output pads). Remaining: per-input/branch reverse-signal routing (PLI / BWE)
-    and mid-stream re-solve through the multi-track runners; launch-registry
-    wiring; bidirectional sendrecv on one connection (one element that is both
-    source and sink, not expressible in the runner model yet) and mid-session
-    transceiver add/remove (renegotiation) are the later, harder steps.
+    output pads). Bidirectional sendrecv DONE (M249): `MultiDuplexSession` trait +
+    `DuplexInbound` + terminal `run_duplex_session` runner (the union of fan-in
+    send and fan-out recv, expressing an element that is at once sink and source)
+    + `WebRtcDuplexSession` (one `Rtc`, sendrecv m-lines; WHIP/WHEP can't carry
+    sendrecv, so peers exchange SDP directly over an `SdpChannel`). Validated by
+    in-process P2P loopbacks (video + full A/V, localhost, no server). Remaining:
+    per-input/branch reverse-signal routing (PLI / BWE) and mid-stream re-solve
+    through the multi-track runners; launch-registry wiring; STUN/TURN for the
+    duplex path; mid-session transceiver add/remove (renegotiation); a pluggable
+    real-SFU (LiveKit) signaller for the duplex element.
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`

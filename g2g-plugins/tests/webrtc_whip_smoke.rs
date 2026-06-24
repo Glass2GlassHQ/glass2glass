@@ -45,8 +45,8 @@ use std::time::{Duration, Instant};
 
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{
-    run_fanin_session, run_fanout_session, run_simple_pipeline, run_source_transform_sink,
-    DynSourceLoop, SourceLoop,
+    run_duplex_session, run_fanin_session, run_fanout_session, run_simple_pipeline,
+    run_source_transform_sink, DynSourceLoop, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome, Dim,
@@ -59,6 +59,7 @@ use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::h264parse::H264Parse;
 use g2g_plugins::oggdemux::OggDemux;
+use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
 use g2g_plugins::webrtcsession::WebRtcSessionSink;
 use g2g_plugins::webrtcsink::WebRtcSink;
 use g2g_plugins::webrtcwhepsession::WebRtcWhepSessionSrc;
@@ -585,4 +586,165 @@ async fn webrtc_av_session_loopback() {
     eprintln!("read back: {v} video frames, {a} audio frames ({} total)", stats.frames_consumed);
     assert!(v >= 1, "expected at least one video frame back over the A/V session");
     assert!(a >= 1, "expected at least one audio frame back over the A/V session");
+}
+
+/// Bidirectional sendrecv P2P loopback (video): two [`WebRtcDuplexSession`] peers
+/// connect **directly** (no media server, which WHIP/WHEP cannot do) by
+/// exchanging SDP over an in-process [`SdpChannel`]; each publishes its own H.264
+/// over a sendrecv m-line and receives the other's. Proves the duplex runner +
+/// element on a real ICE/DTLS/SRTP PeerConnection: **both** peers must receive
+/// frames the other sent. Runs fully on localhost UDP.
+///
+/// ```sh
+/// ffmpeg -f lavfi -i testsrc=size=640x480:rate=30:duration=10 \
+///        -c:v libx264 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+/// G2G_H264_FIXTURE=/tmp/clip.h264 \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_duplex_p2p_loopback -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "needs an H.264 fixture (G2G_H264_FIXTURE); runs on localhost, no server"]
+async fn webrtc_duplex_p2p_loopback() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let Ok(fixture) = std::env::var("G2G_H264_FIXTURE") else {
+        eprintln!("skipping: set G2G_H264_FIXTURE to run");
+        return;
+    };
+    let bytes = std::fs::read(&fixture).expect("read h264 fixture");
+    let nals = Arc::new(split_annexb(&bytes));
+    assert!(!nals.is_empty(), "fixture had no NAL units");
+    let (off_sig, ans_sig) = SdpChannel::pair();
+
+    let a_recv = Arc::new(AtomicU64::new(0));
+    let b_recv = Arc::new(AtomicU64::new(0));
+
+    // Peer A = offerer; peer B = answerer. Each sends its own video and receives
+    // the peer's. Both run loops are !Send (str0m), so join! rather than spawn.
+    let peer_a = {
+        let (nals, af) = (nals.clone(), a_recv.clone());
+        async move {
+            let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+            let mut sess = WebRtcDuplexSession::new(SignalRole::Offerer, off_sig, 1);
+            let mut sink = CountingSink { frames: af };
+            let clock = ZeroClock;
+            let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut src];
+            let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut sink];
+            run_duplex_session(sources, &mut sess, sinks, &clock, 8).await
+        }
+    };
+    let peer_b = {
+        let (nals, bf) = (nals.clone(), b_recv.clone());
+        async move {
+            let mut src = PacedH264Src { nals, duration: Duration::from_secs(8) };
+            let mut sess = WebRtcDuplexSession::new(SignalRole::Answerer, ans_sig, 1);
+            let mut sink = CountingSink { frames: bf };
+            let clock = ZeroClock;
+            let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut src];
+            let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut sink];
+            run_duplex_session(sources, &mut sess, sinks, &clock, 8).await
+        }
+    };
+
+    let (ra, rb) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(peer_a, peer_b)
+    })
+    .await
+    .expect("P2P loopback completes within 30s");
+    ra.expect("peer A duplex session ok");
+    rb.expect("peer B duplex session ok");
+
+    let (a, b) = (a_recv.load(Ordering::SeqCst), b_recv.load(Ordering::SeqCst));
+    eprintln!("duplex P2P: peer A received {a} frames, peer B received {b} frames");
+    assert!(a >= 1, "peer A (offerer) should receive peer B's video");
+    assert!(b >= 1, "peer B (answerer) should receive peer A's video");
+}
+
+/// Bidirectional sendrecv P2P loopback (full A/V): the [`webrtc_duplex_p2p_loopback`]
+/// shape with **two** sendrecv m-lines per peer (H.264 video + Opus audio), so each
+/// peer publishes and receives both tracks over one PeerConnection, the complete
+/// `webrtcbin` sendrecv shape. Each peer must receive both a video and an audio
+/// frame from the other.
+///
+/// ```sh
+/// ffmpeg -f lavfi -i testsrc=size=640x480:rate=30:duration=10 \
+///        -c:v libx264 -bsf:v h264_mp4toannexb -f h264 /tmp/clip.h264
+/// ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=10 \
+///        -c:a libopus -b:a 64k -f ogg /tmp/clip.opus.ogg
+/// G2G_H264_FIXTURE=/tmp/clip.h264 G2G_OPUS_FIXTURE=/tmp/clip.opus.ogg \
+///     cargo test -p g2g-plugins --features webrtc \
+///     --test webrtc_whip_smoke webrtc_duplex_p2p_av_loopback -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "needs H.264 (G2G_H264_FIXTURE) + Ogg-Opus (G2G_OPUS_FIXTURE) fixtures; runs on localhost"]
+async fn webrtc_duplex_p2p_av_loopback() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let (Ok(h264_fixture), Ok(opus_fixture)) =
+        (std::env::var("G2G_H264_FIXTURE"), std::env::var("G2G_OPUS_FIXTURE"))
+    else {
+        eprintln!("skipping: set G2G_H264_FIXTURE and G2G_OPUS_FIXTURE to run");
+        return;
+    };
+    let h264_bytes = std::fs::read(&h264_fixture).expect("read h264 fixture");
+    let nals = Arc::new(split_annexb(&h264_bytes));
+    let opus_packets = Arc::new(extract_opus_packets(&opus_fixture).await);
+    assert!(!nals.is_empty() && !opus_packets.is_empty(), "empty fixtures");
+    let (off_sig, ans_sig) = SdpChannel::pair();
+
+    // Per-peer, per-track received-frame counters.
+    let a_v = Arc::new(AtomicU64::new(0));
+    let a_a = Arc::new(AtomicU64::new(0));
+    let b_v = Arc::new(AtomicU64::new(0));
+    let b_a = Arc::new(AtomicU64::new(0));
+
+    let mk_peer = |role: SignalRole,
+                   sig: SdpChannel,
+                   nals: Arc<std::vec::Vec<std::vec::Vec<u8>>>,
+                   opus: Arc<std::vec::Vec<std::vec::Vec<u8>>>,
+                   vc: Arc<AtomicU64>,
+                   ac: Arc<AtomicU64>| async move {
+        let mut vsrc = PacedH264Src { nals, duration: Duration::from_secs(8) };
+        let mut asrc = PacedOpusSrc { packets: opus, duration: Duration::from_secs(8) };
+        let mut sess = WebRtcDuplexSession::new(role, sig, 2);
+        let mut vsink = CountingSink { frames: vc };
+        let mut asink = CountingSink { frames: ac };
+        let clock = ZeroClock;
+        let sources: std::vec::Vec<&mut dyn DynSourceLoop> = std::vec![&mut vsrc, &mut asrc];
+        let sinks: std::vec::Vec<&mut dyn DynAsyncElement> = std::vec![&mut vsink, &mut asink];
+        run_duplex_session(sources, &mut sess, sinks, &clock, 8).await
+    };
+
+    let peer_a = mk_peer(
+        SignalRole::Offerer,
+        off_sig,
+        nals.clone(),
+        opus_packets.clone(),
+        a_v.clone(),
+        a_a.clone(),
+    );
+    let peer_b = mk_peer(
+        SignalRole::Answerer,
+        ans_sig,
+        nals.clone(),
+        opus_packets.clone(),
+        b_v.clone(),
+        b_a.clone(),
+    );
+
+    let (ra, rb) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(peer_a, peer_b)
+    })
+    .await
+    .expect("A/V P2P loopback completes within 30s");
+    ra.expect("peer A duplex A/V session ok");
+    rb.expect("peer B duplex A/V session ok");
+
+    let (av, aa, bv, ba) = (
+        a_v.load(Ordering::SeqCst),
+        a_a.load(Ordering::SeqCst),
+        b_v.load(Ordering::SeqCst),
+        b_a.load(Ordering::SeqCst),
+    );
+    eprintln!("duplex A/V P2P: peer A got {av} video + {aa} audio; peer B got {bv} video + {ba} audio");
+    assert!(av >= 1 && aa >= 1, "peer A should receive peer B's video and audio");
+    assert!(bv >= 1 && ba >= 1, "peer B should receive peer A's video and audio");
 }

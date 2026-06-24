@@ -21,17 +21,20 @@ use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::PipelineClock;
 use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+    AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
+    PushOutcome, Reconfigure,
 };
 use crate::clock::{ClockCandidate, ClockPriority};
 use crate::format_element::CapsConstraint;
 use crate::error::G2gError;
-use crate::fanout::{Merger, MultiInputElement};
+use crate::fanout::{
+    DuplexInbound, Merger, MultiDuplexSession, MultiInputElement, MultiSenderSink,
+};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{bounded, link, Sender, SenderSink};
+use crate::runtime::channel::{bounded, link, Receiver, Sender, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::join::join_all;
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
@@ -658,6 +661,179 @@ where
     }
     let emitted: u64 = counts[0..input_count].iter().copied().sum();
     let consumed = counts[input_count];
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        frames_dropped: 0,
+        latency: LatencyReport::ZERO,
+        allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
+        coordinator_events: 0,
+    })
+}
+
+/// [`DuplexInbound`] backed by the runner's shared tagged inbound channel, so a
+/// [`MultiDuplexSession`] drains its send-side sources through the same erased
+/// interface regardless of how the runner wired them.
+struct InboundReceiver {
+    rx: Receiver<(usize, PipelinePacket)>,
+}
+
+impl DuplexInbound for InboundReceiver {
+    fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>> {
+        Box::pin(async move { self.rx.recv().await })
+    }
+}
+
+/// Drives a terminal **duplex** session ([`MultiDuplexSession`]): N send-side
+/// sources **and** M recv-side sinks over one connection, the union of
+/// [`run_fanin_session`] (send) and
+/// [`run_fanout_session`](crate::runtime::run_fanout_session) (recv). A
+/// `WebRtcBin`-style sendrecv PeerConnection both publishes local tracks and
+/// emits the peer's tracks; this is the runner shape that expresses an element
+/// that is at once a sink (for its inputs) and a source (for its outputs), which
+/// neither the fan-in nor fan-out session runner could.
+///
+/// Negotiation mirrors both halves: each source self-fixates and configures the
+/// matching session input pad (send side, like [`run_fanin_session`]); each
+/// recv-side output's caps configure the matching sink (like
+/// [`run_fanout_session`](crate::runtime::run_fanout_session)). At runtime the
+/// sources push `(input, packet)` into one shared tagged channel; the single
+/// session arm owns `&mut session` and calls `session.run(inbound, out)`, so the
+/// send and recv halves share state with no aliasing (no detached task needed);
+/// the M sink arms drain the per-output branch links. The run ends when the
+/// session's `run` returns (e.g. on peer disconnect), which closes the branch
+/// links and lets the sinks finish.
+///
+/// Reverse signals and per-branch mid-stream re-solve are not routed here yet
+/// (a follow-up, as for the fan-in / fan-out session runners).
+pub async fn run_duplex_session<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
+    sinks: Vec<&mut dyn DynAsyncElement>,
+    _clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiDuplexSession,
+    Clk: PipelineClock,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let input_count = sources.len();
+    let output_count = sinks.len();
+    assert!(input_count > 0, "duplex session needs at least one send source");
+    assert!(output_count > 0, "duplex session needs at least one recv sink");
+    assert!(
+        session.input_count() == input_count,
+        "session input count must match the number of send sources"
+    );
+    assert!(
+        session.output_count() == output_count,
+        "session output count must match the number of recv sinks"
+    );
+
+    // Negotiate the send inputs (like run_fanin_session): each source self-fixates
+    // and the fixated caps configure both the source and its session input pad.
+    let mut sources = sources;
+    for (i, source) in sources.iter_mut().enumerate() {
+        let proposal = source.intercept_caps().await?;
+        let fixated = proposal.fixate()?;
+        if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+        if let ConfigureOutcome::ReFixate(_) = session.configure_input(i, &fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+    // Negotiate the recv outputs (like run_fanout_session): the session self-
+    // fixates each output's caps and configures the matching sink.
+    let mut sinks = sinks;
+    for (o, sink) in sinks.iter_mut().enumerate() {
+        let fixated = session.output_caps(o)?.fixate()?;
+        if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+
+    // Inbound: one shared tagged channel; every send source pushes (its index, packet).
+    let (in_tx, in_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+    // Outbound: one branch link per recv output.
+    let mut branch_senders = Vec::with_capacity(output_count);
+    let mut branch_receivers = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        let (tx, rx) = link(link_capacity);
+        branch_senders.push(SenderSink::new(tx));
+        branch_receivers.push(rx);
+    }
+
+    let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
+        Vec::with_capacity(input_count);
+    for (i, source) in sources.into_iter().enumerate() {
+        let tx_i = in_tx.clone();
+        source_arms.push(Box::pin(async move {
+            let mut adapter = TaggingSink { idx: i, tx: tx_i };
+            source.run(&mut adapter).await
+        }));
+    }
+    // Drop the runner's own sender so the inbound channel closes once all sources
+    // end (the session sees `recv() == None` and can stop publishing).
+    drop(in_tx);
+
+    let session_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut inbound = InboundReceiver { rx: in_rx };
+        let mut multi = MultiSenderSink::new(branch_senders);
+        session.run(&mut inbound, &mut multi).await
+    });
+
+    let mut sink_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
+        Vec::with_capacity(output_count);
+    for (sink, rx) in sinks.into_iter().zip(branch_receivers) {
+        sink_arms.push(Box::pin(async move {
+            let mut null = NullSink;
+            let mut consumed: u64 = 0;
+            loop {
+                match rx.recv().await {
+                    Some(PipelinePacket::Eos) => {
+                        sink.process(PipelinePacket::Eos, &mut null).await?;
+                        return Ok::<u64, G2gError>(consumed);
+                    }
+                    Some(PipelinePacket::CapsChanged(new_caps)) => {
+                        match sink.configure_pipeline(&new_caps)? {
+                            ConfigureOutcome::Accepted => {
+                                sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
+                                    .await?;
+                            }
+                            ConfigureOutcome::ReFixate(counter) => {
+                                rx.request_reconfigure(Reconfigure::Propose(counter));
+                            }
+                        }
+                    }
+                    Some(packet) => {
+                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            consumed += 1;
+                        }
+                        sink.process(packet, &mut null).await?;
+                    }
+                    None => return Ok(consumed),
+                }
+            }
+        }));
+    }
+
+    // Arm order: [source0..N, session, sink0..M].
+    let mut arms = Vec::with_capacity(input_count + 1 + output_count);
+    arms.extend(source_arms);
+    arms.push(session_arm);
+    arms.extend(sink_arms);
+
+    let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    let emitted: u64 = counts[0..input_count].iter().copied().sum();
+    let consumed: u64 = counts[input_count + 1..].iter().copied().sum();
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
