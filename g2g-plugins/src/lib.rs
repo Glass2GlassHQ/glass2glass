@@ -195,6 +195,8 @@ mod webrtc_util;
 #[cfg(feature = "webrtc")]
 pub mod webrtcsink;
 #[cfg(feature = "webrtc")]
+pub mod webrtcsession;
+#[cfg(feature = "webrtc")]
 pub mod webrtcwhepsrc;
 
 // UDP ingress source (M91): receives RTP on a tokio UdpSocket and depayloads

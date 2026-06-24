@@ -159,11 +159,15 @@ leverage first:
     below is trustworthy until this passes (sandbox blocks the ports).
   - **T1 (keystone): unified `WebRtcBin`-equivalent session element.** One element
     owning one `Rtc` with N tracks, on the multi-pad traits, so BUNDLE / A-V on one
-    PeerConnection / sendrecv / data channels all hang off it; subsumes the
-    one-track-per-element sink/src. Design call (given the Option-A flattening
-    decision): fixed-arity-from-caps tracks declared at negotiation, *not* webrtcbin
-    dynamic request pads. Mid-session transceiver add/remove (renegotiation) is a
-    later, harder step.
+    PeerConnection / sendrecv / data channels all hang off it. Fixed-arity-from-caps
+    tracks declared at negotiation (NOT webrtcbin dynamic request pads), per the
+    Option-A flattening decision. Egress DONE (M245): terminal fan-in runner
+    `run_fanin_session` (N sources -> terminal `MultiInputElement`, no downstream
+    sink) + `WebRtcSessionSink` (one `Rtc`, H.264 video + Opus audio m-lines, one
+    WHIP session). Remaining: ingress A/V (a multi-output WHEP session source);
+    per-input reverse-signal routing (PLI / BWE) through the multi-track runner;
+    launch-registry wiring; bidirectional sendrecv on one connection and
+    mid-session transceiver add/remove (renegotiation) are the later, harder steps.
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`

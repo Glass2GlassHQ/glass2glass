@@ -21,7 +21,7 @@ use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::PipelineClock;
 use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, Reconfigure,
+    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 use crate::clock::{ClockCandidate, ClockPriority};
 use crate::format_element::CapsConstraint;
@@ -31,7 +31,7 @@ use crate::frame::PipelinePacket;
 use crate::graph::Graph;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{link, SenderSink};
+use crate::runtime::channel::{bounded, link, Sender, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::join::join_all;
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
@@ -521,6 +521,143 @@ where
     // Fan-in latency / allocation / clock election across N inputs is deferred
     // (M12 covers the linear path); report neutral values rather than a
     // misleading partial one.
+    Ok(RunStats {
+        frames_emitted: emitted,
+        frames_consumed: consumed,
+        frames_dropped: 0,
+        latency: LatencyReport::ZERO,
+        allocation: None,
+        clock_priority: ClockPriority::SystemFallback,
+        base_time_ns: 0,
+        coordinator_events: 0,
+    })
+}
+
+/// `OutputSink` that tags each pushed packet with its source's input index and
+/// forwards it into the shared session channel. Reverse signals are not routed
+/// per-input yet (a follow-up), so push always reports `Accepted`.
+struct TaggingSink {
+    idx: usize,
+    tx: Sender<(usize, PipelinePacket)>,
+}
+
+impl OutputSink for TaggingSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+        Box::pin(async move {
+            match self.tx.send((self.idx, packet)).await {
+                Ok(()) => Ok(PushOutcome::Accepted),
+                Err(_) => Err(G2gError::Shutdown),
+            }
+        })
+    }
+}
+
+/// Drives `N sources → terminal multi-input element` with **no downstream sink**
+/// (the element is the destination, e.g. a WebRTC session that publishes its
+/// inputs over one PeerConnection). The fan-in analog of a terminal sink: unlike
+/// [`run_muxer_sink`], the [`MultiInputElement`] here produces no merged output,
+/// so there is no trailing sink to wire.
+///
+/// Each source self-fixates (no peer narrowing, like [`run_fanin_sink`]) and its
+/// fixated caps configure the matching session input pad. Every source pushes
+/// into one shared `(input, packet)` channel; a single session task drains it and
+/// calls `session.process(input, ..)` serially, so the session keeps `&mut` state
+/// without aliasing. A per-input `Eos` is delivered to the session (so it can
+/// flush that track); the run ends once every input has ended.
+///
+/// `output_caps()` is not consulted (there is no output), and reverse signals
+/// (keyframe-request / bitrate / QoS) are not yet routed back per-input through
+/// this runner, a documented follow-up.
+pub async fn run_fanin_session<Sess, Clk>(
+    sources: Vec<&mut dyn DynSourceLoop>,
+    session: &mut Sess,
+    _clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> Result<RunStats, G2gError>
+where
+    Sess: MultiInputElement,
+    Clk: PipelineClock,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let input_count = sources.len();
+    assert!(input_count > 0, "fan-in session needs at least one source");
+    assert!(
+        session.input_count() == input_count,
+        "session input count must match the number of sources"
+    );
+
+    // Phase 1 + 2 per input: each source self-fixates; the fixated caps configure
+    // both the source and the matching session input pad (the session decides the
+    // track kind, e.g. H.264 video vs Opus audio, from these caps).
+    let mut sources = sources;
+    for (i, source) in sources.iter_mut().enumerate() {
+        let proposal = source.intercept_caps().await?;
+        let fixated = proposal.fixate()?;
+        if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
+            return Err(G2gError::FixationFailed);
+        }
+        if let ConfigureOutcome::ReFixate(_) =
+            MultiInputElement::configure_pipeline(session, i, &fixated)?
+        {
+            return Err(G2gError::FixationFailed);
+        }
+    }
+
+    // One shared tagged channel: every source pushes `(its index, packet)`.
+    let (tx, rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+    let live_inputs = Arc::new(AtomicUsize::new(input_count));
+
+    let mut source_arms: Vec<BoxFuture<'_, Result<u64, G2gError>>> =
+        Vec::with_capacity(input_count);
+    for (i, source) in sources.into_iter().enumerate() {
+        let tx_i = tx.clone();
+        source_arms.push(Box::pin(async move {
+            let mut adapter = TaggingSink { idx: i, tx: tx_i };
+            source.run(&mut adapter).await
+        }));
+    }
+    // Drop the runner's own sender so the channel closes once all sources end.
+    drop(tx);
+
+    let session_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
+        let mut null = NullSink;
+        let mut consumed: u64 = 0;
+        loop {
+            match rx.recv().await {
+                Some((idx, PipelinePacket::Eos)) => {
+                    // Per-input end: let the session flush that track, then finish
+                    // once every input has ended (the session owns its own EOS to
+                    // the network).
+                    session.process(idx, PipelinePacket::Eos, &mut null).await?;
+                    if live_inputs.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        return Ok::<u64, G2gError>(consumed);
+                    }
+                }
+                Some((idx, packet)) => {
+                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        consumed += 1;
+                    }
+                    session.process(idx, packet, &mut null).await?;
+                }
+                None => return Ok(consumed),
+            }
+        }
+    });
+
+    let mut arms = Vec::with_capacity(input_count + 1);
+    arms.extend(source_arms);
+    arms.push(session_arm);
+
+    let results = join_all(arms).await;
+    let mut counts = Vec::with_capacity(results.len());
+    for r in results {
+        counts.push(r?);
+    }
+    let emitted: u64 = counts[0..input_count].iter().copied().sum();
+    let consumed = counts[input_count];
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,

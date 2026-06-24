@@ -83,7 +83,7 @@ struct MediaUnit {
 /// means one track per sink (simultaneous A/V over one PeerConnection is a
 /// `MultiInputElement` follow-up).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Track {
+pub(crate) enum Track {
     /// H.264 video on a 90 kHz clock.
     Video,
     /// Opus audio on a 48 kHz clock.
@@ -91,21 +91,21 @@ enum Track {
 }
 
 impl Track {
-    fn media_kind(self) -> MediaKind {
+    pub(crate) fn media_kind(self) -> MediaKind {
         match self {
             Track::Video => MediaKind::Video,
             Track::Audio => MediaKind::Audio,
         }
     }
 
-    fn codec(self) -> Codec {
+    pub(crate) fn codec(self) -> Codec {
         match self {
             Track::Video => Codec::H264,
             Track::Audio => Codec::Opus,
         }
     }
 
-    fn frequency(self) -> Frequency {
+    pub(crate) fn frequency(self) -> Frequency {
         match self {
             Track::Video => Frequency::NINETY_KHZ,
             Track::Audio => Frequency::FORTY_EIGHT_KHZ,
@@ -121,7 +121,7 @@ impl Track {
 
     /// Map a nanosecond PTS to this track's RTP `MediaTime`. `u128` intermediate
     /// avoids overflow on large timestamps.
-    fn media_time(self, pts_ns: u64) -> MediaTime {
+    pub(crate) fn media_time(self, pts_ns: u64) -> MediaTime {
         let ticks = (pts_ns as u128 * self.rate_hz() as u128 / 1_000_000_000) as u64;
         MediaTime::new(ticks, self.frequency())
     }
