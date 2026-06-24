@@ -284,6 +284,17 @@ leverage first:
   device, runs `decode -> (preprocess) -> appsink`, and samples the yielded
   `WgpuTexture` onto an in-app 3D surface. The mechanism is validated (M263 unit
   test); a worked example is the adoption artifact for the game-engine wedge.
+  Bevy 0.19 pins the same wgpu 29 as g2g, so the device handoff type-checks
+  (clone Bevy's `RenderDevice`/`Queue`/`Adapter`/`Instance` into `from_wgpu`).
+- Server-side render-and-stream demo (the stronger, headless-validatable variant
+  of the engine wedge): Bevy renders a scene headless to a texture, g2g consumes
+  it via `from_wgpu` on the shared device and streams it out. The H.264 encoder
+  now exists (`FfmpegH264Enc` NVENC, M266) and feeds `WebRtcSink` (H.264). Owed:
+  the standalone demo crate wiring Bevy -> g2g readback -> `FfmpegH264Enc` ->
+  `WebRtcSink`/WHIP, and a native NVENC element (Video Codec SDK) so the encode
+  ingests the CUDA/wgpu texture zero-copy (reverse of the M220 `CudaToWgpu`
+  bridge) instead of a readback. NVENC AV1 needs an RTX 40-series (Ampere/3060 is
+  H.264 + HEVC encode only).
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation

@@ -574,6 +574,17 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 - **Flush / EOS:** `decoder.flush()` on `PipelinePacket::Flush`; `send_eof()` + final drain before forwarding `Eos`.
 - **Thread safety:** `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is `!Send` by default; `unsafe impl Send` is justified by the same ownership-transfer argument as `MfDecode` and `VaapiH264Dec`.
 
+`FfmpegH264Enc` (`g2g-plugins/src/ffmpegenc.rs`, feature `ffmpeg`, `cfg(target_os = "linux")`, M266) is the encode-side mirror: `Caps::RawVideo { format: I420, .. }` in, `Caps::CompressedVideo { codec: H264, .. }` Annex-B out, via `ffmpeg-next`. It gives the Linux production path a hardware H.264 encoder, the codec `WebRtcSink` / `RtpH264Packetizer` / the RTSP server require (the other Linux encoders are AV1 / VP8/9 / MJPEG, none of which those H.264-only sinks accept). Selectable backend:
+
+| `Backend` variant | Encoder opened | Notes |
+| :--- | :--- | :--- |
+| `Nvenc` (default) | `h264_nvenc` | NVIDIA NVENC; hardware, realtime. The server-side render-and-stream path wants this. Fails loud at configure if absent (no driver / libavcodec built without it). |
+| `Software` | `libx264` | Portable CPU fallback (CI / no-GPU hosts), present only if libavcodec was built `--enable-libx264`. |
+
+- **Low latency:** `max_b_frames = 0` (output in presentation order, no reorder hold), in-band SPS/PPS (the `GLOBAL_HEADER` flag is *not* set, so parameter sets ride each IDR, the Annex-B stream a network sink expects), and a per-backend low-latency preset/tune (`p4`/`ll`/CBR/`delay=0` for NVENC, `veryfast`/`zerolatency` for libx264). A downstream PLI (`Reconfigure::ForceKeyframe`) forces an IDR on the next frame via `pict_type`.
+- **PTS:** the input frame's nanosecond PTS is mapped through the encoder's frame-index PTS (`time_base = 1/fps`) and recovered on the output packet, surviving any reorder.
+- **Validation:** a round-trip test on the RTX 3060 encodes I420 through `Nvenc` (and `Software`) and decodes the result back through `FfmpegVideoDec`, asserting Annex-B framing and that the stream decodes to I420 at the original geometry. Like the decoder, the `ffmpeg` feature is CI-excluded (libav version-sensitivity), so this is validated on libav hosts. Deferred: runtime bitrate retarget (fixed at open, like `Av1Enc`'s rebuild), NV12 input, 10-bit, and a native NVENC element (Video Codec SDK) for zero-copy CUDA/wgpu-resident encode.
+
 #### 4.11.4 End-to-End RTSP Pipeline
 
 The complete glass-to-glass receive pipeline is:

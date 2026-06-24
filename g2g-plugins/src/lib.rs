@@ -248,7 +248,7 @@ pub mod mfaacencode;
 pub mod mfaacdecode;
 
 // Shared frame-emission loop for the packet-producing encoders below.
-#[cfg(any(feature = "av1-encode", feature = "vpx", feature = "opus"))]
+#[cfg(any(feature = "av1-encode", feature = "vpx", feature = "opus", feature = "ffmpeg"))]
 mod encoder_base;
 
 // AV1 software encode via the pure-Rust rav1e crate (cross-platform).
@@ -342,6 +342,11 @@ pub mod vaapidec;
 // stays inside this module and does not change the public AsyncElement shape.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegdec;
+
+// H.264 encode via libavcodec (NVENC / libx264), the encode-side mirror of
+// ffmpegdec (M266). Same Linux + ffmpeg gating.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+pub mod ffmpegenc;
 
 // Pure chroma-resampling math for the decoders (YUV444P -> 4:2:0 downsample).
 // Compiled for the Linux ffmpeg build that uses it and under cfg(test) so the
