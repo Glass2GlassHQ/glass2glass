@@ -32,7 +32,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -45,6 +45,7 @@ use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::format::Codec;
@@ -65,6 +66,10 @@ use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
 const DEFAULT_QUEUE_DEPTH: usize = 256;
+
+/// Initial BWE estimate seeded into str0m before any feedback arrives. The
+/// congestion controller adapts from here as TWCC/REMB reports come in.
+const INITIAL_BITRATE_BPS: u64 = 2_000_000;
 
 /// One encoded access unit handed from the element to the session task.
 #[derive(Debug)]
@@ -146,6 +151,13 @@ pub struct WebRtcSink {
     /// `Reconfigure::ForceKeyframe` up the reverse channel to the encoder. Shared
     /// because the str0m loop lives on a separate task.
     keyframe_requested: Arc<AtomicBool>,
+    /// Latest congestion-control / BWE estimate (bits/second, 0 = none yet),
+    /// written by the session task from `Event::EgressBitrateEstimate`. Shared
+    /// with the task; `take_bitrate` forwards changes up the reverse channel.
+    bitrate_estimate: Arc<AtomicU64>,
+    /// Last estimate `take_bitrate` forwarded, so it only reports changes (it is
+    /// polled every frame; the encoder need not see the same value repeatedly).
+    last_bitrate_sent: u64,
     frames_sent: u64,
 }
 
@@ -175,6 +187,8 @@ impl WebRtcSink {
             track: Track::Video,
             tx: None,
             keyframe_requested: Arc::new(AtomicBool::new(false)),
+            bitrate_estimate: Arc::new(AtomicU64::new(0)),
+            last_bitrate_sent: 0,
             frames_sent: 0,
         }
     }
@@ -238,6 +252,9 @@ impl WebRtcSink {
         // codec so the answer's payload type is unambiguous.
         let config = RtcConfig::new()
             .set_crypto_provider(Arc::new(from_feature_flags()))
+            // Congestion control: str0m runs the TWCC/REMB estimator and emits
+            // `EgressBitrateEstimate`; the sink relays it to the encoder (BWE).
+            .enable_bwe(Some(Bitrate::bps(INITIAL_BITRATE_BPS)))
             .clear_codecs();
         let config = match self.track {
             Track::Video => config.enable_h264(true),
@@ -274,7 +291,18 @@ impl WebRtcSink {
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         let keyframe_requested = Arc::clone(&self.keyframe_requested);
-        tokio::spawn(run_session(rtc, socket, local, mid, self.track, turn, keyframe_requested, rx));
+        let bitrate_estimate = Arc::clone(&self.bitrate_estimate);
+        tokio::spawn(run_session(
+            rtc,
+            socket,
+            local,
+            mid,
+            self.track,
+            turn,
+            keyframe_requested,
+            bitrate_estimate,
+            rx,
+        ));
         self.tx = Some(tx);
         Ok(())
     }
@@ -413,6 +441,18 @@ impl AsyncElement for WebRtcSink {
         }
     }
 
+    fn take_bitrate(&mut self) -> Option<u32> {
+        // Forward the session task's latest BWE estimate, but only when it
+        // changed (this is polled every frame; the encoder need not re-see it).
+        let cur = self.bitrate_estimate.load(Ordering::Relaxed);
+        if cur != 0 && cur != self.last_bitrate_sent {
+            self.last_bitrate_sent = cur;
+            Some(cur.min(u32::MAX as u64) as u32)
+        } else {
+            None
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -467,6 +507,7 @@ async fn run_session(
     track: Track,
     mut turn: Option<TurnClient>,
     keyframe_requested: Arc<AtomicBool>,
+    bitrate_estimate: Arc<AtomicU64>,
     mut rx: mpsc::Receiver<MediaUnit>,
 ) {
     let mut buf = alloc::vec![0u8; 2000];
@@ -503,6 +544,18 @@ async fn run_session(
                 // `ForceKeyframe` up the reverse channel to the encoder.
                 Ok(Output::Event(Event::KeyframeRequest(_))) => {
                     keyframe_requested.store(true, Ordering::Relaxed);
+                }
+                // Congestion-control estimate: stash the latest target bitrate
+                // (TWCC or REMB carry a `Bitrate`); `take_bitrate` relays changes.
+                Ok(Output::Event(Event::EgressBitrateEstimate(kind))) => {
+                    let bps = match kind {
+                        BweKind::Twcc(b) | BweKind::Remb(_, b) => Some(b.as_u64()),
+                        // `BweKind` is non-exhaustive; ignore unknown future kinds.
+                        _ => None,
+                    };
+                    if let Some(bps) = bps {
+                        bitrate_estimate.store(bps, Ordering::Relaxed);
+                    }
                 }
                 Ok(Output::Event(_)) => {}
                 Err(_) => return,
@@ -677,6 +730,21 @@ mod tests {
         assert_eq!(s.take_reconfigure(), Some(Reconfigure::ForceKeyframe));
         // Consumed: a second poll yields nothing until the next PLI.
         assert_eq!(s.take_reconfigure(), None);
+    }
+
+    #[test]
+    fn bitrate_estimate_surfaces_as_take_bitrate_on_change() {
+        let mut s = WebRtcSink::new("http://h/whip");
+        // No estimate yet.
+        assert_eq!(s.take_bitrate(), None);
+        // Session task stored a BWE estimate.
+        s.bitrate_estimate.store(1_500_000, Ordering::Relaxed);
+        assert_eq!(s.take_bitrate(), Some(1_500_000));
+        // Same value again: not re-reported (the encoder need not re-see it).
+        assert_eq!(s.take_bitrate(), None);
+        // A new estimate is reported.
+        s.bitrate_estimate.store(900_000, Ordering::Relaxed);
+        assert_eq!(s.take_bitrate(), Some(900_000));
     }
 
     #[test]

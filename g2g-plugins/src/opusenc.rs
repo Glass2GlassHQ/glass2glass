@@ -160,7 +160,7 @@ impl OpusEnc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
-        // Audio has no keyframes, so a downstream keyframe request is ignored.
+        // Audio has no keyframes; runtime Opus bitrate adaptation is a follow-up.
         crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
@@ -169,7 +169,7 @@ impl OpusEnc {
             out,
         )
         .await
-        .map(|_force_keyframe| ())
+        .map(|_feedback| ())
     }
 }
 

@@ -167,12 +167,14 @@ leverage first:
   - **T2 (mostly wiring): RTCP feedback.** PLI / keyframe-request DONE (M243):
     `Reconfigure::ForceKeyframe` + `take_reconfigure`; `WebRtcSink` maps a remote
     `Event::KeyframeRequest` to it, `Av1Enc` forces an IDR, `WebRtcWhepSrc`
-    originates PLI on mid-GOP join. Remaining: VP8/VP9 force-keyframe (needs a
-    libvpx flag path `vpx-encode` does not expose) and `ForceKeyframe` relay
-    through an intervening transform; adaptive bitrate / congestion control (map
-    `Event::EgressBitrateEstimate` -> a bitrate-target reverse message -> a
-    runtime-bitrate encoder; str0m runs the GCC/TWCC estimator); NACK / RTX
-    (str0m-internal, enable by offering the RTX payload type).
+    originates PLI on mid-GOP join. Adaptive bitrate / congestion control DONE
+    (M244): `PushOutcome::Bitrate` + `take_bitrate`; `WebRtcSink` enables str0m
+    BWE and relays `Event::EgressBitrateEstimate`, `Av1Enc` retargets (rav1e
+    context rebuild, hysteresis-gated). Remaining: VP8/VP9 runtime bitrate +
+    force-keyframe (needs a libvpx path `vpx-encode` does not expose); Opus
+    bitrate adaptation; `ForceKeyframe`/`Bitrate` relay through an intervening
+    transform; NACK / RTX (str0m-internal, enable by offering the RTX payload
+    type).
   - **T3: TURN / ICE completeness.** TURN channel binding (lower overhead than
     Send/Data indications), TURN-over-TCP / -TLS, IPv6 reflexive + relay, multiple
     TURN servers, 438 stale-nonce retry, trickle ICE (WHIP/WHEP `PATCH`), ICE

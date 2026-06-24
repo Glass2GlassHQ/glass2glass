@@ -76,6 +76,12 @@ pub enum PushOutcome {
     /// the producer may skip ahead to shed load. Reconfigure takes priority when
     /// both are pending (negotiation correctness over QoS).
     Qos(QosMessage),
+    /// Downstream reports a target send bitrate in bits/second (a WebRTC sink
+    /// relaying its congestion-control / BWE estimate). Advisory: an encoder
+    /// upstream should retarget its bitrate. Lowest priority of the reverse
+    /// signals (Reconfigure > Qos > Bitrate); a held estimate surfaces on a
+    /// later push, and BWE updates far slower than the frame rate.
+    Bitrate(u32),
 }
 
 /// Downstream output for elements. `push` is async so backpressure-aware
@@ -179,6 +185,15 @@ pub trait AsyncElement: ElementBound {
     /// [`Reconfigure::ForceKeyframe`] so the upstream encoder emits an IDR.
     /// Called by the runner after each `process`. Default: nothing to send.
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        None
+    }
+
+    /// Take a target send bitrate (bits/second) this element wants to push
+    /// upstream, consuming it. A WebRTC egress sink returns its latest
+    /// congestion-control / BWE estimate here; the runner forwards it onto the
+    /// incoming link, where the encoder observes it as [`PushOutcome::Bitrate`]
+    /// and retargets. Called by the runner after each `process`. Default: none.
+    fn take_bitrate(&mut self) -> Option<u32> {
         None
     }
 
@@ -352,6 +367,12 @@ pub trait DynAsyncElement: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::take_bitrate`], so an erased sink can
+    /// push a target bitrate upstream. Defaults to nothing.
+    fn take_bitrate(&mut self) -> Option<u32> {
+        None
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -455,6 +476,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::take_reconfigure(self)
     }
 
+    fn take_bitrate(&mut self) -> Option<u32> {
+        AsyncElement::take_bitrate(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -544,6 +569,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn take_reconfigure(&mut self) -> Option<Reconfigure> {
         (**self).take_reconfigure()
+    }
+
+    fn take_bitrate(&mut self) -> Option<u32> {
+        (**self).take_bitrate()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

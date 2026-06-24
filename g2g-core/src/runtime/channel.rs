@@ -234,6 +234,25 @@ impl QosSlot {
     }
 }
 
+/// Capacity-1 latest-wins slot carrying an upstream-traveling target bitrate
+/// (bits/second), the WebRTC congestion-control / BWE signal. Same shape as
+/// [`QosSlot`]: a later estimate supersedes an unobserved earlier one (the
+/// current target, not a stream).
+#[derive(Debug, Clone, Default)]
+pub struct BitrateSlot {
+    inner: Arc<Mutex<Option<u32>>>,
+}
+
+impl BitrateSlot {
+    pub fn store(&self, value: u32) {
+        *self.inner.lock() = Some(value);
+    }
+
+    pub fn take(&self) -> Option<u32> {
+        self.inner.lock().take()
+    }
+}
+
 /// Upstream end of a bidirectional inter-element link: forward
 /// `PipelinePacket` channel + reverse `Reconfigure` slot. Held by the
 /// producing element (wrapped in [`SenderSink`]). Cloneable so a fan-in
@@ -246,6 +265,9 @@ pub struct LinkSender {
     /// Reverse QoS slot (M174): a downstream sink stores a lateness report here;
     /// the producer observes it on its next push as [`PushOutcome::Qos`].
     pub(crate) qos: QosSlot,
+    /// Reverse bitrate slot: a downstream WebRTC sink stores its BWE estimate
+    /// here; the producer (encoder) observes it as [`PushOutcome::Bitrate`].
+    pub(crate) bitrate: BitrateSlot,
     /// Backpressure policy for this link. `Block` (the default) awaits
     /// capacity; the leaky variants drop data frames under a full channel.
     pub(crate) policy: LinkPolicy,
@@ -287,6 +309,7 @@ pub struct LinkReceiver {
     pub(crate) data: Receiver<PipelinePacket>,
     pub(crate) reconfigure: ReconfigureSlot,
     pub(crate) qos: QosSlot,
+    pub(crate) bitrate: BitrateSlot,
 }
 
 impl LinkReceiver {
@@ -318,6 +341,13 @@ impl LinkReceiver {
         self.qos.store(q);
     }
 
+    /// Latest-wins target bitrate (bits/second): a downstream WebRTC sink reports
+    /// its congestion-control / BWE estimate; the producing encoder observes it on
+    /// its next [`OutputSink::push`] as [`PushOutcome::Bitrate`] and retargets.
+    pub fn request_bitrate(&self, bps: u32) {
+        self.bitrate.store(bps);
+    }
+
     /// A clone of this link's reverse QoS slot (M175). A transform arm hands it
     /// to its *output* [`SenderSink`] as a relay target, so a QoS report seen on
     /// the downstream link is forwarded onto this (upstream) link toward the
@@ -333,15 +363,17 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
     let (data_tx, data_rx) = bounded::<PipelinePacket>(capacity);
     let slot = ReconfigureSlot::default();
     let qos = QosSlot::default();
+    let bitrate = BitrateSlot::default();
     (
         LinkSender {
             data: data_tx,
             reconfigure: slot.clone(),
             qos: qos.clone(),
+            bitrate: bitrate.clone(),
             policy: LinkPolicy::Block,
             dropped: None,
         },
-        LinkReceiver { data: data_rx, reconfigure: slot, qos },
+        LinkReceiver { data: data_rx, reconfigure: slot, qos, bitrate },
     )
 }
 
@@ -462,6 +494,11 @@ impl SenderSink {
                 }
                 None => PushOutcome::Qos(q),
             }
+        } else if let Some(bps) = self.link.bitrate.take() {
+            // Lowest priority: surfaced to the immediate producer (the encoder is
+            // adjacent to a WebRTC sink in practice). Relay through an intervening
+            // transform is a follow-up, like the keyframe-request path.
+            PushOutcome::Bitrate(bps)
         } else {
             PushOutcome::Accepted
         }

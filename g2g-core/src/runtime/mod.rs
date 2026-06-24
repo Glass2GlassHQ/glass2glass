@@ -30,8 +30,8 @@ mod graph_runner;
 mod launch;
 
 pub use channel::{
-    bounded, link, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot, QosSlot,
-    Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
+    bounded, link, BitrateSlot, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot,
+    QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};

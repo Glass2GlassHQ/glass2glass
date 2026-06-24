@@ -620,6 +620,11 @@ where
                     if let Some(reconf) = sink.take_reconfigure() {
                         link_rx.request_reconfigure(reconf);
                     }
+                    // Target bitrate (WebRTC BWE) up the same reverse channel; the
+                    // upstream encoder observes it as `PushOutcome::Bitrate`.
+                    if let Some(bps) = sink.take_bitrate() {
+                        link_rx.request_bitrate(bps);
+                    }
                     // M77: the first buffer in non-live `Paused` is the preroll
                     // frame; mark this arm prerolled so the gate flips from
                     // preroll-grant to hold, and report it for aggregation.
@@ -1311,6 +1316,9 @@ where
                     // transform's output adapter relays it one hop toward the encoder.
                     if let Some(reconf) = sink.take_reconfigure() {
                         link2_rx.request_reconfigure(reconf);
+                    }
+                    if let Some(bps) = sink.take_bitrate() {
+                        link2_rx.request_bitrate(bps);
                     }
                 }
                 None => return Ok(consumed),

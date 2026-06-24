@@ -34,6 +34,11 @@ use rav1e::prelude::{
 /// real-time-ish software encode.
 const DEFAULT_SPEED: u8 = 9;
 
+/// Minimum percent change in target bitrate before the rav1e context is rebuilt.
+/// rav1e cannot retarget at runtime, so each change costs a context rebuild (and
+/// a keyframe); this damps a jittery BWE estimate.
+const BITRATE_HYSTERESIS_PCT: u64 = 20;
+
 /// Encodes raw I420 video into an AV1 elementary stream.
 pub struct Av1Enc {
     speed: u8,
@@ -48,6 +53,9 @@ pub struct Av1Enc {
     /// A downstream element (e.g. a WebRTC sink on a remote PLI) asked for a
     /// keyframe; the next `encode` overrides the frame type to Key and clears it.
     force_keyframe: bool,
+    /// Target bitrate (bits/second) from downstream congestion control, or `None`
+    /// for rav1e's default quantizer mode. A change rebuilds the rav1e context.
+    bitrate_bps: Option<u32>,
     configured: bool,
 }
 
@@ -82,6 +90,7 @@ impl Av1Enc {
             emitted: 0,
             caps_sent: false,
             force_keyframe: false,
+            bitrate_bps: None,
             configured: false,
         }
     }
@@ -122,6 +131,9 @@ impl Av1Enc {
             bit_depth: 8,
             chroma_sampling: ChromaSampling::Cs420,
             speed_settings: SpeedSettings::from_preset(self.speed),
+            // 0 = rav1e's default quantizer mode; a downstream BWE target switches
+            // to rate control (rav1e's `bitrate` is bits/second).
+            bitrate: self.bitrate_bps.map_or(0, |b| b.min(i32::MAX as u32) as i32),
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
@@ -196,20 +208,50 @@ impl Av1Enc {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = self.output_caps();
-        // A downstream keyframe request (PLI) latches here; the next `encode`
-        // forces a Key frame.
-        if crate::encoder_base::emit_packets(
+        let feedback = crate::encoder_base::emit_packets(
             &mut self.caps_sent,
             &mut self.emitted,
             packets,
             &caps,
             out,
         )
-        .await?
-        {
+        .await?;
+        // A downstream keyframe request (PLI) latches here; the next `encode`
+        // forces a Key frame.
+        if feedback.force_keyframe {
             self.force_keyframe = true;
         }
+        // A downstream bitrate estimate (WebRTC BWE) retargets the encoder.
+        if let Some(bps) = feedback.bitrate_bps {
+            self.set_target_bitrate(bps);
+        }
         Ok(())
+    }
+
+    /// Apply a target bitrate (bits/second) from downstream congestion control.
+    /// rav1e fixes the rate at `Context` construction, so a change rebuilds the
+    /// context (the next frame is then a keyframe). Hysteresis-gated: only act on
+    /// a change of at least `BITRATE_HYSTERESIS` from the active target, so a
+    /// jittery estimate near the frame rate does not thrash the encoder (each
+    /// rebuild costs a keyframe). A bitrate drop is exactly when a fresh keyframe
+    /// is wanted anyway. Rebuild failure leaves the current context running.
+    fn set_target_bitrate(&mut self, bps: u32) {
+        let bps = bps.max(1);
+        let changed = match self.bitrate_bps {
+            None => true,
+            Some(cur) => {
+                let (lo, hi) = (cur.min(bps), cur.max(bps));
+                (hi - lo) as u64 * 100 >= cur as u64 * BITRATE_HYSTERESIS_PCT
+            }
+        };
+        if changed {
+            self.bitrate_bps = Some(bps);
+            // Rebuild at the new rate if the encoder is already running; otherwise
+            // the next `build_context` (at configure) picks up the target.
+            if self.ctx.is_some() {
+                let _ = self.build_context();
+            }
+        }
     }
 }
 
@@ -424,5 +466,54 @@ mod tests {
             _ => None,
         });
         assert_eq!(geometry, Some((64, 64)), "av1parse recovers the encoded 64x64 geometry");
+    }
+
+    #[test]
+    fn bitrate_target_applies_with_hysteresis() {
+        let mut enc = Av1Enc::new().with_speed(10);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        assert_eq!(enc.bitrate_bps, None, "default quantizer mode until a target arrives");
+
+        // First target always applies.
+        enc.set_target_bitrate(1_000_000);
+        assert_eq!(enc.bitrate_bps, Some(1_000_000));
+
+        // A small change (< 20%) is damped to avoid a rebuild-per-estimate.
+        enc.set_target_bitrate(1_050_000);
+        assert_eq!(enc.bitrate_bps, Some(1_000_000), "5% change ignored");
+
+        // A large change applies (and the rebuilt context is still usable).
+        enc.set_target_bitrate(2_000_000);
+        assert_eq!(enc.bitrate_bps, Some(2_000_000), "100% change applied");
+        assert!(enc.ctx.is_some(), "rebuild left a live context");
+    }
+
+    #[tokio::test]
+    async fn encodes_after_a_bitrate_change() {
+        // A mid-stream bitrate retarget rebuilds the context; the encoder must
+        // keep producing valid frames with monotonic timestamps afterward.
+        let mut enc = Av1Enc::new().with_speed(10);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..3u64 {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
+                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                i,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        }
+        enc.set_target_bitrate(500_000);
+        for i in 3..6u64 {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
+                FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+                i,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+        }
+        enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert!(!sink.frames.is_empty(), "still produces frames after a bitrate change");
+        assert!(sink.frames.iter().all(|f| !f.is_empty()), "no empty packets after rebuild");
     }
 }

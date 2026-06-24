@@ -19,22 +19,33 @@ use g2g_core::{
 /// monotonic sequence number drawn from `emitted`. An empty batch is a no-op,
 /// so the caps stay unannounced until real data arrives.
 ///
-/// Returns `true` if a downstream element requested a keyframe
-/// ([`Reconfigure::ForceKeyframe`], e.g. a WebRTC sink on a remote PLI) while
-/// pushing this batch. A video encoder should force a key frame on its next
-/// encode; an audio encoder ignores it (no keyframes).
+/// Downstream feedback an encoder collects while pushing a batch, so it can
+/// adapt its next encode: a keyframe request and/or a target bitrate.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct EmitFeedback {
+    /// A downstream element asked for a keyframe ([`Reconfigure::ForceKeyframe`],
+    /// e.g. a WebRTC sink on a remote PLI). A video encoder forces a key frame on
+    /// its next encode; an audio encoder ignores it.
+    pub force_keyframe: bool,
+    /// The most recent target send bitrate (bits/second) reported downstream
+    /// ([`PushOutcome::Bitrate`], a WebRTC sink's BWE estimate), or `None` if
+    /// none was seen this batch.
+    pub bitrate_bps: Option<u32>,
+}
+
+/// Push a batch and return any downstream feedback (see [`EmitFeedback`]).
 pub(crate) async fn emit_packets(
     caps_sent: &mut bool,
     emitted: &mut u64,
     packets: Vec<(Vec<u8>, u64)>,
     caps: &Caps,
     out: &mut dyn OutputSink,
-) -> Result<bool, G2gError> {
+) -> Result<EmitFeedback, G2gError> {
     if !packets.is_empty() && !*caps_sent {
         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
         *caps_sent = true;
     }
-    let mut force_keyframe = false;
+    let mut feedback = EmitFeedback::default();
     for (data, pts_ns) in packets {
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
@@ -42,14 +53,13 @@ pub(crate) async fn emit_packets(
             *emitted,
         );
         *emitted += 1;
-        if matches!(
-            out.push(PipelinePacket::DataFrame(frame)).await?,
-            PushOutcome::Reconfigure(Reconfigure::ForceKeyframe)
-        ) {
-            force_keyframe = true;
+        match out.push(PipelinePacket::DataFrame(frame)).await? {
+            PushOutcome::Reconfigure(Reconfigure::ForceKeyframe) => feedback.force_keyframe = true,
+            PushOutcome::Bitrate(bps) => feedback.bitrate_bps = Some(bps),
+            _ => {}
         }
     }
-    Ok(force_keyframe)
+    Ok(feedback)
 }
 
 #[cfg(test)]
@@ -76,12 +86,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_downstream_force_keyframe() {
-        // A downstream ForceKeyframe on a pushed frame propagates as `true`.
+    async fn reports_downstream_force_keyframe_and_bitrate() {
+        // A downstream ForceKeyframe on a pushed frame propagates.
         let mut sent = false;
         let mut emitted = 0;
         let mut sink = OutcomeSink(PushOutcome::Reconfigure(Reconfigure::ForceKeyframe));
-        let force = emit_packets(
+        let fb = emit_packets(
             &mut sent,
             &mut emitted,
             Vec::from([(Vec::from([1u8, 2, 3]), 0u64)]),
@@ -90,12 +100,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(force, "downstream keyframe request is reported to the encoder");
+        assert!(fb.force_keyframe, "downstream keyframe request is reported");
+        assert_eq!(fb.bitrate_bps, None);
         assert_eq!(emitted, 1);
 
-        // A plain Accepted reports false.
-        let mut sink = OutcomeSink(PushOutcome::Accepted);
-        let force = emit_packets(
+        // A downstream Bitrate estimate propagates as the target.
+        let mut sink = OutcomeSink(PushOutcome::Bitrate(800_000));
+        let fb = emit_packets(
             &mut sent,
             &mut emitted,
             Vec::from([(Vec::from([4u8]), 1u64)]),
@@ -104,7 +115,22 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!force);
+        assert!(!fb.force_keyframe);
+        assert_eq!(fb.bitrate_bps, Some(800_000));
+
+        // A plain Accepted reports neither.
+        let mut sink = OutcomeSink(PushOutcome::Accepted);
+        let fb = emit_packets(
+            &mut sent,
+            &mut emitted,
+            Vec::from([(Vec::from([5u8]), 2u64)]),
+            &caps(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(!fb.force_keyframe);
+        assert_eq!(fb.bitrate_bps, None);
     }
 
     #[tokio::test]
@@ -112,9 +138,10 @@ mod tests {
         let mut sent = false;
         let mut emitted = 0;
         let mut sink = OutcomeSink(PushOutcome::Accepted);
-        let force =
+        let fb =
             emit_packets(&mut sent, &mut emitted, Vec::new(), &caps(), &mut sink).await.unwrap();
-        assert!(!force);
+        assert!(!fb.force_keyframe);
+        assert_eq!(fb.bitrate_bps, None);
         assert!(!sent, "caps stay unannounced until real data arrives");
         assert_eq!(emitted, 0);
     }
