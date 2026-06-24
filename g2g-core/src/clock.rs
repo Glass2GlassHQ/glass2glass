@@ -1,7 +1,13 @@
 use core::future::Future;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use alloc::sync::Arc;
+
+// `portable_atomic` (not `core`) so the 64-bit clock counter compiles on targets
+// without native 64-bit atomics (Cortex-M, RISC-V32), same as the metrics
+// histogram. Native where available; the `critical-section` feature makes the
+// lock-based fallback interrupt-safe on real hardware.
+use portable_atomic::AtomicU64;
 
 /// Single source of truth for timestamps within a pipeline.
 ///
