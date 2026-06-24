@@ -248,7 +248,13 @@ pub mod mfaacencode;
 pub mod mfaacdecode;
 
 // Shared frame-emission loop for the packet-producing encoders below.
-#[cfg(any(feature = "av1-encode", feature = "vpx", feature = "opus", feature = "ffmpeg"))]
+#[cfg(any(
+    feature = "av1-encode",
+    feature = "vpx",
+    feature = "opus",
+    feature = "ffmpeg",
+    feature = "nvenc"
+))]
 mod encoder_base;
 
 // AV1 software encode via the pure-Rust rav1e crate (cross-platform).
@@ -394,6 +400,14 @@ pub mod pipewiresrc;
 // stream reaches the CPU sinks. Hand-rolled libcuda FFI; Linux + NVIDIA only.
 #[cfg(all(target_os = "linux", feature = "cuda"))]
 pub mod cuda;
+
+// Native NVENC H.264 encode (M269): `NvEnc` ingests a CUDA NV12 surface (the
+// NVDEC hwframe domain) and drives the NVIDIA Video Codec SDK directly, so the
+// encode runs GPU-resident with no device->host read-back, the zero-copy mirror
+// of the `cuda-wgpu` import bridge. Hand-rolled libnvidia-encode + libcuda FFI;
+// Linux + NVIDIA only.
+#[cfg(all(target_os = "linux", feature = "nvenc"))]
+pub mod nvenc;
 
 // Shared NV12 GL ES render state for the CUDA-GL sinks (program + textures +
 // per-frame CUDA upload + draw); the platform present stays in each sink.

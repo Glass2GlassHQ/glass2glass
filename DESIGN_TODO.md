@@ -286,14 +286,17 @@ leverage first:
   test); a worked example is the adoption artifact for the game-engine wedge.
   Bevy 0.19 pins the same wgpu 29 as g2g, so the device handoff type-checks
   (clone Bevy's `RenderDevice`/`Queue`/`Adapter`/`Instance` into `from_wgpu`).
-- Native NVENC encode element (Video Codec SDK / `cudarc`): the moat follow-up to
-  the `examples/bevy-g2g-stream` demo (M267, which captures Bevy's render via
-  `from_wgpu` and encodes with `FfmpegH264Enc` NVENC after a device->host
-  read-back). A native element would ingest the CUDA/wgpu texture *zero-copy*
-  (reverse of the M220 `CudaToWgpu` bridge), eliminating the read-back, and would
-  be the gst-`nvcodec`-style first-class `NvEnc` element (with NVDEC promoted from
-  the `FfmpegVideoDec` backend flag to a matching native `NvDec`). NVENC AV1 needs
-  an RTX 40-series (Ampere/3060 is H.264 + HEVC encode only).
+- Native `NvDec` element (NVDEC via the Video Codec SDK / `cuvid`), the decode
+  half of the gst-`nvcodec`-style pair: promote NVDEC from the `FfmpegVideoDec`
+  `NvdecCuda` backend flag to a first-class element matching the native `NvEnc`
+  (M269), so the whole `NvDec -> ... -> NvEnc` path leaves libavcodec. (`NvEnc`
+  itself is done: native zero-copy CUDA NV12 -> H.264, M269.)
+- Extend `NvEnc` (M269) beyond the v1 cut: system-memory NV12 input (host
+  upload), HEVC via the HEVC GUID (NVENC AV1 needs an RTX 40-series; Ampere/3060
+  is H.264 + HEVC encode only), finite-GOP periodic IDRs with `repeatSPSPPS`, an
+  output-bitstream-buffer pool (one is alloc/freed per frame today), and runtime
+  bitrate retarget via `nvEncReconfigureEncoder`. A wgpu-texture -> CUDA hand-off
+  would let it ingest the Bevy/M267 render zero-copy (the read-back the demo pays).
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
