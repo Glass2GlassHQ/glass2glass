@@ -8,7 +8,9 @@ Rust.
 The name reflects the metric the project optimizes for: **glass-to-glass
 latency**, the time between physical photon capture and hardware presentation.
 
-See [DESIGN.md](DESIGN.md) for the architecture specification.
+See [DESIGN.md](DESIGN.md) for the architecture specification and
+[DEVTOOLS.md](DEVTOOLS.md) for the developer tooling (`cargo xtask`, the pipeline
+visualizer, the caps explainer, benchmarks).
 
 ## The four pillars
 
@@ -412,7 +414,10 @@ g2g-enterprise/  # multi-stream tensor batcher
 g2g-python/      # gst-python-ml element host (embedded CPython)
 g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h)
 g2g-pyapi/       # Python (pyo3) bindings
+xtask/           # dev-command crate (cargo xtask ci | test --here | size | wasm | bench | ffi-probe)
+g2g-bench/       # criterion benchmarks (excluded from the workspace)
 DESIGN.md        # architecture specification
+DEVTOOLS.md      # developer tooling reference
 docs/            # GitHub Pages site
 ```
 
