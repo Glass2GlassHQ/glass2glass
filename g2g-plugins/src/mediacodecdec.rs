@@ -207,6 +207,23 @@ impl MediaCodecDec {
         self
     }
 
+    /// Like [`with_gpu_output`](Self::with_gpu_output), but decode onto a
+    /// caller-supplied interop device instead of one created lazily (M305). The
+    /// on-screen present path needs the decoder and the [`WgpuSink`] to share a
+    /// single wgpu device (a texture binds only to its own device): the app builds
+    /// one [`InteropDevice`](crate::mediacodec_wgpu::InteropDevice), derives a
+    /// surface + sink from it via
+    /// [`gpu_context`](crate::mediacodec_wgpu::InteropDevice::gpu_context) /
+    /// [`create_android_surface`](crate::mediacodec_wgpu::create_android_surface),
+    /// then hands the device here so the decoder converts frames on that very
+    /// device. The same single-thread executor contract as `with_gpu_output`.
+    #[cfg(feature = "mediacodec-wgpu")]
+    pub fn with_gpu_device(mut self, dev: crate::mediacodec_wgpu::InteropDevice) -> Self {
+        self.gpu_output = true;
+        self.interop = Some(dev);
+        self
+    }
+
     /// Convert a decoded `AHardwareBuffer` to an RGBA `wgpu::Texture` on the GPU
     /// and wrap it as a `MemoryDomain::WgpuTexture`. Creates the interop device
     /// (async) and the reusable converter lazily on the first frame. The buffer

@@ -110,8 +110,10 @@ mediacodec = ["std", "dep:ndk"]
 # (wgpu-hal + ash). Android-only, implies `mediacodec`. `ndk/api-level-26` is
 # required: `AImage_getHardwareBuffer` and the whole `AHardwareBuffer` ref API
 # are NDK API 26+, so the ndk crate gates them behind that feature. Build the
-# on-device probe with cargo-ndk `--platform 26`.
-mediacodec-wgpu = ["mediacodec", "ndk/api-level-26", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# on-device probe with cargo-ndk `--platform 26`. Pulls in `wgpu-sink` (M305): the
+# decoded RGBA WgpuTexture is presented on-screen by `WgpuSink::with_surface`,
+# fed an Android `ANativeWindow` surface via `mediacodec_wgpu::create_android_surface`.
+mediacodec-wgpu = ["mediacodec", "wgpu-sink", "ndk/api-level-26", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # Windows H.264 encode via the Media Foundation H.264 Encoder MFT
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.

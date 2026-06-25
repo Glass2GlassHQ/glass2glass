@@ -87,9 +87,16 @@ leverage first:
   RGBA-GPU path (decoder derives Rgba8 in gpu mode, WgpuPreprocess accepts it) so
   a runner can auto-plug it. Validated on the Pixel 10a end to end (9 frames ->
   NCHW tensor, no CPU frame copy). Pillar complete.
-- Android `Surface` present sink (the on-screen output half; the decode-to-GPU
-  side is done above).
-- Encode, Camera2 capture, AAudio, Surface present.
+- Android `Surface` present sink (M305): DONE for the GPU path. The decoded RGBA
+  `WgpuTexture` (M304) is presented through a `wgpu::Surface` over an Android
+  `ANativeWindow` by the existing `WgpuSink`, on the shared interop device, so
+  decode -> GPU -> display is copy-free. `mediacodec_wgpu::create_android_surface`
+  builds the surface, `InteropDevice::gpu_context()` + `MediaCodecDec::with_gpu_device`
+  share the device, and `gpu::texture_of` recognises the decoder's keep-alive.
+  Validated headless on the `android_surface_present_probe` (an `ImageReader`-backed
+  surface, `presented_count() > 0`). Remaining: a real on-screen `SurfaceView` /
+  `NativeActivity` run (needs an APK harness, no headless equivalent).
+- Encode, Camera2 capture, AAudio.
 
 ## Receive / decode
 

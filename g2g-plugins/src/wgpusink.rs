@@ -578,9 +578,11 @@ mod tests {
     }
 
     /// Captures a single forwarded frame (to relay the overlay output to the sink).
+    #[cfg(feature = "vello-overlay")]
     struct CaptureSink {
         frame: Option<Frame>,
     }
+    #[cfg(feature = "vello-overlay")]
     impl OutputSink for CaptureSink {
         fn push<'a>(
             &'a mut self,

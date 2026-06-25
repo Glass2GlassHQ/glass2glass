@@ -123,6 +123,72 @@ pub async fn create_android_interop_device() -> Result<InteropDevice, G2gError> 
     Ok(InteropDevice { device, queue, adapter, instance })
 }
 
+impl InteropDevice {
+    /// View this interop device as a shared [`GpuContext`](crate::gpu::GpuContext)
+    /// so the on-screen [`WgpuSink`](crate::wgpusink) presents the decoder's RGBA
+    /// textures on the *same* device (M305). A `wgpu::Texture` binds only to the
+    /// device that created it, so the decode element and the present sink must
+    /// share one device; wgpu handles are reference-counted, so this clones the
+    /// handles, not the GPU. Pair with [`create_android_surface`] and
+    /// [`MediaCodecDec::with_gpu_device`](crate::mediacodecdec::MediaCodecDec::with_gpu_device).
+    pub fn gpu_context(&self) -> crate::gpu::GpuContext {
+        crate::gpu::GpuContext::from_wgpu(
+            self.instance.clone(),
+            self.adapter.clone(),
+            self.device.clone(),
+            self.queue.clone(),
+        )
+    }
+}
+
+/// Create and configure a `wgpu::Surface` over an Android `ANativeWindow` (M305):
+/// the on-screen target for the decode -> GPU -> present path. The window is an
+/// app's `SurfaceView` / `NativeActivity` surface (or, headless, an
+/// `ImageReader`'s window for the present probe); the returned surface presents
+/// the decoder's RGBA `WgpuTexture` frames via
+/// [`WgpuSink::with_surface`](crate::wgpusink::WgpuSink::with_surface).
+///
+/// The surface is created on `dev`'s instance and configured for `dev`'s device,
+/// the same device the decoder converts frames on (see
+/// [`InteropDevice::gpu_context`]), so the present is copy-free. The format /
+/// present mode come from the surface's own capabilities
+/// (`get_default_config`); the blit in `WgpuSink` reconciles the source RGBA
+/// with whatever surface format the device prefers.
+///
+/// # Safety contract (caller)
+///
+/// The returned `Surface<'static>` does not borrow `window`, but the underlying
+/// `ANativeWindow` must stay alive for as long as the surface is used (the same
+/// window-ownership contract as [`WgpuSink::with_surface`]); keep the
+/// `NativeWindow` (and its backing `SurfaceView` / `ImageReader`) resident.
+pub fn create_android_surface(
+    dev: &InteropDevice,
+    window: &ndk::native_window::NativeWindow,
+    width: u32,
+    height: u32,
+) -> Result<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration), G2gError> {
+    let raw_window = wgpu::rwh::RawWindowHandle::AndroidNdk(wgpu::rwh::AndroidNdkWindowHandle::new(
+        window.ptr().cast(),
+    ));
+    let raw_display = wgpu::rwh::RawDisplayHandle::Android(wgpu::rwh::AndroidDisplayHandle::new());
+    // SAFETY: `window.ptr()` is a live `ANativeWindow` for the duration of this
+    // call; the caller's documented contract keeps it alive while the surface is
+    // used (the surface borrows nothing, hence `'static`). The display handle is
+    // the empty Android display, matching the Vulkan backend's expectation.
+    let surface = unsafe {
+        dev.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle: Some(raw_display),
+            raw_window_handle: raw_window,
+        })
+    }
+    .map_err(gpu_err)?;
+    let config = surface
+        .get_default_config(&dev.adapter, width, height)
+        .ok_or(G2gError::Hardware(HardwareError::Other))?;
+    surface.configure(&dev.device, &config);
+    Ok((surface, config))
+}
+
 /// The Vulkan view of an imported `AHardwareBuffer`, as reported by
 /// `vkGetAndroidHardwareBufferPropertiesANDROID`. This is the linchpin probe
 /// result: [`vk_format`](Self::vk_format) vs [`external_format`](Self::external_format)

@@ -115,15 +115,25 @@ impl WgpuKeepAlive for WgpuTextureKeepAlive {
     }
 }
 
-/// Recover the `wgpu::Texture` from a [`OwnedWgpuTexture`] produced with a
-/// [`WgpuTextureKeepAlive`]. Returns `None` if the frame's keep-alive is some
-/// other producer's type (a foreign GPU domain this sink cannot present).
+/// Recover the `wgpu::Texture` from a [`OwnedWgpuTexture`], whatever g2g GPU
+/// producer wrapped it. Returns `None` if the frame's keep-alive is some other
+/// (foreign) producer's type this sink cannot present.
+///
+/// Two in-tree producers wrap their texture differently: the overlay / blit path
+/// uses [`WgpuTextureKeepAlive`], and the Android MediaCodec GPU decode (M304/M305)
+/// uses [`mediacodec_wgpu::WgpuRgbaTexture`](crate::mediacodec_wgpu::WgpuRgbaTexture).
+/// Recognising both lets the one [`WgpuSink`](crate::wgpusink) present either.
 pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {
-    owned
-        .keep_alive()
-        .as_any()
-        .downcast_ref::<WgpuTextureKeepAlive>()
-        .map(|k| &k.0)
+    let any = owned.keep_alive().as_any();
+    if let Some(k) = any.downcast_ref::<WgpuTextureKeepAlive>() {
+        return Some(&k.0);
+    }
+    // The Android decoder's RGBA output: same device, different wrapper.
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    if let Some(k) = any.downcast_ref::<crate::mediacodec_wgpu::WgpuRgbaTexture>() {
+        return Some(k.texture());
+    }
+    None
 }
 
 /// Map any wgpu / Vello failure to a structured hardware error.
