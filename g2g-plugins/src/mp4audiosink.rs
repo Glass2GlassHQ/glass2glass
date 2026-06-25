@@ -223,7 +223,7 @@ fn descriptor(tag: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// The `esds` (ES_Descriptor) box carrying the AAC AudioSpecificConfig.
-fn esds(asc: &[u8]) -> Vec<u8> {
+pub(crate) fn esds(asc: &[u8]) -> Vec<u8> {
     let dec_specific = descriptor(0x05, asc);
     let mut dcd = Vec::new();
     dcd.push(0x40); // objectTypeIndication: Audio ISO/IEC 14496-3 (AAC)

@@ -305,7 +305,7 @@ fn ns_to_timescale(ns: u64) -> u64 {
 }
 
 /// Split an Annex-B buffer into NALUs (3- and 4-byte start codes).
-fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     let mut nalus = Vec::new();
     let mut start = None;
     let mut i = 0;
@@ -345,7 +345,7 @@ fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u
 
 /// Whether a NAL begins a keyframe: H.264 IDR (type 5), H.265 any IRAP
 /// picture (types 16..=23, covering BLA/IDR/CRA).
-fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
+pub(crate) fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
     let ty = nalu_type(codec, nalu);
     match codec {
         VideoCodec::H265 => (16..=23).contains(&ty),
@@ -355,7 +355,7 @@ fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
 
 /// Ordered parameter-set NALUs the moov needs: H.264 SPS(7)+PPS(8), H.265
 /// VPS(32)+SPS(33)+PPS(34). Missing any one is a loud error.
-fn parameter_sets<'a>(
+pub(crate) fn parameter_sets<'a>(
     codec: VideoCodec,
     nalus: &[&'a [u8]],
 ) -> Result<Vec<&'a [u8]>, G2gError> {
@@ -377,7 +377,7 @@ fn parameter_sets<'a>(
 
 /// AVCC sample payload: every NALU prefixed with its 4-byte big-endian
 /// length (parameter sets stay in-band, which fMP4 players accept).
-fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for n in nalus {
         out.extend_from_slice(&(n.len() as u32).to_be_bytes());
@@ -492,7 +492,7 @@ fn moov(codec: VideoCodec, width: u32, height: u32, param_sets: &[&[u8]], tags: 
 /// The visual sample entry for the track: `avc1`+`avcC` for H.264,
 /// `hvc1`+`hvcC` for H.265. `param_sets` is the ordered set the moov needs
 /// (SPS,PPS for H.264; VPS,SPS,PPS for H.265).
-fn visual_sample_entry(
+pub(crate) fn visual_sample_entry(
     codec: VideoCodec,
     width: u32,
     height: u32,

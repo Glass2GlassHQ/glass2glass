@@ -282,6 +282,15 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("mpegtsmux", |inputs| {
         Box::new(crate::tsmuxn::TsMux::new(inputs))
     }));
+    // Multi-track fragmented-MP4 fan-in (M293): the A/V container case. Like
+    // `mpegtsmux`, `mp4mux` is registered both as a single-input launch element
+    // (`mp4mux::Mp4Mux` above) and here as a fan-in muxer (`mp4muxn::Mp4MuxN`);
+    // the parser picks by link degree, so one name covers `! mp4mux !` and
+    // `v.! m.  a.! m.  mp4mux name=m`. Video + AAC audio interleave by PTS.
+    #[cfg(feature = "std")]
+    reg.register_muxer(MuxerFactory::new("mp4mux", |inputs| {
+        Box::new(crate::mp4muxn::Mp4MuxN::new(inputs))
+    }));
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));
