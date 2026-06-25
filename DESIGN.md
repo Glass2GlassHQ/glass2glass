@@ -1762,6 +1762,33 @@ than architecture (browser interop, real remote-NAT / TURN / LiveKit Cloud runs,
 launch-registry wiring for the session elements, renegotiation, data channels /
 simulcast / FEC); `DESIGN_TODO.md`'s "WebRTC" item carries the tiered list.
 
+### 4.20 Developer Tooling: DOT Visualization
+
+`g2g_core::dot` renders a pipeline graph as Graphviz DOT, the
+`GST_DEBUG_DUMP_DOT_DIR` analog: `Graph::to_dot` (pre-validation) and
+`ValidatedGraph::to_dot` (post-`finish`) emit a `digraph { .. }` a developer
+renders with `dot -Tsvg`. It is pure `no_std + alloc` string formatting (no I/O),
+so it builds on every target the core does, embedded included.
+
+Because the graph carries an opaque element payload `E`, node display names come
+from a caller-supplied `Fn(NodeId) -> Option<String>`; returning `None` falls
+back to the node's structural kind, the right answer for a `tee` / `mux` that
+carries no element. Nodes are role-coded by shape and fill (source / sink /
+transform boxes, a `tee` diamond, a muxer trapezium). Edges are annotated from a
+`DotAnnotations { edge_caps, edge_memory }`, both indexed by edge id, the same
+index `solve_graph` returns its `Vec<Caps>` solution under and `ValidatedGraph::edge`
+uses: an edge shows its negotiated caps (`Caps::to_gst_string`), a non-`System`
+memory domain (drawn bold, since a GPU / zero-copy link is the interesting one),
+its non-default `LinkPolicy`, and fan-out / fan-in pad indices.
+
+`g2g-launch --dot` is the user-facing entry: it parses a pipeline against the
+registry, dumps the DOT to stdout, and exits without running, labelling each node
+by its element's `log_category` (the short type name, e.g. `VideoTestSrc`) via
+the new `GraphNodeRef::log_category`. The launch path does not yet surface the
+solver's per-edge caps (negotiation runs inside `run_graph`), so the dump is
+topology + policy until that solution is exposed (a `DESIGN_TODO.md` follow-up);
+the renderer already accepts the caps the moment a caller has them.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

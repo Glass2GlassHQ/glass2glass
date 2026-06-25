@@ -417,10 +417,11 @@ No `xtask` / `justfile`, pipeline visualization, caps tracing, or benchmarks
 exist today; the dev workflow is shell-history tribal knowledge. Highest leverage
 first:
 
-- **Pipeline -> DOT/SVG visualizer** (the `GST_DEBUG_DUMP_DOT_DIR` equivalent).
-  `Graph::to_dot()` rendering nodes, links, the *negotiated caps on each edge*,
-  memory domains, and `link_capacity`. g2g has a `Graph` but no way to see it or
-  the caps that got chosen. Self-contained, CI-safe.
+- **Negotiated caps in the DOT dump.** `Graph::to_dot` (M279) already renders
+  caps + memory domains per edge from a `DotAnnotations`, but `g2g-launch --dot`
+  passes none: the solver runs inside `run_graph` and its `Vec<Caps>` solution
+  is not surfaced. Expose the solved per-edge caps (and per-edge memory domain)
+  from the run path so the dump can show what got chosen, not just the topology.
 - **Caps-negotiation explainer** (`G2G_CAPS_TRACE=1`). Narrate each
   `intersect` / `fixate` decision so a `CapsMismatch` is a readable log, not a
   guess (e.g. `h264parse.src ∩ nvdec.sink ✓ … fixate W=Any -> REJECTED`). Highest

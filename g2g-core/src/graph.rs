@@ -267,6 +267,24 @@ impl<E> Graph<E> {
         &self.edges
     }
 
+    /// Number of nodes added so far. With [`edges`](Self::edges) and
+    /// [`node_kind`](Self::node_kind) this is enough to render the wiring
+    /// before validation (the DOT dump).
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The [`NodeKind`] of a node, or `None` if the id is past the node count.
+    pub fn node_kind(&self, node: NodeId) -> Option<NodeKind> {
+        self.nodes.get(node.0 as usize).map(|n| n.kind)
+    }
+
+    /// Borrow a node's element payload (`None` for tee nodes or an unknown id),
+    /// for labeling a pre-validation dump from the element itself.
+    pub fn element(&self, node: NodeId) -> Option<&E> {
+        self.nodes.get(node.0 as usize).and_then(|n| n.element.as_ref())
+    }
+
     /// Append every node and edge of `inner` into this graph, returning the
     /// [`NodeIdOffset`] that maps `inner`'s ids into this graph's id space.
     /// Composition is a pure index shift: nodes are a flat `Vec` and edges carry
@@ -533,6 +551,12 @@ impl<E> ValidatedGraph<E> {
 
     pub fn edge(&self, id: usize) -> &Edge {
         &self.edges[id]
+    }
+
+    /// All edges, indexed by edge id (the same index the solver's `Vec<Caps>`
+    /// solution and the DOT renderer's per-edge annotations use).
+    pub fn edges(&self) -> &[Edge] {
+        &self.edges
     }
 
     /// Edge ids feeding this node's input pads.

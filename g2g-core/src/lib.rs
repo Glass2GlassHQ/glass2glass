@@ -28,6 +28,7 @@ pub mod aggregator;
 pub mod caps;
 pub mod format_element;
 pub mod clock;
+pub mod dot;
 pub mod element;
 pub mod error;
 pub mod frame;
@@ -87,6 +88,7 @@ pub use meta::{
     AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, Classification, FrameMeta, ObjectDetection,
     Propagation, Relation, RelationKind, Tracking, Transform,
 };
+pub use dot::DotAnnotations;
 pub use graph::{
     Bin, BinInstance, Demux, Edge, Graph, GraphError, Muxer, NodeId, NodeIdOffset, NodeKind, PadDir,
     PadId, Tee, ValidatedGraph,

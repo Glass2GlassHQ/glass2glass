@@ -125,6 +125,21 @@ impl<'a> GraphNodeRef<'a> {
     pub fn demux_ref(demux: &'a mut (dyn DynMultiOutputElement + 'a)) -> Self {
         GraphNodeRef::Demux(Box::new(demux))
     }
+
+    /// The element's log category (M179), its short type name, e.g.
+    /// `videotestsrc`. The runner uses it to derive instance names
+    /// (`<category>N`); a DOT dump uses it as the node label before the run
+    /// assigns the suffixed name. Fan-in / fan-out elements don't expose a
+    /// category on their dyn trait (the runner doesn't name them either), so
+    /// they report their structural role.
+    pub fn log_category(&self) -> &'static str {
+        match self {
+            GraphNodeRef::Source(s) => s.log_category(),
+            GraphNodeRef::Element(e) => e.log_category(),
+            GraphNodeRef::Muxer(_) => "mux",
+            GraphNodeRef::Demux(_) => "demux",
+        }
+    }
 }
 
 impl core::fmt::Debug for GraphNodeRef<'_> {

@@ -14,6 +14,8 @@
 //! Options (the common `gst-launch-1.0` set):
 //!   -v, --verbose       print the parsed pipeline (elements + link policies)
 //!   -q, --quiet         suppress the PLAYING / Done progress lines
+//!   --dot               dump the parsed pipeline as Graphviz DOT and exit
+//!                       (pipe to `dot -Tsvg`); does not run the pipeline
 //!   --plugin <path>     load a third-party plugin `.so` before parsing
 //!                       (repeatable; needs the `plugin-loader` build feature)
 //!   -h, --help          print this help and exit
@@ -41,7 +43,7 @@ use g2g_plugins::registry::default_registry;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
@@ -50,6 +52,9 @@ struct Opts {
     verbose: bool,
     quiet: bool,
     help: bool,
+    /// Dump the parsed pipeline as Graphviz DOT to stdout and exit without
+    /// running it (`--dot`, the `GST_DEBUG_DUMP_DOT_DIR` analog).
+    dot: bool,
     /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
     plugins: Vec<String>,
 }
@@ -80,6 +85,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
             "-h" | "--help" => opts.help = true,
+            "--dot" => opts.dot = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
                 None => eprintln!("g2g-launch: --plugin needs a path argument"),
@@ -164,6 +170,23 @@ fn main() {
         }
     };
 
+    if opts.dot {
+        // Dump the parsed wiring as Graphviz DOT and exit, before the run
+        // consumes the graph. Each node is labelled with its element's log
+        // category (the short type name, e.g. `videotestsrc`); a tee falls back
+        // to its kind. Negotiated caps are not surfaced from the parse yet, so
+        // edges carry their backpressure policy but no caps.
+        print!(
+            "{}",
+            graph.to_dot(
+                "pipeline",
+                |n| graph.element(n).map(|e| e.log_category().to_string()),
+                &g2g_core::DotAnnotations::default(),
+            )
+        );
+        return;
+    }
+
     if opts.verbose {
         // Best-effort `-v`: report the wiring the parse produced (link count and
         // each edge's backpressure policy). Per-pad negotiated caps are not
@@ -230,5 +253,13 @@ mod tests {
         let (opts, rest) = parse_opts(toks(&["--quiet", "--verbose", "fakesink"]).into_iter());
         assert!(opts.quiet && opts.verbose);
         assert_eq!(rest, toks(&["fakesink"]));
+    }
+
+    #[test]
+    fn dot_flag_splits_from_pipeline() {
+        let (opts, rest) = parse_opts(toks(&["--dot", "videotestsrc", "!", "fakesink"]).into_iter());
+        assert!(opts.dot);
+        assert!(!opts.verbose);
+        assert_eq!(rest, toks(&["videotestsrc", "!", "fakesink"]));
     }
 }
