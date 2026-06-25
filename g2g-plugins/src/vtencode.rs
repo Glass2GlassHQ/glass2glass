@@ -25,6 +25,13 @@
 //! contract (caps, pad templates, `process`, `Send`) mirrors `VtDecode` /
 //! `MfEncode` and is the stable part.
 
+// objc2 renamed these free CoreMedia functions to associated functions (e.g.
+// `CMSampleBuffer::data_buffer`). VtEncode is compile-pending (never run on a
+// Mac), so the migration is deferred to when it is validated on real hardware;
+// the deprecated calls behave identically. TODO: migrate to the associated
+// forms.
+#![allow(deprecated)]
+
 use core::ffi::{c_char, c_void};
 use core::ptr::{self, NonNull};
 
@@ -616,14 +623,14 @@ unsafe fn make_pixel_buffer(
     }
     let mut src = 0usize;
     for plane in 0..2usize {
-        let base = unsafe { CVPixelBufferGetBaseAddressOfPlane(&pb, plane) } as *mut u8;
+        let base = CVPixelBufferGetBaseAddressOfPlane(&pb, plane) as *mut u8;
         if base.is_null() {
             unsafe { CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
             return Err(hw());
         }
-        let stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(&pb, plane) };
-        let pw = unsafe { CVPixelBufferGetWidthOfPlane(&pb, plane) };
-        let ph = unsafe { CVPixelBufferGetHeightOfPlane(&pb, plane) };
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(&pb, plane);
+        let pw = CVPixelBufferGetWidthOfPlane(&pb, plane);
+        let ph = CVPixelBufferGetHeightOfPlane(&pb, plane);
         let row_bytes = if plane == 0 { pw } else { pw * 2 };
         for row in 0..ph {
             if src + row_bytes > nv12.len() {

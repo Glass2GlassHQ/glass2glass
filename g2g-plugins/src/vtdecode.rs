@@ -27,6 +27,13 @@
 //! The g2g element contract (caps, pad templates, `process` loop, `Send`) mirrors
 //! `MfDecode` and is the stable part.
 
+// objc2 renamed these free CoreMedia / VideoToolbox functions to associated
+// functions (e.g. `CMBlockBuffer::create_with_memory_block`). VtDecode is
+// compile-pending (never run on a Mac), so the migration is deferred to when it
+// is validated on real hardware; the deprecated calls behave identically. TODO:
+// migrate to the associated-function forms.
+#![allow(deprecated)]
+
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 

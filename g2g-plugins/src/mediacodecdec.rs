@@ -39,7 +39,7 @@ use g2g_core::{
     RawVideoFormat, VideoCodec,
 };
 
-use crate::annexb::{h264_nal_type, h264_parameter_sets};
+use crate::annexb::h264_parameter_sets;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

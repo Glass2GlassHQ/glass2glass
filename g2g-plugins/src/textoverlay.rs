@@ -30,7 +30,10 @@ use g2g_core::{
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
-use crate::subparse::{parse_auto, parse_srt, parse_webvtt, Cue, TextAlign};
+use crate::subparse::{parse_srt, parse_webvtt, Cue, TextAlign};
+// Only the std `load_location` path sniffs the format; gate the import to match.
+#[cfg(feature = "std")]
+use crate::subparse::parse_auto;
 
 /// Renders the active subtitle cue's text onto an RGBA8 frame. Cue selection is
 /// by the frame's `pts_ns`; a frame with no covering cue passes through
