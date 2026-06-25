@@ -34,6 +34,17 @@ leverage first:
 
 ## Negotiation
 
+- **Stacked auto-converter cascade bug.** Two chained auto `videoconvert`s into a
+  format-changing sink corrupt output: `videotestsrc ! videoconvert ! videoconvert
+  ! capsfilter caps=video/x-raw,format=nv12 ! filesink` emits the raw RGBA bytes
+  mislabeled NV12 (no conversion), while a single `videoconvert` is correct. RCA:
+  the startup per-edge solve assigns `VC0->VC1 = RGBA, VC1->sink = NV12`, but the
+  runtime Caps-α downstream-feasibility re-cascade then feeds the second converter
+  a `CapsChanged(NV12)` it adopts as its *input* format while it still receives
+  RGBA bytes, so it does an `NV12->NV12` passthrough of unconverted data. The
+  runtime re-cascade and the startup solve disagree for stacked auto transforms
+  (an instance of the missing multi-element subgraph re-solve). Needs a regression
+  test (byte-compare 1 vs 2 converts) + reconciling the two paths.
 - **Closure-free `FieldTransform` refactor.** Make forward derivation
   declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
 - **Dynamic pads / request pads.** `tee` / `mux` runtime branch/input addition;
