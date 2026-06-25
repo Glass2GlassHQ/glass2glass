@@ -31,6 +31,7 @@
 use alloc::vec::Vec;
 
 use crate::caps::{AudioFormat, Caps, CapsSet};
+use crate::memory::MemoryDomainKind;
 use crate::pad_template::{pad_link, PadCaps, PadDirection, PadTemplate};
 use crate::runtime::solver::NegotiationFailure;
 
@@ -44,12 +45,29 @@ pub struct ElementDesc {
     pub name: &'static str,
     /// The element type's pad templates, in declaration order.
     pub templates: Vec<PadTemplate>,
+    /// The memory feature the element's source pad emits (a `decodebin` caps
+    /// feature, GStreamer's `memory:CUDAMemory` analog). Caps geometry / format
+    /// is in the pad templates; the *memory domain* is not, so it rides here so
+    /// the search can prefer a producer whose output memory matches the request
+    /// (e.g. pick `NvDec` -> `Cuda` for a GPU consumer). `System` for the CPU
+    /// elements, which is also the search default, so a plain pipeline is
+    /// unaffected.
+    pub output_memory: MemoryDomainKind,
 }
 
 impl ElementDesc {
-    /// Build a descriptor from a name and its pad templates.
+    /// Build a descriptor from a name and its pad templates. The output memory
+    /// feature defaults to `System`; tag a GPU producer with
+    /// [`with_output_memory`](Self::with_output_memory).
     pub fn new(name: &'static str, templates: Vec<PadTemplate>) -> Self {
-        Self { name, templates }
+        Self { name, templates, output_memory: MemoryDomainKind::System }
+    }
+
+    /// Tag the memory feature this element's source pad produces (see
+    /// [`output_memory`](Self::output_memory)). Builder form.
+    pub fn with_output_memory(mut self, kind: MemoryDomainKind) -> Self {
+        self.output_memory = kind;
+        self
     }
 
     /// First sink (input) pad template, if any.
@@ -130,9 +148,33 @@ pub fn find_chain(
     target: &dyn Fn(&Caps) -> bool,
     max_depth: usize,
 ) -> Option<Vec<ChainLink>> {
+    find_chain_preferring(descs, input, target, max_depth, MemoryDomainKind::System)
+}
+
+/// Like [`find_chain`], but biases ties toward a chain whose terminal element
+/// emits the `preferred` memory feature (see [`ElementDesc::output_memory`]). The
+/// search is still breadth-first, so a shorter chain always wins; among
+/// equal-length chains, candidates producing `preferred` are tried first, so a
+/// GPU consumer can request `Cuda` and get `NvDec` ahead of a CPU decoder without
+/// changing the default (`System`) selection a plain pipeline gets.
+///
+/// The preference only reorders which candidate is *tried first* at each hop; if
+/// no `preferred`-memory chain exists, the search still finds a `System` one.
+pub fn find_chain_preferring(
+    descs: &[ElementDesc],
+    input: &Caps,
+    target: &dyn Fn(&Caps) -> bool,
+    max_depth: usize,
+    preferred: MemoryDomainKind,
+) -> Option<Vec<ChainLink>> {
     if target(input) {
         return Some(Vec::new());
     }
+    // Visit order: candidates whose source-pad memory matches `preferred` first,
+    // then the rest in registration order. Stable, so with the default `System`
+    // preference this is registration order (no behavior change).
+    let mut order: Vec<usize> = (0..descs.len()).collect();
+    order.sort_by_key(|&i| descs[i].output_memory != preferred);
     // BFS frontier: each entry is a reached caps state and the element path
     // that produced it. Depth is bounded by max_depth so an unsatisfiable
     // target terminates even with cycle-free same-shape elements.
@@ -140,10 +182,11 @@ pub fn find_chain(
     for _ in 0..max_depth {
         let mut next: Vec<(Caps, Vec<ChainLink>)> = Vec::new();
         for (caps, path) in &frontier {
-            for (i, desc) in descs.iter().enumerate() {
+            for &i in &order {
                 if path.iter().any(|link| link.index == i) {
                     continue;
                 }
+                let desc = &descs[i];
                 let Some(out_set) = desc.step(caps) else { continue };
                 for out in out_set.alternatives() {
                     let mut new_path = path.clone();
@@ -208,6 +251,15 @@ mod factory {
             build: fn(&Caps) -> Box<dyn DynAsyncElement>,
         ) -> Self {
             Self::new(name, E::pad_templates(), build)
+        }
+
+        /// Tag the memory feature this factory's element produces on its source
+        /// pad (see [`ElementDesc::output_memory`]); used by the domain-aware
+        /// auto-plug search to prefer e.g. a `Cuda` producer for a GPU consumer.
+        /// Builder form, defaulting to `System`.
+        pub fn produces(mut self, kind: crate::memory::MemoryDomainKind) -> Self {
+            self.desc = self.desc.with_output_memory(kind);
+            self
         }
 
         /// Instantiate a fresh boxed element configured to produce `output`.
@@ -803,6 +855,67 @@ mod factory {
             max_depth: usize,
         ) -> Result<Vec<NodeId>, DecodebinError> {
             let elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            let mut prev: PadId = from.into();
+            let to: PadId = to.into();
+            let mut inserted = Vec::with_capacity(elements.len());
+            for boxed in elements {
+                let node = graph.add_transform(GraphNodeRef::Element(boxed));
+                graph.link(prev, node)?;
+                inserted.push(node);
+                prev = node.into();
+            }
+            graph.link(prev, to)?;
+            Ok(inserted)
+        }
+
+        /// Domain-aware [`autoplug_names`](Self::autoplug_names): bias ties toward a
+        /// chain whose terminal element emits the `preferred` memory feature (see
+        /// [`ElementDesc::output_memory`]). `MemoryDomainKind::System` reproduces
+        /// the default selection; `Cuda` prefers e.g. `NvDec` over a CPU decoder.
+        pub fn autoplug_names_preferring(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+        ) -> Option<Vec<&'static str>> {
+            let descs = self.descs();
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
+        }
+
+        /// Domain-aware [`autoplug`](Self::autoplug): instantiate the chain the
+        /// domain-aware search picks (see
+        /// [`autoplug_names_preferring`](Self::autoplug_names_preferring)).
+        pub fn autoplug_preferring(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+        ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+            let descs = self.descs();
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            Some(chain.into_iter().map(|link| self.factories[link.index].build(&link.output)).collect())
+        }
+
+        /// Domain-aware [`decodebin`](Self::decodebin): splice in the chain the
+        /// domain-aware search picks, biased toward `preferred` memory (e.g. `Cuda`
+        /// to prefer `NvDec` when the downstream consumer is GPU-resident).
+        #[allow(clippy::too_many_arguments)]
+        pub fn decodebin_preferring(
+            &self,
+            graph: &mut Graph<GraphNode>,
+            from: impl Into<PadId>,
+            to: impl Into<PadId>,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+        ) -> Result<Vec<NodeId>, DecodebinError> {
+            let elements = self
+                .autoplug_preferring(input, target, max_depth, preferred)
+                .ok_or(DecodebinError::NoChain)?;
             let mut prev: PadId = from.into();
             let to: PadId = to.into();
             let mut inserted = Vec::with_capacity(elements.len());

@@ -352,14 +352,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register(ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())));
-    // Native NVDEC (M270), registered last so it is available to an explicit
-    // decode chain without out-ranking the CPU decoders: `NvDec` emits NV12 in
-    // CUDA device memory (`MemoryDomain::Cuda`), which caps do not encode, so a
-    // generic `decodebin` to a system-memory sink must still pick a CPU decoder.
-    // Selecting `NvDec` is explicit (the `nvh264dec` / `nvdec` launch name) until
-    // a caps memory-feature gates auto-plug by domain.
+    // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
+    // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
+    // caps geometry / format does not encode. M276 makes that domain a first-class
+    // auto-plug feature: the factory is tagged `produces(Cuda)`, so the
+    // domain-aware search (`decodebin_preferring(.., Cuda)`) prefers `NvDec` for a
+    // GPU consumer, while a plain `decodebin` (preference `System`) is unchanged.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
-    reg.register(ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new())));
+    reg.register(
+        ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
+            .produces(g2g_core::MemoryDomainKind::Cuda),
+    );
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -589,6 +592,40 @@ mod nv_registry_tests {
         // The native decoder is also an auto-plug candidate (registered after the
         // CPU decoders so it does not out-rank them; see register_autoplug_candidates).
         assert!(reg.element_names().contains(&"nvdec"), "nvdec is an autoplug factory");
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nvdec", feature = "ffmpeg"))]
+mod domain_aware_autoplug_tests {
+    use super::*;
+    use g2g_core::runtime::is_raw_video;
+    use g2g_core::{Caps, Dim, MemoryDomainKind, Rate, VideoCodec};
+
+    fn h264() -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }
+    }
+
+    /// M276: the memory feature gates auto-plug by domain. A default (System)
+    /// decode of H.264 stays on the CPU decoder; requesting `Cuda` prefers the
+    /// native NVDEC. Needs no GPU (the search reads pad-template + feature
+    /// metadata; nothing is constructed or run).
+    #[test]
+    fn cuda_preference_selects_nvdec_over_cpu_decoder() {
+        let reg = default_registry();
+        // Default selection: NvDec (registered last, tagged Cuda) does not hijack
+        // the system-memory path; the CPU decoder is chosen.
+        let cpu = reg.autoplug_names(&h264(), &is_raw_video, 4).expect("a decoder reaches raw");
+        assert_eq!(cpu.last(), Some(&"ffmpegdec"), "default decode stays on the CPU: {cpu:?}");
+        // Cuda preference: the domain-aware search prefers the native NVDEC.
+        let gpu = reg
+            .autoplug_names_preferring(&h264(), &is_raw_video, 4, MemoryDomainKind::Cuda)
+            .expect("a decoder reaches raw");
+        assert_eq!(gpu.last(), Some(&"nvdec"), "Cuda preference prefers NvDec: {gpu:?}");
     }
 }
 

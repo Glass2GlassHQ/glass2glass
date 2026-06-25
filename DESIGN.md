@@ -1237,6 +1237,25 @@ known without sniffing the byte stream.
   produces (geometry resolves at negotiation), which is all the chain search
   needs to pick the right decoder.
 
+- **Memory-feature-aware selection** (M276). The `Caps` algebra encodes media
+  type, format, and geometry but *not* the memory domain a producer emits, so a
+  GPU-resident decoder (`NvDec` → NV12 in `MemoryDomain::Cuda`) is
+  indistinguishable from a CPU one by caps alone. Rather than thread the domain
+  through every `Caps` (446 construction sites, and it is orthogonal to the
+  format algebra), it rides as a *memory feature* on the auto-plug metadata:
+  `ElementDesc::output_memory: MemoryDomainKind` (the GStreamer `memory:CUDAMemory`
+  caps-feature analog), set per factory via `ElementFactory::produces(kind)`,
+  defaulting to `System`. `find_chain_preferring(.., preferred)` /
+  `Registry::{autoplug,decodebin}_preferring(.., preferred)` bias *ties* toward a
+  chain whose terminal element emits `preferred`: still breadth-first (a shorter
+  chain always wins), but among equal-length chains the matching-memory candidate
+  is tried first. With the default `System` preference this is exactly
+  registration order (a plain pipeline is unchanged, so `NvDec` registered last
+  never hijacks a CPU path); a GPU consumer requests `Cuda` and gets `NvDec` ahead
+  of the CPU decoder. Deriving the preference automatically from a downstream
+  consumer's accepted input memory (so a plain `decodebin` into a CUDA sink prefers
+  `NvDec` without an explicit request) is the remaining follow-up.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),
