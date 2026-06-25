@@ -38,7 +38,7 @@ pub mod compositor;
 pub mod analyticsoverlay;
 // Shared wgpu device context for the GPU elements (M103): a producer and a sink
 // must share one device for a copy-free WgpuTexture handoff.
-#[cfg(any(feature = "vello-overlay", feature = "wgpu-sink"))]
+#[cfg(any(feature = "vello-overlay", feature = "wgpu-sink", feature = "cuda-wgpu"))]
 pub mod gpu;
 // Vello GPU companion to analyticsoverlay (M102): renders boxes with the Vello
 // 2D renderer into a wgpu texture (MemoryDomain::WgpuTexture, kept on GPU).

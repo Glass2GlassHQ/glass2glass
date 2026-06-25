@@ -10,7 +10,9 @@
 //! inside wgpu), so cloning a `GpuContext` shares the GPU rather than duplicating
 //! it.
 //!
-//! Gated on the GPU features (`vello-overlay` / `wgpu-sink`).
+//! Gated on the GPU features (`vello-overlay` / `wgpu-sink` / `cuda-wgpu`); the
+//! last reuses [`texture_of`] / [`WgpuTextureKeepAlive`] to read an upstream
+//! producer's texture in the wgpu -> CUDA bridge element.
 
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{G2gError, HardwareError, WgpuKeepAlive};

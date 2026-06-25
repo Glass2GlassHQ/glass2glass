@@ -36,10 +36,16 @@
 //! NVDEC -> `CudaToWgpu` -> `WgpuPreprocess` -> inference chain against a CPU
 //! reference (all frames match, no PCIe download).
 
+use core::future::Future;
+use core::pin::Pin;
+
 use alloc::boxed::Box;
 use ash::vk;
 
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+};
 
 /// Map any wgpu request/poll error to a structured hardware failure.
 fn gpu_err<E>(_e: E) -> G2gError {
@@ -1285,6 +1291,14 @@ pub struct WgpuToCuda {
     context: u64,
     width: u32,
     height: u32,
+    /// Free list of linear output buffers, recycled across frames.
+    pool: LinearBufferPool,
+    /// Set once [`configure_pipeline`](AsyncElement::configure_pipeline) accepts
+    /// (the element path); the standalone struct API ignores it.
+    configured: bool,
+    /// Frames bridged wgpu -> CUDA (the element path). Atomic so `to_cuda_frame`
+    /// can count on `&self` (the standalone struct API takes `&self`).
+    frames: core::sync::atomic::AtomicU64,
     // Last field: releases the retained CUDA primary context, so it runs *after*
     // `mapping` (the CUDA import) and `texture` (the Vulkan memory) have dropped.
     _ctx_release: PrimaryCtxRelease,
@@ -1360,6 +1374,9 @@ impl WgpuToCuda {
                 context,
                 width,
                 height,
+                pool: LinearBufferPool::new(),
+                configured: false,
+                frames: core::sync::atomic::AtomicU64::new(0),
                 _ctx_release: PrimaryCtxRelease(device_ordinal),
             }),
             Err(e) => {
@@ -1393,55 +1410,60 @@ impl WgpuToCuda {
     }
 
     /// Copy the current texture contents (the shared CUDA array) device->device
-    /// into a fresh linear `CUdeviceptr` and return it as a `MemoryDomain::Cuda`
-    /// `Rgba8` frame stamped with `pts_ns`. The caller must have completed and
-    /// drained the render (`device.poll(Wait)`) before calling this.
+    /// into a linear `CUdeviceptr` and return it as a `MemoryDomain::Cuda` `Rgba8`
+    /// frame stamped with `pts_ns`. The caller must have completed and drained the
+    /// render (`device.poll(Wait)`) before calling this.
+    ///
+    /// The linear buffer is drawn from the bridge's [`LinearBufferPool`]: a
+    /// recycled buffer of the right size is reused, else one is allocated, and it
+    /// returns to the pool when the emitted frame's keep-alive is released. v1
+    /// `cuMemAlloc`d / `cuMemFree`d every frame; this amortizes both.
     pub fn to_cuda_frame(&self, pts_ns: u64) -> Result<g2g_core::frame::Frame, G2gError> {
         use cuda_ffi as c;
         let pitch = (self.width as usize) * 4; // packed RGBA, NVENC pitch (mult of 4)
         let size = pitch * self.height as usize;
-        // SAFETY: alloc + array->linear copy in `self.context`, pushed current.
-        let dptr = unsafe {
+        // Reuse a pooled buffer of this size, or allocate one. A recycled buffer's
+        // previous contents are fully overwritten by the copy below.
+        let buf = match self.pool.take(size) {
+            Some(buf) => buf,
+            None => LinearBuf::alloc(self.context, size)?,
+        };
+        let dptr = buf.dptr;
+        // SAFETY: array->linear copy in `self.context`, pushed current.
+        let copied = unsafe {
             check(c::cuCtxPushCurrent(self.context as c::CuContext))?;
-            let mut dptr = 0u64;
-            let mut result = check(c::cuMemAlloc(&mut dptr, size));
-            if result.is_ok() {
-                let copy = c::CudaMemcpy2D {
-                    src_x_in_bytes: 0,
-                    src_y: 0,
-                    src_memory_type: c::CU_MEMORYTYPE_ARRAY,
-                    src_host: core::ptr::null(),
-                    src_device: 0,
-                    src_array: self.mapping.array as *mut core::ffi::c_void,
-                    src_pitch: 0,
-                    dst_x_in_bytes: 0,
-                    dst_y: 0,
-                    dst_memory_type: c::CU_MEMORYTYPE_DEVICE,
-                    dst_host: core::ptr::null_mut(),
-                    dst_device: dptr,
-                    dst_array: core::ptr::null_mut(),
-                    dst_pitch: pitch,
-                    width_in_bytes: pitch,
-                    height: self.height as usize,
-                };
-                result = check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cuCtxSynchronize()));
-            }
+            let copy = c::CudaMemcpy2D {
+                src_x_in_bytes: 0,
+                src_y: 0,
+                src_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                src_host: core::ptr::null(),
+                src_device: 0,
+                src_array: self.mapping.array as *mut core::ffi::c_void,
+                src_pitch: 0,
+                dst_x_in_bytes: 0,
+                dst_y: 0,
+                dst_memory_type: c::CU_MEMORYTYPE_DEVICE,
+                dst_host: core::ptr::null_mut(),
+                dst_device: dptr,
+                dst_array: core::ptr::null_mut(),
+                dst_pitch: pitch,
+                width_in_bytes: pitch,
+                height: self.height as usize,
+            };
+            let result = check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cuCtxSynchronize()));
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cuCtxPopCurrent(&mut popped);
-            if let Err(e) = result {
-                if dptr != 0 {
-                    // SAFETY: free the just-allocated buffer; push/pop around it.
-                    let _ = c::cuCtxPushCurrent(self.context as c::CuContext);
-                    let _ = c::cuMemFree(dptr);
-                    let mut p: c::CuContext = core::ptr::null_mut();
-                    let _ = c::cuCtxPopCurrent(&mut p);
-                }
-                return Err(e);
-            }
-            dptr
+            result
         };
+        // On copy failure the buffer drops here (freeing its CUdeviceptr), not
+        // returned to the pool.
+        copied?;
 
-        let keep_alive = alloc::sync::Arc::new(LinearCudaBuffer { dptr, context: self.context });
+        // The frame's keep-alive recycles `buf` into the pool when released.
+        let keep_alive = alloc::sync::Arc::new(RecycledLinearBuffer {
+            free: alloc::sync::Arc::clone(&self.pool.free),
+            buf: std::sync::Mutex::new(Some(buf)),
+        });
         let buffer = g2g_core::memory::OwnedCudaBuffer::new(
             dptr,
             0,
@@ -1452,43 +1474,229 @@ impl WgpuToCuda {
             self.context,
             keep_alive,
         );
+        self.frames.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok(g2g_core::frame::Frame::new(
             g2g_core::MemoryDomain::Cuda(buffer),
             g2g_core::FrameTiming { pts_ns, dts_ns: pts_ns, ..Default::default() },
             0,
         ))
     }
+
+    /// Frames bridged wgpu -> CUDA so far (the element path). Useful in tests.
+    pub fn frames(&self) -> u64 {
+        self.frames.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Copy an upstream `src` RGBA texture (which must live on this bridge's
+    /// interop [`device`](Self::device)) into the bridge's exportable render
+    /// target, then drain the device so CUDA sees the result. The element path
+    /// calls this before [`to_cuda_frame`](Self::to_cuda_frame); a renderer that
+    /// already draws straight into [`texture`](Self::texture) skips it.
+    fn ingest_texture(&self, src: &wgpu::Texture) -> Result<(), G2gError> {
+        // Copy only the overlap, so a slightly mismatched upstream size is clamped
+        // rather than triggering a wgpu validation panic.
+        let w = src.width().min(self.width);
+        let h = src.height().min(self.height);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("wgpu-to-cuda") });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        // CUDA reads the shared memory directly (no wgpu fence), so the copy must
+        // be complete before to_cuda_frame's device->device copy runs.
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .map_err(gpu_err)?;
+        Ok(())
+    }
 }
 
-/// Frees one linear `CUdeviceptr` (a [`WgpuToCuda::to_cuda_frame`] output buffer)
-/// when the frame is released. The CUDA analog of an `AVFrame` owner.
+/// RGBA8 with open geometry: the bridge element's identity caps set. Only the
+/// memory domain changes (WgpuTexture -> Cuda); caps do not encode the domain.
+fn rgba_any() -> CapsSet {
+    CapsSet::one(Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+    })
+}
+
+/// `WgpuToCuda` as a pipeline transform (M275): a `MemoryDomain::WgpuTexture`
+/// RGBA frame (rendered on this bridge's interop [`device`](WgpuToCuda::device))
+/// in, a `MemoryDomain::Cuda` RGBA frame `NvEnc` can encode out, with no
+/// device->host read-back. Caps are `Identity(RGBA)`; only the domain changes.
+///
+/// Unlike the M220 CUDA -> wgpu (`CudaToWgpu`) bridge, whose interop device is
+/// built lazily on the first frame, this element owns its device up
+/// front (in [`WgpuToCuda::new`]) and exposes it: the upstream renderer must draw
+/// onto it (clone [`device`](WgpuToCuda::device) / [`queue`](WgpuToCuda::queue)
+/// in), because a `wgpu::Texture` is bound to the device that made it and the
+/// CUDA import only sees this device's memory. The application-wired, render-side
+/// counterpart of the [`WgpuSink`](crate::wgpusink) pattern.
+impl AsyncElement for WgpuToCuda {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        for alt in rgba_any().alternatives() {
+            if let Ok(narrowed) = upstream_caps.intersect(alt) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Identity(rgba_any())
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        if !rgba_any().accepts(absolute_caps) {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+                        // GPU-input only: a System frame is the CPU encoder's job.
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    // A frame from a foreign GPU producer (other keep-alive type)
+                    // or a different device is not bridgeable here.
+                    let src = crate::gpu::texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+                    self.ingest_texture(src)?;
+                    let out_frame = self.to_cuda_frame(frame.timing.pts_ns)?;
+                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                }
+                PipelinePacket::CapsChanged(c) => {
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
+                }
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Eos => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+/// One linear `CUdeviceptr` output buffer for [`WgpuToCuda::to_cuda_frame`], with
+/// its byte size (the pool keys reuse on it) and the context it lives in. Drop
+/// frees the pointer, so a buffer that is never recycled (pool teardown, or a
+/// copy failure) is reclaimed.
 #[derive(Debug)]
-struct LinearCudaBuffer {
+struct LinearBuf {
     dptr: u64,
+    size: usize,
     context: u64,
 }
 
-// SAFETY: inert owner of a device pointer; the context is thread-floating and
-// pushed per use, so the handle carries no thread affinity (same contract as
-// `OwnedCudaBuffer`). `Sync` lets a tee share it read-only.
-unsafe impl Send for LinearCudaBuffer {}
-// SAFETY: as for `Send`; an inert device-pointer owner, freed once under its
-// pushed context, safe to share read-only across a tee.
-unsafe impl Sync for LinearCudaBuffer {}
+impl LinearBuf {
+    /// Allocate a `size`-byte linear buffer in `context`.
+    fn alloc(context: u64, size: usize) -> Result<Self, G2gError> {
+        use cuda_ffi as c;
+        // SAFETY: `cuMemAlloc` in `context`, pushed current and popped before return.
+        unsafe {
+            check(c::cuCtxPushCurrent(context as c::CuContext))?;
+            let mut dptr = 0u64;
+            let result = check(c::cuMemAlloc(&mut dptr, size));
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cuCtxPopCurrent(&mut popped);
+            result?;
+            Ok(LinearBuf { dptr, size, context })
+        }
+    }
+}
 
-impl g2g_core::memory::CudaKeepAlive for LinearCudaBuffer {}
-
-impl Drop for LinearCudaBuffer {
+impl Drop for LinearBuf {
     fn drop(&mut self) {
         use cuda_ffi as c;
-        // SAFETY: `dptr` came from `cuMemAlloc` in `context`; freed once, with the
-        // context pushed. Best-effort.
+        // SAFETY: `dptr` came from `cuMemAlloc` in `context`; freed once, context
+        // pushed. Best-effort.
         unsafe {
             if c::cuCtxPushCurrent(self.context as c::CuContext) == 0 {
                 c::cuMemFree(self.dptr);
                 let mut popped: c::CuContext = core::ptr::null_mut();
                 let _ = c::cuCtxPopCurrent(&mut popped);
             }
+        }
+    }
+}
+
+/// Free list of recycled [`LinearBuf`] output buffers, shared (`Arc`) between the
+/// bridge and each emitted frame's keep-alive. A buffer returns here when its
+/// frame is released and is handed back out by the next [`WgpuToCuda::to_cuda_frame`]
+/// of the same size; remaining buffers are freed when the pool is dropped.
+#[derive(Debug, Clone, Default)]
+pub struct LinearBufferPool {
+    free: alloc::sync::Arc<std::sync::Mutex<alloc::vec::Vec<LinearBuf>>>,
+}
+
+impl LinearBufferPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pop a recycled buffer of exactly `size` bytes, or `None` to allocate one.
+    fn take(&self, size: usize) -> Option<LinearBuf> {
+        let mut free = self.free.lock().unwrap();
+        let idx = free.iter().position(|b| b.size == size)?;
+        Some(free.swap_remove(idx))
+    }
+}
+
+/// Keep-alive for one [`WgpuToCuda::to_cuda_frame`] output frame: holds its
+/// [`LinearBuf`] and returns it to the [`LinearBufferPool`] on drop (when the
+/// downstream consumer releases the frame), rather than freeing it. The recycling
+/// counterpart of the old per-frame-free `LinearCudaBuffer`.
+#[derive(Debug)]
+struct RecycledLinearBuffer {
+    free: alloc::sync::Arc<std::sync::Mutex<alloc::vec::Vec<LinearBuf>>>,
+    buf: std::sync::Mutex<Option<LinearBuf>>,
+}
+
+impl g2g_core::memory::CudaKeepAlive for RecycledLinearBuffer {}
+
+impl Drop for RecycledLinearBuffer {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.lock().ok().and_then(|mut b| b.take()) {
+            if let Ok(mut free) = self.free.lock() {
+                free.push(buf);
+            }
+            // If the pool lock is poisoned, `buf` drops here and frees itself.
         }
     }
 }
