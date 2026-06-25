@@ -39,7 +39,10 @@ use g2g_core::{
 };
 
 use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
-use crate::fmp4mux::{avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry};
+use crate::fmp4mux::{
+    avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry, vp8_keyframe,
+    vp9_keyframe,
+};
 use crate::mp4audiosink::esds;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
@@ -119,9 +122,10 @@ impl Mp4MuxN {
 
     fn pad_kind_for(caps: &Caps) -> Option<PadKind> {
         match caps {
-            Caps::CompressedVideo { codec: c @ (VideoCodec::H264 | VideoCodec::H265), .. } => {
-                Some(PadKind::Video(*c))
-            }
+            Caps::CompressedVideo {
+                codec: c @ (VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Vp8 | VideoCodec::Vp9),
+                ..
+            } => Some(PadKind::Video(*c)),
             Caps::Audio {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
@@ -144,13 +148,24 @@ impl Mp4MuxN {
         }
         match self.kinds[input] {
             Some(PadKind::Video(codec)) => {
-                let nalus = split_annexb(au);
-                // Parameter sets only ride the IDR; a leading P-frame has none, so
-                // wait for the keyframe that carries them.
-                if let Ok(param_sets) = parameter_sets(codec, &nalus) {
-                    let owned: Vec<Vec<u8>> = param_sets.iter().map(|s| s.to_vec()).collect();
-                    let (w, h) = self.dims[input];
-                    self.inits[input] = Some(TrackInit::Video { codec, width: w, height: h, param_sets: owned });
+                let (w, h) = self.dims[input];
+                match codec {
+                    VideoCodec::H264 | VideoCodec::H265 => {
+                        let nalus = split_annexb(au);
+                        // Parameter sets only ride the IDR; a leading P-frame has
+                        // none, so wait for the keyframe that carries them.
+                        if let Ok(param_sets) = parameter_sets(codec, &nalus) {
+                            let owned: Vec<Vec<u8>> = param_sets.iter().map(|s| s.to_vec()).collect();
+                            self.inits[input] =
+                                Some(TrackInit::Video { codec, width: w, height: h, param_sets: owned });
+                        }
+                    }
+                    // VP8/VP9 carry no out-of-band parameter sets; the track is
+                    // ready at the first frame (the vpcC uses caps geometry).
+                    _ => {
+                        self.inits[input] =
+                            Some(TrackInit::Video { codec, width: w, height: h, param_sets: Vec::new() });
+                    }
                 }
             }
             Some(PadKind::Audio { format, channels, rate }) => match format {
@@ -175,11 +190,16 @@ impl Mp4MuxN {
     /// the de-ADTS'd raw AAC for audio. Also returns whether it is a sync sample.
     fn sample_for(&self, input: usize, au: &[u8]) -> (Vec<u8>, bool) {
         match self.kinds[input] {
-            Some(PadKind::Video(codec)) => {
-                let nalus = split_annexb(au);
-                let is_sync = nalus.iter().any(|n| is_keyframe_nal(codec, n));
-                (avcc_sample(&nalus), is_sync)
-            }
+            Some(PadKind::Video(codec)) => match codec {
+                VideoCodec::H264 | VideoCodec::H265 => {
+                    let nalus = split_annexb(au);
+                    let is_sync = nalus.iter().any(|n| is_keyframe_nal(codec, n));
+                    (avcc_sample(&nalus), is_sync)
+                }
+                // VP8/VP9 frames are stored verbatim; keyframe from the frame header.
+                VideoCodec::Vp8 => (au.to_vec(), vp8_keyframe(au)),
+                _ => (au.to_vec(), vp9_keyframe(au)),
+            },
             // Audio access units are always sync samples. AAC strips its ADTS
             // header; Opus packets are stored raw.
             Some(PadKind::Audio { format: AudioFormat::Aac, .. }) => (strip_adts(au).to_vec(), true),
@@ -399,11 +419,17 @@ struct TrakMedia {
 fn trak_media(init: &TrackInit) -> TrakMedia {
     match init {
         TrackInit::Video { codec, width, height, param_sets } => {
-            let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
+            let sample_entry = match codec {
+                VideoCodec::Vp8 | VideoCodec::Vp9 => vp_sample_entry(*codec, *width, *height),
+                _ => {
+                    let refs: Vec<&[u8]> = param_sets.iter().map(|v| v.as_slice()).collect();
+                    visual_sample_entry(*codec, *width, *height, &refs)
+                }
+            };
             TrakMedia {
                 handler: b"vide",
                 media_header: full_box(b"vmhd", 0, 1, &[0u8; 8]),
-                sample_entry: visual_sample_entry(*codec, *width, *height, &refs),
+                sample_entry,
                 timescale: VIDEO_TIMESCALE,
                 dims: (*width, *height),
                 is_video: true,
@@ -424,6 +450,44 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
             }
         }
     }
+}
+
+/// The VP8/VP9 `VisualSampleEntry` (`vp08` / `vp09`) with its `vpcC`
+/// VPCodecConfigurationBox (the VP-in-ISOBMFF binding). Geometry comes from the
+/// caps; the codec config uses the 8-bit 4:2:0 unspecified-colour defaults (no
+/// bitstream parsing), which a player overrides from the frames it decodes.
+fn vp_sample_entry(codec: VideoCodec, width: u32, height: u32) -> Vec<u8> {
+    let fourcc: &[u8; 4] = match codec {
+        VideoCodec::Vp8 => b"vp08",
+        _ => b"vp09",
+    };
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    p.extend_from_slice(&[0u8; 16]); // pre_defined / reserved
+    p.extend_from_slice(&(width as u16).to_be_bytes());
+    p.extend_from_slice(&(height as u16).to_be_bytes());
+    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi horiz
+    p.extend_from_slice(&0x00480000u32.to_be_bytes()); // 72 dpi vert
+    p.extend_from_slice(&[0u8; 4]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // frame count
+    p.extend_from_slice(&[0u8; 32]); // compressor name
+    p.extend_from_slice(&0x0018u16.to_be_bytes()); // depth 24
+    p.extend_from_slice(&0xFFFFu16.to_be_bytes()); // pre_defined -1
+    p.extend_from_slice(&vpcc());
+    mp4_box(fourcc, &p)
+}
+
+/// The `vpcC` VPCodecConfigurationBox (fullbox v1): profile 0, level unset, 8-bit
+/// 4:2:0 (colocated), unspecified colour, no codec initialization data, the
+/// generic defaults for an unparsed VP8/VP9 stream.
+fn vpcc() -> Vec<u8> {
+    // profile 0, level unset, then a packed byte:
+    // bitDepth(4)=8 | chromaSubsampling(3)=1 (4:2:0 colocated) | videoFullRangeFlag(1)=0,
+    // colour_primaries / transfer / matrix unspecified (2), then a 2-byte
+    // codec_initialization_data_size of 0 (VP8/VP9 carry no init data).
+    let record = [0u8, 0, (8 << 4) | (1 << 1), 2, 2, 2, 0, 0];
+    full_box(b"vpcC", 1, 0, &record)
 }
 
 /// An `AudioSampleEntry` box (`mp4a` / `Opus`): the shared sample-entry header
@@ -613,5 +677,21 @@ mod tests {
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
         assert_eq!(count(b"esds"), 0, "no AAC descriptor for an Opus track");
         assert_eq!(count(b"soun"), 1, "sound handler");
+    }
+
+    #[test]
+    fn vp9_track_writes_a_vp09_sample_entry_with_vpcc() {
+        let tracks = [TrackInit::Video {
+            codec: VideoCodec::Vp9,
+            width: 320,
+            height: 240,
+            param_sets: Vec::new(),
+        }];
+        let moov = av_moov(&tracks);
+        let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
+        assert_eq!(count(b"vpcC"), 1, "VPCodecConfigurationBox");
+        assert_eq!(count(b"avcC"), 0, "no avcC for a VP9 track");
+        assert_eq!(count(b"vide"), 1, "video handler");
     }
 }

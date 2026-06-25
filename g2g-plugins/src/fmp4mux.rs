@@ -361,6 +361,34 @@ fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
     mp4_box(b"avcC", &avcc_record(param_sets))
 }
 
+/// VP8 keyframe flag: the frame tag's bit 0 (`0` = key frame). Shared by the
+/// container muxers that store VP8 frames verbatim (Matroska, MP4).
+pub(crate) fn vp8_keyframe(frame: &[u8]) -> bool {
+    frame.first().is_some_and(|b| b & 1 == 0)
+}
+
+/// VP9 keyframe flag from the uncompressed frame header: frame_marker(2)=0b10,
+/// profile(2) (+1 reserved bit for profile 3), show_existing_frame(1), then
+/// frame_type(1) where `0` = key frame. Superframes are not unpacked (the vpx
+/// encoder emits a single frame per buffer). Shared by the VP9-carrying muxers.
+pub(crate) fn vp9_keyframe(frame: &[u8]) -> bool {
+    let Some(&b0) = frame.first() else { return false };
+    let bit = |i: u32| (b0 >> (7 - i)) & 1;
+    if ((bit(0) << 1) | bit(1)) != 0b10 {
+        return false; // not a valid VP9 frame marker
+    }
+    let profile = (bit(3) << 1) | bit(2);
+    let mut cursor: u32 = 4;
+    if profile == 3 {
+        cursor += 1; // reserved_zero
+    }
+    if bit(cursor) == 1 {
+        return false; // show_existing_frame: a repeat, not a key frame
+    }
+    cursor += 1;
+    bit(cursor) == 0 // frame_type: 0 = key frame
+}
+
 /// `hvcC` decoder configuration record. `param_sets` is [VPS, SPS, PPS]. The
 /// 12-byte general profile_tier_level is copied from the SPS (it sits right
 /// after the 2-byte NAL header and the 1-byte sps_video_parameter_set_id /
