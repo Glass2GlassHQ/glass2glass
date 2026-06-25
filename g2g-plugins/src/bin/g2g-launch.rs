@@ -32,6 +32,10 @@
 //! cancellation channel yet, so `-e` / `-m` / `-f` / `-t` are recognized and
 //! ignored rather than rejected, keeping pasted lines parsing.
 //!
+//! Display: when built with `wayland-sink` and `WAYLAND_DISPLAY` is unset, it
+//! defaults to `wayland-0` so `autovideosink` finds a compositor without the
+//! caller exporting it; an existing value is left untouched.
+//!
 //! Debugging: `G2G_DEBUG` (the `GST_DEBUG` analog, e.g. `G2G_DEBUG=*:debug`)
 //! sets per-category log thresholds; `G2G_CAPS_TRACE=1` turns on the
 //! caps-negotiation explainer, which narrates the per-edge intersect / fixate
@@ -161,6 +165,19 @@ fn main() {
     if pipeline.trim().is_empty() {
         eprintln!("{USAGE}");
         process::exit(2);
+    }
+
+    // Default `WAYLAND_DISPLAY` to the conventional `wayland-0` socket when it is
+    // unset, so `autovideosink` / `waylandsink` find a compositor without the
+    // caller exporting it first. Only when the display sink is compiled in; an
+    // explicit env value always wins. If `wayland-0` is wrong, the sink fails the
+    // same way it would have with no value set.
+    #[cfg(feature = "wayland-sink")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+        if !opts.quiet {
+            eprintln!("WAYLAND_DISPLAY unset, defaulting to wayland-0");
+        }
     }
 
     let mut reg = default_registry();
