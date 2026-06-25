@@ -1009,12 +1009,496 @@ fn check(code: i32) -> Result<(), G2gError> {
     }
 }
 
+// ===========================================================================
+// wgpu -> CUDA (the encode direction, M271): the reverse of the NV12 import
+// above. A renderer writes a packed-RGBA `wgpu::Texture` backed by exportable
+// Vulkan memory; CUDA reads the same memory as an array and copies it
+// device->device into a linear `CUdeviceptr`, which `NvEnc` registers as an
+// `ABGR` surface (NVENC color converts to H.264 internally). The pixels reach
+// the encoder with no device->host read-back, the moat the M267 Bevy demo pays.
+// ===========================================================================
+
+/// A self-allocated, FD-exportable Vulkan RGBA8 image shared with CUDA, the
+/// encode-side counterpart of [`SharedNv12Image`]. Raw handles owned here; the
+/// `wgpu::Texture` that wraps it frees the image/memory on drop, and CUDA owns
+/// the exported FD after import.
+#[derive(Debug)]
+pub struct SharedRgbaImage {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    fd: i32,
+    size: u64,
+    width: u32,
+    height: u32,
+}
+
+/// Allocate an FD-exportable `R8G8B8A8_UNORM` Vulkan image (`width` x `height`),
+/// usable as a wgpu render target and importable into CUDA. Mirror of
+/// [`export_nv12_image`].
+///
+/// # Safety
+/// `device` must be a Vulkan-backend wgpu device with `VK_KHR_external_memory_fd`
+/// (see [`create_interop_device`]).
+pub unsafe fn export_rgba_image(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> Result<SharedRgbaImage, G2gError> {
+    // SAFETY: caller guarantees a Vulkan device; the hal guard is held for the
+    // whole allocation and no raw handle outlives the ash device.
+    unsafe {
+        let hal_device = device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let raw: &ash::Device = hal_device.raw_device();
+        let phys = hal_device.raw_physical_device();
+        let instance: &ash::Instance = hal_device.shared_instance().raw_instance();
+
+        let mut ext_img = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(vk::Format::R8G8B8A8_UNORM)
+            .extent(vk::Extent3D { width, height, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            // COLOR_ATTACHMENT: a renderer draws into it. TRANSFER_DST: the test
+            // (and `queue.write_texture`) uploads a pattern. TRANSFER_SRC/SAMPLED:
+            // completeness for copies / sampling.
+            .usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::SAMPLED,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut ext_img);
+        let image = raw.create_image(&image_info, None).map_err(gpu_err)?;
+
+        let reqs = raw.get_image_memory_requirements(image);
+        let props = instance.get_physical_device_memory_properties(phys);
+        let Some(mem_type) =
+            find_memory_type(&props, reqs.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        else {
+            raw.destroy_image(image, None);
+            return Err(G2gError::Hardware(HardwareError::Other));
+        };
+
+        // Dedicated allocation: CUDA's import of a Vulkan image requires it.
+        let mut export = vk::ExportMemoryAllocateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(reqs.size)
+            .memory_type_index(mem_type)
+            .push_next(&mut export)
+            .push_next(&mut dedicated);
+        let memory = match raw.allocate_memory(&alloc_info, None) {
+            Ok(m) => m,
+            Err(e) => {
+                raw.destroy_image(image, None);
+                return Err(gpu_err(e));
+            }
+        };
+        if let Err(e) = raw.bind_image_memory(image, memory, 0) {
+            raw.free_memory(memory, None);
+            raw.destroy_image(image, None);
+            return Err(gpu_err(e));
+        }
+
+        let ext_fd = ash::khr::external_memory_fd::Device::new(instance, raw);
+        let fd = match ext_fd.get_memory_fd(
+            &vk::MemoryGetFdInfoKHR::default()
+                .memory(memory)
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
+        ) {
+            Ok(fd) => fd,
+            Err(e) => {
+                raw.free_memory(memory, None);
+                raw.destroy_image(image, None);
+                return Err(gpu_err(e));
+            }
+        };
+
+        Ok(SharedRgbaImage { image, memory, fd, size: reqs.size, width, height })
+    }
+}
+
+/// Wrap a [`SharedRgbaImage`] as a `wgpu::Texture` (an `Rgba8Unorm` render
+/// target). The texture's drop frees the backing Vulkan image/memory. Mirror of
+/// [`wrap_as_texture`].
+///
+/// # Safety
+/// `device` must be the interop device the image was created on; `shared`'s image
+/// and memory must not be freed by any other path.
+pub unsafe fn wrap_rgba_as_texture(
+    device: &wgpu::Device,
+    shared: SharedRgbaImage,
+) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width: shared.width,
+        height: shared.height,
+        depth_or_array_layers: 1,
+    };
+    let image = shared.image;
+    let memory = shared.memory;
+    // SAFETY: `device` is the interop Vulkan device; `image` / `memory` are valid
+    // and owned here, moved into the drop callback (fired once when wgpu drops the
+    // texture, after the GPU is idle).
+    let hal_texture = unsafe {
+        let hal_device = device.as_hal::<wgpu_hal::api::Vulkan>().expect("vulkan wgpu device");
+        let raw = hal_device.raw_device().clone();
+        let drop_cb: wgpu_hal::DropCallback = Box::new(move || {
+            raw.destroy_image(image, None);
+            raw.free_memory(memory, None);
+        });
+        let hal_desc = wgpu_hal::TextureDescriptor {
+            label: Some("wgpu-cuda-rgba"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUses::COLOR_TARGET
+                | wgpu::TextureUses::COPY_DST
+                | wgpu::TextureUses::COPY_SRC
+                | wgpu::TextureUses::RESOURCE,
+            memory_flags: wgpu_hal::MemoryFlags::empty(),
+            view_formats: alloc::vec::Vec::new(),
+        };
+        hal_device.texture_from_raw(
+            image,
+            &hal_desc,
+            Some(drop_cb),
+            wgpu_hal::vulkan::TextureMemory::External,
+        )
+    };
+    let wgpu_desc = wgpu::TextureDescriptor {
+        label: Some("wgpu-cuda-rgba"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    };
+    // SAFETY: `hal_texture` was just produced by this device's hal.
+    unsafe { device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(hal_texture, &wgpu_desc) }
+}
+
+/// Import a [`SharedRgbaImage`] into CUDA once and map it as a 4-channel uint8
+/// CUDA array, in `context`. Consumes `shared.fd`. Mirror of
+/// [`import_image_into_cuda`] with the RGBA (4-channel, full-height) array shape.
+///
+/// # Safety
+/// `shared` must come from [`export_rgba_image`] and not yet be imported.
+pub unsafe fn import_rgba_into_cuda(
+    shared: &SharedRgbaImage,
+    context: u64,
+) -> Result<CudaImageMapping, G2gError> {
+    use cuda_ffi as c;
+    // SAFETY: CUDA Driver API import sequence in `context`; on error every handle
+    // created so far is destroyed before the context is popped.
+    unsafe {
+        check(c::cuInit(0))?;
+        check(c::cuCtxPushCurrent(context as c::CuContext))?;
+
+        let import_desc = c::CudaExternalMemoryHandleDesc {
+            type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+            _pad: 0,
+            handle_fd: shared.fd,
+            _handle_rest: [0; 12],
+            size: shared.size,
+            flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
+            reserved: [0; 16],
+        };
+        let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
+        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
+
+        let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
+            offset: 0,
+            array_desc: c::CudaArray3dDescriptor {
+                width: shared.width as usize,
+                height: shared.height as usize,
+                depth: 0,
+                format: c::CU_AD_FORMAT_UNSIGNED_INT8,
+                num_channels: 4,
+                flags: 0,
+            },
+            num_levels: 1,
+            reserved: [0; 16],
+        };
+        let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
+        let mut array: c::CuArray = core::ptr::null_mut();
+        if result.is_ok() {
+            result = check(c::cuExternalMemoryGetMappedMipmappedArray(
+                &mut mipmap,
+                ext_mem,
+                &mipmap_desc,
+            ));
+        }
+        if result.is_ok() {
+            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
+        }
+        if let Err(e) = result {
+            if !mipmap.is_null() {
+                c::cuMipmappedArrayDestroy(mipmap);
+            }
+            if !ext_mem.is_null() {
+                c::cuDestroyExternalMemory(ext_mem);
+            }
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cuCtxPopCurrent(&mut popped);
+            return Err(e);
+        }
+        let mut popped: c::CuContext = core::ptr::null_mut();
+        let _ = c::cuCtxPopCurrent(&mut popped);
+        Ok(CudaImageMapping {
+            ext_mem: ext_mem as usize,
+            mipmap: mipmap as usize,
+            array: array as usize,
+            context,
+        })
+    }
+}
+
+/// Bridges a GPU-rendered RGBA `wgpu::Texture` to a CUDA-resident frame `NvEnc`
+/// can encode, with no device->host read-back. Owns an exportable RGBA texture
+/// (the render target) and its persistent CUDA import; [`to_cuda_frame`] copies
+/// the shared array device->device into a fresh linear `CUdeviceptr` and hands it
+/// downstream as a `MemoryDomain::Cuda` `Rgba8` frame.
+///
+/// `mapping` is declared before `texture` so the CUDA import is destroyed before
+/// the texture's drop frees the Vulkan memory it aliased.
+pub struct WgpuToCuda {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    mapping: CudaImageMapping,
+    texture: wgpu::Texture,
+    context: u64,
+    width: u32,
+    height: u32,
+    // Last field: releases the retained CUDA primary context, so it runs *after*
+    // `mapping` (the CUDA import) and `texture` (the Vulkan memory) have dropped.
+    _ctx_release: PrimaryCtxRelease,
+}
+
+/// Releases a retained CUDA primary context on drop (the device ordinal it was
+/// retained on). Held as the last field of [`WgpuToCuda`] so the release is
+/// ordered after the CUDA import and Vulkan image teardown.
+#[derive(Debug)]
+struct PrimaryCtxRelease(i32);
+
+impl Drop for PrimaryCtxRelease {
+    fn drop(&mut self) {
+        // SAFETY: balances the `cuDevicePrimaryCtxRetain` in `WgpuToCuda::new`;
+        // released once. Best-effort.
+        unsafe {
+            let _ = cuda_ffi::cuDevicePrimaryCtxRelease(self.0);
+        }
+    }
+}
+
+impl core::fmt::Debug for WgpuToCuda {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WgpuToCuda")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish()
+    }
+}
+
+impl WgpuToCuda {
+    /// Build the bridge on an interop `device`: retain the CUDA primary context on
+    /// device 0 (the NVIDIA GPU the interop device also selects), allocate an
+    /// exportable RGBA image, import it into CUDA, and wrap it as the render
+    /// target texture. The retained context is the one `NvEnc` runs in (the
+    /// bridge's frames are valid there) and is released on drop, so the bridge
+    /// must outlive any frame it produced.
+    ///
+    /// # Safety
+    /// `device` must be a `VK_KHR_external_memory_fd` interop device (see
+    /// [`create_interop_device`]).
+    pub unsafe fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, G2gError> {
+        use cuda_ffi as c;
+        let device_ordinal = 0i32;
+        // SAFETY: retain the primary context on device 0; released in `Drop`.
+        let context = unsafe {
+            check(c::cuInit(0))?;
+            let mut dev = 0i32;
+            check(c::cuDeviceGet(&mut dev, device_ordinal))?;
+            let mut ctx: c::CuContext = core::ptr::null_mut();
+            check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+            ctx as u64
+        };
+        // SAFETY: interop device per the contract; `shared` is exported, imported
+        // exactly once (FD consumed), then wrapped (image/memory owned by the texture).
+        let built = unsafe {
+            export_rgba_image(&device, width, height).and_then(|shared| {
+                import_rgba_into_cuda(&shared, context)
+                    .map(|mapping| (mapping, wrap_rgba_as_texture(&device, shared)))
+            })
+        };
+        match built {
+            Ok((mapping, texture)) => Ok(Self {
+                device,
+                queue,
+                mapping,
+                texture,
+                context,
+                width,
+                height,
+                _ctx_release: PrimaryCtxRelease(device_ordinal),
+            }),
+            Err(e) => {
+                // SAFETY: balance the retain above on the build failure path.
+                unsafe {
+                    let _ = c::cuDevicePrimaryCtxRelease(device_ordinal);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The CUDA context the bridge (and `NvEnc`) run in.
+    pub fn context(&self) -> u64 {
+        self.context
+    }
+
+    /// The exportable RGBA render target. A renderer draws into this (or the
+    /// caller `queue.write_texture`s it); the pixels are then visible to CUDA.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    /// The interop wgpu device / queue, for the caller to submit its render and
+    /// drain it before [`to_cuda_frame`].
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Copy the current texture contents (the shared CUDA array) device->device
+    /// into a fresh linear `CUdeviceptr` and return it as a `MemoryDomain::Cuda`
+    /// `Rgba8` frame stamped with `pts_ns`. The caller must have completed and
+    /// drained the render (`device.poll(Wait)`) before calling this.
+    pub fn to_cuda_frame(&self, pts_ns: u64) -> Result<g2g_core::frame::Frame, G2gError> {
+        use cuda_ffi as c;
+        let pitch = (self.width as usize) * 4; // packed RGBA, NVENC pitch (mult of 4)
+        let size = pitch * self.height as usize;
+        // SAFETY: alloc + array->linear copy in `self.context`, pushed current.
+        let dptr = unsafe {
+            check(c::cuCtxPushCurrent(self.context as c::CuContext))?;
+            let mut dptr = 0u64;
+            let mut result = check(c::cuMemAlloc(&mut dptr, size));
+            if result.is_ok() {
+                let copy = c::CudaMemcpy2D {
+                    src_x_in_bytes: 0,
+                    src_y: 0,
+                    src_memory_type: c::CU_MEMORYTYPE_ARRAY,
+                    src_host: core::ptr::null(),
+                    src_device: 0,
+                    src_array: self.mapping.array as *mut core::ffi::c_void,
+                    src_pitch: 0,
+                    dst_x_in_bytes: 0,
+                    dst_y: 0,
+                    dst_memory_type: c::CU_MEMORYTYPE_DEVICE,
+                    dst_host: core::ptr::null_mut(),
+                    dst_device: dptr,
+                    dst_array: core::ptr::null_mut(),
+                    dst_pitch: pitch,
+                    width_in_bytes: pitch,
+                    height: self.height as usize,
+                };
+                result = check(c::cu_memcpy_2d(&copy)).and_then(|()| check(c::cuCtxSynchronize()));
+            }
+            let mut popped: c::CuContext = core::ptr::null_mut();
+            let _ = c::cuCtxPopCurrent(&mut popped);
+            if let Err(e) = result {
+                if dptr != 0 {
+                    // SAFETY: free the just-allocated buffer; push/pop around it.
+                    let _ = c::cuCtxPushCurrent(self.context as c::CuContext);
+                    let _ = c::cuMemFree(dptr);
+                    let mut p: c::CuContext = core::ptr::null_mut();
+                    let _ = c::cuCtxPopCurrent(&mut p);
+                }
+                return Err(e);
+            }
+            dptr
+        };
+
+        let keep_alive = alloc::sync::Arc::new(LinearCudaBuffer { dptr, context: self.context });
+        let buffer = g2g_core::memory::OwnedCudaBuffer::new(
+            dptr,
+            0,
+            pitch as u32,
+            0,
+            self.width,
+            self.height,
+            self.context,
+            keep_alive,
+        );
+        Ok(g2g_core::frame::Frame::new(
+            g2g_core::MemoryDomain::Cuda(buffer),
+            g2g_core::FrameTiming { pts_ns, dts_ns: pts_ns, ..Default::default() },
+            0,
+        ))
+    }
+}
+
+/// Frees one linear `CUdeviceptr` (a [`WgpuToCuda::to_cuda_frame`] output buffer)
+/// when the frame is released. The CUDA analog of an `AVFrame` owner.
+#[derive(Debug)]
+struct LinearCudaBuffer {
+    dptr: u64,
+    context: u64,
+}
+
+// SAFETY: inert owner of a device pointer; the context is thread-floating and
+// pushed per use, so the handle carries no thread affinity (same contract as
+// `OwnedCudaBuffer`). `Sync` lets a tee share it read-only.
+unsafe impl Send for LinearCudaBuffer {}
+// SAFETY: as for `Send`; an inert device-pointer owner, freed once under its
+// pushed context, safe to share read-only across a tee.
+unsafe impl Sync for LinearCudaBuffer {}
+
+impl g2g_core::memory::CudaKeepAlive for LinearCudaBuffer {}
+
+impl Drop for LinearCudaBuffer {
+    fn drop(&mut self) {
+        use cuda_ffi as c;
+        // SAFETY: `dptr` came from `cuMemAlloc` in `context`; freed once, with the
+        // context pushed. Best-effort.
+        unsafe {
+            if c::cuCtxPushCurrent(self.context as c::CuContext) == 0 {
+                c::cuMemFree(self.dptr);
+                let mut popped: c::CuContext = core::ptr::null_mut();
+                let _ = c::cuCtxPopCurrent(&mut popped);
+            }
+        }
+    }
+}
+
 /// CUDA Driver API external-memory FFI for the interop bridge. Extends the
 /// surface in [`crate::cuda`] (which has the download path) with the
 /// import-by-FD + mapped-array calls. Struct layouts are field-for-field from
 /// `cuda.h` (64-bit); the `_v2` suffixed names match the symbols `libcuda`
 /// exports for the `#define`d unsuffixed entry points.
-#[allow(non_snake_case)]
+#[allow(non_snake_case, unreachable_pub)]
 mod cuda_ffi {
     use core::ffi::c_void;
 
@@ -1118,5 +1602,9 @@ mod cuda_ffi {
         pub fn cuDestroyExternalMemory(ext_mem: CuExternalMemory) -> i32;
         #[link_name = "cuMemcpy2D_v2"]
         pub fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> i32;
+        #[link_name = "cuMemAlloc_v2"]
+        pub fn cuMemAlloc(dptr: *mut u64, bytesize: usize) -> i32;
+        #[link_name = "cuMemFree_v2"]
+        pub fn cuMemFree(dptr: u64) -> i32;
     }
 }

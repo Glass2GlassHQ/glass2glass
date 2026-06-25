@@ -64,6 +64,10 @@ pub struct NvEnc {
     width: u32,
     height: u32,
     framerate: Rate,
+    /// Negotiated input pixel format: NV12 (the NVDEC hwframe domain) or a packed
+    /// 8-bit RGBA (the GPU-render domain, e.g. via `WgpuToCuda`). NVENC color
+    /// converts RGBA internally, so both produce H.264.
+    input_format: RawVideoFormat,
     bitrate_bps: u32,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
     /// the CUDA context it was opened on. `None` until the first frame.
@@ -117,6 +121,7 @@ impl NvEnc {
             width: 0,
             height: 0,
             framerate: Rate::Any,
+            input_format: RawVideoFormat::Nv12,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             session: None,
             frame_no: 0,
@@ -138,12 +143,35 @@ impl NvEnc {
         self.emitted
     }
 
-    fn input_template() -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
+    /// The accepted input formats: NV12 (the NVDEC hwframe domain) and packed
+    /// 8-bit RGBA (the GPU-render domain). NVENC color converts RGBA internally.
+    fn input_formats() -> [RawVideoFormat; 2] {
+        [RawVideoFormat::Nv12, RawVideoFormat::Rgba8]
+    }
+
+    /// Open-geometry input caps, one alternative per accepted format.
+    fn input_caps_set() -> CapsSet {
+        CapsSet::from_alternatives(
+            Self::input_formats()
+                .into_iter()
+                .map(|format| Caps::RawVideo {
+                    format,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                })
+                .collect(),
+        )
+    }
+
+    /// The NVENC input buffer format for the negotiated input. RGBA maps to
+    /// `ABGR` (NVENC's word-ordered `A8B8G8R8` is byte order R,G,B,A, exactly
+    /// wgpu's `Rgba8`); `Bgra8` maps to `ARGB`.
+    fn nv_buffer_format(&self) -> u32 {
+        match self.input_format {
+            RawVideoFormat::Rgba8 => ffi::NV_ENC_BUFFER_FORMAT_ABGR,
+            RawVideoFormat::Bgra8 => ffi::NV_ENC_BUFFER_FORMAT_ARGB,
+            _ => ffi::NV_ENC_BUFFER_FORMAT_NV12,
         }
     }
 
@@ -294,11 +322,14 @@ impl NvEnc {
         pts_ns: u64,
         force_keyframe: bool,
     ) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+        let buffer_format = self.nv_buffer_format();
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         let enc = session.encoder;
         let f = &session.funcs;
 
-        // Register the NV12 surface as a CUDA device pointer.
+        // Register the input surface (NV12 two-plane, or packed RGBA) as a CUDA
+        // device pointer. For RGBA the pitch is the full row in bytes and the
+        // single plane lives at `luma_ptr`; NVENC color converts internally.
         // SAFETY: the NVENC param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut reg: ffi::RegisterResource = unsafe { core::mem::zeroed() };
@@ -308,7 +339,7 @@ impl NvEnc {
         reg.height = self.height;
         reg.pitch = buf.luma_pitch;
         reg.resource_to_register = buf.luma_ptr as *mut core::ffi::c_void;
-        reg.buffer_format = ffi::NV_ENC_BUFFER_FORMAT_NV12;
+        reg.buffer_format = buffer_format;
         reg.buffer_usage = ffi::NV_ENC_INPUT_IMAGE;
         // SAFETY: valid encoder + fully-initialized register struct.
         nvchk(unsafe { (f.nv_enc_register_resource.ok_or(hw())?)(enc, &mut reg) })?;
@@ -358,7 +389,7 @@ impl NvEnc {
         pic.input_time_stamp = pts_ns;
         pic.input_buffer = mapped;
         pic.output_bitstream = output;
-        pic.buffer_fmt = ffi::NV_ENC_BUFFER_FORMAT_NV12;
+        pic.buffer_fmt = buffer_format;
         pic.picture_struct = ffi::NV_ENC_PIC_STRUCT_FRAME;
         if force_keyframe {
             // Force an IDR and write SPS/PPS in-band so each keyframe is a valid
@@ -558,36 +589,50 @@ impl AsyncElement for NvEnc {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_template())
+        for alt in Self::input_caps_set().alternatives() {
+            if let Ok(narrowed) = upstream_caps.intersect(alt) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: NV12 (any geometry) in, H.264 at the same dims and
-    /// framerate out. Non-NV12 input yields an empty set, rejected at solve.
+    /// Native `DerivedOutput`: NV12 or packed RGBA (any geometry) in, H.264 at the
+    /// same dims and framerate out. Any other input yields an empty set, rejected
+    /// at solve.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate } => {
-                CapsSet::one(Caps::CompressedVideo {
-                    codec: VideoCodec::H264,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12 | RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate } =
-            absolute_caps
-        else {
+        let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
+        if !matches!(
+            format,
+            RawVideoFormat::Nv12 | RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8
+        ) {
+            return Err(G2gError::CapsMismatch);
+        }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
             return Err(G2gError::CapsMismatch);
         };
         self.width = *w;
         self.height = *h;
+        self.input_format = *format;
         self.framerate = framerate.clone();
         // The NVENC session opens lazily on the first frame (it needs the frame's
         // CUDA context), so configure only records geometry.
@@ -666,7 +711,7 @@ impl PadTemplates for NvEnc {
             framerate: Rate::Any,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_template())),
+            PadTemplate::sink(Self::input_caps_set()),
             PadTemplate::source(CapsSet::one(out)),
         ])
     }
@@ -726,6 +771,10 @@ mod ffi {
     pub const NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR: u32 = 0x1;
     pub const NV_ENC_INPUT_IMAGE: u32 = 0x0;
     pub const NV_ENC_BUFFER_FORMAT_NV12: u32 = 0x1;
+    /// Packed `A8R8G8B8` (word order), byte order B,G,R,A on little-endian.
+    pub const NV_ENC_BUFFER_FORMAT_ARGB: u32 = 0x0100_0000;
+    /// Packed `A8B8G8R8` (word order), byte order R,G,B,A, i.e. wgpu `Rgba8`.
+    pub const NV_ENC_BUFFER_FORMAT_ABGR: u32 = 0x1000_0000;
     pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x1;
     pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2;
     pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 0x2;

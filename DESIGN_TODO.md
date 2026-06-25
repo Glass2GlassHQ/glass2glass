@@ -292,9 +292,15 @@ leverage first:
   - `NvEnc`: system-memory NV12 input (host upload), HEVC via the HEVC GUID
     (NVENC AV1 needs an RTX 40-series; Ampere/3060 is H.264 + HEVC encode only),
     finite-GOP periodic IDRs with `repeatSPSPPS`, an output-bitstream-buffer pool
-    (one is alloc/freed per frame today), runtime bitrate retarget via
-    `nvEncReconfigureEncoder`, and a wgpu-texture -> CUDA hand-off so it can
-    ingest the Bevy/M267 render zero-copy (the read-back the demo pays today).
+    (one is alloc/freed per frame today), and runtime bitrate retarget via
+    `nvEncReconfigureEncoder`. (RGBA input + the wgpu->CUDA `WgpuToCuda` bridge
+    are done, M271.)
+- Finish the zero-copy GPU-render egress (M271 shipped the `WgpuToCuda` bridge +
+  `NvEnc` RGBA, validated standalone): rewire `examples/bevy-g2g-stream` to render
+  on the interop device into the bridge texture via `RenderCreation::Manual` so the
+  demo encodes with no read-back, and promote `WgpuToCuda` to a pipeline element
+  (`MemoryDomain::WgpuTexture` input + a linear-buffer reuse pool; one is
+  alloc/freed per frame today).
   - `NvDec`: mid-stream resolution change (decoder reconfigure), HEVC / other
     codecs via the codec enum, 10-bit output, and a configurable display delay
     (fixed at a low-latency 1 today). Registry / auto-plug wiring so `decodebin`
