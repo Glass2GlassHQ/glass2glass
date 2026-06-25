@@ -22,9 +22,10 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
-/// A short H.264 Annex-B clip (SPS/PPS + IDR + P-frames), embedded so the test
-/// binary needs no companion file on the device.
-const H264: &[u8] = include_bytes!("../../examples/bevy-g2g-stream/bevy_g2g.h264");
+/// A short H.264 Annex-B clip (128x96, 10 frames, baseline: SPS/PPS + IDR +
+/// P-frames), committed under `tests/fixtures/` and embedded so the test binary
+/// needs no companion file on the device.
+const H264: &[u8] = include_bytes!("fixtures/h264_128x96.h264");
 
 /// `OutputSink` that records every packet the decoder pushes (CapsChanged +
 /// DataFrames), the same collector the other decode smoke tests use.

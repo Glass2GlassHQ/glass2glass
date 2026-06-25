@@ -124,6 +124,8 @@ use crate::vaapidec::VaapiH264Dec;
 use crate::nvdec::NvDec;
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 use crate::nvenc::NvEnc;
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+use crate::mediacodecdec::MediaCodecDec;
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -405,6 +407,12 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
             .produces(g2g_core::MemoryDomainKind::Cuda),
     );
+    // Android hardware H.264 decode via the NDK MediaCodec (M219). Reachable
+    // from g2g-launch on-device; the gst analog is `amcviddec`.
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdec", |_| {
+        Box::new(MediaCodecDec::h264())
+    }));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
