@@ -22,10 +22,45 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
-/// A short H.264 Annex-B clip (128x96, 10 frames, baseline: SPS/PPS + IDR +
+/// Start a binder threadpool so Codec2 can allocate the decoder's output graphic
+/// buffers, which it does by calling back into this process over binder
+/// (IGraphicBufferAllocator). An Android app gets a threadpool from the
+/// framework; a bare native binary has none, so the allocate transaction has no
+/// thread to service it and the codec stalls. The `ABinderProcess_*` functions
+/// live in the device's libbinder_ndk.so but are not in the NDK link stub
+/// (platform/LLNDK only), so resolve them at runtime with dlsym.
+fn start_binder_threadpool() {
+    use core::ffi::{c_char, c_int, c_void};
+    extern "C" {
+        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    const RTLD_NOW: c_int = 2;
+    // SAFETY: libbinder_ndk.so is already loaded by MediaCodec; the dlsym'd
+    // symbols have the C signatures declared in <android/binder_process.h>.
+    unsafe {
+        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
+        if lib.is_null() {
+            return;
+        }
+        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        if !set.is_null() {
+            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
+            set(1);
+        }
+        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        if !start.is_null() {
+            let start: extern "C" fn() = core::mem::transmute(start);
+            start();
+        }
+    }
+}
+
+/// A short H.264 Annex-B clip (640x480, 10 frames, baseline: SPS/PPS + IDR +
 /// P-frames), committed under `tests/fixtures/` and embedded so the test binary
-/// needs no companion file on the device.
-const H264: &[u8] = include_bytes!("fixtures/h264_128x96.h264");
+/// needs no companion file on the device. 640x480 (not a tiny size) because
+/// hardware decoders' graphic-buffer allocators reject sub-minimum dimensions.
+const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 
 /// `OutputSink` that records every packet the decoder pushes (CapsChanged +
 /// DataFrames), the same collector the other decode smoke tests use.
@@ -101,16 +136,21 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
 
 #[tokio::test]
 async fn mediacodec_decodes_h264_to_nv12() {
+    start_binder_threadpool();
+
     let aus = access_units(H264);
     assert!(aus.len() > 1, "fixture must split into multiple access units, got {}", aus.len());
 
     let mut dec = MediaCodecDec::h264();
 
-    // Negotiation surrogate: upstream is H.264 with geometry unknown until SPS.
+    // Negotiation surrogate: upstream H.264 with the fixture's geometry, as
+    // `h264parse` would emit from the SPS. MediaCodec's `configure()` requires
+    // width/height (it returns EINVAL without them), so the geometry is not
+    // optional here, unlike the codec-private SPS/PPS which ride the stream.
     let upstream = Caps::CompressedVideo {
         codec: VideoCodec::H264,
-        width: Dim::Any,
-        height: Dim::Any,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
         framerate: Rate::Any,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept H.264");

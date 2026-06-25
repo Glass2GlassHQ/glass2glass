@@ -34,14 +34,17 @@ if [ -z "$(adb devices | awk 'NR>1 && $2=="device"{print $1}')" ]; then
 fi
 
 # 2. Cross-compile just this test binary with the NDK linker (cargo-ndk).
+#    --platform 24: AImageReader (the decoder's output Surface) is API 24+.
 echo ">> building android_mediacodec_smoke for $ABI ($TRIPLE)"
-cargo ndk -t "$ABI" build --release -p g2g-plugins --features mediacodec \
+cargo ndk --platform 24 -t "$ABI" build --release -p g2g-plugins --features mediacodec \
     --test android_mediacodec_smoke
 
-# 3. Locate the freshly built test binary (cargo names it deps/<test>-<hash>,
-#    with a sibling .d depfile we must skip).
-BIN="$(ls -t "target/$TRIPLE/release/deps/android_mediacodec_smoke-"* 2>/dev/null \
-    | grep -vE '\.(d|so)$' | head -1 || true)"
+# 3. Locate the freshly built test binary: the newest *executable* matching
+#    deps/<test>-<hash> (the dir also holds non-executable .d / .o artifacts with
+#    the same prefix, so filter by the execute bit, not the extension).
+BIN="$(find "target/$TRIPLE/release/deps" -maxdepth 1 -type f -executable \
+    -name 'android_mediacodec_smoke-*' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2)"
 if [ -z "$BIN" ]; then echo "could not find the built test binary under target/$TRIPLE/release/deps" >&2; exit 1; fi
 echo ">> built $BIN"
 

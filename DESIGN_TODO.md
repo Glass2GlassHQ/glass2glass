@@ -14,8 +14,7 @@ leverage first:
 
 1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
    Metal present, plus on-device validation of `VtDecode` / `VtEncode`.
-   Android: encode, Camera2, AAudio, Surface present, plus on-device
-   validation of `MediaCodecDec`.
+   Android: encode, Camera2, AAudio, Surface present.
 2. **Egress / transports.** SRT TSBPD + congestion control + real-peer interop,
    AES-256 + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Pure-Rust / wasm codec decode (dav1d/rav1d, vpx) to drop the
@@ -78,9 +77,8 @@ leverage first:
 
 ## Platform: Android
 
-- `MediaCodecDec`: on-device runtime validation; output color-format beyond
-  semi-planar / planar (`COLOR_FormatYUV420Flexible` via `AImageReader`); HEVC;
-  an `AHardwareBuffer` zero-copy domain; the `Surface` present sink.
+- `MediaCodecDec`: HEVC; an `AHardwareBuffer` / `SurfaceTexture` zero-copy
+  domain; the `Surface` present sink.
 - Encode, Camera2 capture, AAudio, Surface present.
 
 ## Receive / decode

@@ -471,10 +471,11 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never
 # attempt to resolve the ndk crate. Drives the `mediacodec` element. The `media`
-# feature pulls AMediaCodec / AMediaFormat (ndk-sys ships pregenerated bindings,
-# so a cross-compile `cargo check` needs only the rustup android target, no NDK).
+# feature pulls AMediaCodec / AMediaFormat; `api-level-24` enables AImageReader
+# (Android 7+), the Surface the decoder renders into (ndk-sys ships pregenerated
+# bindings, so a cross-compile `cargo check` needs only the rustup target, no NDK).
 [target.'cfg(target_os = "android")'.dependencies]
-ndk = { version = "0.9", optional = true, default-features = false, features = ["media"] }
+ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-24"] }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
 # to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).
