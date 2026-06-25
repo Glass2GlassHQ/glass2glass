@@ -133,6 +133,13 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets
           --target aarch64-linux-android --features mediacodec
+      # M304: the MediaCodec -> wgpu/Vulkan zero-copy bridge (pulls wgpu + the raw
+      # Vulkan escape hatch). Cross-check the bridge module and the on-device
+      # probe test; running it is validated on a device separately.
+      - name: check g2g-plugins (mediacodec-wgpu)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features mediacodec-wgpu
 
   # The no_std + wasm pillar: the core builds for the browser target. (A bare-
   # metal target like thumbv7em needs the critical-section feature + a CS impl, so

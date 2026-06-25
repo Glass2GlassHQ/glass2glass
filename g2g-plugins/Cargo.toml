@@ -102,6 +102,16 @@ vtencode = [
 # first element of the Android platform track. See DESIGN_TODO.md "Platform:
 # Android".
 mediacodec = ["std", "dep:ndk"]
+# Android zero-copy decode -> GPU (M304): keep MediaCodec output on the GPU by
+# importing the decoded AImage's AHardwareBuffer into wgpu/Vulkan
+# (VK_ANDROID_external_memory_android_hardware_buffer), then a device-local copy
+# into a plain wgpu texture WgpuPreprocess samples, no CPU readback. The Android
+# analog of the `cuda-wgpu` FD bridge; pulls wgpu + the raw Vulkan escape hatch
+# (wgpu-hal + ash). Android-only, implies `mediacodec`. `ndk/api-level-26` is
+# required: `AImage_getHardwareBuffer` and the whole `AHardwareBuffer` ref API
+# are NDK API 26+, so the ndk crate gates them behind that feature. Build the
+# on-device probe with cargo-ndk `--platform 26`.
+mediacodec-wgpu = ["mediacodec", "ndk/api-level-26", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # Windows H.264 encode via the Media Foundation H.264 Encoder MFT
 # (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
 # Pulls the windows crate; Windows-only, implies std.

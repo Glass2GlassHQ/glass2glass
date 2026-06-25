@@ -77,8 +77,15 @@ leverage first:
 
 ## Platform: Android
 
-- `MediaCodecDec`: an `AHardwareBuffer` / `SurfaceTexture` zero-copy domain;
-  the `Surface` present sink.
+- `MediaCodecDec` zero-copy to GPU (M304): the bridge + on-device probe landed
+  (`mediacodec_wgpu`). Probe verdict on the Pixel 10a: the decoded
+  `AHardwareBuffer` imports as an *opaque* buffer (`VkFormat::UNDEFINED`,
+  `externalFormat != 0`, suggested YCbCr 601 / narrow), so there is no per-plane
+  image access and the planned per-plane `vkCmdCopyImage` device-local copy is
+  out. Remaining: a raw-Vulkan `VkSamplerYcbcrConversion` + immutable sampler
+  (wgpu's bind-group API can't express it) feeding a convert-to-RGBA pass we own,
+  output as `MemoryDomain::WgpuTexture` for `WgpuPreprocess` (no CPU readback).
+  The `Surface` present sink is still separate.
 - Encode, Camera2 capture, AAudio, Surface present.
 
 ## Receive / decode

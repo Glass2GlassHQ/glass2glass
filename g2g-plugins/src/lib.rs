@@ -250,6 +250,12 @@ pub mod vtencode;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 pub mod mediacodecdec;
 
+// M304: Android MediaCodec -> wgpu/Vulkan zero-copy bridge. Imports the decoded
+// AImage's AHardwareBuffer into a wgpu Vulkan device for a device-local copy
+// into a sampled texture (no CPU NV12 readback). The Android analog of cudawgpu.
+#[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+pub mod mediacodec_wgpu;
+
 // Media Foundation H.264 encode, the encode-side mirror of mfdecode. Same
 // Windows-only target gate; enabling the feature elsewhere is a no-op.
 #[cfg(all(target_os = "windows", feature = "mf-encode"))]

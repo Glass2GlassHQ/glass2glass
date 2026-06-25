@@ -124,6 +124,12 @@ pub struct MediaCodecDec {
     last_caps: Option<Caps>,
     input_caps: Option<Caps>,
     emitted: u64,
+    /// M304 probe hook: an owned reference to the first decoded frame's backing
+    /// `AHardwareBuffer`, captured so the GPU-interop bridge can query its Vulkan
+    /// format / import it without re-driving the decode. Acquired (refcount bump)
+    /// so it outlives the transient `Image` it came from.
+    #[cfg(feature = "mediacodec-wgpu")]
+    captured_ahb: Option<ndk::hardware_buffer::HardwareBufferRef>,
 }
 
 // SAFETY: `ndk::media::MediaCodec` wraps a raw `AMediaCodec` pointer and is not
@@ -161,7 +167,18 @@ impl MediaCodecDec {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+            #[cfg(feature = "mediacodec-wgpu")]
+            captured_ahb: None,
         }
+    }
+
+    /// M304 probe accessor: the first decoded frame's `AHardwareBuffer` (owned
+    /// reference), once at least one frame has been drained. `None` before then.
+    /// Used by the `mediacodec_wgpu` bridge to inspect the vendor buffer's Vulkan
+    /// format on-device.
+    #[cfg(feature = "mediacodec-wgpu")]
+    pub fn captured_hardware_buffer(&self) -> Option<&ndk::hardware_buffer::HardwareBufferRef> {
+        self.captured_ahb.as_ref()
     }
 
     /// The MediaCodec MIME type for this element's codec.
@@ -359,23 +376,36 @@ impl MediaCodecDec {
     /// Acquire and pack every image the rendered output buffers have produced.
     /// The `YUV_420_888` plane strides describe whatever layout the decoder chose.
     fn drain_images(&mut self, out: &mut Vec<DecodedFrame>) -> Result<(), G2gError> {
+        // M304: stash the first decoded frame's AHardwareBuffer for GPU interop.
+        // Captured into a local while `st` borrows `self`, then moved onto the
+        // element after the loop (can't touch `self.captured_ahb` while borrowed).
+        #[cfg(feature = "mediacodec-wgpu")]
+        let mut first_ahb: Option<ndk::hardware_buffer::HardwareBufferRef> = None;
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        loop {
-            match st
-                .reader
-                .acquire_next_image()
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            {
-                AcquireResult::Image(img) => {
-                    let pts_ns = img.timestamp().unwrap_or(0).max(0) as u64;
-                    if let Some(frame) = image_to_nv12(&img, pts_ns) {
-                        out.push(frame);
-                    }
+        // NoBufferAvailable / MaxImagesAcquired ends the loop: nothing more now.
+        while let AcquireResult::Image(img) = st
+            .reader
+            .acquire_next_image()
+            .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+        {
+            // Acquire an owned reference (refcount bump) before `img` is dropped,
+            // so the buffer outlives the transient Image.
+            #[cfg(feature = "mediacodec-wgpu")]
+            if first_ahb.is_none() && self.captured_ahb.is_none() {
+                if let Ok(hb) = img.hardware_buffer() {
+                    first_ahb = Some(hb.acquire());
                 }
-                // NoBufferAvailable / MaxImagesAcquired: nothing more right now.
-                _ => return Ok(()),
+            }
+            let pts_ns = img.timestamp().unwrap_or(0).max(0) as u64;
+            if let Some(frame) = image_to_nv12(&img, pts_ns) {
+                out.push(frame);
             }
         }
+        #[cfg(feature = "mediacodec-wgpu")]
+        if self.captured_ahb.is_none() {
+            self.captured_ahb = first_ahb;
+        }
+        Ok(())
     }
 }
 
