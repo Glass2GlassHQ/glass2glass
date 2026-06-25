@@ -2,7 +2,7 @@
 //! to a standard RIFF/WAVE file, so an audio pipeline's output is playable
 //! anywhere. The header's running sizes are patched in place on `Eos`
 //! (WAV is not stream-friendly; the fragmented recording format for live
-//! durability remains `Mp4Sink` on the video side).
+//! durability remains `Mp4Mux` on the video side).
 
 use core::future::Future;
 use core::pin::Pin;

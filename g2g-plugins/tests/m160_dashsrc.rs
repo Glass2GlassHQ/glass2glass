@@ -1,7 +1,7 @@
 //! M160 DASH source end to end: `DashSrc` parses an MPD, selects a
 //! Representation, and streams its fMP4 init + media segments (SegmentTemplate
 //! $Number$ addressing). A local routing server serves the manifest + segments
-//! (real fMP4 from `Mp4Sink`); `DashSrc -> Fmp4Demux` recovers the access units.
+//! (real fMP4 from `Mp4Mux`); `DashSrc -> Fmp4Demux` recovers the access units.
 
 #![cfg(feature = "dash")]
 
@@ -9,7 +9,6 @@ use core::future::Future;
 use core::pin::Pin;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -24,21 +23,7 @@ use g2g_core::{
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
-use g2g_plugins::mp4sink::Mp4Sink;
-
-fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("g2g_m160_{}_{}.mp4", std::process::id(), name))
-}
-
-struct NullOut;
-impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
-    }
-}
+use g2g_plugins::mp4mux::Mp4Mux;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -80,28 +65,25 @@ fn access_units() -> Vec<Vec<u8>> {
     vec![idr, p(1), p(2)]
 }
 
+/// Mux the access units to an fMP4 byte buffer via the `Mp4Mux` element,
+/// returning the byte stream it forwards downstream.
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    // Unique file per call so parallel tests don't race on one temp path.
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let path = temp_path(&format!("dash{}", N.fetch_add(1, Ordering::Relaxed)));
-    let mut sink = Mp4Sink::new(&path);
-    sink.configure_pipeline(&Caps::CompressedVideo {
+    let mut mux = Mp4Mux::new();
+    mux.configure_pipeline(&Caps::CompressedVideo {
         codec: VideoCodec::H264,
         width: Dim::Fixed(64),
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
     })
     .unwrap();
-    let mut out = NullOut;
+    let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
-        sink.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
+        mux.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
             .await
             .unwrap();
     }
-    sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
-    bytes
+    mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+    out.body
 }
 
 /// Split fMP4 into the init segment (ftyp+moov) and one segment per moof+mdat.

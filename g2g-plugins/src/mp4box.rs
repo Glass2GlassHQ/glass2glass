@@ -1,5 +1,5 @@
 //! Shared fragmented-MP4 box primitives for the MP4 muxer/demuxer elements
-//! (`mp4sink`/`mp4src` and their audio counterparts). Writers build
+//! (`fmp4mux`/`mp4src` and their audio counterparts). Writers build
 //! size-prefixed boxes; readers walk the box tree. std-gated like its callers.
 
 use alloc::string::String;

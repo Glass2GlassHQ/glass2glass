@@ -1,5 +1,5 @@
 //! Fragmented-MP4 demuxer source (M28, HEVC in M31), the read-side counterpart
-//! of `Mp4Sink`: parses a single-video-track fMP4 and emits Annex-B H.264 or
+//! of `Mp4Mux`: parses a single-video-track fMP4 and emits Annex-B H.264 or
 //! H.265 access units with their recovered timing, so a recording plays back
 //! through `MfDecode` / `FfmpegH264Dec` exactly like a live stream.
 //!
@@ -9,7 +9,7 @@
 //! negotiation, so downstream solves against the real geometry. The fragment
 //! scan happens in `run`.
 //!
-//! Supported profile: what `Mp4Sink` writes and CMAF-style single-track
+//! Supported profile: what `Mp4Mux` writes and CMAF-style single-track
 //! files generally share: one video track, `trun` v0 with explicit sample
 //! sizes, `default-base-is-moof` data offsets landing on the following
 //! `mdat`'s payload. Anything else fails loud rather than emitting a

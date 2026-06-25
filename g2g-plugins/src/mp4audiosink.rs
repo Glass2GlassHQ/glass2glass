@@ -1,5 +1,5 @@
 //! Audio-only fragmented-MP4 muxer sink (M37). The audio counterpart of
-//! `Mp4Sink`: wraps a raw AAC-LC elementary stream in a single-`soun`-track
+//! `Mp4Mux`: wraps a raw AAC-LC elementary stream in a single-`soun`-track
 //! fMP4 (`ftyp` + `moov` once, then one `moof`+`mdat` fragment per access
 //! unit), so an encoded audio stream is a playable, durable `.m4a`. Pairs with
 //! `MfAacEncode` upstream; `WavSink` remains the uncompressed alternative.

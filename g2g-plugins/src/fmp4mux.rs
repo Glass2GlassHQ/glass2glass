@@ -1,214 +1,37 @@
-//! Fragmented-MP4 muxer sink (M24, HEVC in M31). Wraps an H.264 or H.265
-//! elementary stream in a standard fMP4/CMAF-style container: `ftyp` + `moov`
-//! once, then one `moof`+`mdat` fragment per access unit, so the recording is
-//! playable (ffplay/VLC/browsers via MSE) and durable: a truncated live
-//! recording stays valid up to the last complete fragment, which is exactly
-//! the property a glass-to-glass recorder wants. Pairs with `MfEncode` /
-//! `H264Parse` upstream; `FileSink` remains the raw-bitstream alternative.
+//! Pure fragmented-MP4 / CMAF box writer (M24, HEVC in M31): the fMP4 muxing
+//! state machine ([`Fmp4Muxer`]) plus the NAL / `avcC` / `hvcC` helpers shared
+//! across the container elements. Annex-B H.264/H.265 access units in, an
+//! `ftyp`+`moov` init segment then one `moof`+`mdat` fragment per access unit
+//! out, so the recording is playable (ffplay/VLC/browsers via MSE) and durable:
+//! a truncated live recording stays valid up to the last complete fragment.
 //!
-//! Input is Annex-B access units (`MemoryDomain::System`), converted to
-//! AVCC-style 4-byte length-prefixed NALUs for the `mdat`. The `moov` needs
-//! the stream's parameter sets, which arrive in-band with the first IDR, so
-//! the header is written on the first access unit; dims come from the
-//! negotiated caps. H.264 carries `avc1`/`avcC` with SPS+PPS; H.265 carries
-//! `hvc1`/`hvcC` with VPS+SPS+PPS (codec from the caps). One fragment per
-//! access unit favours latency/durability over container overhead (~100 bytes
-//! per frame); a batching knob is a follow-up.
+//! The `moov` needs the stream's parameter sets, which arrive in-band with the
+//! first IDR, so the init segment is emitted on the first access unit; H.264
+//! carries `avc1`/`avcC` with SPS+PPS, H.265 `hvc1`/`hvcC` with VPS+SPS+PPS.
+//! Samples are AVCC-style 4-byte length-prefixed NALUs. One fragment per access
+//! unit favours latency/durability over container overhead (~100 bytes/frame).
+//!
+//! Wrapped by [`Mp4Mux`](crate::mp4mux) / the A/V [`Mp4MuxN`](crate::mp4muxn)
+//! (which forward the bytes to any sink, e.g. `mp4mux ! filesink`); the helpers
+//! are reused by the Matroska A/V muxer [`MkvMuxN`](crate::mkvmuxn). Pure
+//! `no_std + alloc`.
 
-use core::future::Future;
-use core::pin::Pin;
-
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
-
-use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, TagList, VideoCodec,
-};
-
-use crate::filesink::io_err;
+use g2g_core::{G2gError, TagList, VideoCodec};
 
 /// 90 kHz media timescale, the conventional choice for video tracks.
 const TIMESCALE: u64 = 90_000;
 /// Fallback per-frame duration when the stream carries no timing: 1/30 s.
 const DEFAULT_DURATION_NS: u64 = 33_333_333;
 
-#[derive(Debug)]
-pub struct Mp4Sink {
-    path: PathBuf,
-    writer: Option<BufWriter<File>>,
-    /// Bitstream codec being muxed (`H264` or `H265`), fixed at negotiation.
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    tags: TagList,
-    /// The shared fMP4 box writer, built lazily on the first access unit (its
-    /// `moov` needs the in-band parameter sets). `Mp4Mux` wraps the same struct.
-    muxer: Option<Fmp4Muxer>,
-    eos_seen: bool,
-}
-
-impl Mp4Sink {
-    /// The file is created in `configure_pipeline`; construction has no
-    /// filesystem side effects.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            writer: None,
-            codec: VideoCodec::H264,
-            width: 0,
-            height: 0,
-            tags: TagList::new(),
-            muxer: None,
-            eos_seen: false,
-        }
-    }
-
-    /// Attach stream metadata, written as a `moov/udta/meta/ilst` box in the init
-    /// segment (the inverse of [`crate::mp4src::Mp4Src`]'s tag reading).
-    pub fn with_tags(mut self, tags: TagList) -> Self {
-        self.tags = tags;
-        self
-    }
-
-    /// Count of `moof`+`mdat` fragments written. Useful in tests.
-    pub fn fragments_written(&self) -> u64 {
-        self.muxer.as_ref().map_or(0, Fmp4Muxer::fragments)
-    }
-
-    pub fn eos_seen(&self) -> bool {
-        self.eos_seen
-    }
-
-    fn accept_caps(&mut self, caps: &Caps) -> Result<(), G2gError> {
-        let Caps::CompressedVideo {
-            codec,
-            width,
-            height,
-            ..
-        } = caps
-        else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
-            return Err(G2gError::CapsMismatch);
-        }
-        self.codec = *codec;
-        if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
-            self.width = *w;
-            self.height = *h;
-        }
-        // After the moov is written a codec swap is not expressible; an
-        // already-built muxer rejects it (a geometry refinement is fine).
-        if let Some(mux) = &mut self.muxer {
-            mux.update_caps(self.codec, self.width, self.height)?;
-        }
-        Ok(())
-    }
-}
-
-/// The compressed-video caps superset the sink accepts: H.264 or H.265 at any
-/// geometry.
-fn supported_caps() -> CapsSet {
-    let compressed = |codec| Caps::CompressedVideo {
-        codec,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-    };
-    CapsSet::from_alternatives(Vec::from([
-        compressed(VideoCodec::H264),
-        compressed(VideoCodec::H265),
-    ]))
-}
-
-impl AsyncElement for Mp4Sink {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Accept whichever supported codec the upstream proposes.
-        for alt in supported_caps().alternatives() {
-            if let Ok(c) = upstream_caps.intersect(alt) {
-                return Ok(c);
-            }
-        }
-        Err(G2gError::CapsMismatch)
-    }
-
-    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(supported_caps())
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.accept_caps(absolute_caps)?;
-        let file = File::create(&self.path).map_err(io_err)?;
-        self.writer = Some(BufWriter::new(file));
-        Ok(ConfigureOutcome::Accepted)
-    }
-
-    fn process<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-        _out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if self.writer.is_none() {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    let MemoryDomain::System(slice) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    // Build the box writer on the first AU (its moov needs the
-                    // in-band parameter sets the first access unit carries).
-                    let mux = self
-                        .muxer
-                        .get_or_insert_with(|| Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone()));
-                    let bytes = mux.push_au(slice.as_slice(), frame.timing.pts_ns, frame.timing.duration_ns)?;
-                    let w = self.writer.as_mut().expect("checked above");
-                    w.write_all(&bytes).map_err(io_err)?;
-                }
-                PipelinePacket::Eos => {
-                    let w = self.writer.as_mut().expect("checked above");
-                    w.flush().map_err(io_err)?;
-                    self.eos_seen = true;
-                }
-                PipelinePacket::CapsChanged(c) => {
-                    // mid-stream H.264 geometry changes carry new in-band
-                    // SPS/PPS; the existing avcC keeps decoding via the
-                    // in-band sets. A non-H.264 change is a hard error.
-                    self.accept_caps(&c)?;
-                }
-                // a raw fragment stream has no seek index to reset.
-                PipelinePacket::Flush => {}
-                // Segment is control: ignored at sink.
-                PipelinePacket::Segment(_) => {}
-            }
-            Ok(())
-        })
-    }
-}
-
-impl PadTemplates for Mp4Sink {
-    /// Terminal compressed-video sink pad (H.264 or H.265); no source pad.
-    fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(supported_caps())])
-    }
-}
-
-/// Pure fragmented-MP4 box writer: the muxing state machine shared by
-/// [`Mp4Sink`] (writes the bytes to a file) and [`crate::mp4mux::Mp4Mux`]
-/// (forwards them downstream). Annex-B H.264/H.265 access units in, an
-/// `ftyp`+`moov` init segment then one `moof`+`mdat` fragment per AU out. The
-/// init segment is emitted on the first [`push_au`](Self::push_au) because the
-/// `moov` needs the stream's in-band parameter sets.
+/// Pure fragmented-MP4 box writer: the muxing state machine wrapped by
+/// [`crate::mp4mux::Mp4Mux`] (forwards the bytes downstream, e.g. to a
+/// `filesink`) and the A/V [`crate::mp4muxn::Mp4MuxN`]. Annex-B H.264/H.265
+/// access units in, an `ftyp`+`moov` init segment then one `moof`+`mdat`
+/// fragment per AU out. The init segment is emitted on the first
+/// [`push_au`](Self::push_au) because the `moov` needs the stream's in-band
+/// parameter sets.
 #[derive(Debug)]
 pub(crate) struct Fmp4Muxer {
     codec: VideoCodec,
@@ -234,11 +57,6 @@ impl Fmp4Muxer {
             decode_time: 0,
             prev_pts_ns: None,
         }
-    }
-
-    /// Count of `moof`+`mdat` fragments emitted so far.
-    pub(crate) fn fragments(&self) -> u64 {
-        self.fragments
     }
 
     /// Apply a mid-stream caps refinement. A geometry change before the header is

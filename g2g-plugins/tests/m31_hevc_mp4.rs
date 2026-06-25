@@ -1,4 +1,4 @@
-//! M31: HEVC through the fMP4 container. `Mp4Sink` writes an `hvc1`/`hvcC`
+//! M31: HEVC through the fMP4 container. `Mp4Mux` muxes an `hvc1`/`hvcC`
 //! track from synthetic H.265 access units, and `Mp4Src` reads them back
 //! byte-exactly with the codec/geometry recovered during the caps probe. No
 //! encoder needed: the elements only frame the bitstream, so hand-built NALUs
@@ -9,7 +9,7 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, Rate, VideoCodec};
-use g2g_plugins::mp4sink::Mp4Sink;
+use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::mp4src::Mp4Src;
 
 use std::path::PathBuf;
@@ -116,8 +116,8 @@ async fn hevc_round_trips_through_the_fmp4_container() {
         .map(|i| if i == 0 { keyframe_au() } else { delta_au(i) })
         .collect();
 
-    let mut sink = Mp4Sink::new(&path);
-    let narrowed = sink.intercept_caps(&hevc_caps()).expect("intercept H.265");
+    let mut mux = Mp4Mux::new();
+    let narrowed = mux.intercept_caps(&hevc_caps()).expect("intercept H.265");
     assert!(matches!(
         narrowed,
         Caps::CompressedVideo {
@@ -125,16 +125,18 @@ async fn hevc_round_trips_through_the_fmp4_container() {
             ..
         }
     ));
-    sink.configure_pipeline(&narrowed).expect("configure sink");
+    mux.configure_pipeline(&narrowed).expect("configure mux");
+    let mut cap = Capture::default();
     for (i, au) in access_units.iter().enumerate() {
-        sink.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut Discard)
+        mux.process(PipelinePacket::DataFrame(frame(au.clone(), i)), &mut cap)
             .await
             .expect("mux frame");
     }
-    sink.process(PipelinePacket::Eos, &mut Discard)
+    mux.process(PipelinePacket::Eos, &mut cap)
         .await
         .expect("mux eos");
-    assert_eq!(sink.fragments_written(), FRAMES as u64);
+    assert_eq!(mux.emitted(), FRAMES as u64);
+    std::fs::write(&path, &cap.bytes).expect("write fmp4 file");
 
     // --- probe + demux ---
     let mut src = Mp4Src::new(&path);
@@ -163,13 +165,23 @@ async fn hevc_round_trips_through_the_fmp4_container() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Sink output goes nowhere; the sink writes to its file.
-struct Discard;
-impl OutputSink for Discard {
+/// Concatenates the ISO-BMFF byte-stream frames `Mp4Mux` forwards downstream.
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+}
+impl OutputSink for Capture {
     fn push<'a>(
         &'a mut self,
-        _packet: PipelinePacket,
+        packet: PipelinePacket,
     ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(f) = packet {
+                if let MemoryDomain::System(s) = &f.domain {
+                    self.bytes.extend_from_slice(s.as_slice());
+                }
+            }
+            Ok(PushOutcome::Accepted)
+        })
     }
 }

@@ -10,7 +10,7 @@
 //! time: `moov` yields the codec/geometry (emitted as `CapsChanged`) and the
 //! parameter sets; each `moof`+`mdat` pair yields samples. The out-of-band
 //! parameter sets are prepended to the first emitted access unit so a decoder can
-//! start. Single video track; the profile `Mp4Sink` writes (see `fmp4`).
+//! start. Single video track; the profile `Mp4Mux` writes (see `fmp4`).
 
 use core::future::Future;
 use core::pin::Pin;

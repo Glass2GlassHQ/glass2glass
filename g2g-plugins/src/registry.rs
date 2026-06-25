@@ -226,7 +226,7 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
     // Fragmented-MP4 / ISO-BMFF muxer (M291), the gst `mp4mux`/`qtmux` analog:
     // `... ! x264enc ! mp4mux ! filesink location=out.mp4`. std-gated like its
-    // module (it shares the `mp4sink` box writer).
+    // module (it shares the `fmp4mux` box writer).
     #[cfg(feature = "std")]
     reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || Box::new(Mp4Mux::new())));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));

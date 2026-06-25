@@ -5,7 +5,7 @@
 //!
 //! Supported profile: one video track, `trun` v0 with explicit sample sizes,
 //! `default-base-is-moof` data offsets landing on the following `mdat`'s
-//! payload (what `Mp4Sink` writes and CMAF single-track files share). Anything
+//! payload (what `Mp4Mux` writes and CMAF single-track files share). Anything
 //! else fails loud rather than emitting a corrupt bitstream.
 
 use alloc::vec::Vec;

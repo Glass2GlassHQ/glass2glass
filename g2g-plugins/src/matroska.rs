@@ -776,8 +776,8 @@ impl MatroskaMuxer {
         self.push_frame_on(0, data, pts_ns, keyframe)
     }
 
-    /// Mux one frame on track `track` (0-based pad index), writing the EBML header
-    /// + Segment + Info + Tracks (+ Tags when present) on the first call, then a
+    /// Mux one frame on track `track` (0-based pad index). The first call writes
+    /// the EBML header, Segment, Info, and Tracks (plus Tags when present); then a
     /// SimpleBlock for that track, opening a new (unknown-size) Cluster first when
     /// the shared time window is exceeded.
     pub fn push_frame_on(&mut self, track: usize, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {

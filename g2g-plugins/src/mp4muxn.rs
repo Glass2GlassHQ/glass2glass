@@ -39,7 +39,7 @@ use g2g_core::{
 };
 
 use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
-use crate::mp4sink::{avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry};
+use crate::fmp4mux::{avcc_sample, is_keyframe_nal, parameter_sets, split_annexb, visual_sample_entry};
 use crate::mp4audiosink::esds;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.

@@ -23,9 +23,7 @@ use g2g_core::{
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
-use g2g_plugins::mp4sink::Mp4Sink;
-
-use std::path::PathBuf;
+use g2g_plugins::mp4mux::Mp4Mux;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -215,20 +213,6 @@ async fn live_reloads_playlist_and_plays_each_new_segment_once() {
 
 // --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------
 
-fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("g2g_m156_{}_{}.mp4", std::process::id(), name))
-}
-
-struct NullOut;
-impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
-    }
-}
-
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {
     Frame {
         domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -247,27 +231,25 @@ fn access_units() -> Vec<Vec<u8>> {
     vec![idr, p(1), p(2)]
 }
 
-/// Mux the access units to an fMP4 buffer via `Mp4Sink`.
+/// Mux the access units to an fMP4 buffer via the `Mp4Mux` element, returning
+/// the byte stream it forwards downstream.
 async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
-    let path = temp_path("fmp4");
-    let mut sink = Mp4Sink::new(&path);
-    sink.configure_pipeline(&Caps::CompressedVideo {
+    let mut mux = Mp4Mux::new();
+    mux.configure_pipeline(&Caps::CompressedVideo {
         codec: VideoCodec::H264,
         width: Dim::Fixed(64),
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
     })
     .unwrap();
-    let mut out = NullOut;
+    let mut out = CaptureSink::default();
     for (i, au) in aus.iter().enumerate() {
-        sink.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
+        mux.process(PipelinePacket::DataFrame(au_frame(au.clone(), i as u64 * 33_333_333, i as u64)), &mut out)
             .await
             .unwrap();
     }
-    sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
-    bytes
+    mux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+    out.body
 }
 
 /// Split an fMP4 buffer into the init segment (ftyp+moov, everything before the

@@ -159,7 +159,7 @@ pub mod mp4mux;
 #[cfg(feature = "std")]
 pub mod mp4muxn;
 #[cfg(feature = "std")]
-pub mod mp4sink;
+pub mod fmp4mux;
 #[cfg(feature = "std")]
 pub mod mp4src;
 #[cfg(feature = "std")]
@@ -322,7 +322,7 @@ pub mod mpd;
 pub mod dashsrc;
 
 // Fragmented-MP4 / CMAF parsing (shared) and the byte-stream demuxer. In the
-// std MP4 family (shares mp4box with mp4src/mp4sink).
+// std MP4 family (shares mp4box with mp4src/fmp4mux).
 #[cfg(feature = "std")]
 mod fmp4;
 #[cfg(feature = "std")]

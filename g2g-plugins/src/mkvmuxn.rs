@@ -41,7 +41,7 @@ use g2g_core::{
 
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
 use crate::mp4muxn::{asc_from_adts, strip_adts};
-use crate::mp4sink::{
+use crate::fmp4mux::{
     avcc_record, avcc_sample, hvcc_record, is_keyframe_nal, parameter_sets, split_annexb,
 };
 

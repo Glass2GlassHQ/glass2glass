@@ -6,18 +6,17 @@
 //! ... ! x264enc ! mp4mux ! filesink location=out.mp4
 //! ```
 //!
-//! The `mp4mux` / `qtmux` analog and the element form of [`crate::mp4sink::Mp4Sink`]:
-//! both wrap the same pure [`Fmp4Muxer`] box writer, but `Mp4Sink` writes the
-//! bytes to a file while `Mp4Mux` forwards them downstream (to a `filesink`,
-//! `udpsink`, an HLS segmenter, ...). `ftyp`+`moov` init segment once, then one
-//! `moof`+`mdat` fragment per access unit, so a truncated recording stays valid
-//! to the last complete fragment.
+//! The `mp4mux` / `qtmux` analog: wraps the pure [`Fmp4Muxer`] box writer and
+//! forwards the muxed bytes downstream (to a `filesink`, `udpsink`, an HLS
+//! segmenter, ...), the way gst muxing is a separate element feeding any sink.
+//! `ftyp`+`moov` init segment once, then one `moof`+`mdat` fragment per access
+//! unit, so a truncated recording stays valid to the last complete fragment.
 //!
 //! The muxer is built lazily on the first frame (its `moov` needs the in-band
 //! parameter sets the first IDR carries), so a `CapsChanged` that refines the
 //! geometry beforehand is reflected in the written tracks. CPU, `no_std`
-//! baseline. Scope (v1): single video track, like `Mp4Sink`; audio / multi-track
-//! interleave is a follow-up gated on the timestamp-ordered fan-in.
+//! baseline. Scope (v1): single video track; A/V multi-track interleave is
+//! [`Mp4MuxN`](crate::mp4muxn).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,7 +32,7 @@ use g2g_core::{
     Rate, TagList, VideoCodec,
 };
 
-use crate::mp4sink::Fmp4Muxer;
+use crate::fmp4mux::Fmp4Muxer;
 
 /// Muxes one H.264 / H.265 elementary stream into a fragmented-MP4 byte stream.
 #[derive(Debug)]

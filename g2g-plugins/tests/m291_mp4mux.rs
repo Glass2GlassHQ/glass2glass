@@ -2,8 +2,9 @@
 //! into an ISO-BMFF byte stream forwarded downstream (the gst `mp4mux`/`qtmux`
 //! analog: `... ! x264enc ! mp4mux ! filesink`). The strong test is a real
 //! round-trip: mux access units through `Mp4Mux`, demux them back through
-//! `Fmp4Demux`, and compare byte-exact, the same proof `m158` does for `Mp4Sink`.
-//! Also checks the launch registry resolves `mp4mux` / `qtmux` to ISO-BMFF.
+//! `Fmp4Demux`, and compare byte-exact (the same round-trip proof `m158` runs).
+//! Also checks the launch registry resolves `mp4mux` / `qtmux` to ISO-BMFF, and
+//! that a non-H.264/H.265 caps is rejected at configure.
 //!
 //! `default_registry` is `std`-gated, so this file is too.
 #![cfg(feature = "std")]
@@ -114,6 +115,20 @@ async fn mp4mux_roundtrips_through_fmp4demux() {
         "the moov drives one CapsChanged with the muxed codec + geometry"
     );
     assert_eq!(sink.frames, aus, "every access unit recovered, in order, byte-exact");
+}
+
+#[test]
+fn rejects_non_h26x_caps() {
+    // The muxer carries H.264 / H.265 only; raw video is refused at configure
+    // (the coverage the removed Mp4Sink test held).
+    let raw = Caps::RawVideo {
+        format: g2g_core::RawVideoFormat::Rgba8,
+        width: Dim::Fixed(64),
+        height: Dim::Fixed(48),
+        framerate: Rate::Fixed(30 << 16),
+    };
+    assert!(Mp4Mux::new().configure_pipeline(&raw).is_err(), "raw video is not a muxable codec");
+    assert!(Mp4Mux::new().configure_pipeline(&h264_caps(64, 48)).is_ok(), "H.264 is accepted");
 }
 
 #[test]
