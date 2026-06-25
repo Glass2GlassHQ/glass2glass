@@ -59,7 +59,7 @@
 #![cfg(all(target_os = "linux", feature = "rtsp", feature = "ffmpeg"))]
 
 use g2g_core::runtime::run_source_transform_sink;
-use g2g_core::{Caps, Dim, PipelineClock, VideoCodec, RawVideoFormat};
+use g2g_core::{Caps, Dim, PipelineClock, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::ffmpegdec::FfmpegH264Dec;
 use g2g_plugins::rtspsrc::RtspSrc;

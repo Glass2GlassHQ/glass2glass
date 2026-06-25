@@ -134,16 +134,11 @@ enum WorkerCmd {
 ///   callback, the worker overwrites it — the older frame never paints.
 ///   Use for live sources that prefer freshness over completeness
 ///   (security cameras, monitoring) and can't tolerate backpressure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PacingPolicy {
+    #[default]
     Block,
     DropOldest,
-}
-
-impl Default for PacingPolicy {
-    fn default() -> Self {
-        Self::Block
-    }
 }
 
 /// What the sink-side struct holds between `process()` calls. We keep
@@ -647,6 +642,9 @@ struct WorkerState {
     pending_ack: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
 }
 
+// The worker owns the whole Wayland-thread state; threading it as one params
+// struct would only move the argument list, not reduce it.
+#[allow(clippy::too_many_arguments)]
 fn worker_main(
     width: u32,
     height: u32,
@@ -917,6 +915,9 @@ delegate_registry!(WorkerState);
 /// endian per pixel: `[B, G, R, 0xFF]`). Uses BT.601 limited-range
 /// coefficients, which is what H.264 SD content usually carries. HDR
 /// and BT.709 paths are deferred.
+// The `col` index drives both the luma read and the subsampled-chroma pair
+// arithmetic (`col / 2`), so an iterator rewrite would not be clearer.
+#[allow(clippy::needless_range_loop)]
 fn nv12_to_xrgb8888(src: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gError> {
     let w = width as usize;
     let h = height as usize;

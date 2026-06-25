@@ -172,8 +172,8 @@ async fn decode_fixture_with(
         } if *format == expected_format => {
             eprintln!("first {:?} caps: {}x{}", expected_format, w, h);
             let f = data_frames.first().unwrap();
-            let cw = ((*w + 1) / 2) as usize;
-            let ch = ((*h + 1) / 2) as usize;
+            let cw = (*w).div_ceil(2) as usize;
+            let ch = (*h).div_ceil(2) as usize;
             let expected = (*w as usize) * (*h as usize) + 2 * cw * ch;
             match &f.domain {
                 MemoryDomain::System(slice) => {

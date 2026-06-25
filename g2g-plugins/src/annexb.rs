@@ -398,7 +398,7 @@ mod tests {
             au.extend_from_slice(nal);
         }
         // Exclude SPS(7) / PPS(8) / AUD(9); keep SEI + VCL, like the decoder.
-        let avcc = to_avcc(&au, |nal| !matches!(h264_nal_type(nal), Some(7 | 8 | 9)));
+        let avcc = to_avcc(&au, |nal| !matches!(h264_nal_type(nal), Some(7..=9)));
         // The kept NALs, recovered by the AVCC iterator, are SEI then IDR.
         let kept: Vec<&[u8]> = avcc_nal_units(&avcc).collect();
         assert_eq!(kept, vec![sei, idr], "parameter sets dropped, order preserved");

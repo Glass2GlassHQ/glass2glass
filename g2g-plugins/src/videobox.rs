@@ -417,6 +417,9 @@ mod tests {
     use super::*;
 
     #[test]
+    // Pixel offsets below are written as (row * width + col) * channels; keep
+    // the unit factors (e.g. row 1 * width) for legibility.
+    #[allow(clippy::identity_op)]
     fn one_pixel_border_grows_and_centres() {
         // 1x1 white pixel, 1px border all sides -> 3x3 with white centre.
         // Border = negative edges; out = 1 - (-1) - (-1) = 3.

@@ -321,8 +321,11 @@ libloading = { version = "0.8", optional = true }
 # encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
 rav1e = { version = "0.8", optional = true, default-features = false }
 # libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
-# codec alongside VP8. Links system libvpx + runs bindgen at build (env-libvpx-sys).
-vpx-encode = { version = "0.6", optional = true, features = ["vp9"] }
+# codec alongside VP8. `ffi-generate` forwards to env-libvpx-sys's bindgen path so
+# the FFI is generated against the installed libvpx headers: that crate only ships
+# pre-generated bindings through 1.13.0, so without this a newer system libvpx
+# (e.g. Fedora's 1.15) fails the build. Needs clang at build time (bindgen).
+vpx-encode = { version = "0.6", optional = true, features = ["vp9", "ffi-generate"] }
 # Pure-Rust JPEG decoder (mjpeg feature). Default features keep the x86/neon SIMD
 # paths and std; no system dependency.
 zune-jpeg = { version = "0.5", optional = true }

@@ -1260,6 +1260,9 @@ unsafe fn cuda_buffer_from_frame(
 /// frame travels downstream. Boxed as the [`CudaKeepAlive`] of an
 /// [`OwnedCudaBuffer`]; dropping it `av_frame_free`s the frame, returning the
 /// surface to the decoder's hwframe pool.
+// The field is never read: it is a drop-guard, held only so the owned `FfVideo`
+// (and thus the `AVFrame`) lives until this owner is dropped.
+#[allow(dead_code)]
 struct CudaFrameOwner(FfVideo);
 
 // SAFETY: an `AVFrame` (like the decoder's `AVCodecContext`) is `!Send` by

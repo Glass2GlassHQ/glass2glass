@@ -173,8 +173,8 @@ impl WebRtcSessionSink {
         };
 
         // One send-only m-line per distinct track kind present on the inputs.
-        let has_video = self.tracks.iter().any(|t| *t == Some(Track::Video));
-        let has_audio = self.tracks.iter().any(|t| *t == Some(Track::Audio));
+        let has_video = self.tracks.contains(&Some(Track::Video));
+        let has_audio = self.tracks.contains(&Some(Track::Audio));
         let (offer_sdp, pending, video_mid, audio_mid): (
             String,
             SdpPendingOffer,

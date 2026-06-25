@@ -461,6 +461,9 @@ mod tests {
     }
 
     #[test]
+    // The expected lengths below are written as width * height * channels; keep
+    // the unit factors (e.g. the 1x1 chroma block) for legibility.
+    #[allow(clippy::identity_op)]
     fn crop_nv12_keeps_plane_sizes() {
         // 4x4 NV12: 16 luma + 8 chroma. Crop 2x2 at (2,2) -> 4 luma + 2 chroma.
         let mut src = vec![0u8; 4 * 4 * 3 / 2];

@@ -442,7 +442,7 @@ mod tests {
         assert!(dump.contains("Klass       Codec/Encoder/Audio"));
         assert!(dump.contains("Author      g2g"));
         assert!(!dump.contains("Description"), "empty description omitted");
-        assert!(ElementMetadata::default().is_set() == false);
+        assert!(!ElementMetadata::default().is_set());
         assert!(meta.is_set());
     }
 }

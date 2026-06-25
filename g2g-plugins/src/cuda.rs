@@ -325,15 +325,15 @@ mod ffi {
     use core::ffi::c_void;
 
     /// `CUcontext` is an opaque handle (`struct CUctx_st *`).
-    pub type CuContext = *mut c_void;
+    pub(super) type CuContext = *mut c_void;
     /// `CUresult` is a C `enum` (int-sized).
-    pub type CuResult = i32;
+    pub(super) type CuResult = i32;
 
-    pub const CUDA_SUCCESS: CuResult = 0;
+    pub(super) const CUDA_SUCCESS: CuResult = 0;
 
     /// `CUmemorytype` values used here (`cuda.h`).
-    pub const CU_MEMORYTYPE_HOST: u32 = 0x01;
-    pub const CU_MEMORYTYPE_DEVICE: u32 = 0x02;
+    pub(super) const CU_MEMORYTYPE_HOST: u32 = 0x01;
+    pub(super) const CU_MEMORYTYPE_DEVICE: u32 = 0x02;
 
     /// `CUDA_MEMCPY2D` (a.k.a. `CUDA_MEMCPY2D_v2`), field-for-field from
     /// `cuda.h`. `size_t` -> `usize`, `CUdeviceptr` -> `u64`,
@@ -341,36 +341,36 @@ mod ffi {
     /// pointer.
     #[repr(C)]
     #[derive(Debug)]
-    pub struct CudaMemcpy2D {
-        pub src_x_in_bytes: usize,
-        pub src_y: usize,
-        pub src_memory_type: u32,
-        pub src_host: *const c_void,
-        pub src_device: u64,
-        pub src_array: *mut c_void,
-        pub src_pitch: usize,
-        pub dst_x_in_bytes: usize,
-        pub dst_y: usize,
-        pub dst_memory_type: u32,
-        pub dst_host: *mut c_void,
-        pub dst_device: u64,
-        pub dst_array: *mut c_void,
-        pub dst_pitch: usize,
-        pub width_in_bytes: usize,
-        pub height: usize,
+    pub(super) struct CudaMemcpy2D {
+        pub(super) src_x_in_bytes: usize,
+        pub(super) src_y: usize,
+        pub(super) src_memory_type: u32,
+        pub(super) src_host: *const c_void,
+        pub(super) src_device: u64,
+        pub(super) src_array: *mut c_void,
+        pub(super) src_pitch: usize,
+        pub(super) dst_x_in_bytes: usize,
+        pub(super) dst_y: usize,
+        pub(super) dst_memory_type: u32,
+        pub(super) dst_host: *mut c_void,
+        pub(super) dst_device: u64,
+        pub(super) dst_array: *mut c_void,
+        pub(super) dst_pitch: usize,
+        pub(super) width_in_bytes: usize,
+        pub(super) height: usize,
     }
 
     #[link(name = "cuda")]
     extern "C" {
         /// Push `ctx` onto the calling thread's current-context stack.
         #[link_name = "cuCtxPushCurrent_v2"]
-        pub fn cu_ctx_push_current(ctx: CuContext) -> CuResult;
+        pub(super) fn cu_ctx_push_current(ctx: CuContext) -> CuResult;
         /// Pop the current context, returning it through `pctx`.
         #[link_name = "cuCtxPopCurrent_v2"]
-        pub fn cu_ctx_pop_current(pctx: *mut CuContext) -> CuResult;
+        pub(super) fn cu_ctx_pop_current(pctx: *mut CuContext) -> CuResult;
         /// 2D memory copy described entirely by `*pcopy`.
         #[link_name = "cuMemcpy2D_v2"]
-        pub fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> CuResult;
+        pub(super) fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> CuResult;
     }
 
     // --- CUDA-GL interop (C3 Phase 3, step 2 / `CudaGlSink`) ---
@@ -386,59 +386,59 @@ mod ffi {
 
     /// `CUgraphicsResource` is an opaque handle (`struct CUgraphicsResource_st *`).
     #[allow(dead_code)]
-    pub type CuGraphicsResource = *mut c_void;
+    pub(super) type CuGraphicsResource = *mut c_void;
     /// `CUarray` is an opaque handle (`struct CUarray_st *`).
     #[allow(dead_code)]
-    pub type CuArray = *mut c_void;
+    pub(super) type CuArray = *mut c_void;
     /// `CUstream`; the default stream is null.
     #[allow(dead_code)]
-    pub type CuStream = *mut c_void;
+    pub(super) type CuStream = *mut c_void;
     /// `GLuint` (OpenGL texture name).
     #[allow(dead_code)]
-    pub type GlUint = u32;
+    pub(super) type GlUint = u32;
     /// `GLenum` (OpenGL enumerant).
     #[allow(dead_code)]
-    pub type GlEnum = u32;
+    pub(super) type GlEnum = u32;
 
     /// `CUmemorytype::CU_MEMORYTYPE_ARRAY`: a `cuMemcpy2D` destination that is
     /// a mapped `CUarray` (the GL texture) rather than host/device memory.
     #[allow(dead_code)]
-    pub const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
+    pub(super) const CU_MEMORYTYPE_ARRAY: u32 = 0x03;
     /// `CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD`: CUDA fully overwrites the
     /// resource each frame (the decoder plane is its sole writer), so the
     /// driver may skip preserving prior contents.
     #[allow(dead_code)]
-    pub const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
+    pub(super) const CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD: u32 = 0x02;
     /// `GL_TEXTURE_2D` target (OpenGL spec constant).
     #[allow(dead_code)]
-    pub const GL_TEXTURE_2D: GlEnum = 0x0DE1;
+    pub(super) const GL_TEXTURE_2D: GlEnum = 0x0DE1;
 
     #[allow(dead_code, non_snake_case)]
     #[link(name = "cuda")]
     extern "C" {
         /// Register a GL texture object for CUDA access.
-        pub fn cuGraphicsGLRegisterImage(
+        pub(super) fn cuGraphicsGLRegisterImage(
             pCudaResource: *mut CuGraphicsResource,
             image: GlUint,
             target: GlEnum,
             Flags: u32,
         ) -> CuResult;
         /// Unregister a previously-registered graphics resource.
-        pub fn cuGraphicsUnregisterResource(resource: CuGraphicsResource) -> CuResult;
+        pub(super) fn cuGraphicsUnregisterResource(resource: CuGraphicsResource) -> CuResult;
         /// Map graphics resources for access by CUDA.
-        pub fn cuGraphicsMapResources(
+        pub(super) fn cuGraphicsMapResources(
             count: u32,
             resources: *mut CuGraphicsResource,
             hStream: CuStream,
         ) -> CuResult;
         /// Unmap graphics resources.
-        pub fn cuGraphicsUnmapResources(
+        pub(super) fn cuGraphicsUnmapResources(
             count: u32,
             resources: *mut CuGraphicsResource,
             hStream: CuStream,
         ) -> CuResult;
         /// Get the `CUarray` through which to access a mapped resource.
-        pub fn cuGraphicsSubResourceGetMappedArray(
+        pub(super) fn cuGraphicsSubResourceGetMappedArray(
             pArray: *mut CuArray,
             resource: CuGraphicsResource,
             arrayIndex: u32,

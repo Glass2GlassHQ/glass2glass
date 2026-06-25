@@ -422,11 +422,13 @@ mod tests {
         // SAFETY: the ring outlives every published frame in this scope. (len 1 so
         // the slice pointer is the slot base, not the empty-slice sentinel.)
         let f0 = unsafe { ring.acquire().unwrap().publish(1) };
+        // SAFETY: as above, the ring outlives this frame and len is 1.
         let f1 = unsafe { ring.acquire().unwrap().publish(1) };
         let p0 = f0.as_slice().as_ptr();
         assert!(ring.acquire().is_none(), "both slots lent: ring is full (back-pressure)");
 
         drop(f0); // a downstream drop frees one slot
+        // SAFETY: as above; the slot freed by the drop above is reacquired here.
         let f2 = unsafe { ring.acquire().expect("slot freed by the drop").publish(1) };
         // The recycled frame reuses slot 0's physical buffer: no fresh allocation.
         assert_eq!(f2.as_slice().as_ptr(), p0, "the freed slot's buffer is recycled");

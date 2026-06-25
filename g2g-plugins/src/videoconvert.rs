@@ -753,6 +753,9 @@ mod tests {
     }
 
     #[test]
+    // The expected lengths below are written as width * height * channels; keep
+    // the unit factors (e.g. the height of 1) for legibility.
+    #[allow(clippy::identity_op)]
     fn yuyv_to_rgb_is_grey_for_neutral_chroma() {
         // Y0 == Y1, U = V = 128: both unpacked pixels are the same neutral grey
         // and alpha is opaque.

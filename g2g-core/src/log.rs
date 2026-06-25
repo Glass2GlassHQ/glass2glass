@@ -588,8 +588,10 @@ mod tests {
         assert_eq!(c2.level_for("x"), LogLevel::Info);
     }
 
+    /// One captured log record (level, category, instance, formatted message).
+    type CapturedRecord = (LogLevel, String, Option<String>, String);
     /// A capturing sink for the global-path test.
-    struct CaptureSink(Arc<Mutex<Vec<(LogLevel, String, Option<String>, String)>>>);
+    struct CaptureSink(Arc<Mutex<Vec<CapturedRecord>>>);
     impl LogSink for CaptureSink {
         fn emit(&self, r: &LogRecord<'_>) {
             self.0.lock().push((
