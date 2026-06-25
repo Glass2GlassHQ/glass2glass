@@ -28,6 +28,7 @@
 //! no per-pad allocation channel, so the proposal stops there (a follow-up).
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::pin::Pin;
 
@@ -55,8 +56,8 @@ use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
 use crate::runtime::solver::{
-    graph_downstream_feasibility, resolve_forward_output, solve_graph, solve_linear, ForwardResolve,
-    NodeConstraint,
+    graph_downstream_feasibility, resolve_forward_output, solve_graph_labeled, solve_linear,
+    ForwardResolve, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
 
@@ -508,7 +509,17 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             };
             constraints.push(nc);
         }
-        let solution = solve_graph(&vg, &constraints).map_err(|f| {
+        // Label nodes by element category (e.g. `h264parse`) so the caps
+        // explainer (`G2G_CAPS_TRACE`) narrates in element names; a structural
+        // tee carries no element, so it falls back to its kind.
+        let label = |node: NodeId| match vg.element(node) {
+            Some(e) => e.log_category().to_string(),
+            None => match vg.kind(node) {
+                NodeKind::Tee(_) => "tee".to_string(),
+                k => alloc::format!("{k:?}"),
+            },
+        };
+        let solution = solve_graph_labeled(&vg, &constraints, &label).map_err(|f| {
             report_nego_failure(bus, f);
             G2gError::CapsMismatch
         })?;

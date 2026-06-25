@@ -1789,6 +1789,28 @@ solver's per-edge caps (negotiation runs inside `run_graph`), so the dump is
 topology + policy until that solution is exposed (a `DESIGN_TODO.md` follow-up);
 the renderer already accepts the caps the moment a caller has them.
 
+### 4.20a Developer Tooling: Caps-Negotiation Explainer
+
+Caps negotiation is the hardest code in the system (§4.13, with accumulating
+workarounds), and a `CapsMismatch` historically gave no hint *why*. The
+explainer makes the solver narrate itself. `solve_graph` emits under a reserved
+`caps` log category (not an element type, so it filters independently): a setup
+dump of each node's constraint, then per edge the surviving `CapsSet` and its
+fixated `Caps`. On failure it narrates at ERROR, naming the two conflicting nodes
+and dumping the set on every edge incident to them, so the log answers "these two
+can't agree, and here is what each wanted"; an edge that survives narrowing but
+can't reduce to one `Caps` logs `cannot fixate`.
+
+Node labels come from the caller via `solve_graph_labeled`: the runner passes
+each element's `log_category` (so the narration reads `h264parse -> nvdec`),
+while `solve_graph` defaults to `n{id}:{kind}`. The narration is gated by the
+logging framework (§4.15): all formatting is skipped unless the `caps` category
+is enabled, which costs one atomic load when off, so it is free in production.
+It is turned on with `G2G_CAPS_TRACE=1` (a boolean shortcut, or a level name /
+number to tune verbosity) or the general `G2G_DEBUG=caps:debug`; both install the
+stderr sink through `log::init_from_env`, which the launch / inspect binaries
+already call at startup.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

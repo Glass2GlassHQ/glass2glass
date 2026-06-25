@@ -422,11 +422,6 @@ first:
   passes none: the solver runs inside `run_graph` and its `Vec<Caps>` solution
   is not surfaced. Expose the solved per-edge caps (and per-edge memory domain)
   from the run path so the dump can show what got chosen, not just the topology.
-- **Caps-negotiation explainer** (`G2G_CAPS_TRACE=1`). Narrate each
-  `intersect` / `fixate` decision so a `CapsMismatch` is a readable log, not a
-  guess (e.g. `h264parse.src ∩ nvdec.sink ✓ … fixate W=Any -> REJECTED`). Highest
-  absolute leverage (caps nego is the hardest code, with accumulating workarounds);
-  more invasive (threads through the solver).
 - **`xtask` dev-command crate** consolidating the bespoke invocations:
   `test --here` (probe the host for NVENC headers / VAAPI / wgpu adapters /
   cameras and run exactly the feature-gated tests this machine supports,

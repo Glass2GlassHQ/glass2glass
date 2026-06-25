@@ -12,6 +12,7 @@
 //! convergence is guaranteed because every iteration either shrinks at
 //! least one link's candidate set or terminates.
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{
@@ -21,6 +22,7 @@ use crate::caps::{
 use crate::caps::{project_passthrough, project_passthrough_derived};
 use crate::format_element::CapsConstraint;
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
+use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
 
 /// Per-link assignment produced by the solver: one fixated `Caps` per
 /// link between adjacent elements. For an `N`-element pipeline this is
@@ -806,6 +808,22 @@ pub fn solve_graph<E>(
     graph: &ValidatedGraph<E>,
     constraints: &[NodeConstraint<'_>],
 ) -> Result<Vec<Caps>, NegotiationFailure> {
+    // Default node labels for the caps explainer: `n{id}:{kind}`. A caller with
+    // element names (the runner) uses `solve_graph_labeled` for prettier output.
+    solve_graph_labeled(graph, constraints, &|n| node_label_default(graph, n))
+}
+
+/// [`solve_graph`] with caller-supplied node labels for the caps-negotiation
+/// explainer (DESIGN.md 4.20a). The runner passes each node's element category
+/// (e.g. `h264parse`) so the `G2G_CAPS_TRACE` narration reads in element names
+/// rather than node ids; direct callers use [`solve_graph`]'s `n{id}:{kind}`
+/// default. The solve itself is identical; `label` only affects the log text,
+/// and all formatting is skipped unless the [`CAPS_CATEGORY`] is enabled.
+pub fn solve_graph_labeled<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    label: &dyn Fn(NodeId) -> String,
+) -> Result<Vec<Caps>, NegotiationFailure> {
     let n = graph.node_count();
     if n < 2 || constraints.len() != n {
         return Err(NegotiationFailure::Degenerate);
@@ -813,15 +831,57 @@ pub fn solve_graph<E>(
     let ne = graph.edge_count();
     let mut edges: Vec<Option<CapsSet>> = alloc::vec![None; ne];
 
+    let t = Target::category(CAPS_CATEGORY);
+    let trace = log::enabled(CAPS_CATEGORY, LogLevel::Debug);
+    if trace {
+        crate::g2g_debug!(t, "negotiating {n} nodes, {ne} edges:");
+        for (i, c) in constraints.iter().enumerate() {
+            crate::g2g_debug!(t, "  {} {}", label(NodeId(i as u32)), fmt_constraint(c));
+        }
+    }
+
+    // Narrate a structured failure once, on the way out: name the conflicting
+    // nodes and dump the current set on every edge incident to them, so a
+    // `CapsMismatch` reads as "these two can't agree, here's what each wanted".
+    // Emitted at error level (visible in any run with a sink, not just a trace),
+    // but only formatted on the rare failure path.
+    let report = |f: &NegotiationFailure, edges: &[Option<CapsSet>]| {
+        match f {
+            NegotiationFailure::EmptyLink { upstream, downstream } => {
+                let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
+                crate::g2g_error!(t, "no caps overlap between {} and {}", label(up), label(down));
+                for (id, slot) in edges.iter().enumerate() {
+                    let e = graph.edge(id);
+                    if [e.src.node, e.dst.node].iter().any(|&x| x == up || x == down) {
+                        crate::g2g_error!(
+                            t,
+                            "  {} -> {}: {}",
+                            label(e.src.node),
+                            label(e.dst.node),
+                            fmt_set_opt(slot)
+                        );
+                    }
+                }
+            }
+            other => crate::g2g_error!(t, "negotiation failed: {other:?}"),
+        }
+    };
+
     // Same convergence bound as the linear solver, generalized to edges.
     let max_iters = 8 * ne + 4;
     for _ in 0..max_iters {
         let snapshot = edges.clone();
         for &node in graph.topo() {
-            apply_node(graph, node, constraints, &mut edges)?;
+            if let Err(f) = apply_node(graph, node, constraints, &mut edges) {
+                report(&f, &edges);
+                return Err(f);
+            }
         }
         for &node in graph.topo().iter().rev() {
-            apply_node(graph, node, constraints, &mut edges)?;
+            if let Err(f) = apply_node(graph, node, constraints, &mut edges) {
+                report(&f, &edges);
+                return Err(f);
+            }
         }
         if edges == snapshot {
             break;
@@ -831,18 +891,110 @@ pub fn solve_graph<E>(
     let mut out = Vec::with_capacity(ne);
     for (id, slot) in edges.iter().enumerate() {
         let (up, down) = edge_endpoints(graph, id);
-        let set = slot
-            .as_ref()
-            .ok_or(NegotiationFailure::EmptyLink { upstream: up, downstream: down })?;
-        if set.is_empty() {
-            return Err(NegotiationFailure::EmptyLink { upstream: up, downstream: down });
+        let e = graph.edge(id);
+        let set = match slot.as_ref() {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                let f = NegotiationFailure::EmptyLink { upstream: up, downstream: down };
+                report(&f, &edges);
+                return Err(f);
+            }
+        };
+        match set.fixate() {
+            Some(c) => {
+                if trace {
+                    crate::g2g_debug!(
+                        t,
+                        "{} -> {}: {} ✓ -> {}",
+                        label(e.src.node),
+                        label(e.dst.node),
+                        fmt_set(set),
+                        c.to_gst_string()
+                    );
+                }
+                out.push(c);
+            }
+            None => {
+                crate::g2g_error!(
+                    t,
+                    "{} -> {}: {} ✗ cannot fixate (still ambiguous after narrowing)",
+                    label(e.src.node),
+                    label(e.dst.node),
+                    fmt_set(set)
+                );
+                return Err(NegotiationFailure::Unfixable { upstream: up, downstream: down });
+            }
         }
-        out.push(
-            set.fixate()
-                .ok_or(NegotiationFailure::Unfixable { upstream: up, downstream: down })?,
-        );
     }
     Ok(out)
+}
+
+/// Default node label for the caps explainer: `n{id}:{kind}` (e.g. `n2:xform`),
+/// used when the caller supplies no element names.
+fn node_label_default<E>(graph: &ValidatedGraph<E>, node: NodeId) -> String {
+    alloc::format!("n{}:{}", node.0, kind_short(graph.kind(node)))
+}
+
+fn kind_short(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Source => "src",
+        NodeKind::Transform => "xform",
+        NodeKind::Sink => "sink",
+        NodeKind::Tee(_) => "tee",
+        NodeKind::Muxer(_) => "mux",
+    }
+}
+
+/// Render a `CapsSet` for the explainer: its alternatives joined by ` | `, with
+/// `∅` for empty and a `(+N more)` elision past four so a wide set stays one
+/// readable line.
+fn fmt_set(set: &CapsSet) -> String {
+    let alts = set.alternatives();
+    if alts.is_empty() {
+        return String::from("∅");
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for (i, a) in alts.iter().enumerate() {
+        if i == 4 {
+            parts.push(alloc::format!("(+{} more)", alts.len() - 4));
+            break;
+        }
+        parts.push(a.to_gst_string());
+    }
+    parts.join(" | ")
+}
+
+fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
+    match slot {
+        Some(s) => fmt_set(s),
+        None => String::from("(unconstrained)"),
+    }
+}
+
+/// One-line summary of a node's constraint for the explainer's setup dump.
+fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
+    match nc {
+        NodeConstraint::Element(c) => fmt_caps_constraint(c),
+        NodeConstraint::Muxer { inputs, output } => {
+            alloc::format!("mux {} inputs -> {}", inputs.len(), fmt_caps_constraint(output))
+        }
+    }
+}
+
+fn fmt_caps_constraint(c: &CapsConstraint<'_>) -> String {
+    match c {
+        CapsConstraint::Produces(s) => alloc::format!("produces {}", fmt_set(s)),
+        CapsConstraint::Accepts(s) => alloc::format!("accepts {}", fmt_set(s)),
+        CapsConstraint::AcceptsAny => "accepts ANY".to_string(),
+        CapsConstraint::Identity(s) => alloc::format!("identity {}", fmt_set(s)),
+        CapsConstraint::IdentityAny => "identity ANY".to_string(),
+        CapsConstraint::Mapping(pairs) => alloc::format!("maps {} pair(s)", pairs.len()),
+        CapsConstraint::DerivedOutput(_) => "derives output".to_string(),
+        CapsConstraint::DerivedCoupled { .. } => "derives output (coupled)".to_string(),
+        CapsConstraint::LegacySource(c) => alloc::format!("legacy source {}", c.to_gst_string()),
+        CapsConstraint::LegacyTransform { .. } => "legacy transform".to_string(),
+        CapsConstraint::LegacySink(_) => "legacy sink".to_string(),
+    }
 }
 
 /// Per-edge downstream feasibility for the DAG runner's mid-stream re-solve
@@ -2314,5 +2466,59 @@ mod tests {
         let sink =
             CapsConstraint::Accepts(CapsSet::one(fixed_video(RawVideoFormat::Nv12, 160, 120, 30)));
         assert!(solve_linear(&[&src, &convert, &sink]).is_err(), "geometry pin must fail loud");
+    }
+
+    // --- caps-negotiation explainer (M280) -------------------------------
+
+    #[test]
+    fn explainer_formats_sets_constraints_and_labels() {
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+
+        // A set renders its alternatives joined by " | "; empty is the ∅ glyph.
+        let set = CapsSet::from_alternatives(vec![rgba.clone(), nv12.clone()]);
+        let rendered = fmt_set(&set);
+        assert!(rendered.contains("format=RGBA") && rendered.contains("format=NV12"));
+        assert!(rendered.contains(" | "));
+        assert_eq!(fmt_set(&CapsSet::from_alternatives(vec![])), "∅");
+
+        // Wide sets elide past four alternatives so the line stays readable.
+        let wide = CapsSet::from_alternatives(
+            (1..=6).map(|w| fixed_video(RawVideoFormat::Rgba8, w * 16, 48, 30)).collect(),
+        );
+        assert!(fmt_set(&wide).contains("(+2 more)"), "{}", fmt_set(&wide));
+
+        // Constraint summaries name the shape.
+        assert!(fmt_caps_constraint(&CapsConstraint::Produces(CapsSet::one(rgba.clone())))
+            .starts_with("produces "));
+        assert_eq!(fmt_caps_constraint(&CapsConstraint::AcceptsAny), "accepts ANY");
+        assert_eq!(
+            fmt_caps_constraint(&CapsConstraint::DerivedOutput(Box::new(move |_: &Caps| {
+                CapsSet::one(nv12.clone())
+            }))),
+            "derives output"
+        );
+    }
+
+    #[test]
+    fn solve_graph_labeled_matches_default_and_uses_labels() {
+        // The labeled solver returns the identical solution; the label closure
+        // only affects log text, which a label override exercises here.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let sink = g.add_sink(());
+        g.link(src, sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let default = solve_graph(&v, &cs).expect("solves");
+        let labeled = solve_graph_labeled(&v, &cs, &|n| alloc::format!("node{}", n.0))
+            .expect("solves with custom labels");
+        assert_eq!(default, labeled);
+        assert_eq!(labeled, vec![rgba]);
     }
 }

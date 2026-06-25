@@ -357,14 +357,43 @@ pub fn reset() {
     *SINK.lock() = None;
 }
 
+/// The reserved log category the caps-negotiation explainer emits under
+/// (DESIGN.md 4.20a). Not an element type: it names the solver's narration, so
+/// `G2G_DEBUG=caps:debug` (or the `G2G_CAPS_TRACE` shortcut) turns it on
+/// independent of element logging.
+pub const CAPS_CATEGORY: &str = "caps";
+
 /// Read the `G2G_DEBUG` environment variable (a `GST_DEBUG`-style spec) and, when
-/// set, install the stderr sink and apply the spec. Call once at startup; the
-/// `g2g-launch` / `g2g-inspect` binaries and apps invoke it.
+/// set, install the stderr sink and apply the spec. Also honors `G2G_CAPS_TRACE`
+/// as a shortcut for the caps explainer: a boolean-ish value (`1` / `true` / `on`
+/// / `yes`) raises the [`CAPS_CATEGORY`] to `Debug`, or a level name / number
+/// (`debug`, `trace`, `7`) sets that verbosity, installing the stderr sink if
+/// `G2G_DEBUG` did not. Call once at startup; the `g2g-launch` / `g2g-inspect`
+/// binaries and apps invoke it.
 #[cfg(feature = "std")]
 pub fn init_from_env() {
+    let mut have_sink = false;
     if let Ok(spec) = std::env::var("G2G_DEBUG") {
         set_sink(Box::new(StderrSink));
+        have_sink = true;
         configure(&spec);
+    }
+    if let Ok(v) = std::env::var("G2G_CAPS_TRACE") {
+        let v = v.trim();
+        let enable = !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false");
+        if enable {
+            // A bare on-switch means Debug; a level name / number tunes it.
+            let level = match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => LogLevel::Debug,
+                other => LogLevel::parse(other)
+                    .filter(|l| *l != LogLevel::Off)
+                    .unwrap_or(LogLevel::Debug),
+            };
+            if !have_sink {
+                set_sink(Box::new(StderrSink));
+            }
+            set_category_level(CAPS_CATEGORY, level);
+        }
     }
 }
 

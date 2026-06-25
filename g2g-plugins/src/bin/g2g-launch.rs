@@ -31,6 +31,12 @@
 //! `num-buffers`) or until the process is killed; there is no run-time
 //! cancellation channel yet, so `-e` / `-m` / `-f` / `-t` are recognized and
 //! ignored rather than rejected, keeping pasted lines parsing.
+//!
+//! Debugging: `G2G_DEBUG` (the `GST_DEBUG` analog, e.g. `G2G_DEBUG=*:debug`)
+//! sets per-category log thresholds; `G2G_CAPS_TRACE=1` turns on the
+//! caps-negotiation explainer, which narrates the per-edge intersect / fixate
+//! decisions (and, on a `CapsMismatch`, names the two conflicting elements and
+//! the caps each wanted). Both are read by `g2g_core::log::init_from_env`.
 
 use std::process;
 
