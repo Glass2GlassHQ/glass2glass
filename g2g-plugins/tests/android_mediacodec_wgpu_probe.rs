@@ -22,7 +22,9 @@ use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec};
-use g2g_plugins::mediacodec_wgpu::{ahb_format_info, create_android_interop_device};
+use g2g_plugins::mediacodec_wgpu::{
+    ahb_format_info, ahb_to_rgba_readback, create_android_interop_device,
+};
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
 use ash::vk;
@@ -205,4 +207,44 @@ async fn probe_ahb_vulkan_format() {
         info.vk_format,
         info.external_format
     );
+
+    // The conversion pass: import the (opaque) AHB, sample it through an
+    // immutable ycbcr-conversion sampler in a compute shader, write RGBA to a
+    // storage image, and read it back. Validates the M304 path end to end on the
+    // GPU (no CPU readback of the decoded YUV; the readback here is the tap).
+    let (w, h) = (640u32, 480u32);
+    // SAFETY: `ahb` is alive (held by `dec`); `info` is its format info; `dev` is
+    // the interop device. `info` is opaque on this device, the path under test.
+    let rgba = unsafe {
+        ahb_to_rgba_readback(&dev, ahb.as_ptr() as *const vk::AHardwareBuffer, &info, w, h)
+            .expect("ycbcr -> rgba conversion + readback")
+    };
+    assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA byte length");
+
+    // Every pixel's alpha is forced to 255 by the shader; the conversion must
+    // produce a real image, not a constant. Sample the channels: alpha all 255,
+    // and the RGB content has variance (a decoded frame is not a flat colour).
+    let alpha_all_opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
+    assert!(alpha_all_opaque, "shader writes opaque alpha");
+    let mut min = [255u8; 3];
+    let mut max = [0u8; 3];
+    let mut sum = [0u64; 3];
+    for px in rgba.chunks_exact(4) {
+        for c in 0..3 {
+            min[c] = min[c].min(px[c]);
+            max[c] = max[c].max(px[c]);
+            sum[c] += px[c] as u64;
+        }
+    }
+    let n = (w * h) as u64;
+    eprintln!(
+        "=== M304 ycbcr->rgba conversion ({}x{}) ===\nR mean={} [{}..{}]  G mean={} [{}..{}]  B mean={} [{}..{}]",
+        w, h,
+        sum[0] / n, min[0], max[0],
+        sum[1] / n, min[1], max[1],
+        sum[2] / n, min[2], max[2],
+    );
+    let has_variance = (0..3).any(|c| max[c] > min[c]);
+    assert!(has_variance, "converted RGBA must vary (got a flat image: min={min:?} max={max:?})");
+    eprintln!(">>> ycbcr -> rgba conversion validated on device.");
 }

@@ -82,10 +82,14 @@ leverage first:
   `AHardwareBuffer` imports as an *opaque* buffer (`VkFormat::UNDEFINED`,
   `externalFormat != 0`, suggested YCbCr 601 / narrow), so there is no per-plane
   image access and the planned per-plane `vkCmdCopyImage` device-local copy is
-  out. Remaining: a raw-Vulkan `VkSamplerYcbcrConversion` + immutable sampler
-  (wgpu's bind-group API can't express it) feeding a convert-to-RGBA pass we own,
-  output as `MemoryDomain::WgpuTexture` for `WgpuPreprocess` (no CPU readback).
-  The `Surface` present sink is still separate.
+  out. The raw-Vulkan `VkSamplerYcbcrConversion` + immutable-sampler convert-to-RGBA
+  compute pass is built and validated on device (`ahb_to_rgba_readback`: a real
+  frame -> RGBA, full per-channel range, no CPU readback of the YUV). Remaining:
+  wrap the RGBA storage image as a `wgpu::Texture` (`MemoryDomain::WgpuTexture`,
+  the cudawgpu `texture_from_raw` pattern) for `WgpuPreprocess`, reuse the
+  pipeline objects per frame instead of rebuilding, and wire it into
+  `MediaCodecDec` as the zero-copy output path. The `Surface` present sink is
+  still separate.
 - Encode, Camera2 capture, AAudio, Surface present.
 
 ## Receive / decode

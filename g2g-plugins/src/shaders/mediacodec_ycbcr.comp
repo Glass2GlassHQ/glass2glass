@@ -1,0 +1,25 @@
+#version 450
+
+// M304: YCbCr -> RGBA conversion for the Android MediaCodec zero-copy bridge.
+//
+// The opaque AImage AHardwareBuffer is imported as a Vulkan image sampled
+// through an immutable VkSamplerYcbcrConversion (set up on the Rust side from
+// the buffer's suggested model / range). The conversion happens implicitly in
+// the sampler, so this shader just samples and writes RGBA: it never sees the
+// raw YUV. `textureLod` (explicit LOD) is required because a YCbCr combined
+// sampler cannot use implicit-derivative sampling in a compute shader.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D ycbcrTex;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outImg;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(outImg);
+    if (p.x >= sz.x || p.y >= sz.y) {
+        return;
+    }
+    vec2 uv = (vec2(p) + 0.5) / vec2(sz);
+    vec4 rgb = textureLod(ycbcrTex, uv, 0.0);
+    imageStore(outImg, p, vec4(rgb.rgb, 1.0));
+}
