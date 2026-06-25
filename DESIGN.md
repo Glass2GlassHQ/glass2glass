@@ -1850,9 +1850,17 @@ the workspace (like `examples/g2g-size`) because criterion pulls plotters / rayo
 that a `--all-targets` CI job would otherwise build on every push, and Cargo's
 `required-features` does not gate a dev-dependency under `--all-targets`. They
 guard the latency moat's hot paths: the caps algebra + linear / DAG solvers
-(`benches/caps.rs`) and the per-pixel software frame conversion
-(`benches/convert.rs`). `cargo xtask bench` drives them by manifest path, passing
-criterion args through (e.g. `--save-baseline`).
+(`benches/caps.rs`), the per-pixel software frame conversion
+(`benches/convert.rs`), and the runner loop's bounded per-edge channel
+(`benches/runner.rs`, the transport every frame crosses; the full `run_graph`
+paces to PTS so it is unsuitable for a microbench). `cargo xtask bench` drives
+them by manifest path, passing criterion args through (e.g. `--save-baseline`).
+
+A dedicated `bench` workflow (separate from the main CI, so criterion never
+slows the check / test / clippy jobs) runs on PRs that touch the benched crates:
+it benches the PR head and its base and fails if any benchmark's mean regressed
+more than 50% (a loose threshold tuned to shared-runner noise, catching a lost
+fast path rather than drift).
 
 ---
 

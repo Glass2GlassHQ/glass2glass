@@ -1,0 +1,59 @@
+name: bench
+
+# Criterion microbenchmark regression guard for the hot paths (caps solve,
+# frame convert, runner channel). Separate from the main CI so the lean
+# check/test/clippy jobs never build criterion. Runs only when the benched code
+# (or the bench crate) changes, plus on manual dispatch.
+on:
+  pull_request:
+    paths:
+      - 'g2g-core/**'
+      - 'g2g-plugins/**'
+      - 'g2g-bench/**'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+
+# A later push to the same PR supersedes an in-flight bench run.
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Shorter than the criterion default so the double run (base + head) fits a CI
+  # budget; still enough samples for a coarse regression check.
+  CRIT_ARGS: --warm-up-time 1 --measurement-time 3
+
+jobs:
+  bench-compare:
+    name: bench (regression guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: g2g-bench
+
+      # Head (the PR / current commit): save the criterion baseline "head".
+      - name: bench head
+        run: cargo bench --manifest-path g2g-bench/Cargo.toml -- --save-baseline head $CRIT_ARGS
+
+      # Base (the PR target): check it out (target/ is gitignored, so the "head"
+      # baseline survives) and save the baseline "base". Skipped on dispatch,
+      # where there is no base to compare against.
+      - name: bench base
+        if: github.event_name == 'pull_request'
+        run: |
+          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          cargo bench --manifest-path g2g-bench/Cargo.toml -- --save-baseline base $CRIT_ARGS
+          git checkout --quiet -
+
+      # Fail if any benchmark's head mean regressed > 50% vs base. The threshold
+      # is deliberately loose: shared CI runners are noisy, so this catches gross
+      # regressions (an accidental O(n^2), a lost fast path), not small drift.
+      - name: compare
+        if: github.event_name == 'pull_request'
+        run: python3 .github/workflows/bench_compare.py g2g-bench/target/criterion 1.5

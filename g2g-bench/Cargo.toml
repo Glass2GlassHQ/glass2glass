@@ -16,7 +16,9 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
-criterion = "0.5"
+# async_tokio: the runner bench drives the bounded channel on a tokio runtime.
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 # dyn-slot gives the full std + multi-thread + runtime combo the solver + lib
 # build need; the benches call the caps solver under `runtime`.
 g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
@@ -28,4 +30,8 @@ harness = false
 
 [[bench]]
 name = "convert"
+harness = false
+
+[[bench]]
+name = "runner"
 harness = false
