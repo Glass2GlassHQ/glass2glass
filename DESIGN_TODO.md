@@ -413,21 +413,15 @@ leverage first:
 
 ## Developer tooling
 
-No `xtask` / `justfile`, pipeline visualization, caps tracing, or benchmarks
-exist today; the dev workflow is shell-history tribal knowledge. Highest leverage
-first:
+The `xtask` crate (`cargo xtask ci | test --here | size | wasm`) and the DOT
+visualizer + caps explainer now exist; the remaining items extend them. Highest
+leverage first:
 
 - **Negotiated caps in the DOT dump.** `Graph::to_dot` (M279) already renders
   caps + memory domains per edge from a `DotAnnotations`, but `g2g-launch --dot`
   passes none: the solver runs inside `run_graph` and its `Vec<Caps>` solution
   is not surfaced. Expose the solved per-edge caps (and per-edge memory domain)
   from the run path so the dump can show what got chosen, not just the topology.
-- **`xtask` dev-command crate** consolidating the bespoke invocations:
-  `test --here` (probe the host for NVENC headers / VAAPI / wgpu adapters /
-  cameras and run exactly the feature-gated tests this machine supports,
-  automating the "validate on this host" dance); `ci` (run locally what CI runs);
-  `size` / `wasm` (wrap the embedded-footprint + wasm builds, baking in the Fedora
-  `PATH="$HOME/.cargo/bin:$PATH"` rustup gotcha).
 - **FFI struct-probe automation.** `xtask ffi-probe <header> <struct>` compiles a
   C probe against the installed SDK header and emits / verifies the `repr(C)`
   size + offset asserts (the hand-rolled-FFI ritual, done manually per struct
@@ -438,9 +432,9 @@ first:
   dominance) are done by hand today.
 - **criterion benchmarks + baseline** for the hot paths (caps solve, runner loop,
   frame convert) so the latency moat is regression-guarded.
-- **Element scaffolding.** `xtask new-element` stamps the `AsyncElement` /
-  `SourceLoop` impl + pad templates + registry stub + milestone test file (the
-  boilerplate every `Mn` repeats).
+- **Element scaffolding.** `xtask new-element` (a new subcommand) stamps the
+  `AsyncElement` / `SourceLoop` impl + pad templates + registry stub + milestone
+  test file (the boilerplate every `Mn` repeats).
 - Longer tail: a live pipeline TUI (`gst-launch -v` on steroids); a gst-parity
   differ (same launch line through real GStreamer vs g2g, diff caps / behaviour);
   a codec golden-fixture / PSNR conformance harness; an MCP server exposing

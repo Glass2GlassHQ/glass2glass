@@ -1811,6 +1811,25 @@ number to tune verbosity) or the general `G2G_DEBUG=caps:debug`; both install th
 stderr sink through `log::init_from_env`, which the launch / inspect binaries
 already call at startup.
 
+### 4.20b Developer Tooling: the `xtask` crate
+
+`cargo xtask <command>` (a `.cargo/config.toml` alias onto the `xtask` workspace
+member) is the home for the build / test invocations that were otherwise
+shell-history knowledge. It is dependency-free, orchestrating only `cargo` and
+toolchain tools. `ci` runs locally what the GitHub workflow runs (workspace
+check / test / clippy, the Linux feature build, the embassy no-alloc tests, the
+wasm core check), `--locked` like CI, so a red CI is reproducible offline.
+`test --here` probes the host (`nvidia-smi`, `pkg-config` for the syslib-backed
+features, `/dev/video*` and `/dev/dri` device nodes) and runs exactly the
+feature-gated tests this machine supports, automating the "validate on this host"
+dance; `--dry-run` prints the detected plan only. `size` builds the
+`examples/g2g-size` Cortex-M harness and reports the gc-sectioned `.text`
+footprint (it locates `rust-lld` in the toolchain sysroot for the final link).
+`wasm` builds the wasm32 targets. The cross-compiling commands (`size`, `wasm`)
+prepend `~/.cargo/bin` to `PATH` so cargo selects the rustup toolchain over a
+distro `rustc` that lacks the target std, and `wasm` passes
+`--cfg=web_sys_unstable_apis` for the `web-codecs` build.
+
 ---
 
 ## 5. First-Class Machine Learning Integration
