@@ -114,6 +114,8 @@ use crate::v4l2src::V4l2Src;
 use crate::kmssink::KmsSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+use crate::ffmpegenc::{Backend as FfmpegEncBackend, FfmpegH264Enc};
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 use crate::vaapidec::VaapiH264Dec;
 #[cfg(all(target_os = "linux", feature = "nvdec"))]
@@ -384,6 +386,10 @@ fn register_aliases(reg: &mut Registry) {
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
+    // gst's libav software H.264 encoder name -> the ffmpeg encoder, software
+    // first (`x264enc`, libx264), falling back to the NVENC-backed `ffmpegenc`
+    // when only that is registered. The native NVENC encoder owns `nvh264enc`.
+    reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
     // to the registered target only when the feature is on (else the alias is
     // inert), the same first-registered rule as the VA-API names above.
@@ -526,6 +532,18 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
         Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
     }));
+    // ffmpeg / libavcodec H.264 *encoder* (M266 / M274), the encode-side mirror of
+    // ffmpegdec. `ffmpegenc` defaults to the NVENC backend (`h264_nvenc`); the
+    // explicit `x264enc` name opens the libx264 software encoder for hosts without
+    // an NVIDIA GPU. Launch-only: an encoder is never an auto-plug candidate.
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<FfmpegH264Enc>("ffmpegenc", || {
+        Box::new(FfmpegH264Enc::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<FfmpegH264Enc>("x264enc", || {
+        Box::new(FfmpegH264Enc::new().with_backend(FfmpegEncBackend::Software))
+    }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
         Box::new(VaapiH264Dec::new())
@@ -571,5 +589,21 @@ mod nv_registry_tests {
         // The native decoder is also an auto-plug candidate (registered after the
         // CPU decoders so it does not out-rank them; see register_autoplug_candidates).
         assert!(reg.element_names().contains(&"nvdec"), "nvdec is an autoplug factory");
+    }
+}
+
+#[cfg(all(test, target_os = "linux", feature = "ffmpeg"))]
+mod ffmpeg_enc_registry_tests {
+    use super::*;
+
+    /// The ffmpeg H.264 encoder (M266 / M274) resolves under its native name, the
+    /// software `x264enc` name, and the gst `avenc_h264` alias. `new()` opens no
+    /// libavcodec context (that happens at configure), so this needs no GPU.
+    #[test]
+    fn ffmpeg_encoder_and_alias_resolve() {
+        let reg = default_registry();
+        for name in ["ffmpegenc", "x264enc", "avenc_h264"] {
+            assert!(reg.make_element(name).is_some(), "registry resolves `{name}`");
+        }
     }
 }
