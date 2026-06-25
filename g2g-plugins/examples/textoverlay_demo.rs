@@ -21,8 +21,9 @@ const HEIGHT: u32 = 720;
 
 /// Frame geometry from optional `WIDTHxHEIGHT` argument (`arg`), else the
 /// default. Lets the live demo run small enough that a debug build outpaces the
-/// framerate, so PTS pacing is the throttle rather than CPU.
-#[cfg(any(feature = "wayland-sink", feature = "std"))]
+/// framerate, so PTS pacing is the throttle rather than CPU. Only the live
+/// (`wayland-sink`) path parses geometry; the still path uses the default size.
+#[cfg(feature = "wayland-sink")]
 fn geometry(arg: Option<String>) -> (u32, u32) {
     arg.and_then(|s| {
         let (w, h) = s.split_once('x')?;
