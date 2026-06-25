@@ -59,7 +59,7 @@ OS-coupled elements live behind cargo features:
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
 | `MfDecode` / `MfEncode` / `MfAacEncode` / `MfAacDecode` | `mf-decode`, `mf-encode`, `mf-aac` | Windows + Media Foundation |
 | `VtDecode` (H.264; CI-compiled, on-device decode pending) | `vtdecode` | macOS + VideoToolbox |
-| `MediaCodecDec` (H.264; CI cross-compiled, on-device decode pending) | `mediacodec` | Android + NDK MediaCodec |
+| `MediaCodecDec` (H.264 / H.265, on-device validated; zero-copy GPU output via `with_gpu_output`) | `mediacodec`, `mediacodec-wgpu` | Android + NDK MediaCodec (+ wgpu / Vulkan for GPU output) |
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
@@ -83,7 +83,7 @@ OS-coupled elements live behind cargo features:
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
-| `WgpuPreprocess` | `wgpu` (in `g2g-ml`) | wgpu |
+| `WgpuPreprocess` (NV12 or Android RGBA GPU texture in, NCHW tensor out) | `wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
 
@@ -160,6 +160,22 @@ run_linear_chain(src, vec![&mut dec, &mut preproc, &mut inference, &mut post],
 
 Features: `rtsp ffmpeg` (plugins) + `wgpu cuda` (g2g-ml). The CUDA execution
 provider falls back to CPU if no CUDA runtime is present.
+
+### Android: MediaCodec decode → GPU → ML preprocess (zero-copy)
+
+```rust
+// Decode on the NDK MediaCodec and keep the frame on the GPU as an RGBA wgpu
+// texture (no CPU NV12 pack); WgpuPreprocess samples it straight into a tensor.
+let dec     = MediaCodecDec::h264().with_gpu_output();   // MemoryDomain::WgpuTexture (RGBA)
+let preproc = WgpuPreprocess::new();                     // samples the texture -> f32 NCHW
+// dec -> preproc -> OrtInference / BurnInference, all on the GPU
+```
+
+Features: `mediacodec-wgpu` (plugins) + `mediacodec-wgpu` (g2g-ml). Android only,
+validated on a Pixel 10a. The decoded `AHardwareBuffer` is imported into Vulkan
+and converted to RGBA through an immutable `VkSamplerYcbcrConversion` compute
+pass (the conversion wgpu's bind-group API cannot express), then handed
+downstream as a `wgpu::Texture` &mdash; the frame never touches the CPU.
 
 ### File capture → H.264 parse → fMP4 record
 

@@ -631,7 +631,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
                 <h3>Decode + encode: ffmpeg / VAAPI / MF / VideoToolbox / MediaCodec / WebCodecs</h3>
-                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda / VAAPI backends (the VAAPI hwaccel is the Linux AMD / Intel path, <code>ffmpegvaapidec</code>); <code>MfDecode</code> (Windows), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust), <code>VtEncode</code> (macOS), <code>MfEncode</code> (Windows).</p>
+                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda / VAAPI backends (the VAAPI hwaccel is the Linux AMD / Intel path, <code>ffmpegvaapidec</code>); <code>MfDecode</code> (Windows), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK, H.264 / H.265, on-device validated, with a zero-copy GPU-texture output path), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust), <code>VtEncode</code> (macOS), <code>MfEncode</code> (Windows).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
@@ -643,7 +643,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#129504;</span>
                 <h3>Inference: ORT + Burn + keep-on-GPU wgpu branch</h3>
-                <p><code>OrtInference</code> with CUDA + DirectML EPs, pure-Rust <code>BurnInference</code> on wgpu, <code>TensorBatcher</code> for N-stream fan-in. The keep-on-GPU branch (M213&ndash;217): <code>WgpuPreprocess</code> imports a GPU NV12 texture and emits a GPU-resident tensor, <code>WgpuInference</code> binds it directly &mdash; pixels never leave the GPU between preprocess and infer; zero-copy frame fan-out through a tee.</p>
+                <p><code>OrtInference</code> with CUDA + DirectML EPs, pure-Rust <code>BurnInference</code> on wgpu, <code>TensorBatcher</code> for N-stream fan-in. The keep-on-GPU branch (M213&ndash;217): <code>WgpuPreprocess</code> imports a GPU NV12 texture and emits a GPU-resident tensor, <code>WgpuInference</code> binds it directly &mdash; pixels never leave the GPU between preprocess and infer; zero-copy frame fan-out through a tee. On Android the same branch consumes the RGBA texture <code>MediaCodecDec</code> emits, so decode &rarr; preprocess &rarr; infer all stay on the GPU.</p>
                 <span class="feature-tag tag-ml">ML</span>
             </div>
             <div class="feature-card">
@@ -760,6 +760,12 @@
                 <p><code>MemoryDomain::Cuda</code> in core, <code>Backend::NvdecCuda</code> keeps NV12 in device memory, <code>CudaDownload</code> + <code>CudaGlSink</code> via CUDA&harr;GL interop (not dmabuf &mdash; doesn't work on NVIDIA).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128241;</span>
+                <h3>Android zero-copy decode &rarr; GPU</h3>
+                <p><code>MediaCodecDec::with_gpu_output()</code> imports the decoded <code>AHardwareBuffer</code> into Vulkan and converts it to an RGBA <code>wgpu::Texture</code> through an immutable <code>VkSamplerYcbcrConversion</code> compute pass (which wgpu's bind-group API cannot express), emitted as <code>MemoryDomain::WgpuTexture</code> for <code>WgpuPreprocess</code> &mdash; the decoded frame never touches the CPU. Validated on a Pixel 10a.</p>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
         </div>
     </div>
 </section>
@@ -783,7 +789,7 @@
             <div class="target-card">
                 <div class="t-icon">&#128187;</div>
                 <h3>Desktop, mobile &amp; edge</h3>
-                <p>Tokio current-thread. Per-OS hardware decode: Linux <code>FfmpegH264Dec</code> sw / NVDEC + VAAPI, Windows <code>MfDecode</code> + <code>D3D11Sink</code>, macOS <code>VtDecode</code> (VideoToolbox), Android <code>MediaCodecDec</code> (NDK). Present via <code>WaylandSink</code> / <code>KmsSink</code>. Pair with <code>OrtInference</code> for on-device ML.</p>
+                <p>Tokio current-thread. Per-OS hardware decode: Linux <code>FfmpegH264Dec</code> sw / NVDEC + VAAPI, Windows <code>MfDecode</code> + <code>D3D11Sink</code>, macOS <code>VtDecode</code> (VideoToolbox), Android <code>MediaCodecDec</code> (NDK, with a zero-copy decode &rarr; GPU &rarr; preprocess path). Present via <code>WaylandSink</code> / <code>KmsSink</code>. Pair with <code>OrtInference</code> for on-device ML.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#129707;</div>
