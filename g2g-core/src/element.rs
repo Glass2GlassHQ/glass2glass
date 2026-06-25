@@ -8,6 +8,7 @@ use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
 use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
 use crate::frame::PipelinePacket;
+use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
@@ -136,6 +137,15 @@ pub trait AsyncElement: ElementBound {
     /// fold the chain into `RunStats::latency`.
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
+    }
+
+    /// The memory domain of the frames this element emits on its output pad.
+    /// Default [`System`](MemoryDomainKind::System); a GPU producer (a hardware
+    /// decoder emitting into VRAM, a wgpu/CUDA bridge) overrides it. Surfaced
+    /// per edge by the negotiate-only path so the DOT dump can mark the GPU /
+    /// zero-copy links (it is not part of `Caps`; see DESIGN.md 4.13.9).
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::System
     }
 
     /// Answer the upstream peer's allocation query (M12): the buffer size,
@@ -344,6 +354,12 @@ pub trait DynAsyncElement: ElementBound {
         LatencyReport::ZERO
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::output_memory`]. Default
+    /// [`System`](MemoryDomainKind::System).
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::System
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
     /// element that paces to hardware joins the runner's clock election.
     /// Defaults to none.
@@ -460,6 +476,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::latency(self)
     }
 
+    fn output_memory(&self) -> MemoryDomainKind {
+        AsyncElement::output_memory(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
@@ -553,6 +573,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        (**self).output_memory()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

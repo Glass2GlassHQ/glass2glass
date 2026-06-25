@@ -647,6 +647,12 @@ impl AsyncElement for NvDec {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// NVDEC emits NV12 in CUDA device memory (the zero-copy hwframe domain),
+    /// so a downstream link from this element is a GPU link (M285).
+    fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
+        g2g_core::memory::MemoryDomainKind::Cuda
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "NVDEC H.264 / HEVC decoder",

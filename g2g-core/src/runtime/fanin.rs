@@ -32,6 +32,7 @@ use crate::fanout::{
 };
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
+use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, Receiver, Sender, SenderSink};
@@ -63,6 +64,12 @@ pub trait DynSourceLoop: ElementBound {
     /// Dyn-safe mirror of [`SourceLoop::latency`], so the DAG runner folds a
     /// source's latency contribution like the linear runner does.
     fn latency(&self) -> LatencyReport;
+
+    /// Dyn-safe mirror of [`SourceLoop::output_memory`]. Default
+    /// [`System`](MemoryDomainKind::System).
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::System
+    }
 
     /// Dyn-safe mirror of [`SourceLoop::query_duration`] (M203), so the DAG
     /// runner can publish an erased source's duration on the progress handle.
@@ -151,6 +158,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::latency(self)
     }
 
+    fn output_memory(&self) -> MemoryDomainKind {
+        SourceLoop::output_memory(self)
+    }
+
     fn query_duration(&self) -> Option<u64> {
         SourceLoop::query_duration(self)
     }
@@ -218,6 +229,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        (**self).output_memory()
     }
 
     fn query_duration(&self) -> Option<u64> {

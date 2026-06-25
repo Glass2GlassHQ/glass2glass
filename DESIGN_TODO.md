@@ -413,14 +413,11 @@ leverage first:
 
 ## Developer tooling
 
-The `xtask` crate (`cargo xtask ci | test --here | size | wasm`), the DOT
-visualizer (now with negotiated caps via `negotiate_graph`), and the caps
-explainer now exist; the remaining items extend them. Highest leverage first:
+The `xtask` crate (`cargo xtask ci | test --here | size | wasm | bench |
+ffi-probe`), the DOT visualizer (with negotiated caps + per-edge memory domains
+via `negotiate_graph`), the caps explainer, and the criterion benches now exist;
+the remaining items extend them. Highest leverage first:
 
-- **Per-edge memory domain in the DOT dump.** `negotiate_graph` (M282) surfaces
-  the per-edge caps, but not each link's memory domain (that rides the auto-plug
-  metadata, not `Caps`). Thread the chosen domain per edge so the dump can mark
-  the GPU / zero-copy links bold (the renderer's `edge_memory` is already there).
 - **Latency / throughput report.** Surface the existing `LatencyProfile` as a
   per-element / per-link p50 / p99 + dropped-frames + fill-level breakdown on run
   end (or live). The glass-to-glass analyses (NVDEC floor, `link_capacity`

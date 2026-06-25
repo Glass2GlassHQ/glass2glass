@@ -187,12 +187,15 @@ fn main() {
             .build()
             .expect("build tokio runtime");
         match rt.block_on(g2g_core::runtime::negotiate_graph(graph)) {
-            Ok((vg, caps)) => print!(
+            Ok((vg, caps, memory)) => print!(
                 "{}",
                 vg.to_dot(
                     "pipeline",
                     |n| vg.element(n).map(|e| e.log_category().to_string()),
-                    &g2g_core::DotAnnotations { edge_caps: Some(&caps), edge_memory: None },
+                    &g2g_core::DotAnnotations {
+                        edge_caps: Some(&caps),
+                        edge_memory: Some(&memory),
+                    },
                 )
             ),
             Err(err) => {

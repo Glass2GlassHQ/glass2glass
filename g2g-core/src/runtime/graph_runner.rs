@@ -141,6 +141,21 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Demux(_) => "demux",
         }
     }
+
+    /// The memory domain of the frames this node emits on its output pad(s)
+    /// (M285): the source's / element's `output_memory`, surfaced per edge for
+    /// the DOT dump so a GPU / zero-copy link is marked. Fan-in / fan-out
+    /// elements are reported as `System` (their domain is the upstream's; the
+    /// per-edge derivation does not propagate through them yet).
+    pub fn output_memory(&self) -> crate::memory::MemoryDomainKind {
+        match self {
+            GraphNodeRef::Source(s) => s.output_memory(),
+            GraphNodeRef::Element(e) => e.output_memory(),
+            GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
+                crate::memory::MemoryDomainKind::System
+            }
+        }
+    }
 }
 
 impl core::fmt::Debug for GraphNodeRef<'_> {
@@ -937,16 +952,21 @@ fn caps_label(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> alloc::str
 
 /// Run startup caps negotiation only, without running the pipeline: validate the
 /// graph, probe each source's caps (Phase 1, async), and solve the whole-graph
-/// CSP (Phase 2), returning the validated graph plus the fixated caps per edge
-/// (indexed by edge id, as [`crate::dot::DotAnnotations::edge_caps`] expects).
-/// For tooling that wants the *chosen* caps without moving data, e.g.
-/// `g2g-launch --dot`. It performs the same source-caps probing the runner does,
-/// so a source that connects on `intercept_caps` (a live ingress) will do so
-/// here too; a negotiation failure returns `CapsMismatch` (the caller can fall
-/// back to a topology-only dump).
+/// CSP (Phase 2), returning the validated graph, the fixated caps per edge, and
+/// each edge's memory domain (all indexed by edge id, as
+/// [`crate::dot::DotAnnotations`] expects). The per-edge domain is the producing
+/// node's [`output_memory`](GraphNodeRef::output_memory) (M285), so a GPU /
+/// zero-copy link shows up in the dump. For tooling that wants the *chosen* caps
+/// without moving data, e.g. `g2g-launch --dot`. It performs the same
+/// source-caps probing the runner does, so a source that connects on
+/// `intercept_caps` (a live ingress) will do so here too; a negotiation failure
+/// returns `CapsMismatch` (the caller can fall back to a topology-only dump).
 pub async fn negotiate_graph<'a>(
     graph: Graph<GraphNodeRef<'a>>,
-) -> Result<(ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>), G2gError> {
+) -> Result<
+    (ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>, Vec<crate::memory::MemoryDomainKind>),
+    G2gError,
+> {
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
     if n < 2 {
@@ -974,7 +994,18 @@ pub async fn negotiate_graph<'a>(
         solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
             .map_err(|_| G2gError::CapsMismatch)?
     };
-    Ok((vg, solution))
+
+    // Per-edge memory domain: the domain of the node producing onto that edge.
+    let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
+        .map(|id| {
+            let src = vg.edge(id).src.node;
+            vg.element(src)
+                .map(|e| e.output_memory())
+                .unwrap_or(crate::memory::MemoryDomainKind::System)
+        })
+        .collect();
+
+    Ok((vg, solution, edge_memory))
 }
 
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps

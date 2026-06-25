@@ -1786,10 +1786,15 @@ registry, dumps the DOT to stdout, and exits without running, labelling each nod
 by its element's `log_category` (the short type name, e.g. `VideoTestSrc`) via
 the new `GraphNodeRef::log_category`. To show the *chosen* caps it first calls
 `negotiate_graph` (§4.20a's seam: Phase 1 source-caps probe + Phase 2 solve,
-without running the pipeline), which returns the per-edge fixated caps the dump
-renders on the edges; a negotiation failure falls back to a topology-only dump.
-Because negotiation probes sources, a `--dot` of a live-ingress pipeline does
-that source's `intercept_caps` (typically a connect) just as a run would.
+without running the pipeline), which returns the per-edge fixated caps and each
+edge's memory domain (the producing node's `output_memory`, M285) the dump
+renders on the edges, marking GPU / zero-copy links bold; a negotiation failure
+falls back to a topology-only dump. Because negotiation probes sources, a `--dot`
+of a live-ingress pipeline does that source's `intercept_caps` (typically a
+connect) just as a run would. Memory domain is a per-element declaration
+(`AsyncElement::output_memory` / `SourceLoop::output_memory`, default `System`,
+overridden by GPU producers like `NvDec`), the runtime peer of the auto-plug
+`ElementDesc::output_memory` (§4.13.9); it is not part of `Caps`.
 
 ### 4.20a Developer Tooling: Caps-Negotiation Explainer
 

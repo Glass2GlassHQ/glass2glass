@@ -16,20 +16,25 @@ async fn dot_dump_carries_negotiated_caps() {
     let graph = parse_launch(&reg, "videotestsrc num-buffers=1 ! videoconvert ! fakesink")
         .expect("pipeline parses");
 
-    let (vg, caps) = negotiate_graph(graph).await.expect("negotiation succeeds");
+    let (vg, caps, memory) = negotiate_graph(graph).await.expect("negotiation succeeds");
     // One fixated caps per edge (a 3-element chain has 2 links).
     assert_eq!(caps.len(), 2);
+    // A CPU pipeline: every edge is System memory.
+    assert_eq!(memory.len(), 2);
+    assert!(memory.iter().all(|d| *d == g2g_core::MemoryDomainKind::System));
 
     let dot = vg.to_dot(
         "pipeline",
         |n| vg.element(n).map(|e| e.log_category().to_string()),
-        &DotAnnotations { edge_caps: Some(&caps), edge_memory: None },
+        &DotAnnotations { edge_caps: Some(&caps), edge_memory: Some(&memory) },
     );
 
     // Both edges carry the chosen caps as their label (videotestsrc defaults to
     // RGBA, which passes through videoconvert to the wildcard sink).
     assert_eq!(dot.matches("label=\"video/x-raw,format=RGBA").count(), 2, "{dot}");
     assert!(dot.contains("VideoTestSrc") && dot.contains("FakeSink"), "{dot}");
+    // A CPU pipeline must not be marked as GPU memory anywhere.
+    assert!(!dot.contains("memory:"), "System edges must not be GPU-marked: {dot}");
 }
 
 #[tokio::test]

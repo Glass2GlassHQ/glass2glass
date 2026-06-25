@@ -11,6 +11,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
+use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
@@ -114,6 +115,14 @@ pub trait SourceLoop: ElementBound {
     /// (eg a file or test-pattern source that can produce data on demand).
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
+    }
+
+    /// The memory domain of the frames this source emits. Default
+    /// [`System`](MemoryDomainKind::System); a GPU capture source (a hardware
+    /// decoder source emitting VRAM frames) overrides it. Surfaced per edge by
+    /// the negotiate-only path for the DOT dump (it is not part of `Caps`).
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::System
     }
 
     /// The total stream duration in nanoseconds, the source's answer to the
