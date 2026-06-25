@@ -164,6 +164,9 @@ mod tests {
         assert!(r.ok, "findings: {:?}", r.findings);
     }
 
+    // Only meaningful when `x264enc` is NOT compiled in: with the `ffmpeg`
+    // feature it is a registered element, so the lint reports no finding.
+    #[cfg(not(feature = "ffmpeg"))]
     #[test]
     fn unknown_encoder_gets_a_suggestion() {
         let reg = default_registry();

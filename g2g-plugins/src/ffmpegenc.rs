@@ -231,7 +231,15 @@ impl FfmpegH264Enc {
             .ok_or(G2gError::Hardware(HardwareError::Other))?;
 
         let fps = self.fps();
-        let mut video = ffmpeg::codec::encoder::new()
+        // Allocate the context *with* the codec so its AVClass defaults apply.
+        // A codec-less `encoder::new()` leaves the generic legacy AVCodecContext
+        // defaults (`qmin=2`, `qmax=31`, `max_qdiff=3`, `qcompress=0.5`,
+        // `me_range=0`), which is exactly libx264's "broken ffmpeg default
+        // settings" fingerprint: it scores those fields and aborts the open at
+        // score >= 5 even though we pass a `preset`. Allocating with the codec
+        // gives the encoder-appropriate defaults the `ffmpeg` CLI gets.
+        let mut video = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .encoder()
             .video()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         video.set_width(self.width);
