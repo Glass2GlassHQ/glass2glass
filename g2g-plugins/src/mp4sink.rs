@@ -520,8 +520,9 @@ pub(crate) fn visual_sample_entry(
     mp4_box(fourcc, &p)
 }
 
-/// `avcC` decoder configuration record. `param_sets` is [SPS, PPS].
-fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
+/// The `avcC` AVCDecoderConfigurationRecord body (no box header). `param_sets`
+/// is [SPS, PPS]. Also the Matroska `CodecPrivate` for `V_MPEG4/ISO/AVC`.
+pub(crate) fn avcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     let sps = param_sets[0];
     let pps = param_sets[1];
     let mut p = Vec::new();
@@ -534,7 +535,12 @@ fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
     p.push(1); // 1 PPS
     p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
     p.extend_from_slice(pps);
-    mp4_box(b"avcC", &p)
+    p
+}
+
+/// `avcC` decoder configuration record box. `param_sets` is [SPS, PPS].
+fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
+    mp4_box(b"avcC", &avcc_record(param_sets))
 }
 
 /// `hvcC` decoder configuration record. `param_sets` is [VPS, SPS, PPS]. The
@@ -545,6 +551,13 @@ fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
 /// stay in-band in each sample regardless, so a player re-parses authoritative
 /// values from the SPS.
 fn hvcc(param_sets: &[&[u8]]) -> Vec<u8> {
+    mp4_box(b"hvcC", &hvcc_record(param_sets))
+}
+
+/// The `hvcC` HEVCDecoderConfigurationRecord body (no box header), shared as the
+/// Matroska `CodecPrivate` for `V_MPEGH/ISO/HEVC`. See [`hvcc`] for the field
+/// layout; `param_sets` is [VPS, SPS, PPS].
+pub(crate) fn hvcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     let vps = param_sets[0];
     let sps = param_sets[1];
     let pps = param_sets[2];
@@ -574,7 +587,7 @@ fn hvcc(param_sets: &[&[u8]]) -> Vec<u8> {
         p.extend_from_slice(&(nalu.len() as u16).to_be_bytes());
         p.extend_from_slice(nalu);
     }
-    mp4_box(b"hvcC", &p)
+    p
 }
 
 /// One `moof`+`mdat` fragment holding a single sample.

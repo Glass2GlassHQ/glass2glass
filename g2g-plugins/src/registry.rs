@@ -291,6 +291,16 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("mp4mux", |inputs| {
         Box::new(crate::mp4muxn::Mp4MuxN::new(inputs))
     }));
+    // Multi-track Matroska / WebM fan-in (M294): the A/V container case. Like
+    // `mpegtsmux`, `matroskamux` is registered both as a single-input launch
+    // element (`mkvmux::MkvMux` above) and here as a fan-in muxer
+    // (`mkvmuxn::MkvMuxN`); the parser picks by link degree, so one name covers
+    // `! matroskamux !` and `v.! m.  a.! m.  matroskamux name=m`. H.26x video +
+    // AAC audio interleave by PTS. std-gated like the `mp4mux` fan-in above.
+    #[cfg(feature = "std")]
+    reg.register_muxer(MuxerFactory::new("matroskamux", |inputs| {
+        Box::new(crate::mkvmuxn::MkvMuxN::new(inputs))
+    }));
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));

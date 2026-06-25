@@ -115,6 +115,12 @@ pub mod mkvdemux;
 // Matroska / WebM muxer element (no_std): one elementary stream ->
 // Caps::ByteStream{Matroska}, the inverse of mkvdemux.
 pub mod mkvmux;
+// Multi-track Matroska / WebM muxer element: N elementary streams (A/V) ->
+// Caps::ByteStream{Matroska}, the fan-in analog of mkvmux. std-gated: reuses the
+// MP4 family's NAL / ADTS / avcC helpers, and the A/V case is only reachable with
+// the std+ffmpeg encoders.
+#[cfg(feature = "std")]
+pub mod mkvmuxn;
 // Ogg demuxer parsing core (no_std): OggS pages -> elementary-stream packets.
 pub mod ogg;
 // Ogg demuxer element (no_std): Caps::ByteStream{Ogg} -> Opus, wrapping the

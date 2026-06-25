@@ -300,7 +300,7 @@ impl MultiInputElement for Mp4MuxN {
 }
 
 /// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
-fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
+pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
     if au.len() < 7 || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
         return None;
     }
@@ -314,7 +314,7 @@ fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
 }
 
 /// Strip the ADTS header (7 bytes, or 9 with CRC) from an AAC access unit.
-fn strip_adts(au: &[u8]) -> &[u8] {
+pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
     if au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0 {
         let header = if au[1] & 0x01 == 0 { 9 } else { 7 }; // protection_absent==0 -> CRC
         au.get(header..).unwrap_or(&[])

@@ -682,8 +682,10 @@ fn read_float(data: &[u8]) -> f64 {
 
 // --- Muxing (M115): the inverse of the demuxer above. ---
 
-/// The single track a [`MatroskaMuxer`] writes.
-const MUX_TRACK_NUMBER: u64 = 1;
+/// `CodecPrivate` element ID (the per-track decoder init bytes: avcC / hvcC
+/// record for H.26x, the AudioSpecificConfig for AAC). Written by the muxer only;
+/// the demuxer leaves these codecs' parameter sets in-band.
+const ID_CODEC_PRIVATE: u32 = 0x63A2;
 
 /// The track parameters a [`MatroskaMuxer`] writes. Geometry is used for video,
 /// channels / sample_rate for audio (the codec selects which).
@@ -694,6 +696,16 @@ pub struct MkvTrackSpec {
     pub height: u32,
     pub channels: u8,
     pub sample_rate: u32,
+}
+
+/// One track of a multi-track [`MatroskaMuxer`]: its parameters plus the
+/// `CodecPrivate` decoder-init bytes (the avcC / hvcC record for H.26x, the
+/// AudioSpecificConfig for AAC). Empty `codec_private` writes no element, which
+/// suits codecs that need none (VP8 / VP9).
+#[derive(Debug, Clone)]
+pub struct MkvTrackConfig {
+    pub spec: MkvTrackSpec,
+    pub codec_private: Vec<u8>,
 }
 
 /// Default cap on a Cluster's time span (ms): a new Cluster opens once a frame is
@@ -711,11 +723,13 @@ const DEFAULT_MAX_CLUSTER_SPAN_MS: u64 = 1_000;
 /// into one Cluster until one is more than the span cap past its base timestamp
 /// (or time runs backward), amortizing the per-Cluster overhead.
 ///
-/// Scope (v1): one track, default TimestampScale (1 ms). Cues and multi-track are
-/// follow-ups.
+/// Scope: default TimestampScale (1 ms). One or more tracks (see
+/// [`MatroskaMuxer::new_multi`], the A/V case driven by
+/// [`crate::mkvmuxn::MkvMuxN`]); Cues are a follow-up.
 #[derive(Debug)]
 pub struct MatroskaMuxer {
-    spec: MkvTrackSpec,
+    /// One or more tracks; the Nth (0-based) writes Matroska TrackNumber N+1.
+    tracks: Vec<MkvTrackConfig>,
     tags: TagList,
     max_cluster_span_ms: u64,
     header_written: bool,
@@ -724,9 +738,18 @@ pub struct MatroskaMuxer {
 }
 
 impl MatroskaMuxer {
+    /// A single-track muxer (no `CodecPrivate`, the codecs that need none).
     pub fn new(spec: MkvTrackSpec) -> Self {
+        Self::new_multi(alloc::vec![MkvTrackConfig { spec, codec_private: Vec::new() }])
+    }
+
+    /// A multi-track muxer: the A/V case. Input order is track order; a track's
+    /// `CodecPrivate` (empty for none) rides the Tracks element. Clusters span the
+    /// shared timeline, so blocks of every track interleave by timestamp.
+    pub fn new_multi(tracks: Vec<MkvTrackConfig>) -> Self {
+        assert!(!tracks.is_empty(), "MatroskaMuxer needs at least one track");
         Self {
-            spec,
+            tracks,
             tags: TagList::new(),
             max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
             header_written: false,
@@ -748,19 +771,27 @@ impl MatroskaMuxer {
         self
     }
 
-    /// Mux one frame, writing the EBML header + Segment + Info + Tracks (+ Tags
-    /// when present) on the first call, then a SimpleBlock, opening a new
-    /// (unknown-size) Cluster first when the time window is exceeded.
+    /// Mux one frame on the first (or only) track. The single-track entry point.
     pub fn push_frame(&mut self, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
+        self.push_frame_on(0, data, pts_ns, keyframe)
+    }
+
+    /// Mux one frame on track `track` (0-based pad index), writing the EBML header
+    /// + Segment + Info + Tracks (+ Tags when present) on the first call, then a
+    /// SimpleBlock for that track, opening a new (unknown-size) Cluster first when
+    /// the shared time window is exceeded.
+    pub fn push_frame_on(&mut self, track: usize, data: &[u8], pts_ns: u64, keyframe: bool) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.header_written {
-            let doctype: &[u8] = if self.spec.codec.is_webm() { b"webm" } else { b"matroska" };
+            // WebM only when every track is a WebM-subset codec, else matroska.
+            let all_webm = self.tracks.iter().all(|t| t.spec.codec.is_webm());
+            let doctype: &[u8] = if all_webm { b"webm" } else { b"matroska" };
             out.extend_from_slice(&ebml_header(doctype));
             // Segment with unknown size: its children run to end of stream.
             id_bytes(ID_SEGMENT, &mut out);
             out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
             out.extend_from_slice(&info_element());
-            out.extend_from_slice(&tracks_element(&self.spec));
+            out.extend_from_slice(&tracks_element(&self.tracks));
             if !self.tags.is_empty() {
                 out.extend_from_slice(&tags_element(&self.tags));
             }
@@ -781,7 +812,8 @@ impl MatroskaMuxer {
         }
         let base = self.cluster_base_ms.expect("set above");
         let rel = (ts as i64 - base as i64) as i16;
-        let block = build_simple_block(MUX_TRACK_NUMBER, rel, keyframe, data);
+        let track_number = (track + 1) as u64;
+        let block = build_simple_block(track_number, rel, keyframe, data);
         out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
         out
     }
@@ -803,22 +835,32 @@ fn info_element() -> Vec<u8> {
     elem_vec(ID_INFO, &elem_vec(ID_TIMESTAMP_SCALE, &uint_bytes(DEFAULT_TIMESTAMP_SCALE)))
 }
 
-fn tracks_element(spec: &MkvTrackSpec) -> Vec<u8> {
-    let codec_id = spec.codec.codec_id().unwrap_or(b"");
-    let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(MUX_TRACK_NUMBER));
-    entry.extend_from_slice(&elem_vec(ID_TRACK_TYPE, &uint_bytes(spec.codec.track_type() as u64)));
-    entry.extend_from_slice(&elem_vec(ID_CODEC_ID, codec_id));
-    if spec.codec.track_type() == 1 {
-        let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
-        v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
-        entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
-    } else {
-        let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
-        a.extend_from_slice(&elem_vec(ID_SAMPLING_FREQ, &(spec.sample_rate as f64).to_be_bytes()));
-        entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+/// The `Tracks` element: one `TrackEntry` per track, numbered 1.. in order. A
+/// non-empty `CodecPrivate` (avcC / hvcC record, AAC AudioSpecificConfig) is
+/// written after the CodecID.
+fn tracks_element(tracks: &[MkvTrackConfig]) -> Vec<u8> {
+    let mut entries = Vec::new();
+    for (i, track) in tracks.iter().enumerate() {
+        let spec = &track.spec;
+        let codec_id = spec.codec.codec_id().unwrap_or(b"");
+        let mut entry = elem_vec(ID_TRACK_NUMBER, &uint_bytes(i as u64 + 1));
+        entry.extend_from_slice(&elem_vec(ID_TRACK_TYPE, &uint_bytes(spec.codec.track_type() as u64)));
+        entry.extend_from_slice(&elem_vec(ID_CODEC_ID, codec_id));
+        if !track.codec_private.is_empty() {
+            entry.extend_from_slice(&elem_vec(ID_CODEC_PRIVATE, &track.codec_private));
+        }
+        if spec.codec.track_type() == 1 {
+            let mut v = elem_vec(ID_PIXEL_WIDTH, &uint_bytes(spec.width as u64));
+            v.extend_from_slice(&elem_vec(ID_PIXEL_HEIGHT, &uint_bytes(spec.height as u64)));
+            entry.extend_from_slice(&elem_vec(ID_VIDEO, &v));
+        } else {
+            let mut a = elem_vec(ID_CHANNELS, &uint_bytes(spec.channels.max(1) as u64));
+            a.extend_from_slice(&elem_vec(ID_SAMPLING_FREQ, &(spec.sample_rate as f64).to_be_bytes()));
+            entry.extend_from_slice(&elem_vec(ID_AUDIO, &a));
+        }
+        entries.extend_from_slice(&elem_vec(ID_TRACK_ENTRY, &entry));
     }
-    let entry = elem_vec(ID_TRACK_ENTRY, &entry);
-    elem_vec(ID_TRACKS, &entry)
+    elem_vec(ID_TRACKS, &entries)
 }
 
 /// A whole-stream `Tags` element: one `Tag` with an empty `Targets` and a
