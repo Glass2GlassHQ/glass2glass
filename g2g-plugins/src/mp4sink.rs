@@ -45,12 +45,10 @@ pub struct Mp4Sink {
     codec: VideoCodec,
     width: u32,
     height: u32,
-    header_written: bool,
-    fragments: u64,
-    /// Accumulated decode time in media-timescale units (`tfdt`).
-    decode_time: u64,
-    prev_pts_ns: Option<u64>,
     tags: TagList,
+    /// The shared fMP4 box writer, built lazily on the first access unit (its
+    /// `moov` needs the in-band parameter sets). `Mp4Mux` wraps the same struct.
+    muxer: Option<Fmp4Muxer>,
     eos_seen: bool,
 }
 
@@ -64,11 +62,8 @@ impl Mp4Sink {
             codec: VideoCodec::H264,
             width: 0,
             height: 0,
-            header_written: false,
-            fragments: 0,
-            decode_time: 0,
-            prev_pts_ns: None,
             tags: TagList::new(),
+            muxer: None,
             eos_seen: false,
         }
     }
@@ -82,7 +77,7 @@ impl Mp4Sink {
 
     /// Count of `moof`+`mdat` fragments written. Useful in tests.
     pub fn fragments_written(&self) -> u64 {
-        self.fragments
+        self.muxer.as_ref().map_or(0, Fmp4Muxer::fragments)
     }
 
     pub fn eos_seen(&self) -> bool {
@@ -102,14 +97,15 @@ impl Mp4Sink {
         if !matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
             return Err(G2gError::CapsMismatch);
         }
-        // A mid-stream codec swap is not expressible in a written moov.
-        if self.header_written && *codec != self.codec {
-            return Err(G2gError::CapsMismatch);
-        }
         self.codec = *codec;
         if let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) {
             self.width = *w;
             self.height = *h;
+        }
+        // After the moov is written a codec swap is not expressible; an
+        // already-built muxer rejects it (a geometry refinement is fine).
+        if let Some(mux) = &mut self.muxer {
+            mux.update_caps(self.codec, self.width, self.height)?;
         }
         Ok(())
     }
@@ -170,51 +166,14 @@ impl AsyncElement for Mp4Sink {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let nalus = split_annexb(slice.as_slice());
-                    if nalus.is_empty() {
-                        return Err(G2gError::CapsMismatch);
-                    }
-
-                    if !self.header_written {
-                        // moov needs the in-band parameter sets of the first AU.
-                        let param_sets = parameter_sets(self.codec, &nalus)?;
-                        let header = [
-                            ftyp(),
-                            moov(self.codec, self.width, self.height, &param_sets, &self.tags),
-                        ]
-                        .concat();
-                        let w = self.writer.as_mut().expect("checked above");
-                        w.write_all(&header).map_err(io_err)?;
-                        self.header_written = true;
-                    }
-
-                    // duration: explicit, else pts delta, else the default.
-                    let duration_ns = if frame.timing.duration_ns != 0 {
-                        frame.timing.duration_ns
-                    } else {
-                        match self.prev_pts_ns {
-                            Some(prev) if frame.timing.pts_ns > prev => {
-                                frame.timing.pts_ns - prev
-                            }
-                            _ => DEFAULT_DURATION_NS,
-                        }
-                    };
-                    self.prev_pts_ns = Some(frame.timing.pts_ns);
-                    let duration = ns_to_timescale(duration_ns);
-
-                    let sample = avcc_sample(&nalus);
-                    let is_sync = nalus.iter().any(|n| is_keyframe_nal(self.codec, n));
-                    let frag = fragment(
-                        self.fragments + 1,
-                        self.decode_time,
-                        duration as u32,
-                        &sample,
-                        is_sync,
-                    );
+                    // Build the box writer on the first AU (its moov needs the
+                    // in-band parameter sets the first access unit carries).
+                    let mux = self
+                        .muxer
+                        .get_or_insert_with(|| Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone()));
+                    let bytes = mux.push_au(slice.as_slice(), frame.timing.pts_ns, frame.timing.duration_ns)?;
                     let w = self.writer.as_mut().expect("checked above");
-                    w.write_all(&frag).map_err(io_err)?;
-                    self.fragments += 1;
-                    self.decode_time += duration;
+                    w.write_all(&bytes).map_err(io_err)?;
                 }
                 PipelinePacket::Eos => {
                     let w = self.writer.as_mut().expect("checked above");
@@ -241,6 +200,102 @@ impl PadTemplates for Mp4Sink {
     /// Terminal compressed-video sink pad (H.264 or H.265); no source pad.
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::sink(supported_caps())])
+    }
+}
+
+/// Pure fragmented-MP4 box writer: the muxing state machine shared by
+/// [`Mp4Sink`] (writes the bytes to a file) and [`crate::mp4mux::Mp4Mux`]
+/// (forwards them downstream). Annex-B H.264/H.265 access units in, an
+/// `ftyp`+`moov` init segment then one `moof`+`mdat` fragment per AU out. The
+/// init segment is emitted on the first [`push_au`](Self::push_au) because the
+/// `moov` needs the stream's in-band parameter sets.
+#[derive(Debug)]
+pub(crate) struct Fmp4Muxer {
+    codec: VideoCodec,
+    width: u32,
+    height: u32,
+    tags: TagList,
+    header_written: bool,
+    fragments: u64,
+    /// Accumulated decode time in media-timescale units (`tfdt`).
+    decode_time: u64,
+    prev_pts_ns: Option<u64>,
+}
+
+impl Fmp4Muxer {
+    pub(crate) fn new(codec: VideoCodec, width: u32, height: u32, tags: TagList) -> Self {
+        Self {
+            codec,
+            width,
+            height,
+            tags,
+            header_written: false,
+            fragments: 0,
+            decode_time: 0,
+            prev_pts_ns: None,
+        }
+    }
+
+    /// Count of `moof`+`mdat` fragments emitted so far.
+    pub(crate) fn fragments(&self) -> u64 {
+        self.fragments
+    }
+
+    /// Apply a mid-stream caps refinement. A geometry change before the header is
+    /// written is absorbed; a codec swap after the `moov` is written is not
+    /// expressible and fails loud.
+    pub(crate) fn update_caps(&mut self, codec: VideoCodec, width: u32, height: u32) -> Result<(), G2gError> {
+        if self.header_written && codec != self.codec {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.codec = codec;
+        if width != 0 {
+            self.width = width;
+        }
+        if height != 0 {
+            self.height = height;
+        }
+        Ok(())
+    }
+
+    /// Mux one Annex-B access unit, returning the bytes to emit. The first call
+    /// prepends the `ftyp`+`moov` init segment. `duration_ns` of 0 derives the
+    /// sample duration from the PTS delta (or a default for the first frame).
+    pub(crate) fn push_au(
+        &mut self,
+        annexb: &[u8],
+        pts_ns: u64,
+        duration_ns: u64,
+    ) -> Result<Vec<u8>, G2gError> {
+        let nalus = split_annexb(annexb);
+        if nalus.is_empty() {
+            return Err(G2gError::CapsMismatch);
+        }
+        let mut out = Vec::new();
+        if !self.header_written {
+            let param_sets = parameter_sets(self.codec, &nalus)?;
+            out.extend_from_slice(&ftyp());
+            out.extend_from_slice(&moov(self.codec, self.width, self.height, &param_sets, &self.tags));
+            self.header_written = true;
+        }
+        // duration: explicit, else pts delta, else the default.
+        let duration_ns = if duration_ns != 0 {
+            duration_ns
+        } else {
+            match self.prev_pts_ns {
+                Some(prev) if pts_ns > prev => pts_ns - prev,
+                _ => DEFAULT_DURATION_NS,
+            }
+        };
+        self.prev_pts_ns = Some(pts_ns);
+        let duration = ns_to_timescale(duration_ns);
+        let sample = avcc_sample(&nalus);
+        let is_sync = nalus.iter().any(|n| is_keyframe_nal(self.codec, n));
+        let frag = fragment(self.fragments + 1, self.decode_time, duration as u32, &sample, is_sync);
+        out.extend_from_slice(&frag);
+        self.fragments += 1;
+        self.decode_time += duration;
+        Ok(out)
     }
 }
 

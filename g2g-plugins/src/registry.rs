@@ -42,6 +42,8 @@ use crate::identity::IdentityTransform;
 use crate::mkvdemux::MkvDemux;
 use crate::mux::InterleaveMux;
 use crate::mkvmux::MkvMux;
+#[cfg(feature = "std")]
+use crate::mp4mux::Mp4Mux;
 use crate::oggdemux::OggDemux;
 use crate::opusparse::OpusParse;
 use crate::vp8parse::Vp8Parse;
@@ -222,6 +224,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || Box::new(MkvDemux::new())));
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || Box::new(TsMux::new())));
     reg.register_launch(LaunchFactory::of::<MkvMux>("matroskamux", || Box::new(MkvMux::new())));
+    // Fragmented-MP4 / ISO-BMFF muxer (M291), the gst `mp4mux`/`qtmux` analog:
+    // `... ! x264enc ! mp4mux ! filesink location=out.mp4`. std-gated like its
+    // module (it shares the `mp4sink` box writer).
+    #[cfg(feature = "std")]
+    reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || Box::new(Mp4Mux::new())));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
     reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || Box::new(Fmp4Demux::new())));
     reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
@@ -400,6 +407,8 @@ fn register_aliases(reg: &mut Registry) {
     // first (`x264enc`, libx264), falling back to the NVENC-backed `ffmpegenc`
     // when only that is registered. The native NVENC encoder owns `nvh264enc`.
     reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
+    // QuickTime / MP4 muxer names -> the one fMP4 muxer (inert without std).
+    reg.register_alias("qtmux", &["mp4mux"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
     // to the registered target only when the feature is on (else the alias is
     // inert), the same first-registered rule as the VA-API names above.

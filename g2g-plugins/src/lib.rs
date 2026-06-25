@@ -149,6 +149,8 @@ mod audio;
 #[cfg(feature = "std")]
 mod mp4box;
 #[cfg(feature = "std")]
+pub mod mp4mux;
+#[cfg(feature = "std")]
 pub mod mp4sink;
 #[cfg(feature = "std")]
 pub mod mp4src;
