@@ -293,11 +293,6 @@ leverage first:
     finite-GOP periodic IDRs with `repeatSPSPPS`. (RGBA input + the wgpu->CUDA
     `WgpuToCuda` bridge are done, M271; HEVC is done, M273; the output-bitstream
     pool + runtime bitrate retarget are done, M277. NVENC AV1 needs RTX 40-series.)
-- Finish the zero-copy GPU-render egress (M271 shipped the `WgpuToCuda` bridge +
-  `NvEnc` RGBA; M275 promoted `WgpuToCuda` to a pipeline element with a
-  linear-buffer reuse pool): rewire `examples/bevy-g2g-stream` to render on the
-  interop device into the bridge texture via `RenderCreation::Manual` so the demo
-  encodes with no read-back (it would just consume the M275 element).
 - `NvDec` depth: mid-stream resolution change (decoder reconfigure), AV1 / other
   codecs via the codec enum, 10-bit output, and a configurable display delay
   (fixed at a low-latency 1 today). (HEVC is done, M273; registry + domain-aware

@@ -58,9 +58,11 @@ fn gpu_err<E>(_e: E) -> G2gError {
 pub struct InteropDevice {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    // Order matters for Drop: device before adapter before instance.
-    _adapter: wgpu::Adapter,
-    _instance: wgpu::Instance,
+    // Order matters for Drop: device before adapter before instance. Public so a
+    // host renderer (the Bevy demo's `RenderCreation::Manual`) can clone all four
+    // handles to adopt this device; the field order still governs drop order.
+    pub adapter: wgpu::Adapter,
+    pub instance: wgpu::Instance,
 }
 
 /// Create a wgpu device that can import / export external memory by FD.
@@ -69,6 +71,23 @@ pub struct InteropDevice {
 /// Linux) and enables `VK_KHR_external_memory_fd` via wgpu-hal's create-device
 /// callback. Fails loud if the adapter is not Vulkan or the extension is absent.
 pub async fn create_interop_device() -> Result<InteropDevice, G2gError> {
+    create_interop_device_inner(false).await
+}
+
+/// Like [`create_interop_device`], but opens the device with the adapter's full
+/// feature set and limits instead of the minimal default. Use this when the
+/// interop device is also driving a full renderer (e.g. handed to a Bevy app via
+/// `RenderCreation::Manual` for the M278 zero-copy render -> NVENC path): a render
+/// engine needs more than the bridge's bare NV12 / RGBA copy path, and a device
+/// opened with `Features::empty()` would fail its pipeline setup. The CUDA interop
+/// itself is unaffected (more features never hurt the copy).
+pub async fn create_interop_device_full() -> Result<InteropDevice, G2gError> {
+    create_interop_device_inner(true).await
+}
+
+/// Shared body: `full` requests the adapter's whole feature set + limits (for a
+/// renderer driving this device), else the minimal default (the bridge's own use).
+async fn create_interop_device_inner(full: bool) -> Result<InteropDevice, G2gError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::default(),
@@ -86,8 +105,11 @@ pub async fn create_interop_device() -> Result<InteropDevice, G2gError> {
 
     // Open via the hal escape hatch so we can add the FD external-memory device
     // extension. wgpu-hal fills in the rest of the feature / queue chain.
-    let features = wgpu::Features::empty();
-    let limits = wgpu::Limits::default();
+    let (features, limits) = if full {
+        (adapter.features(), adapter.limits())
+    } else {
+        (wgpu::Features::empty(), wgpu::Limits::default())
+    };
     let memory_hints = wgpu::MemoryHints::default();
 
     // SAFETY: we only read the hal adapter and immediately open a device from
@@ -121,7 +143,7 @@ pub async fn create_interop_device() -> Result<InteropDevice, G2gError> {
     }
     .map_err(gpu_err)?;
 
-    Ok(InteropDevice { device, queue, _adapter: adapter, _instance: instance })
+    Ok(InteropDevice { device, queue, adapter, instance })
 }
 
 /// The packed-NV12 texture geometry M217 samples: one R8Uint plane holding the
@@ -1491,8 +1513,12 @@ impl WgpuToCuda {
     /// interop [`device`](Self::device)) into the bridge's exportable render
     /// target, then drain the device so CUDA sees the result. The element path
     /// calls this before [`to_cuda_frame`](Self::to_cuda_frame); a renderer that
-    /// already draws straight into [`texture`](Self::texture) skips it.
-    fn ingest_texture(&self, src: &wgpu::Texture) -> Result<(), G2gError> {
+    /// already draws straight into [`texture`](Self::texture) skips it. Public so a
+    /// host (e.g. the Bevy demo) that renders on the interop device can push its
+    /// target texture in directly, then call `to_cuda_frame`, without the
+    /// `WgpuTexture`-frame `process` wrapper. `src` and the bridge texture must be
+    /// copy-compatible RGBA (the srgb / non-srgb pair is allowed).
+    pub fn ingest_texture(&self, src: &wgpu::Texture) -> Result<(), G2gError> {
         // Copy only the overlap, so a slightly mismatched upstream size is clamped
         // rather than triggering a wgpu validation panic.
         let w = src.width().min(self.width);

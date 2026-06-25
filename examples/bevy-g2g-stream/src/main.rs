@@ -1,24 +1,36 @@
-//! Bevy + g2g server-side render-and-stream demo (M267).
+//! Bevy + g2g server-side render-and-stream demo, zero-copy path (M267 -> M278).
 //!
-//! A Bevy app renders a 3D scene **headless** (no window) to an offscreen
-//! texture on its own GPU, and g2g — joining Bevy's wgpu device via
-//! [`GpuContext::from_wgpu`] — reads that rendered texture back off the *shared*
-//! device each frame. This is the server-side / cloud-gaming shape: the engine
-//! renders on a server GPU, g2g captures and (phase B) encodes + streams the
-//! frames to a thin client.
+//! A Bevy app renders a 3D scene **headless** (no window) on an interop GPU
+//! device, and g2g encodes each rendered frame to H.264 with **no device->host
+//! read-back**: the rendered texture is copied device->device into a CUDA surface
+//! ([`WgpuToCuda`], M275) and handed straight to the native NVENC encoder
+//! ([`NvEnc`]). Only the compact H.264 access units leave the GPU. This is the
+//! server-side / cloud-gaming shape: render on a server GPU, encode + stream to a
+//! thin client, never paying a full-frame PCIe download.
 //!
-//! Phase A (this file): the render + zero-copy device handoff + read-back, the
-//! load-bearing core. Bevy 0.19 pins the same wgpu 29 as g2g, so a `wgpu::Texture`
-//! Bevy creates is bindable on the device g2g wraps. Phase B feeds the read-back
-//! frames into `AppSrc -> VideoConvert -> FfmpegH264Enc -> sink`.
+//! The load-bearing trick is making Bevy render on g2g's *interop* device: g2g
+//! creates a Vulkan device with `VK_KHR_external_memory_fd`
+//! ([`create_interop_device_full`]) and hands it to Bevy via
+//! `RenderCreation::Manual`, so a `wgpu::Texture` Bevy renders is on the exact
+//! device the `WgpuToCuda` bridge can export to CUDA. Bevy 0.19 pins the same
+//! wgpu 29 as g2g, so the handle types match. The earlier M267 version read the
+//! texture back to system memory and encoded with the ffmpeg NVENC backend; this
+//! version removes the read-back entirely.
+//!
+//! Layout:
+//! - **Render world** (`encode_via_g2g`): after Bevy renders into the target
+//!   texture, copy it through `WgpuToCuda` -> CUDA and encode with `NvEnc`,
+//!   emitting H.264 access units to the main world over a channel.
+//! - **Main world** (`drain_frames`): push the access units into the g2g sink
+//!   pipeline's `AppSrc` feed and stop after the frame cap.
+//! - **Sink thread** (`sink_pipeline`): `AppSrc(H.264) -> FileSink` (default) or
+//!   `-> WebRtcSink` (WHIP egress when `G2G_WHIP_URL` is set).
 //!
 //! Headless setup follows Bevy's official `headless_renderer` example: render to
-//! a `RenderTarget::Image`, drive the loop with `ScheduleRunnerPlugin` and no
-//! `WinitPlugin`. The read-back is a single render-world system that runs after
-//! the main render and copies the target texture to a mapped buffer via the g2g
-//! `GpuContext` (= Bevy's device), the same `copy_texture_to_buffer` + map the
-//! g2g `gpu` module uses.
+//! a `RenderTarget::Image`, drive the loop with `ScheduleRunnerPlugin`, no
+//! `WinitPlugin`.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::{
@@ -29,13 +41,14 @@ use bevy::{
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
-        render_resource::{
-            BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Extent3d, MapMode,
-            TexelCopyBufferInfo, TexelCopyBufferLayout, TextureFormat, TextureUsages,
+        render_resource::{TextureFormat, TextureUsages},
+        renderer::{
+            RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
+            WgpuWrapper,
         },
-        renderer::{RenderAdapter, RenderDevice, RenderInstance, RenderQueue},
+        settings::{RenderCreation, RenderResources},
         texture::GpuImage,
-        Render, RenderApp, RenderSystems,
+        Render, RenderApp, RenderPlugin, RenderSystems,
     },
     window::ExitCondition,
     winit::WinitPlugin,
@@ -43,12 +56,14 @@ use bevy::{
 use crossbeam_channel::{Receiver, Sender};
 use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
-use g2g_core::{PipelineClock, PropValue, RawVideoFormat};
+use g2g_core::{
+    AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
+    PropValue, PushOutcome, RawVideoFormat, Rate,
+};
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
-use g2g_plugins::ffmpegenc::FfmpegH264Enc;
+use g2g_plugins::cudawgpu::{create_interop_device_full, WgpuToCuda};
 use g2g_plugins::filesink::FileSink;
-use g2g_plugins::gpu::GpuContext;
-use g2g_plugins::videoconvert::VideoConvert;
+use g2g_plugins::nvenc::NvEnc;
 use g2g_plugins::webrtcsink::WebRtcSink;
 
 const WIDTH: u32 = 640;
@@ -56,24 +71,44 @@ const HEIGHT: u32 = 480;
 const FPS: u32 = 60;
 /// Render this many frames, then exit (a demo run, not an endless server).
 const FRAMES: u32 = 240;
-/// AppSrc feed channel name shared with the encode thread.
+/// AppSrc feed channel name shared with the sink thread.
 const APPSRC_CHANNEL: &str = "bevy";
-/// Where the encoded H.264 Annex-B stream is written.
+/// Where the encoded H.264 Annex-B stream is written (the no-WHIP default).
 const OUT_PATH: &str = "bevy_g2g.h264";
 
-fn main() {
-    let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+/// One encoded access unit handed render-world -> main-world: the H.264 Annex-B
+/// bytes and their presentation timestamp (ns).
+type EncodedAu = (Vec<u8>, u64);
 
-    // The g2g encode pipeline runs on its own thread, fed the read-back RGBA
-    // frames through this push handle (claimed by the AppSrc inside the chain by
+fn main() {
+    let (tx, rx) = crossbeam_channel::unbounded::<EncodedAu>();
+
+    // The g2g sink pipeline runs on its own thread, fed the encoded H.264 access
+    // units through this push handle (claimed by the AppSrc inside the chain by
     // matching channel name). Register before spawning so the source finds it.
     let feed = register_appsrc(APPSRC_CHANNEL);
-    let encode = std::thread::spawn(encode_pipeline);
+    let sink = std::thread::spawn(sink_pipeline);
 
     let max_frames = std::env::var("G2G_FRAMES")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(FRAMES);
+
+    // g2g's interop device (Vulkan + VK_KHR_external_memory_fd, opened with the
+    // adapter's full features so Bevy's renderer is happy on it). Bevy adopts it
+    // via RenderCreation::Manual, so every texture it renders is exportable to
+    // CUDA on this exact device, the prerequisite for the zero-copy bridge.
+    let interop = pollster::block_on(create_interop_device_full())
+        .expect("create interop wgpu device (need a Vulkan + NVIDIA GPU)");
+    let render_resources = RenderResources(
+        RenderDevice::from(interop.device.clone()),
+        RenderQueue(Arc::new(WgpuWrapper::new(interop.queue.clone()))),
+        RenderAdapterInfo(WgpuWrapper::new(interop.adapter.get_info())),
+        RenderAdapter(Arc::new(WgpuWrapper::new(interop.adapter.clone()))),
+        RenderInstance(Arc::new(WgpuWrapper::new(interop.instance.clone()))),
+    );
+    // Bevy holds its own (reference-counted) clones now; drop our handle.
+    drop(interop);
 
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.1)))
@@ -81,9 +116,21 @@ fn main() {
         .insert_resource(FrameCount(0))
         .insert_resource(MaxFrames(max_frames))
         .insert_resource(EncodeFeed(feed))
-        .init_resource::<FirstNonBlank>()
         .add_plugins(
             DefaultPlugins
+                .set(RenderPlugin {
+                    // Render on g2g's interop device instead of letting Bevy open
+                    // its own: the load-bearing handoff for zero-copy encode.
+                    render_creation: RenderCreation::Manual(render_resources),
+                    // Compile pipelines synchronously on the render thread. Bevy's
+                    // default async compilation runs Vulkan pipeline creation on a
+                    // background task that, on the NVIDIA driver, faults when it
+                    // overlaps our CUDA encode work on the same device (Vulkan +
+                    // CUDA concurrency on the shared driver). Synchronous compile
+                    // serialises it with our after-render encode system.
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                })
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: ExitCondition::DontExit,
@@ -94,69 +141,85 @@ fn main() {
                 .disable::<WinitPlugin>(),
         )
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / FPS as f64)))
-        .add_plugins(ReadbackPlugin { sender: tx })
+        .add_plugins(EncodePlugin { sender: tx })
         .add_systems(Startup, setup)
         .add_systems(Update, (spin_cube, drain_frames));
     app.run();
 
-    // The exit system signalled EOS to the feed; wait for the encoder to flush
-    // and close the file.
-    match encode.join() {
-        Ok(Ok(stats)) => info!("encode pipeline finished: {} frames", stats),
-        Ok(Err(e)) => error!("encode pipeline failed: {e:?}"),
-        Err(_) => error!("encode thread panicked"),
-    }
+    // The exit system signalled EOS to the feed; wait for the sink thread to flush
+    // and close the file / WHIP session. The H.264 output is complete here.
+    let ok = match sink.join() {
+        Ok(Ok(frames)) => {
+            info!("sink pipeline finished: {frames} access units");
+            true
+        }
+        Ok(Err(e)) => {
+            error!("sink pipeline failed: {e:?}");
+            false
+        }
+        Err(_) => {
+            error!("sink thread panicked");
+            false
+        }
+    };
+
+    // Exit now rather than dropping `app`. The render world holds CUDA + wgpu
+    // resources (the `WgpuToCuda` bridge, the NVENC session) on Bevy's device;
+    // dropping them races Bevy's own render-thread / device teardown, which can
+    // segfault in the driver on shutdown (a known GPU-app teardown-order hazard).
+    // The work is done and flushed, so skip the destructors and let the OS reclaim
+    // the GPU resources, the standard demo-shutdown approach.
+    std::process::exit(if ok { 0 } else { 1 });
 }
 
-/// Drives `AppSrc -> VideoConvert(RGBA->I420) -> FfmpegH264Enc(NVENC H.264) ->
-/// sink` to completion on its own thread. The sink is `WebRtcSink` (WHIP egress)
-/// when `G2G_WHIP_URL` is set, else `FileSink` (the self-contained default).
-/// `AppSrc` blocks on the feed until the main loop pushes frames and finishes on
-/// EOS. Returns the number of source frames pushed through.
+/// Drives `AppSrc(H.264) -> sink` to completion on its own thread. The sink is
+/// `WebRtcSink` (WHIP egress) when `G2G_WHIP_URL` is set, else `FileSink` (the
+/// self-contained default). `AppSrc` carries the already-encoded H.264 access
+/// units from the render world (no `VideoConvert` / encoder in the chain anymore,
+/// the GPU did that), blocks on the feed until the main loop pushes, and finishes
+/// on EOS. Returns the number of access units pushed through.
 ///
 /// Runs inside a tokio runtime: `WebRtcSink`'s WHIP handshake (reqwest) and
 /// session (tokio::spawn) need a reactor. `FileSink` is happy under it too.
-fn encode_pipeline() -> Result<u64, g2g_core::G2gError> {
+fn sink_pipeline() -> Result<u64, G2gError> {
     let mut src = AppSrc::new();
     src.set_property("channel", PropValue::Str(APPSRC_CHANNEL.into()))
         .expect("appsrc channel");
     src.set_property(
         "caps",
         PropValue::Str(
-            format!("video/x-raw,format=RGBA,width={WIDTH},height={HEIGHT},framerate={FPS}/1")
-                .into(),
+            format!("video/x-h264,width={WIDTH},height={HEIGHT},framerate={FPS}/1").into(),
         ),
     )
     .expect("appsrc caps");
 
-    let mut convert = VideoConvert::new(RawVideoFormat::I420);
-    let mut encoder = FfmpegH264Enc::new(); // NVENC by default
     let clock = ZeroClock;
-
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
+    // No transforms: the render world already produced H.264, so the sink chain is
+    // just source -> sink.
     let stats = match std::env::var("G2G_WHIP_URL") {
         Ok(url) => {
             info!("streaming H.264 to WHIP endpoint: {url}");
             let mut sink = WebRtcSink::new(url);
-            let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
+            let transforms: Vec<&mut dyn DynAsyncElement> = vec![];
             rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
         }
         Err(_) => {
             info!("G2G_WHIP_URL unset; writing H.264 to {OUT_PATH} (set it to stream over WHIP)");
             let mut sink = FileSink::new(OUT_PATH);
-            let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut convert, &mut encoder];
+            let transforms: Vec<&mut dyn DynAsyncElement> = vec![];
             rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
         }
     };
     Ok(stats.frames_consumed)
 }
 
-/// Trivial clock: the sink (`FileSink`) does not pace to a clock, so the runner
-/// needs only a `now_ns`, never advanced.
+/// Trivial clock: the sinks here do not pace to a clock, so the runner needs only
+/// a `now_ns`, never advanced.
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
@@ -169,19 +232,19 @@ impl PipelineClock for ZeroClock {
 struct Spin;
 
 /// The offscreen texture the camera renders into; extracted to the render world
-/// so the read-back system can find its GPU texture.
+/// so the encode system can find its GPU texture.
 #[derive(Resource, Clone, ExtractResource)]
 struct RenderTargetImage(Handle<Image>);
 
-/// Main-world end of the render-world -> main-world frame channel.
+/// Main-world end of the render-world -> main-world access-unit channel.
 #[derive(Resource)]
-struct FrameReceiver(Receiver<Vec<u8>>);
+struct FrameReceiver(Receiver<EncodedAu>);
 
 /// Render-world end of that channel.
 #[derive(Resource, Clone)]
-struct FrameSender(Sender<Vec<u8>>);
+struct FrameSender(Sender<EncodedAu>);
 
-/// Push handle into the g2g encode pipeline (the AppSrc feed).
+/// Push handle into the g2g sink pipeline (the AppSrc feed).
 #[derive(Resource)]
 struct EncodeFeed(AppSrcFeed);
 
@@ -193,11 +256,98 @@ struct FrameCount(u32);
 #[derive(Resource)]
 struct MaxFrames(u32);
 
-/// Sequence of the first non-blank frame seen, or `None` until one arrives.
-/// Headless render has a few frames of pre-roll warmup where the target is still
-/// transparent, so "the scene rendered" is asserted over the run, not frame 0.
-#[derive(Resource, Default)]
-struct FirstNonBlank(Option<u32>);
+/// The render-world zero-copy encoder, behind a `Mutex` so it satisfies the
+/// `Send + Sync` resource bound (`NvEnc` is `Send` but not `Sync`; the system
+/// takes exclusive access through the lock). Built lazily on the first render
+/// frame, once the target's GPU texture exists.
+#[derive(Resource)]
+struct Encoder(Mutex<Option<EncodeState>>);
+
+/// The render-world encode state: the NVENC encoder and the wgpu->CUDA bridge,
+/// both living on Bevy's (= the interop) device, plus the running frame index for
+/// presentation timestamps.
+///
+/// Field order matters for `Drop`: `nvenc` is declared first so it drops first.
+/// NVENC's session lives in the CUDA primary context the `bridge` retains, so the
+/// session must be destroyed before the bridge releases that context, else
+/// teardown destroys a session on a freed context (an intermittent exit segfault).
+struct EncodeState {
+    nvenc: NvEnc,
+    bridge: WgpuToCuda,
+    frame_no: u64,
+}
+
+impl EncodeState {
+    /// Build the bridge + encoder on `device` (Bevy's interop device). Returns
+    /// `None` if the interop bridge or NVENC is unavailable on this host.
+    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Option<Self> {
+        // SAFETY: `device` is the VK_KHR_external_memory_fd interop device created
+        // by `create_interop_device_full` and handed to Bevy, so the bridge's
+        // exportable-image allocation and CUDA import are valid on it.
+        let bridge = unsafe { WgpuToCuda::new(device, queue, WIDTH, HEIGHT) }.ok()?;
+        let mut nvenc = NvEnc::new();
+        // Disambiguate: both AsyncElement and DynAsyncElement (imported for the
+        // sink chain) are in scope.
+        AsyncElement::configure_pipeline(&mut nvenc, &rgba_caps()).ok()?;
+        Some(Self { bridge, nvenc, frame_no: 0 })
+    }
+
+    /// Copy `texture` (Bevy's just-rendered target) into the bridge's CUDA surface
+    /// and encode it, returning any ready H.264 access units. No device->host copy.
+    fn encode(&mut self, texture: &wgpu::Texture) -> Vec<EncodedAu> {
+        let pts_ns = self.frame_no * 1_000_000_000 / FPS as u64;
+        self.frame_no += 1;
+        if self.bridge.ingest_texture(texture).is_err() {
+            return Vec::new();
+        }
+        let frame = match self.bridge.to_cuda_frame(pts_ns) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let mut cap = CaptureAus::default();
+        // NVENC sync-mode encode; the capture sink resolves immediately, so the
+        // block_on returns this frame's access unit without a reactor.
+        let fut = AsyncElement::process(&mut self.nvenc, PipelinePacket::DataFrame(frame), &mut cap);
+        if pollster::block_on(fut).is_err() {
+            return Vec::new();
+        }
+        cap.aus
+    }
+}
+
+/// RGBA at the render geometry: the caps `NvEnc` is configured for (it color
+/// converts ABGR -> H.264 internally).
+fn rgba_caps() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(WIDTH),
+        height: Dim::Fixed(HEIGHT),
+        framerate: Rate::Fixed(FPS << 16),
+    }
+}
+
+/// Render-world sink that captures `NvEnc`'s emitted H.264 access units (System
+/// memory) and their timestamps.
+#[derive(Default)]
+struct CaptureAus {
+    aus: Vec<EncodedAu>,
+}
+impl OutputSink for CaptureAus {
+    fn push<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PushOutcome, G2gError>> + 'a>>
+    {
+        Box::pin(async move {
+            if let PipelinePacket::DataFrame(f) = packet {
+                if let MemoryDomain::System(s) = &f.domain {
+                    self.aus.push((s.as_slice().to_vec(), f.timing.pts_ns));
+                }
+            }
+            Ok(PushOutcome::Accepted)
+        })
+    }
+}
 
 fn setup(
     mut commands: Commands,
@@ -205,7 +355,9 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    // The texture the camera renders into. COPY_SRC so g2g can copy it out.
+    // The texture the camera renders into. COPY_SRC so the bridge can copy it into
+    // its exportable CUDA surface. Rgba8UnormSrgb is copy-compatible with the
+    // bridge's Rgba8Unorm export image (same format ignoring the srgb suffix).
     let mut target = Image::new_target_texture(WIDTH, HEIGHT, TextureFormat::Rgba8UnormSrgb, None);
     target.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target_handle = images.add(target);
@@ -243,87 +395,69 @@ fn spin_cube(time: Res<Time>, mut q: Query<&mut Transform, With<Spin>>) {
     }
 }
 
-/// Drain read-back frames in the main world: count them, sanity-check the first
-/// is a real rendered image (not blank), and exit after `FRAMES`.
+/// Drain encoded access units in the main world: push them into the g2g sink
+/// pipeline and exit after `FRAMES` have been encoded.
 fn drain_frames(
     receiver: Res<FrameReceiver>,
     feed: Res<EncodeFeed>,
     max: Res<MaxFrames>,
     mut count: ResMut<FrameCount>,
-    mut first_non_blank: ResMut<FirstNonBlank>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    while let Ok(rgba) = receiver.0.try_recv() {
+    while let Ok((au, pts_ns)) = receiver.0.try_recv() {
         if count.0 == 0 {
             info!(
-                "g2g read back Bevy's first frame off the shared device: {} bytes, {WIDTH}x{HEIGHT} RGBA",
-                rgba.len()
+                "g2g encoded Bevy's first frame on the GPU with no read-back: {} bytes H.264",
+                au.len()
             );
         }
-        // A lit cube + plane means pixels vary well above the dark clear colour.
-        // The first frames are blank (headless render pre-roll); record when the
-        // scene actually shows up.
-        if first_non_blank.0.is_none() {
-            let lit = rgba.chunks_exact(4).any(|p| p[0] > 60 || p[1] > 60 || p[2] > 60);
-            if lit {
-                first_non_blank.0 = Some(count.0);
-                info!("scene rendered: first non-blank frame at index {}", count.0);
-            }
-        }
-        // Hand the frame to the g2g encode pipeline (RGBA -> I420 -> NVENC H.264
-        // -> file). `push` returns false if the encoder is backed up; at this
-        // resolution NVENC keeps up, so a drop would be notable.
-        let pts_ns = count.0 as u64 * 1_000_000_000 / FPS as u64;
-        if !feed.0.push(&rgba, pts_ns) {
-            warn!("encode feed full; dropped frame {}", count.0);
+        // Hand the access unit to the g2g sink pipeline (H.264 -> file / WHIP).
+        // `push` returns false if the sink is backed up; at this resolution it
+        // keeps up, so a drop would be notable.
+        if !feed.0.push(&au, pts_ns) {
+            warn!("sink feed full; dropped access unit {}", count.0);
         }
         count.0 += 1;
         // `max == 0` streams forever (watch it live); otherwise stop at the cap.
         if max.0 != 0 && count.0 >= max.0 {
-            assert!(
-                first_non_blank.0.is_some(),
-                "no non-blank frame in {} frames: the scene never rendered onto the target",
-                max.0
-            );
-            // Signal EOS so the encoder flushes and the sink finalises, then
-            // exit; `main` joins the encode thread after the loop returns.
+            // Signal EOS so the sink flushes and finalises, then exit; `main` joins
+            // the sink thread after the loop returns.
             feed.0.end_of_stream();
             info!(
-                "captured {} frames off the shared GPU device (first non-blank at {:?}); EOS sent, exiting",
-                count.0, first_non_blank.0
+                "encoded {} frames on the GPU (no read-back); EOS sent, exiting",
+                count.0
             );
             exit.write(AppExit::Success);
         }
     }
 }
 
-/// Wires the render-world read-back: extracts the target image handle, stashes
-/// the channel sender, and runs `readback_via_g2g` after the main render.
-struct ReadbackPlugin {
-    sender: Sender<Vec<u8>>,
+/// Wires the render-world zero-copy encode: extracts the target image handle,
+/// stashes the channel sender + the lazily-built [`Encoder`], and runs
+/// `encode_via_g2g` after the main render.
+struct EncodePlugin {
+    sender: Sender<EncodedAu>,
 }
 
-impl Plugin for ReadbackPlugin {
+impl Plugin for EncodePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<RenderTargetImage>::default());
         let render_app = app.sub_app_mut(RenderApp);
         render_app.insert_resource(FrameSender(self.sender.clone()));
-        render_app.add_systems(Render, readback_via_g2g.after(RenderSystems::Render));
+        render_app.insert_resource(Encoder(Mutex::new(None)));
+        render_app.add_systems(Render, encode_via_g2g.after(RenderSystems::Render));
     }
 }
 
 /// Render-world system: after Bevy renders the scene into the target texture,
-/// g2g (wrapping Bevy's device via `GpuContext::from_wgpu`) copies that texture
-/// to a mapped buffer and sends the RGBA bytes to the main world. The `GpuContext`
-/// is built once and cached in a `Local`. Demonstrates the bring-your-own-device
-/// handoff: the texture was created by Bevy, read by g2g, on the *one* device.
-#[allow(clippy::too_many_arguments)]
-fn readback_via_g2g(
-    mut ctx: Local<Option<GpuContext>>,
+/// copy that texture device->device into a CUDA surface (`WgpuToCuda` on Bevy's
+/// interop device) and encode it with `NvEnc`, sending the H.264 access units to
+/// the main world. No GPU->CPU read-back: the pixels go straight from the render
+/// target to the encoder on the one device.
+fn encode_via_g2g(
+    encoder: Res<Encoder>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    adapter: Res<RenderAdapter>,
-    instance: Res<RenderInstance>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     target: Res<RenderTargetImage>,
     sender: Res<FrameSender>,
@@ -333,69 +467,22 @@ fn readback_via_g2g(
         return;
     };
 
-    // Build the g2g context from Bevy's wgpu handles on first run (cheap clones;
-    // wgpu handles are reference-counted, so this shares Bevy's GPU, not a copy).
-    let ctx = ctx.get_or_insert_with(|| {
-        GpuContext::from_wgpu(
-            (**instance.0).clone(),
-            (**adapter.0).clone(),
-            device.wgpu_device().clone(),
-            (**queue.0).clone(),
-        )
-    });
+    let mut guard = encoder.0.lock().expect("encoder lock");
+    let state = match &mut *guard {
+        Some(s) => s,
+        none => {
+            // Build the bridge + encoder on Bevy's (interop) device on first run.
+            match EncodeState::new(device.wgpu_device().clone(), (**queue.0).clone()) {
+                Some(s) => none.insert(s),
+                None => {
+                    // No interop bridge / NVENC on this host: nothing to do.
+                    return;
+                }
+            }
+        }
+    };
 
-    if let Some(rgba) = read_texture_rgba(ctx, &gpu_image.texture) {
-        let _ = sender.0.send(rgba);
+    for au in state.encode(&gpu_image.texture) {
+        let _ = sender.0.send(au);
     }
-}
-
-/// Copy an `Rgba8` `WIDTH x HEIGHT` texture to a buffer on `ctx`'s device, map it,
-/// and return tightly-packed RGBA bytes (the wgpu 256-byte row alignment is undone
-/// here). This is the g2g side reading a Bevy-created texture on the shared device,
-/// the same `copy_texture_to_buffer` + map the g2g `gpu` module uses.
-fn read_texture_rgba(ctx: &GpuContext, texture: &wgpu::Texture) -> Option<Vec<u8>> {
-    let unpadded = (WIDTH * 4) as usize;
-    // wgpu requires each buffer row aligned to 256 bytes for texture->buffer copy.
-    let padded = unpadded.div_ceil(256) * 256;
-    let buffer = ctx.device.create_buffer(&BufferDescriptor {
-        label: Some("g2g-readback"),
-        size: (padded * HEIGHT as usize) as u64,
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder =
-        ctx.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("g2g-readback") });
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded as u32),
-                rows_per_image: Some(HEIGHT),
-            },
-        },
-        Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
-    );
-    ctx.queue.submit([encoder.finish()]);
-
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    // wgpu 29: poll takes a PollType (the same call g2g's `gpu` module uses).
-    let _ = ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-    rx.recv().ok()?.ok()?;
-
-    let mapped = slice.get_mapped_range();
-    let mut rgba = Vec::with_capacity(unpadded * HEIGHT as usize);
-    for row in 0..HEIGHT as usize {
-        let start = row * padded;
-        rgba.extend_from_slice(&mapped[start..start + unpadded]);
-    }
-    drop(mapped);
-    buffer.unmap();
-    Some(rgba)
 }
