@@ -82,10 +82,11 @@ leverage first:
   via the `YcbcrToRgba` converter (opaque AHB import -> immutable
   `VkSamplerYcbcrConversion` compute pass -> RGBA `wgpu::Texture`), and
   `WgpuPreprocess` consumes that texture straight into its tensor (g2g-ml
-  `mediacodec-wgpu` feature). Validated on the Pixel 10a end to end (9 frames ->
-  NCHW tensor, no CPU frame copy). Remaining polish: runner-level caps
-  negotiation for the RGBA-GPU path (driven directly today), and the converter's
-  per-frame fence could pipeline via a ring of in-flight conversions.
+  `mediacodec-wgpu` feature). The converter pipelines via a `RING_DEPTH`-slot
+  in-flight ring (no per-frame fence block), and both elements negotiate the
+  RGBA-GPU path (decoder derives Rgba8 in gpu mode, WgpuPreprocess accepts it) so
+  a runner can auto-plug it. Validated on the Pixel 10a end to end (9 frames ->
+  NCHW tensor, no CPU frame copy). Pillar complete.
 - Android `Surface` present sink (the on-screen output half; the decode-to-GPU
   side is done above).
 - Encode, Camera2 capture, AAudio, Surface present.

@@ -767,6 +767,17 @@ impl AsyncElement for WgpuPreprocess {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // M304: also accept an already-RGB GPU texture (from the Android decode
+        // path); fall back to the NV12 input otherwise.
+        #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+        if let Ok(rgba) = upstream_caps.intersect(&Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }) {
+            return Ok(rgba);
+        }
         upstream_caps.intersect(&self.supported_input())
     }
 
@@ -781,6 +792,18 @@ impl AsyncElement for WgpuPreprocess {
                 height: Dim::Fixed(h),
                 ..
             } if w % 2 == 0 && h % 2 == 0 => CapsSet::one(Caps::Tensor {
+                dtype: TensorDType::F32,
+                shape: TensorShape(vec![1, 3, *h, *w]),
+                layout: TensorLayout::Nchw,
+            }),
+            // M304: already-RGB GPU texture input maps to the same NCHW tensor.
+            #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => CapsSet::one(Caps::Tensor {
                 dtype: TensorDType::F32,
                 shape: TensorShape(vec![1, 3, *h, *w]),
                 layout: TensorLayout::Nchw,

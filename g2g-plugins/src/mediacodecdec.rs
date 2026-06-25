@@ -233,13 +233,18 @@ impl MediaCodecDec {
             // SAFETY: same device; `info` is this buffer's format.
             self.converter = Some(unsafe { YcbcrToRgba::new(dev, &info, width, height)? });
         }
-        let dev = self.interop.as_ref().unwrap();
-        // SAFETY: `ahb` is live (held here); the converter was built on `dev` for
-        // this format / geometry. `convert` waits on its fence before returning.
-        let texture = unsafe { self.converter.as_ref().unwrap().convert(ahb_ptr)? };
-        // The conversion is done; release the buffer back to the decoder.
+        // Clone the device/queue handles before the &mut converter borrow.
+        let (wdev, wqueue) = {
+            let dev = self.interop.as_ref().unwrap();
+            (dev.device.clone(), dev.queue.clone())
+        };
+        // SAFETY: `ahb` is live (held here); the converter was built on this
+        // device for this format / geometry. The conversion is pipelined (submit
+        // without wait); importing `ahb` gave Vulkan its own reference, so the
+        // buffer may be released as soon as `convert` returns.
+        let texture = unsafe { self.converter.as_mut().unwrap().convert(ahb_ptr)? };
         drop(ahb);
-        let owner = WgpuRgbaTexture::new(dev.device.clone(), dev.queue.clone(), texture);
+        let owner = WgpuRgbaTexture::new(wdev, wqueue, texture);
         Ok(MemoryDomain::WgpuTexture(g2g_core::OwnedWgpuTexture::new(
             width,
             height,
@@ -293,6 +298,19 @@ impl MediaCodecDec {
     /// Count of decoded NV12 `DataFrame`s pushed downstream. Useful in tests.
     pub fn emitted(&self) -> u64 {
         self.emitted
+    }
+
+    /// Whether the zero-copy GPU output path is active (always false without the
+    /// `mediacodec-wgpu` feature). Drives the negotiated output format.
+    fn gpu_output_enabled(&self) -> bool {
+        #[cfg(feature = "mediacodec-wgpu")]
+        {
+            self.gpu_output
+        }
+        #[cfg(not(feature = "mediacodec-wgpu"))]
+        {
+            false
+        }
     }
 
     fn output_caps(&self) -> Caps {
@@ -507,7 +525,11 @@ impl AsyncElement for MediaCodecDec {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| derive_output_caps(codec, input)))
+        // GPU-output mode derives RGBA (a WgpuTexture frame), else NV12.
+        let rgba = self.gpu_output_enabled();
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            derive_output_caps(codec, rgba, input)
+        }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -622,7 +644,19 @@ impl PadTemplates for MediaCodecDec {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([PadTemplate::sink(CapsSet::one(h264)), PadTemplate::source(CapsSet::one(nv12))])
+        // The source advertises both the default NV12 (CPU) output and the M304
+        // RGBA WgpuTexture output (GPU mode); `caps_constraint_as_transform`
+        // picks the active one per instance.
+        let rgba8 = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(h264)),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([nv12, rgba8]))),
+        ])
     }
 }
 
@@ -700,11 +734,12 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
     }
 }
 
-fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
+fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
+    let format = if rgba { RawVideoFormat::Rgba8 } else { RawVideoFormat::Nv12 };
     match input {
         Caps::CompressedVideo { codec: c, width, height, framerate } if *c == codec => {
             CapsSet::one(Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
+                format,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),

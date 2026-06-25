@@ -697,6 +697,35 @@ impl g2g_core::WgpuKeepAlive for WgpuRgbaTexture {
 /// the consumer. Because it submits to the wgpu device's queue directly (raw
 /// Vulkan, bypassing wgpu's queue mutex), the owning element must run on a
 /// single-thread executor, the same contract `MediaCodecDec` already documents.
+/// Depth of the conversion ring: how many conversions may be outstanding (the
+/// GPU still reading the imported buffer / writing the output) before the next
+/// `convert` blocks on the oldest. Small: just enough to overlap a conversion
+/// with the downstream consume of the previous frame.
+const RING_DEPTH: usize = 3;
+
+/// Transient Vulkan objects of one in-flight conversion, kept alive until its
+/// fence signals (the GPU is done reading the imported buffer and the views).
+/// The output image / memory are not here: they transfer to the wgpu texture.
+#[derive(Debug)]
+struct InFlight {
+    in_image: vk::Image,
+    in_mem: vk::DeviceMemory,
+    in_view: vk::ImageView,
+    out_view: vk::ImageView,
+}
+
+/// One slot of the conversion ring: its own fence / command buffer / descriptor
+/// set, so a conversion can be in flight here while other slots run.
+#[derive(Debug)]
+struct ConvSlot {
+    fence: vk::Fence,
+    cmd_buf: vk::CommandBuffer,
+    desc_set: vk::DescriptorSet,
+    /// The transient objects of the conversion currently running on this slot,
+    /// reclaimed (after a fence wait) when the slot is reused. `None` when idle.
+    in_flight: Option<InFlight>,
+}
+
 pub struct YcbcrToRgba {
     device: wgpu::Device,
     raw: ash::Device,
@@ -716,10 +745,11 @@ pub struct YcbcrToRgba {
     pipeline: vk::Pipeline,
     shader: vk::ShaderModule,
     cmd_pool: vk::CommandPool,
-    cmd_buf: vk::CommandBuffer,
     desc_pool: vk::DescriptorPool,
-    desc_set: vk::DescriptorSet,
-    fence: vk::Fence,
+    /// Round-robin ring of `RING_DEPTH` slots; `next` is the slot the next
+    /// conversion uses (reclaiming whatever it last held).
+    slots: Vec<ConvSlot>,
+    next: usize,
 }
 
 impl core::fmt::Debug for YcbcrToRgba {
@@ -818,44 +848,62 @@ impl YcbcrToRgba {
                 )
                 .map_err(|(_, e)| gpu_err(e))?[0];
 
+            // The ring needs RING_DEPTH descriptor sets (one per slot, so a slot's
+            // bindings stay valid while another slot's conversion runs).
+            let ring = RING_DEPTH as u32;
             let pool_sizes = [
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .descriptor_count(1),
+                    .descriptor_count(ring),
                 vk::DescriptorPoolSize::default()
                     .ty(vk::DescriptorType::STORAGE_IMAGE)
-                    .descriptor_count(1),
+                    .descriptor_count(ring),
             ];
             let desc_pool = d
                 .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(ring).pool_sizes(&pool_sizes),
                     None,
                 )
                 .map_err(gpu_err)?;
-            let desc_set = d
+            let all_layouts = [dsl; RING_DEPTH];
+            let desc_sets = d
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(desc_pool)
-                        .set_layouts(&set_layouts),
+                        .set_layouts(&all_layouts),
                 )
-                .map_err(gpu_err)?[0];
+                .map_err(gpu_err)?;
 
+            // RESET_COMMAND_BUFFER: each slot re-records its own buffer per reuse
+            // (a whole-pool reset would clobber buffers still in flight).
             let cmd_pool = d
                 .create_command_pool(
-                    &vk::CommandPoolCreateInfo::default().queue_family_index(qfi),
+                    &vk::CommandPoolCreateInfo::default()
+                        .queue_family_index(qfi)
+                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                     None,
                 )
                 .map_err(gpu_err)?;
-            let cmd_buf = d
+            let cmd_bufs = d
                 .allocate_command_buffers(
                     &vk::CommandBufferAllocateInfo::default()
                         .command_pool(cmd_pool)
                         .level(vk::CommandBufferLevel::PRIMARY)
-                        .command_buffer_count(1),
+                        .command_buffer_count(ring),
                 )
-                .map_err(gpu_err)?[0];
-            let fence =
-                d.create_fence(&vk::FenceCreateInfo::default(), None).map_err(gpu_err)?;
+                .map_err(gpu_err)?;
+
+            let mut slots = Vec::with_capacity(RING_DEPTH);
+            for i in 0..RING_DEPTH {
+                let fence =
+                    d.create_fence(&vk::FenceCreateInfo::default(), None).map_err(gpu_err)?;
+                slots.push(ConvSlot {
+                    fence,
+                    cmd_buf: cmd_bufs[i],
+                    desc_set: desc_sets[i],
+                    in_flight: None,
+                });
+            }
 
             Ok(Self {
                 device: dev.device.clone(),
@@ -874,10 +922,9 @@ impl YcbcrToRgba {
                 pipeline,
                 shader,
                 cmd_pool,
-                cmd_buf,
                 desc_pool,
-                desc_set,
-                fence,
+                slots,
+                next: 0,
             })
         }
     }
@@ -889,14 +936,23 @@ impl YcbcrToRgba {
 
     /// Import one decoded `AHardwareBuffer`, convert it to RGBA on the GPU, and
     /// return the result as a `wgpu::Texture` (`Rgba8Unorm`), ready to sample.
-    /// Blocks until the conversion completes (fence wait), so `ahb` may be
-    /// released immediately after.
+    ///
+    /// Pipelined: the conversion is submitted but not waited on, so up to
+    /// `RING_DEPTH` conversions can overlap downstream consumption. The returned
+    /// texture's writes complete on the same queue before any later wgpu use of
+    /// it, so a consumer on this device sees correct data without an explicit
+    /// wait. The caller may release `ahb` as soon as this returns: importing it
+    /// gave Vulkan its own reference (held until the slot frees the memory).
     ///
     /// # Safety
     /// `ahb` must point to a live `AHardwareBuffer` of this converter's external
     /// format and geometry (hold an acquired reference across the call).
-    pub unsafe fn convert(&self, ahb: *const vk::AHardwareBuffer) -> Result<wgpu::Texture, G2gError> {
-        let d = &self.raw;
+    pub unsafe fn convert(
+        &mut self,
+        ahb: *const vk::AHardwareBuffer,
+    ) -> Result<wgpu::Texture, G2gError> {
+        // Cheap handle clone so we can use the device while mutating `self.slots`.
+        let d = self.raw.clone();
         let extent = vk::Extent3D { width: self.width, height: self.height, depth: 1 };
         let color_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -907,9 +963,9 @@ impl YcbcrToRgba {
         };
 
         // SAFETY: persistent objects were built on `d` in `new`; `ahb` is a live
-        // buffer per the contract; transient objects are destroyed after the
-        // fence signals (GPU idle), and the output image+memory transfer into the
-        // returned texture's drop callback.
+        // buffer per the contract; each conversion's transient objects are kept on
+        // its ring slot and reclaimed (after a fence wait) when the slot is reused;
+        // the output image+memory transfer into the returned texture's drop cb.
         unsafe {
             // ---- import the AHB as a sampled image ----
             let mut ext_fmt_img =
@@ -1016,7 +1072,23 @@ impl YcbcrToRgba {
                 )
                 .map_err(gpu_err)?;
 
-            // ---- bind + record ----
+            // ---- claim a ring slot, reclaiming its previous conversion ----
+            let idx = self.next;
+            self.next = (self.next + 1) % RING_DEPTH;
+            let (cb, desc_set, fence) = {
+                let slot = &mut self.slots[idx];
+                if let Some(old) = slot.in_flight.take() {
+                    d.wait_for_fences(&[slot.fence], true, u64::MAX).map_err(gpu_err)?;
+                    d.destroy_image_view(old.in_view, None);
+                    d.destroy_image(old.in_image, None);
+                    d.free_memory(old.in_mem, None);
+                    d.destroy_image_view(old.out_view, None);
+                }
+                d.reset_fences(&[slot.fence]).map_err(gpu_err)?;
+                (slot.cmd_buf, slot.desc_set, slot.fence)
+            };
+
+            // ---- bind + record on this slot ----
             let in_desc = [vk::DescriptorImageInfo::default()
                 .sampler(self.sampler)
                 .image_view(in_view)
@@ -1027,12 +1099,12 @@ impl YcbcrToRgba {
             d.update_descriptor_sets(
                 &[
                     vk::WriteDescriptorSet::default()
-                        .dst_set(self.desc_set)
+                        .dst_set(desc_set)
                         .dst_binding(0)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(&in_desc),
                     vk::WriteDescriptorSet::default()
-                        .dst_set(self.desc_set)
+                        .dst_set(desc_set)
                         .dst_binding(1)
                         .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                         .image_info(&out_desc),
@@ -1040,9 +1112,7 @@ impl YcbcrToRgba {
                 &[],
             );
 
-            d.reset_command_pool(self.cmd_pool, vk::CommandPoolResetFlags::empty())
-                .map_err(gpu_err)?;
-            let cb = self.cmd_buf;
+            d.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty()).map_err(gpu_err)?;
             d.begin_command_buffer(
                 cb,
                 &vk::CommandBufferBeginInfo::default()
@@ -1081,7 +1151,7 @@ impl YcbcrToRgba {
                 vk::PipelineBindPoint::COMPUTE,
                 self.pipeline_layout,
                 0,
-                &[self.desc_set],
+                &[desc_set],
                 &[],
             );
             d.cmd_dispatch(cb, self.width.div_ceil(8), self.height.div_ceil(8), 1);
@@ -1107,21 +1177,15 @@ impl YcbcrToRgba {
             );
             d.end_command_buffer(cb).map_err(gpu_err)?;
 
-            d.reset_fences(&[self.fence]).map_err(gpu_err)?;
+            // Submit without waiting: this conversion now runs in flight on `idx`.
             let cbs = [cb];
             d.queue_submit(
                 self.queue_raw,
                 &[vk::SubmitInfo::default().command_buffers(&cbs)],
-                self.fence,
+                fence,
             )
             .map_err(gpu_err)?;
-            d.wait_for_fences(&[self.fence], true, u64::MAX).map_err(gpu_err)?;
-
-            // ---- transient cleanup (GPU idle past the fence) ----
-            d.destroy_image_view(in_view, None);
-            d.destroy_image(in_image, None);
-            d.free_memory(in_mem, None);
-            d.destroy_image_view(out_view, None);
+            self.slots[idx].in_flight = Some(InFlight { in_image, in_mem, in_view, out_view });
 
             // ---- wrap the output image as a wgpu texture ----
             Ok(self.wrap_rgba_texture(out_image, out_mem))
@@ -1185,11 +1249,20 @@ impl YcbcrToRgba {
 
 impl Drop for YcbcrToRgba {
     fn drop(&mut self) {
-        // SAFETY: the element owns this converter and drops it only when idle (no
-        // in-flight conversion); every handle was created on `self.raw`.
+        // SAFETY: every handle was created on `self.raw`; we drain the device so
+        // no conversion is still reading the in-flight transient objects, then
+        // free each slot's resources and the shared pipeline objects.
         unsafe {
             let _ = self.raw.device_wait_idle();
-            self.raw.destroy_fence(self.fence, None);
+            for slot in &self.slots {
+                if let Some(f) = &slot.in_flight {
+                    self.raw.destroy_image_view(f.in_view, None);
+                    self.raw.destroy_image(f.in_image, None);
+                    self.raw.free_memory(f.in_mem, None);
+                    self.raw.destroy_image_view(f.out_view, None);
+                }
+                self.raw.destroy_fence(slot.fence, None);
+            }
             self.raw.destroy_command_pool(self.cmd_pool, None);
             self.raw.destroy_descriptor_pool(self.desc_pool, None);
             self.raw.destroy_pipeline(self.pipeline, None);

@@ -139,6 +139,22 @@ async fn decode_gpu_to_preprocess_tensor() {
         ConfigureOutcome::Accepted
     ));
 
+    // Negotiation (#3): in GPU mode the decoder derives RGBA output.
+    match dec.caps_constraint_as_transform() {
+        g2g_core::CapsConstraint::DerivedOutput(derive) => {
+            let derived = derive(&upstream);
+            assert!(
+                derived
+                    .alternatives()
+                    .iter()
+                    .any(|c| matches!(c, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })),
+                "GPU-mode decoder must derive RGBA output, got {:?}",
+                derived.alternatives()
+            );
+        }
+        other => panic!("expected DerivedOutput, got {other:?}"),
+    }
+
     let mut dec_sink = Collect::default();
     let mut pts_ns = 0u64;
     for au in access_units(H264) {
@@ -161,6 +177,11 @@ async fn decode_gpu_to_preprocess_tensor() {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
     };
+    // Negotiation (#3): WgpuPreprocess accepts RGBA input.
+    assert_eq!(
+        pre.intercept_caps(&rgba_caps).expect("preprocess must negotiate RGBA"),
+        rgba_caps
+    );
     assert!(matches!(
         pre.configure_pipeline(&rgba_caps).expect("configure preprocess for RGBA"),
         ConfigureOutcome::Accepted
