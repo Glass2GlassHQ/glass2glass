@@ -42,11 +42,6 @@ leverage first:
   rejecting branch fails the run loud today.
 - **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad
   re-cascade channel, so the DAG β walk terminates at a muxer.
-- **Runner-level timestamp-ordered fan-in.** `muxer_arm` drains per-input
-  channels in arrival order, not PTS order. The A/V muxers (`mp4mux`/`mpegtsmux`)
-  already PTS-order *inside* the element via `InputAggregator::take_earliest_by`,
-  so A/V interleave works; a runner-level merge would still help multi-camera
-  grids and PTS-synchronized compositing. Gated on a frame-accurate-sync use case.
 - **Allocation join policy across diamonds.** Two branches downstream of a tee
   proposing different allocation params need a join policy (sketch:
   most-restrictive intersection, loud failure on empty).

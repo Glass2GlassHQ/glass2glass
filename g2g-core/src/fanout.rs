@@ -256,6 +256,22 @@ pub trait MultiInputElement: ElementBound {
 
     fn input_count(&self) -> usize;
 
+    /// Whether the runner should deliver this element's inputs in global
+    /// presentation-timestamp order. Default `false` (arrival-order round-robin,
+    /// the historical behavior). When `true`, the runner merges the per-input
+    /// streams by `DataFrame` PTS, releasing the globally-earliest only once every
+    /// still-open input has one queued, so `process(pad, DataFrame(..))` arrives in
+    /// non-decreasing PTS across all pads.
+    ///
+    /// An element wanting time-aligned input without hand-rolling an
+    /// [`InputAggregator`](crate::InputAggregator) (a muxer, a multi-camera grid, a
+    /// PTS-synchronized compositor) opts in by returning `true`. Per-input `Eos`
+    /// and `CapsChanged` are still delivered as they occur; the merge holds only
+    /// `DataFrame`s. Inputs are assumed monotonic in PTS (the merge invariant).
+    fn input_pts_ordered(&self) -> bool {
+        false
+    }
+
     /// Phase 1 for one input pad: narrow that input's proposed caps.
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 

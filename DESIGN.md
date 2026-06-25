@@ -1124,6 +1124,19 @@ interleaving keys on that instead. This is distinct from the synchronized-*round
 collection (`take_earliest_by`'s sibling `take_round`) a compositor / audio mixer
 uses, where every input contributes one item per output.
 
+The same PTS merge is also available **at the runner level**: a
+`MultiInputElement` returning `input_pts_ordered() == true` is driven by
+`muxer_arm_pts` instead of the default arrival-order `muxer_arm`. That arm owns an
+`InputAggregator<Frame>` and calls `process(pad, DataFrame(..))` in global PTS
+order (the same collect-and-pick-earliest rule), so an element wanting time-aligned
+input, a multi-camera grid or PTS-synchronized compositor, gets it without
+hand-rolling its own aggregator. Per-input `Eos` (flush + the merged-EOS
+aggregation) and `CapsChanged` (MX-1 / MX-2 re-solve) are handled exactly as in
+`muxer_arm`; only `DataFrame`s are reordered. The default stays arrival-order
+round-robin, so the existing element-level mergers (`InterleaveMux`, `tsmuxn`,
+`mp4muxn`) are unchanged; the runner arm is the alternative for elements that would
+rather not carry the buffering themselves.
+
 Over the DAG, a node-keyed `GraphCoordinator` walks a sink's re-derived
 allocation proposal upstream through tees via `in_edges` (sources and muxers
 terminate the walk), and a per-edge `graph_downstream_feasibility` snapshot

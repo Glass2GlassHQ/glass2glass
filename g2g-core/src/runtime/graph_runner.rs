@@ -40,6 +40,7 @@ use crate::element::{
     Reconfigure,
 };
 use crate::error::G2gError;
+use crate::aggregator::InputAggregator;
 use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink};
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
@@ -763,8 +764,14 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 arm_kinds.push(kind);
                 pad_rxs.push((pad, pad_rx));
             }
-            let arm: BoxFuture<'a, Result<u64, G2gError>> =
-                Box::pin(muxer_arm(mux, pad_rxs, out_tx, input_count, mux_out_caps));
+            // A muxer can opt into runner-level PTS-ordered delivery (the runner
+            // merges its inputs by DataFrame PTS); the default drains round-robin
+            // in arrival order.
+            let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
+                Box::pin(muxer_arm_pts(mux, pad_rxs, out_tx, input_count, mux_out_caps))
+            } else {
+                Box::pin(muxer_arm(mux, pad_rxs, out_tx, input_count, mux_out_caps))
+            };
             arms.push(arm);
             arm_kinds.push(kind);
             continue;
@@ -1557,6 +1564,73 @@ async fn muxer_arm<'a>(
             packet => {
                 mux.process(pad, packet, &mut adapter).await?;
             }
+        }
+    }
+}
+
+/// The PTS-ordered muxer arm (the opt-in alternative to [`muxer_arm`], selected
+/// by [`DynMultiInputElement::input_pts_ordered`]): buffer each input's
+/// `DataFrame`s in an [`InputAggregator`] and release the globally-earliest-PTS
+/// one only once every still-open input has a head queued, so `process(pad, ..)`
+/// sees frames in non-decreasing PTS across all pads. The runner does the
+/// time-ordered interleave a multi-camera grid / PTS-synchronized compositor
+/// would otherwise hand-roll. `Eos` (per-input flush + aggregation) and
+/// `CapsChanged` (MX-1 / MX-2) are handled as in [`muxer_arm`]; only `DataFrame`s
+/// are reordered.
+async fn muxer_arm_pts<'a>(
+    mut mux: Box<dyn DynMultiInputElement + 'a>,
+    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    out_tx: LinkSender,
+    input_count: usize,
+    mut current_output: Caps,
+) -> Result<u64, G2gError> {
+    let mut adapter = SenderSink::new(out_tx);
+    let mut open = alloc::vec![true; input_count];
+    let mut agg: InputAggregator<Frame> = InputAggregator::new(input_count);
+    // Round-robin wake cursor, so a fast input does not bias the block path.
+    let mut next = 0usize;
+    loop {
+        // Release every frame now safe to emit, in global PTS order: the
+        // aggregator yields the earliest only once every still-contributing input
+        // has a head, so no later input can still deliver something earlier.
+        while let Some((slot, frame)) = agg.take_earliest_by(|f| f.timing.pts_ns) {
+            let pad = pad_rxs[slot].0;
+            mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter).await?;
+        }
+        // Once every input has ended, the loop above has drained the aggregator
+        // (ended+empty inputs drop out of the round); emit the single merged Eos.
+        if !open.iter().any(|&o| o) {
+            adapter.push(PipelinePacket::Eos).await?;
+            return Ok(0);
+        }
+        // Make progress: block for the next packet from any still-open input.
+        let (slot, maybe) = muxer_recv_any(&pad_rxs, &open, next).await;
+        next = (slot + 1) % input_count;
+        let pad = pad_rxs[slot].0;
+        // A closed channel with no `Eos` is an upstream end (as in `muxer_arm`).
+        match maybe.unwrap_or(PipelinePacket::Eos) {
+            PipelinePacket::DataFrame(frame) => agg.push(slot, frame),
+            PipelinePacket::Eos => {
+                mux.process(pad, PipelinePacket::Eos, &mut adapter).await?;
+                open[slot] = false;
+                agg.mark_ended(slot);
+            }
+            PipelinePacket::CapsChanged(new_caps) => {
+                // MX-1 / MX-2, identical to `muxer_arm`: re-solve this input's pad
+                // and emit one downstream `CapsChanged` only when the merged output
+                // actually shifts.
+                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                if let ConfigureOutcome::ReFixate(_) = mux.configure_pipeline(pad, &input_caps)? {
+                    return Err(G2gError::FixationFailed);
+                }
+                let new_output = solve_mux_output_dyn(&*mux)?;
+                if new_output != current_output {
+                    current_output = new_output.clone();
+                    adapter.push(PipelinePacket::CapsChanged(new_output)).await?;
+                }
+            }
+            // Flush / Segment are not part of the muxer-input contract here.
+            _ => {}
         }
     }
 }

@@ -284,6 +284,9 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 /// legacy paths stay on the concrete trait).
 pub trait DynMultiInputElement: ElementBound {
     fn input_count(&self) -> usize;
+    /// Dyn-safe mirror of [`MultiInputElement::input_pts_ordered`]: whether the
+    /// runner delivers inputs in global PTS order rather than arrival order.
+    fn input_pts_ordered(&self) -> bool;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
     fn configure_pipeline(
@@ -305,6 +308,10 @@ pub trait DynMultiInputElement: ElementBound {
 impl<T: MultiInputElement> DynMultiInputElement for T {
     fn input_count(&self) -> usize {
         MultiInputElement::input_count(self)
+    }
+
+    fn input_pts_ordered(&self) -> bool {
+        MultiInputElement::input_pts_ordered(self)
     }
 
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
@@ -352,6 +359,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
     fn input_count(&self) -> usize {
         (**self).input_count()
+    }
+
+    fn input_pts_ordered(&self) -> bool {
+        (**self).input_pts_ordered()
     }
 
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
