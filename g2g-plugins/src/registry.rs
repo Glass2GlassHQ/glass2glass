@@ -144,12 +144,16 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Any,
         },
-        || Box::new(VideoTestSrc::new(320, 240, 30, 0)),
+        // num-buffers defaults to forever (the property's documented `-1`),
+        // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
+        || Box::new(VideoTestSrc::new(320, 240, 30, u64::MAX)),
     ));
     reg.register_source(SourceFactory::new(
         "audiotestsrc",
         Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
-        || Box::new(AudioTestSrc::new(48_000, 2, 440, 0)),
+        // num-buffers defaults to forever (the property's documented `-1`),
+        // matching gst audiotestsrc; a launch line bounds it with `num-buffers=N`.
+        || Box::new(AudioTestSrc::new(48_000, 2, 440, u64::MAX)),
     ));
     // The output caps are a nominal default; the `bytestream-format` property
     // (incl. `auto`) sets the real container per instance before negotiation.
