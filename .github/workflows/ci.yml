@@ -140,6 +140,13 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets
           --target aarch64-linux-android --features mediacodec-wgpu
+      # M304: WgpuPreprocess consumes the RGBA WgpuTexture MediaCodecDec emits
+      # (the decode -> preprocess loop on GPU). Cross-check the consume path + the
+      # on-device chain test; running it is validated on a device separately.
+      - name: check g2g-ml (mediacodec-wgpu)
+        run: >
+          cargo check -p g2g-ml --locked --all-targets
+          --target aarch64-linux-android --features mediacodec-wgpu
 
   # The no_std + wasm pillar: the core builds for the browser target. (A bare-
   # metal target like thumbv7em needs the critical-section feature + a CS impl, so

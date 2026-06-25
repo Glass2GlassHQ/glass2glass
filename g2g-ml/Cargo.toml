@@ -28,6 +28,12 @@ wgpu = ["std", "dep:wgpu"]
 # external-memory interop, no PCIe round-trip. Implies wgpu; pulls
 # g2g-plugins/cuda-wgpu (wgpu-hal + ash + libcuda FFI). Linux + NVIDIA only.
 cuda-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/cuda-wgpu"]
+# Android zero-copy decode -> preprocess (M304): WgpuPreprocess consumes the RGBA
+# MemoryDomain::WgpuTexture that MediaCodecDec emits in GPU-output mode, sampling
+# it straight into the tensor with no CPU round-trip. The Android analog of
+# cuda-wgpu; pulls g2g-plugins/mediacodec-wgpu for the WgpuRgbaTexture keep-alive.
+# Android only. Implies wgpu.
+mediacodec-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/mediacodec-wgpu"]
 # ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).

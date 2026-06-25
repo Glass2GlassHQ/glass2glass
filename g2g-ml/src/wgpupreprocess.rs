@@ -126,6 +126,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Surface-import variant for an already-RGB frame (M304): the input is an
+/// `Rgba8Unorm` texture whose YCbCr->RGB conversion already happened upstream
+/// (the Android `MediaCodecDec` GPU path samples the decoded `AHardwareBuffer`
+/// through an immutable ycbcr sampler). `textureLoad` returns normalized f32
+/// already, so this just writes R,G,B into the NCHW tensor, no colour math.
+#[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+const TEX_SHADER_RGBA: &str = r#"
+struct Dims { width: u32, height: u32, _pad0: u32, _pad1: u32 };
+
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var img: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let w = dims.width;
+    let h = dims.height;
+    if (x >= w || y >= h) { return; }
+
+    let c = textureLoad(img, vec2<i32>(i32(x), i32(y)), 0);
+    let area = w * h;
+    let li = y * w + x;
+    out[li] = c.r;
+    out[area + li] = c.g;
+    out[2u * area + li] = c.b;
+}
+"#;
+
 /// The host BT.601 reference matching `SHADER`, kept public so the test (and a
 /// CPU-fallback caller) can compare against the GPU output. Returns the f32
 /// NCHW RGB tensor for one NV12 frame.
@@ -194,6 +224,11 @@ pub struct WgpuPreprocess {
     /// frame's device (M217). Separate from `gpu` because the texture path binds
     /// a sampled texture, not a storage buffer, and adopts the producer's device.
     tex_gpu: Option<TexGpu>,
+    /// RGBA surface-import resources (M304), built on the first RGBA GPU-texture
+    /// frame. Separate pipeline from `tex_gpu` (samples `texture_2d<f32>`, no
+    /// YCbCr math); the input is already-converted RGBA from `MediaCodecDec`.
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    tex_rgba_gpu: Option<TexGpu>,
     last_caps: Option<Caps>,
     emitted: u64,
     /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
@@ -216,6 +251,8 @@ impl WgpuPreprocess {
             configured: false,
             gpu: None,
             tex_gpu: None,
+            #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+            tex_rgba_gpu: None,
             last_caps: None,
             emitted: 0,
             gpu_output: false,
@@ -455,6 +492,118 @@ impl WgpuPreprocess {
             Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
         }
     }
+
+    /// Try to consume the GPU texture as an already-RGB `WgpuRgbaTexture` (the
+    /// M304 Android decode path). Returns `Ok(None)` if the keep-alive is not one
+    /// (so the caller falls through to `UnsupportedDomain`).
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    fn try_dispatch_rgba(
+        &mut self,
+        any: &dyn core::any::Any,
+    ) -> Result<Option<MemoryDomain>, G2gError> {
+        let Some(owner) = any.downcast_ref::<g2g_plugins::mediacodec_wgpu::WgpuRgbaTexture>() else {
+            return Ok(None);
+        };
+        self.ensure_tex_rgba_gpu(owner.device(), owner.queue());
+        Ok(Some(self.dispatch_tex_rgba(owner)?))
+    }
+
+    /// No RGBA-texture producer off the Android `mediacodec-wgpu` path.
+    #[cfg(not(all(target_os = "android", feature = "mediacodec-wgpu")))]
+    fn try_dispatch_rgba(
+        &mut self,
+        _any: &dyn core::any::Any,
+    ) -> Result<Option<MemoryDomain>, G2gError> {
+        Ok(None)
+    }
+
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    fn ensure_tex_rgba_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.tex_rgba_gpu.is_some() {
+            return;
+        }
+        self.tex_rgba_gpu = Some(build_tex_rgba_gpu(device, queue, self.width, self.height));
+    }
+
+    /// RGBA surface-import dispatch (M304): sample the already-converted RGBA
+    /// texture straight into the tensor on its own device, no colour math, no CPU
+    /// upload. Mirrors [`dispatch_tex`] but binds an `Rgba8Unorm` `texture_2d<f32>`
+    /// sized `width x height` (not the NV12 `x 3/2`).
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    fn dispatch_tex_rgba(
+        &self,
+        owner: &g2g_plugins::mediacodec_wgpu::WgpuRgbaTexture,
+    ) -> Result<MemoryDomain, G2gError> {
+        let tg = self.tex_rgba_gpu.as_ref().ok_or(G2gError::NotConfigured)?;
+        let texture = owner.texture();
+        if texture.width() != self.width || texture.height() != self.height {
+            return Err(G2gError::CapsMismatch);
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let layout = tg.pipeline.get_bind_group_layout(0);
+        let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rgba-tex-binding"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: tg.dims_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: tg.out_buf.as_entire_binding() },
+            ],
+        });
+
+        let mut encoder =
+            tg.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("rgba-tex->tensor"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&tg.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let gx = self.width.div_ceil(WORKGROUP);
+            let gy = self.height.div_ceil(WORKGROUP);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+
+        if self.gpu_output {
+            let frame_buf = tg.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("preprocess-tensor"),
+                size: tg.out_bytes as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &frame_buf, 0, tg.out_bytes as u64);
+            tg.queue.submit([encoder.finish()]);
+            let owner =
+                WgpuBufferOwner::new(tg.device.clone(), tg.queue.clone(), frame_buf, tg.out_bytes);
+            Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
+                tg.out_bytes,
+                std::sync::Arc::new(owner),
+            )))
+        } else {
+            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &tg.staging, 0, tg.out_bytes as u64);
+            tg.queue.submit([encoder.finish()]);
+            let slice = tg.staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            tg.device
+                .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            rx.recv()
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+            let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
+            tg.staging.unmap();
+            Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
+        }
+    }
 }
 
 /// Owns a GPU-resident linear tensor buffer: the `wgpu::Buffer` holding an f32
@@ -653,6 +802,20 @@ impl AsyncElement for WgpuPreprocess {
                 self.configured = true;
                 Ok(ConfigureOutcome::Accepted)
             }
+            // M304: already-RGB GPU texture input (no chroma subsampling, so any
+            // fixed geometry is fine).
+            #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
+                ..
+            } => {
+                self.width = *w;
+                self.height = *h;
+                self.configured = true;
+                Ok(ConfigureOutcome::Accepted)
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -687,13 +850,16 @@ impl AsyncElement for WgpuPreprocess {
                         // texture. Adopt its device and sample it directly, no
                         // CPU upload. A foreign keep-alive we cannot bind.
                         MemoryDomain::WgpuTexture(owned) => {
-                            let owner = owned
-                                .keep_alive()
-                                .as_any()
-                                .downcast_ref::<WgpuNv12Texture>()
-                                .ok_or(G2gError::UnsupportedDomain)?;
-                            self.ensure_tex_gpu(owner.device(), owner.queue());
-                            self.dispatch_tex(owner)?
+                            let any = owned.keep_alive().as_any();
+                            if let Some(owner) = any.downcast_ref::<WgpuNv12Texture>() {
+                                self.ensure_tex_gpu(owner.device(), owner.queue());
+                                self.dispatch_tex(owner)?
+                            } else if let Some(domain) = self.try_dispatch_rgba(any)? {
+                                // M304: already-RGB texture from the Android decode path.
+                                domain
+                            } else {
+                                return Err(G2gError::UnsupportedDomain);
+                            }
                         }
                         _ => return Err(G2gError::UnsupportedDomain),
                     };
@@ -891,6 +1057,53 @@ fn build_tex_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height:
         staging,
         out_bytes,
     }
+}
+
+/// Build the RGBA surface-import resources (M304): same output buffers + dims as
+/// [`build_tex_gpu`], but the `TEX_SHADER_RGBA` pipeline that samples an
+/// `Rgba8Unorm` texture (no YCbCr math). The input texture is `width x height`.
+#[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+fn build_tex_rgba_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> TexGpu {
+    let area = width as usize * height as usize;
+    let out_bytes = 3 * area * 4;
+
+    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rgb-tensor-out"),
+        size: out_bytes as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: out_bytes as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("dims"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut dims = [0u8; 16];
+    dims[0..4].copy_from_slice(&width.to_le_bytes());
+    dims[4..8].copy_from_slice(&height.to_le_bytes());
+    queue.write_buffer(&dims_buf, 0, &dims);
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("rgba-tex-tensor"),
+        source: wgpu::ShaderSource::Wgsl(TEX_SHADER_RGBA.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("rgba-tex-tensor"),
+        layout: None,
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    TexGpu { device: device.clone(), queue: queue.clone(), pipeline, dims_buf, out_buf, staging, out_bytes }
 }
 
 /// Stand-in for a GPU NV12 decoder until one lands (M217): upload NV12 system

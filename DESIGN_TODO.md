@@ -77,15 +77,15 @@ leverage first:
 
 ## Platform: Android
 
-- `MediaCodecDec` zero-copy to GPU (M304): DONE. `with_gpu_output()` emits
-  decoded frames as `MemoryDomain::WgpuTexture` (RGBA) via the `YcbcrToRgba`
-  converter (opaque AHB import -> immutable `VkSamplerYcbcrConversion` compute
-  pass -> RGBA `wgpu::Texture`), no CPU NV12 pack. Validated on the Pixel 10a
-  (9 frames, read back through wgpu, content survives). Follow-up: `WgpuPreprocess`
-  only imports NV12 today, so consuming the RGBA `WgpuRgbaTexture` keep-alive in
-  the inference path is an ML-on-Android task; and the converter blocks on a
-  per-frame fence (correctness over throughput) which a future ring of in-flight
-  conversions could pipeline.
+- `MediaCodecDec` zero-copy to GPU (M304): DONE, decode -> preprocess on GPU.
+  `with_gpu_output()` emits decoded frames as `MemoryDomain::WgpuTexture` (RGBA)
+  via the `YcbcrToRgba` converter (opaque AHB import -> immutable
+  `VkSamplerYcbcrConversion` compute pass -> RGBA `wgpu::Texture`), and
+  `WgpuPreprocess` consumes that texture straight into its tensor (g2g-ml
+  `mediacodec-wgpu` feature). Validated on the Pixel 10a end to end (9 frames ->
+  NCHW tensor, no CPU frame copy). Remaining polish: runner-level caps
+  negotiation for the RGBA-GPU path (driven directly today), and the converter's
+  per-frame fence could pipeline via a ring of in-flight conversions.
 - Android `Surface` present sink (the on-screen output half; the decode-to-GPU
   side is done above).
 - Encode, Camera2 capture, AAudio, Surface present.
