@@ -438,8 +438,8 @@
             <li><a href="#features">Features</a></li>
             <li><a href="#targets">Targets</a></li>
             <li><a href="#quickstart">Quickstart</a></li>
-            <li><a href="https://github.com/GrokImageCompression/glass2glass/blob/master/DESIGN.md" class="nav-btn-ghost">Spec</a></li>
-            <li><a href="https://github.com/GrokImageCompression/glass2glass" class="nav-btn-accent">GitHub</a></li>
+            <li><a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md" class="nav-btn-ghost">Spec</a></li>
+            <li><a href="https://github.com/Glass2GlassHQ/glass2glass" class="nav-btn-accent">GitHub</a></li>
         </ul>
         <button class="nav-hamburger" onclick="document.querySelector('.nav-links').classList.toggle('show')" aria-label="Toggle menu">&#9776;</button>
     </div>
@@ -460,12 +460,12 @@
         </p>
         <div class="hero-actions">
             <a href="#quickstart" class="btn btn-accent">Quickstart &rarr;</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass" class="btn btn-outline">View on GitHub</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass" class="btn btn-outline">View on GitHub</a>
         </div>
 
         <div style="margin-bottom: 44px;">
-            <a href="https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml">
-                <img src="https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml/badge.svg" alt="CI status" style="height: 20px; vertical-align: middle;">
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml">
+                <img src="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml/badge.svg" alt="CI status" style="height: 20px; vertical-align: middle;">
             </a>
             <span style="font-size: 0.8rem; color: var(--text-tertiary); margin-left: 12px;">CI green across Linux &middot; Windows &middot; macOS &middot; Android &middot; wasm</span>
         </div>
@@ -817,7 +817,7 @@
         <p class="section-desc">
             Pick a pipeline shape, enable the right cargo features, and run.
             Detailed smoke-test recipes (RTSP feed, NVDEC, KMS, VAAPI, ML) in the
-            <a href="https://github.com/GrokImageCompression/glass2glass#running-smoke-tests" style="color: var(--accent);">README</a>.
+            <a href="https://github.com/Glass2GlassHQ/glass2glass#running-smoke-tests" style="color: var(--accent);">README</a>.
         </p>
 
         <div class="code-block">
@@ -832,8 +832,8 @@
 
 <div class="tab-panel active" id="rtsp-wayland"><pre><span class="cmt"># Cargo.toml</span>
 [dependencies]
-g2g-core    = { git = <span class="str">"https://github.com/GrokImageCompression/glass2glass"</span> }
-g2g-plugins = { git = <span class="str">"https://github.com/GrokImageCompression/glass2glass"</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
+g2g-core    = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span> }
+g2g-plugins = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
 
 <span class="cmt">// main.rs</span>
 <span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
@@ -915,9 +915,9 @@ wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async
         <h2>Start building <em style="color: var(--accent); font-style: normal;">glass to glass</em>.</h2>
         <p>Read the spec, clone the repo, try the smoke tests.</p>
         <div class="cta-actions">
-            <a href="https://github.com/GrokImageCompression/glass2glass" class="btn btn-accent">Clone on GitHub</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/DESIGN.md" class="btn btn-outline">Read DESIGN.md</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/README.md" class="btn btn-outline">Sample pipelines</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass" class="btn btn-accent">Clone on GitHub</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md" class="btn btn-outline">Read DESIGN.md</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/README.md" class="btn btn-outline">Sample pipelines</a>
         </div>
     </div>
 </section>
@@ -927,10 +927,10 @@ wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async
     <div class="footer-inner">
         <p>&copy; 2026 Aaron Boxer &middot; glass2glass &middot; LGPL v2.1+ (g2g-enterprise: AGPL v3)</p>
         <div class="footer-links">
-            <a href="https://github.com/GrokImageCompression/glass2glass">GitHub</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/DESIGN.md">Spec</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass/blob/master/CHANGELOG.md">Changelog</a>
-            <a href="https://github.com/GrokImageCompression/glass2glass/issues">Issues</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass">GitHub</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md">Spec</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/CHANGELOG.md">Changelog</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/issues">Issues</a>
         </div>
     </div>
 </footer>

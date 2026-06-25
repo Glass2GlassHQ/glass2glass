@@ -1,6 +1,6 @@
 # glass2glass (`g2g`)
 
-[![CI](https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml/badge.svg)](https://github.com/GrokImageCompression/glass2glass/actions/workflows/ci.yml)
+[![CI](https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml/badge.svg)](https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml)
 
 A hardware-first, sans-IO, asynchronous multimedia graph framework in pure
 Rust.
