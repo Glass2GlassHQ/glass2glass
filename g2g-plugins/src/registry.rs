@@ -301,6 +301,15 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("matroskamux", |inputs| {
         Box::new(crate::mkvmuxn::MkvMuxN::new(inputs))
     }));
+    // Multi-track FLV fan-in (M296): the A/V container case, FLV's one-video +
+    // one-audio model. Like the others, `flvmux` is both a single-input launch
+    // element (`flvmux::FlvMux` above) and this fan-in muxer (`flvmuxn::FlvMuxN`);
+    // the parser picks by link degree. H.264 video + AAC audio interleave by PTS,
+    // with the decoder-config sequence headers written up front. std-gated.
+    #[cfg(feature = "std")]
+    reg.register_muxer(MuxerFactory::new("flvmux", |inputs| {
+        Box::new(crate::flvmuxn::FlvMuxN::new(inputs))
+    }));
 
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || Box::new(FakeSink::new())));

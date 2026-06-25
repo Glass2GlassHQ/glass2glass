@@ -134,6 +134,11 @@ pub mod flvdemux;
 // FLV muxer element (no_std): one elementary stream -> Caps::ByteStream{Flv}, the
 // inverse of flvdemux.
 pub mod flvmux;
+// Multi-track FLV muxer element: a video + audio elementary stream (A/V) ->
+// Caps::ByteStream{Flv}, the fan-in analog of flvmux. std-gated: reuses the MP4
+// family's NAL / ADTS / avcC helpers, like mkvmuxn.
+#[cfg(feature = "std")]
+pub mod flvmuxn;
 // Container content sniffing (no_std): guess a ByteStreamEncoding from a header.
 pub mod typefind;
 pub mod videotestsrc;
