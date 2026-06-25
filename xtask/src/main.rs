@@ -269,7 +269,9 @@ fn probe_host() -> Capabilities {
         wayland: pkg_exists("wayland-client"),
         ffmpeg: pkg_exists("libavcodec"),
         pipewire: pkg_exists("libpipewire-0.3") && clang,
-        vpx: pkg_exists("libvpx") && clang,
+        // Fedora's libvpx-devel (and most distros) ships the pkg-config module
+        // as `vpx`, not `libvpx`.
+        vpx: pkg_exists("vpx") && clang,
         openssl: pkg_exists("openssl"),
     }
 }
