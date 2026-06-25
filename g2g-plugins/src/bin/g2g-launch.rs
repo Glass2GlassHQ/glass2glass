@@ -38,9 +38,11 @@
 //! decisions (and, on a `CapsMismatch`, names the two conflicting elements and
 //! the caps each wanted). Both are read by `g2g_core::log::init_from_env`.
 
+use std::io::Write;
 use std::process;
+use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
@@ -240,8 +242,36 @@ fn main() {
         println!("Setting pipeline to PLAYING ...");
     }
     let clock = WallClock::new();
-    let started = std::time::Instant::now();
-    match rt.block_on(run_graph(graph, &clock, LINK_CAPACITY)) {
+    let progress = PipelineProgress::new();
+    let started = Instant::now();
+    // Poll the run future with a 1s timeout so a long-running (e.g. forever, the
+    // default `videotestsrc`) pipeline prints a liveness heartbeat instead of
+    // looking hung. `timeout` only needs tokio's `time` feature (no `select!`
+    // macro). A short pipeline finishes inside the first tick, so it stays quiet.
+    let mut printed_status = false;
+    let result = rt.block_on(async {
+        let mut run = Box::pin(run_graph_with_progress(graph, &clock, LINK_CAPACITY, &progress));
+        loop {
+            match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
+                Ok(r) => break r,
+                Err(_elapsed) => {
+                    if !opts.quiet {
+                        let pos = match progress.position() {
+                            Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
+                            None => String::from("prerolling"),
+                        };
+                        eprint!("\r  running... {pos} ({:.0}s wall)   ", started.elapsed().as_secs_f64());
+                        let _ = std::io::stderr().flush();
+                        printed_status = true;
+                    }
+                }
+            }
+        }
+    });
+    if printed_status {
+        eprintln!(); // move off the \r status line before the summary
+    }
+    match result {
         Ok(stats) => {
             if !opts.quiet {
                 // End-of-run report (M287): the RunStats telemetry plus the
