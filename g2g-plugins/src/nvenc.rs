@@ -66,8 +66,12 @@ pub struct NvEnc {
     framerate: Rate,
     /// Negotiated input pixel format: NV12 (the NVDEC hwframe domain) or a packed
     /// 8-bit RGBA (the GPU-render domain, e.g. via `WgpuToCuda`). NVENC color
-    /// converts RGBA internally, so both produce H.264.
+    /// converts RGBA internally.
     input_format: RawVideoFormat,
+    /// Output codec: H.264 (default) or HEVC (H.265). Both are NVENC-encodable on
+    /// Ampere/3060; AV1 needs RTX 40-series. The encode path is identical bar the
+    /// codec GUID and the announced output caps.
+    codec: VideoCodec,
     bitrate_bps: u32,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
     /// the CUDA context it was opened on. `None` until the first frame.
@@ -122,6 +126,7 @@ impl NvEnc {
             height: 0,
             framerate: Rate::Any,
             input_format: RawVideoFormat::Nv12,
+            codec: VideoCodec::H264,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             session: None,
             frame_no: 0,
@@ -136,6 +141,21 @@ impl NvEnc {
     pub fn with_bitrate(mut self, bps: u32) -> Self {
         self.bitrate_bps = bps.max(1);
         self
+    }
+
+    /// Select the output codec: [`VideoCodec::H264`] (default) or
+    /// [`VideoCodec::H265`] (HEVC). Other codecs are rejected at configure.
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// The NVENC encode GUID for the selected codec.
+    fn encode_guid(&self) -> ffi::Guid {
+        match self.codec {
+            VideoCodec::H265 => ffi::NV_ENC_CODEC_HEVC_GUID,
+            _ => ffi::NV_ENC_CODEC_H264_GUID,
+        }
     }
 
     /// Count of H.264 access units emitted.
@@ -177,7 +197,7 @@ impl NvEnc {
 
     fn output_caps(&self) -> Caps {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: self.codec,
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
@@ -198,6 +218,7 @@ impl NvEnc {
     /// negotiated geometry. Fails loud (`HardwareError::Other`) if NVENC is
     /// unavailable so the caller can fall back to `FfmpegH264Enc`.
     fn open_session(&mut self, context: u64) -> Result<(), G2gError> {
+        let encode_guid = self.encode_guid();
         // Load the SDK dispatch table.
         let mut funcs: Box<ffi::NvEncodeApiFunctionList> =
             // SAFETY: the function-list struct is plain old data; all-zero is the valid
@@ -246,7 +267,7 @@ impl NvEnc {
         nvchk(unsafe {
             preset_fn(
                 encoder,
-                ffi::NV_ENC_CODEC_H264_GUID,
+                encode_guid,
                 ffi::NV_ENC_PRESET_P4_GUID,
                 ffi::NV_ENC_TUNING_INFO_LOW_LATENCY,
                 &mut preset,
@@ -270,7 +291,7 @@ impl NvEnc {
         // reserved arrays); all-zero is a valid initial state we then version-tag.
         let mut init: ffi::InitializeParams = unsafe { core::mem::zeroed() };
         init.version = ffi::NV_ENC_INITIALIZE_PARAMS_VER;
-        init.encode_guid = ffi::NV_ENC_CODEC_H264_GUID;
+        init.encode_guid = encode_guid;
         init.preset_guid = ffi::NV_ENC_PRESET_P4_GUID;
         init.encode_width = self.width;
         init.encode_height = self.height;
@@ -597,18 +618,19 @@ impl AsyncElement for NvEnc {
         Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: NV12 or packed RGBA (any geometry) in, H.264 at the
-    /// same dims and framerate out. Any other input yields an empty set, rejected
-    /// at solve.
+    /// Native `DerivedOutput`: NV12 or packed RGBA (any geometry) in, the selected
+    /// codec (H.264 or HEVC) at the same dims and framerate out. Any other input
+    /// yields an empty set, rejected at solve.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+        let codec = self.codec;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12 | RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8,
                 width,
                 height,
                 framerate,
             } => CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
+                codec,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
@@ -627,6 +649,10 @@ impl AsyncElement for NvEnc {
         ) {
             return Err(G2gError::CapsMismatch);
         }
+        // Only H.264 / HEVC are NVENC-encodable here (AV1 needs RTX 40-series).
+        if !matches!(self.codec, VideoCodec::H264 | VideoCodec::H265) {
+            return Err(G2gError::CapsMismatch);
+        }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
             return Err(G2gError::CapsMismatch);
         };
@@ -642,9 +668,9 @@ impl AsyncElement for NvEnc {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "NVENC H.264 encoder",
+            "NVENC H.264 / HEVC encoder",
             "Codec/Encoder/Video/Hardware",
-            "Zero-copy H.264 encode of CUDA NV12 surfaces via the NVIDIA Video Codec SDK",
+            "Zero-copy H.264 / HEVC encode of CUDA NV12 / RGBA surfaces via the NVIDIA Video Codec SDK",
             "g2g",
         )
     }
@@ -660,6 +686,14 @@ impl AsyncElement for NvEnc {
                 self.bitrate_bps = (bps as u32).max(1);
                 Ok(())
             }
+            "codec" => {
+                self.codec = match value.as_str().ok_or(PropError::Type)? {
+                    "h264" | "avc" => VideoCodec::H264,
+                    "h265" | "hevc" => VideoCodec::H265,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -667,6 +701,13 @@ impl AsyncElement for NvEnc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "bitrate" => Some(PropValue::Uint(self.bitrate_bps as u64)),
+            "codec" => Some(PropValue::Str(
+                match self.codec {
+                    VideoCodec::H265 => "h265",
+                    _ => "h264",
+                }
+                .into(),
+            )),
             _ => None,
         }
     }
@@ -704,23 +745,27 @@ impl AsyncElement for NvEnc {
 
 impl PadTemplates for NvEnc {
     fn pad_templates() -> Vec<PadTemplate> {
-        let out = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
-        Vec::from([
-            PadTemplate::sink(Self::input_caps_set()),
-            PadTemplate::source(CapsSet::one(out)),
-        ])
+        let out = CapsSet::from_alternatives(
+            [VideoCodec::H264, VideoCodec::H265]
+                .into_iter()
+                .map(|codec| Caps::CompressedVideo {
+                    codec,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                })
+                .collect(),
+        );
+        Vec::from([PadTemplate::sink(Self::input_caps_set()), PadTemplate::source(out)])
     }
 }
 
-/// Settable properties: the target bitrate, so a `gst-launch` line can set the
-/// rate without the builder.
-static NVENC_PROPS: &[PropertySpec] =
-    &[PropertySpec::new("bitrate", PropKind::Uint, "constant target bitrate, bits/second")];
+/// Settable properties: the target bitrate and the output codec (`h264` |
+/// `hevc`), so a `gst-launch` line can pick them without the builder.
+static NVENC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("bitrate", PropKind::Uint, "constant target bitrate, bits/second"),
+    PropertySpec::new("codec", PropKind::Str, "output codec: h264 | hevc"),
+];
 
 /// Thin hand-rolled FFI for the NVIDIA Video Codec SDK (`nvEncodeAPI.h`, SDK
 /// 13.0) plus the two `libcuda` context calls NVENC needs. Only the surface this
@@ -803,6 +848,12 @@ mod ffi {
         0x4e63,
         0x4ca4,
         [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf],
+    );
+    pub const NV_ENC_CODEC_HEVC_GUID: Guid = guid(
+        0x790cdc88,
+        0x4522,
+        0x4d7b,
+        [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03],
     );
     pub const NV_ENC_PRESET_P4_GUID: Guid = guid(
         0x90a7b826,
@@ -1206,6 +1257,31 @@ mod tests {
             framerate: Rate::Any,
         };
         assert!(derive(&i420).alternatives().is_empty());
+    }
+
+    #[test]
+    fn hevc_codec_selects_h265_output_and_guid() {
+        let e = NvEnc::new().with_codec(VideoCodec::H265);
+        // The encode GUID switches to HEVC.
+        let g = e.encode_guid();
+        assert_eq!(g.data1, ffi::NV_ENC_CODEC_HEVC_GUID.data1);
+        // NV12 (and RGBA) in -> H.265 out at the same geometry.
+        let CapsConstraint::DerivedOutput(derive) = e.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let out = derive(&nv12(1280, 720));
+        assert!(out.accepts(&Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        }));
+        assert!(!out.accepts(&Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        }));
     }
 
     #[test]

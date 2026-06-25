@@ -84,6 +84,9 @@ pub struct NvDec {
 struct DecoderState {
     context: u64,
     ctx_lock: *mut core::ffi::c_void,
+    /// The `cudaVideoCodec` the parser / decoder were created for (H.264 or HEVC),
+    /// from the negotiated input caps.
+    codec_cuvid: i32,
     /// `CUvideodecoder`, created in the sequence callback. Raw copy for the decode
     /// / display callbacks; ownership / destruction is the `Arc`'s.
     decoder: *mut core::ffi::c_void,
@@ -140,6 +143,7 @@ impl NvDec {
             state: Box::new(DecoderState {
                 context: 0,
                 ctx_lock: core::ptr::null_mut(),
+                codec_cuvid: ffi::CUDA_VIDEO_CODEC_H264,
                 decoder: core::ptr::null_mut(),
                 decoder_owner: None,
                 target_width: 0,
@@ -158,12 +162,33 @@ impl NvDec {
         self.emitted
     }
 
-    fn input_template() -> Caps {
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
+    /// Accepted input codecs: H.264 and HEVC (NVCUVID decodes both; AV1 needs an
+    /// Ampere+ NVDEC and is a follow-up).
+    fn input_codecs() -> [VideoCodec; 2] {
+        [VideoCodec::H264, VideoCodec::H265]
+    }
+
+    /// Open-geometry input caps, one alternative per accepted codec.
+    fn input_caps_set() -> CapsSet {
+        CapsSet::from_alternatives(
+            Self::input_codecs()
+                .into_iter()
+                .map(|codec| Caps::CompressedVideo {
+                    codec,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                })
+                .collect(),
+        )
+    }
+
+    /// The `cudaVideoCodec` value for a supported input codec.
+    fn cuvid_codec(codec: VideoCodec) -> Option<i32> {
+        match codec {
+            VideoCodec::H264 => Some(ffi::CUDA_VIDEO_CODEC_H264),
+            VideoCodec::H265 => Some(ffi::CUDA_VIDEO_CODEC_HEVC),
+            _ => None,
         }
     }
 
@@ -216,7 +241,7 @@ impl NvDec {
         // SAFETY: the NVCUVID param structs are plain old data (ints, pointers,
         // reserved arrays); all-zero is a valid initial state we then fill.
         let mut params: ffi::ParserParams = unsafe { core::mem::zeroed() };
-        params.codec_type = ffi::CUDA_VIDEO_CODEC_H264;
+        params.codec_type = self.state.codec_cuvid;
         params.max_num_decode_surfaces = NUM_DECODE_SURFACES;
         // Low latency: a single-frame display delay (recommended 2..4 for higher
         // throughput / heavier reorder; 1 keeps glass-to-glass tight).
@@ -428,7 +453,7 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     info.width = f.coded_width as u64;
     info.height = f.coded_height as u64;
     info.num_decode_surfaces = num_surfaces as u64;
-    info.codec_type = ffi::CUDA_VIDEO_CODEC_H264;
+    info.codec_type = state.codec_cuvid;
     info.chroma_format = f.chroma_format;
     info.creation_flags = ffi::CUDA_VIDEO_CREATE_PREFER_CUVID;
     info.bit_depth_minus8 = f.bit_depth_luma_minus8 as u64;
@@ -576,32 +601,40 @@ impl AsyncElement for NvDec {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_template())
+        for alt in Self::input_caps_set().alternatives() {
+            if let Ok(narrowed) = upstream_caps.intersect(alt) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: H.264 (any geometry) in, NV12 at the same dims and
-    /// framerate out. Non-H.264 input yields an empty set, rejected at solve. The
-    /// runtime `CapsChanged` carries the actual decoded (cropped) display dims.
+    /// Native `DerivedOutput`: H.264 or HEVC (any geometry) in, NV12 at the same
+    /// dims and framerate out. Any other input yields an empty set, rejected at
+    /// solve. The runtime `CapsChanged` carries the actual decoded (cropped) dims.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo { codec: VideoCodec::H264, width, height, framerate } => {
-                CapsSet::one(Caps::RawVideo {
-                    format: RawVideoFormat::Nv12,
-                    width: width.clone(),
-                    height: height.clone(),
-                    framerate: framerate.clone(),
-                })
-            }
+            Caps::CompressedVideo {
+                codec: VideoCodec::H264 | VideoCodec::H265,
+                width,
+                height,
+                framerate,
+            } => CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: width.clone(),
+                height: height.clone(),
+                framerate: framerate.clone(),
+            }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::CompressedVideo { codec: VideoCodec::H264, width, height, framerate } =
-            absolute_caps
-        else {
+        let Caps::CompressedVideo { codec, width, height, framerate } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
+        // Pick the NVCUVID codec before opening the parser; reject unsupported ones.
+        self.state.codec_cuvid = Self::cuvid_codec(*codec).ok_or(G2gError::CapsMismatch)?;
         if let Dim::Fixed(w) = width {
             self.width = *w;
         }
@@ -616,9 +649,9 @@ impl AsyncElement for NvDec {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "NVDEC H.264 decoder",
+            "NVDEC H.264 / HEVC decoder",
             "Codec/Decoder/Video/Hardware",
-            "Zero-copy H.264 decode to CUDA NV12 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
+            "Zero-copy H.264 / HEVC decode to CUDA NV12 surfaces via the NVIDIA Video Codec SDK (NVCUVID)",
             "g2g",
         )
     }
@@ -664,7 +697,7 @@ impl PadTemplates for NvDec {
             framerate: Rate::Any,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_template())),
+            PadTemplate::sink(Self::input_caps_set()),
             PadTemplate::source(CapsSet::one(out)),
         ])
     }
@@ -685,6 +718,7 @@ mod ffi {
 
     // Codec / format enum values (cuviddec.h).
     pub const CUDA_VIDEO_CODEC_H264: i32 = 4;
+    pub const CUDA_VIDEO_CODEC_HEVC: i32 = 8;
     pub const CUDA_VIDEO_SURFACE_FORMAT_NV12: i32 = 0;
     pub const CUDA_VIDEO_DEINTERLACE_WEAVE: i32 = 0;
     pub const CUDA_VIDEO_CREATE_PREFER_CUVID: u64 = 0x04;
@@ -944,7 +978,13 @@ mod tests {
     #[cfg(feature = "nvenc")]
     #[tokio::test]
     async fn nvenc_to_nvdec_round_trip_on_gpu() {
-        gpu_round_trip().await;
+        gpu_round_trip(VideoCodec::H264).await;
+    }
+
+    #[cfg(feature = "nvenc")]
+    #[tokio::test]
+    async fn nvenc_to_nvdec_hevc_round_trip_on_gpu() {
+        gpu_round_trip(VideoCodec::H265).await;
     }
 
     /// CUDA driver FFI to synthesize an NV12 surface for the encode leg and to
@@ -1000,7 +1040,7 @@ mod tests {
     }
 
     #[cfg(feature = "nvenc")]
-    async fn gpu_round_trip() {
+    async fn gpu_round_trip(codec: VideoCodec) {
         use crate::nvenc::NvEnc;
         use core::future::Future;
         use core::pin::Pin;
@@ -1110,7 +1150,7 @@ mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
         };
-        let mut enc = NvEnc::new();
+        let mut enc = NvEnc::new().with_codec(codec);
         enc.configure_pipeline(&nv12_caps).unwrap();
         let mut au_sink = AuSink::default();
         for i in 0..10u64 {
@@ -1179,7 +1219,13 @@ mod tests {
         }
 
         let mut dec = NvDec::new();
-        if dec.configure_pipeline(&h264(W, H)).is_err() {
+        let in_caps = Caps::CompressedVideo {
+            codec,
+            width: Dim::Fixed(W),
+            height: Dim::Fixed(H),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        if dec.configure_pipeline(&in_caps).is_err() {
             std::eprintln!("skipping: NVDEC unavailable on this host");
             return;
         }
