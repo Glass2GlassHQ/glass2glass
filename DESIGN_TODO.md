@@ -413,15 +413,14 @@ leverage first:
 
 ## Developer tooling
 
-The `xtask` crate (`cargo xtask ci | test --here | size | wasm`) and the DOT
-visualizer + caps explainer now exist; the remaining items extend them. Highest
-leverage first:
+The `xtask` crate (`cargo xtask ci | test --here | size | wasm`), the DOT
+visualizer (now with negotiated caps via `negotiate_graph`), and the caps
+explainer now exist; the remaining items extend them. Highest leverage first:
 
-- **Negotiated caps in the DOT dump.** `Graph::to_dot` (M279) already renders
-  caps + memory domains per edge from a `DotAnnotations`, but `g2g-launch --dot`
-  passes none: the solver runs inside `run_graph` and its `Vec<Caps>` solution
-  is not surfaced. Expose the solved per-edge caps (and per-edge memory domain)
-  from the run path so the dump can show what got chosen, not just the topology.
+- **Per-edge memory domain in the DOT dump.** `negotiate_graph` (M282) surfaces
+  the per-edge caps, but not each link's memory domain (that rides the auto-plug
+  metadata, not `Caps`). Thread the chosen domain per edge so the dump can mark
+  the GPU / zero-copy links bold (the renderer's `edge_memory` is already there).
 - **FFI struct-probe automation.** `xtask ffi-probe <header> <struct>` compiles a
   C probe against the installed SDK header and emits / verifies the `repr(C)`
   size + offset asserts (the hand-rolled-FFI ritual, done manually per struct

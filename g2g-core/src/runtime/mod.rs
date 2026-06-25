@@ -62,8 +62,8 @@ pub use fanin::{
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    run_graph, run_graph_stateful, run_graph_with_bus, run_graph_with_progress, DynMultiOutputElement,
-    GraphNode, GraphNodeRef,
+    negotiate_graph, run_graph, run_graph_stateful, run_graph_with_bus, run_graph_with_progress,
+    DynMultiOutputElement, GraphNode, GraphNodeRef,
 };
 
 #[cfg(feature = "std")]

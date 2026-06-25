@@ -474,55 +474,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // transform/sink constraints borrow their elements immutably (coexisting),
     // so both are computed and the borrows released before configure.
     let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
-        let mut constraints: Vec<NodeConstraint<'_>> = Vec::with_capacity(n);
-        for (i, src_caps) in source_caps.iter().enumerate() {
-            let node = NodeId(i as u32);
-            let nc = match vg.kind(node) {
-                NodeKind::Source => {
-                    let caps = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
-                    NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(caps)))
-                }
-                NodeKind::Transform => {
-                    let elem = element_ref(&vg, node).ok_or(G2gError::CapsMismatch)?;
-                    NodeConstraint::Element(elem.caps_constraint_as_transform())
-                }
-                NodeKind::Sink => {
-                    let elem = element_ref(&vg, node).ok_or(G2gError::CapsMismatch)?;
-                    NodeConstraint::Element(elem.caps_constraint_as_sink())
-                }
-                // A tee is structural; the solver ignores its slot.
-                NodeKind::Tee(_) => NodeConstraint::Element(CapsConstraint::IdentityAny),
-                NodeKind::Muxer(_) => {
-                    let GraphNodeRef::Muxer(elem) =
-                        vg.element(node).ok_or(G2gError::CapsMismatch)?
-                    else {
-                        return Err(G2gError::CapsMismatch);
-                    };
-                    let inputs: Vec<CapsConstraint<'_>> = (0..elem.input_count())
-                        .map(|pad| elem.caps_constraint_as_input(pad))
-                        .collect();
-                    let output = elem
-                        .caps_constraint_for_output()
-                        .map_err(|_| G2gError::CapsMismatch)?;
-                    NodeConstraint::Muxer { inputs, output }
-                }
-            };
-            constraints.push(nc);
-        }
-        // Label nodes by element category (e.g. `h264parse`) so the caps
-        // explainer (`G2G_CAPS_TRACE`) narrates in element names; a structural
-        // tee carries no element, so it falls back to its kind.
-        let label = |node: NodeId| match vg.element(node) {
-            Some(e) => e.log_category().to_string(),
-            None => match vg.kind(node) {
-                NodeKind::Tee(_) => "tee".to_string(),
-                k => alloc::format!("{k:?}"),
-            },
-        };
-        let solution = solve_graph_labeled(&vg, &constraints, &label).map_err(|f| {
-            report_nego_failure(bus, f);
-            G2gError::CapsMismatch
-        })?;
+        let constraints = build_node_constraints(&vg, &source_caps)?;
+        let solution = solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
+            .map_err(|f| {
+                report_nego_failure(bus, f);
+                G2gError::CapsMismatch
+            })?;
         let feasibility = graph_downstream_feasibility(&vg, &constraints, &solution);
         (solution, feasibility)
     };
@@ -918,6 +875,106 @@ fn element_ref<'g, 'a>(
         GraphNodeRef::Element(elem) => Some(&**elem),
         GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => None,
     }
+}
+
+/// Build the per-node solver constraints for a validated graph, given each
+/// source's probed caps (indexed by node id, `None` for non-sources). The
+/// constraints borrow their elements immutably, so the returned vec must be
+/// dropped before any `&mut` borrow (configure). Shared by the runner's Phase 2
+/// and the negotiate-only tooling path ([`negotiate_graph`]).
+fn build_node_constraints<'g, 'a>(
+    vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
+    source_caps: &[Option<Caps>],
+) -> Result<Vec<NodeConstraint<'g>>, G2gError> {
+    let mut constraints: Vec<NodeConstraint<'g>> = Vec::with_capacity(vg.node_count());
+    for (i, src_caps) in source_caps.iter().enumerate() {
+        let node = NodeId(i as u32);
+        let nc = match vg.kind(node) {
+            NodeKind::Source => {
+                let caps = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
+                NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(caps)))
+            }
+            NodeKind::Transform => {
+                let elem = element_ref(vg, node).ok_or(G2gError::CapsMismatch)?;
+                NodeConstraint::Element(elem.caps_constraint_as_transform())
+            }
+            NodeKind::Sink => {
+                let elem = element_ref(vg, node).ok_or(G2gError::CapsMismatch)?;
+                NodeConstraint::Element(elem.caps_constraint_as_sink())
+            }
+            // A tee is structural; the solver ignores its slot.
+            NodeKind::Tee(_) => NodeConstraint::Element(CapsConstraint::IdentityAny),
+            NodeKind::Muxer(_) => {
+                let GraphNodeRef::Muxer(elem) = vg.element(node).ok_or(G2gError::CapsMismatch)?
+                else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                let inputs: Vec<CapsConstraint<'g>> = (0..elem.input_count())
+                    .map(|pad| elem.caps_constraint_as_input(pad))
+                    .collect();
+                let output =
+                    elem.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?;
+                NodeConstraint::Muxer { inputs, output }
+            }
+        };
+        constraints.push(nc);
+    }
+    Ok(constraints)
+}
+
+/// A node's label for the caps explainer and the DOT dump: the element's log
+/// category (e.g. `h264parse`), falling back to the structural kind for a tee
+/// (which carries no element).
+fn caps_label(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> alloc::string::String {
+    match vg.element(node) {
+        Some(e) => e.log_category().to_string(),
+        None => match vg.kind(node) {
+            NodeKind::Tee(_) => "tee".to_string(),
+            k => alloc::format!("{k:?}"),
+        },
+    }
+}
+
+/// Run startup caps negotiation only, without running the pipeline: validate the
+/// graph, probe each source's caps (Phase 1, async), and solve the whole-graph
+/// CSP (Phase 2), returning the validated graph plus the fixated caps per edge
+/// (indexed by edge id, as [`crate::dot::DotAnnotations::edge_caps`] expects).
+/// For tooling that wants the *chosen* caps without moving data, e.g.
+/// `g2g-launch --dot`. It performs the same source-caps probing the runner does,
+/// so a source that connects on `intercept_caps` (a live ingress) will do so
+/// here too; a negotiation failure returns `CapsMismatch` (the caller can fall
+/// back to a topology-only dump).
+pub async fn negotiate_graph<'a>(
+    graph: Graph<GraphNodeRef<'a>>,
+) -> Result<(ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>), G2gError> {
+    let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
+    let n = vg.node_count();
+    if n < 2 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let topo = vg.topo().to_vec();
+
+    // Phase 1: probe each source's caps (async), releasing the mutable borrow
+    // before the constraint phase borrows every node immutably.
+    let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
+    for &node in &topo {
+        if matches!(vg.kind(node), NodeKind::Source) {
+            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+            else {
+                return Err(G2gError::CapsMismatch);
+            };
+            source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
+        }
+    }
+
+    // Phase 2: build constraints and solve. Scope the immutable borrow so `vg`
+    // moves out cleanly in the return.
+    let solution = {
+        let constraints = build_node_constraints(&vg, &source_caps)?;
+        solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
+            .map_err(|_| G2gError::CapsMismatch)?
+    };
+    Ok((vg, solution))
 }
 
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps

@@ -1784,10 +1784,12 @@ its non-default `LinkPolicy`, and fan-out / fan-in pad indices.
 `g2g-launch --dot` is the user-facing entry: it parses a pipeline against the
 registry, dumps the DOT to stdout, and exits without running, labelling each node
 by its element's `log_category` (the short type name, e.g. `VideoTestSrc`) via
-the new `GraphNodeRef::log_category`. The launch path does not yet surface the
-solver's per-edge caps (negotiation runs inside `run_graph`), so the dump is
-topology + policy until that solution is exposed (a `DESIGN_TODO.md` follow-up);
-the renderer already accepts the caps the moment a caller has them.
+the new `GraphNodeRef::log_category`. To show the *chosen* caps it first calls
+`negotiate_graph` (§4.20a's seam: Phase 1 source-caps probe + Phase 2 solve,
+without running the pipeline), which returns the per-edge fixated caps the dump
+renders on the edges; a negotiation failure falls back to a topology-only dump.
+Because negotiation probes sources, a `--dot` of a live-ingress pipeline does
+that source's `intercept_caps` (typically a connect) just as a run would.
 
 ### 4.20a Developer Tooling: Caps-Negotiation Explainer
 

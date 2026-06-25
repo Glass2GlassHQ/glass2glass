@@ -177,19 +177,43 @@ fn main() {
     };
 
     if opts.dot {
-        // Dump the parsed wiring as Graphviz DOT and exit, before the run
-        // consumes the graph. Each node is labelled with its element's log
-        // category (the short type name, e.g. `videotestsrc`); a tee falls back
-        // to its kind. Negotiated caps are not surfaced from the parse yet, so
-        // edges carry their backpressure policy but no caps.
-        print!(
-            "{}",
-            graph.to_dot(
-                "pipeline",
-                |n| graph.element(n).map(|e| e.log_category().to_string()),
-                &g2g_core::DotAnnotations::default(),
-            )
-        );
+        // Dump the pipeline as Graphviz DOT and exit. Negotiate first (probe
+        // source caps + solve the whole graph) so each edge carries the chosen
+        // caps; on a negotiation failure fall back to a topology-only dump
+        // (re-parsing, since negotiation consumed the graph). Each node is
+        // labelled with its element's log category; a tee falls back to its kind.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+        match rt.block_on(g2g_core::runtime::negotiate_graph(graph)) {
+            Ok((vg, caps)) => print!(
+                "{}",
+                vg.to_dot(
+                    "pipeline",
+                    |n| vg.element(n).map(|e| e.log_category().to_string()),
+                    &g2g_core::DotAnnotations { edge_caps: Some(&caps), edge_memory: None },
+                )
+            ),
+            Err(err) => {
+                eprintln!("g2g-launch: negotiation failed ({err:?}); dumping topology only");
+                let graph = match parse_launch(&reg, &pipeline) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        eprintln!("parse error: {e}");
+                        process::exit(1);
+                    }
+                };
+                print!(
+                    "{}",
+                    graph.to_dot(
+                        "pipeline",
+                        |n| graph.element(n).map(|e| e.log_category().to_string()),
+                        &g2g_core::DotAnnotations::default(),
+                    )
+                );
+            }
+        }
         return;
     }
 
