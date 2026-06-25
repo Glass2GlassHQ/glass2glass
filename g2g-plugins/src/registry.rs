@@ -116,6 +116,10 @@ use crate::kmssink::KmsSink;
 use crate::ffmpegdec::{Backend as FfmpegBackend, FfmpegH264Dec};
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 use crate::vaapidec::VaapiH264Dec;
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+use crate::nvdec::NvDec;
+#[cfg(all(target_os = "linux", feature = "nvenc"))]
+use crate::nvenc::NvEnc;
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -346,6 +350,14 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register(ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())));
+    // Native NVDEC (M270), registered last so it is available to an explicit
+    // decode chain without out-ranking the CPU decoders: `NvDec` emits NV12 in
+    // CUDA device memory (`MemoryDomain::Cuda`), which caps do not encode, so a
+    // generic `decodebin` to a system-memory sink must still pick a CPU decoder.
+    // Selecting `NvDec` is explicit (the `nvh264dec` / `nvdec` launch name) until
+    // a caps memory-feature gates auto-plug by domain.
+    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    reg.register(ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new())));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -372,6 +384,12 @@ fn register_aliases(reg: &mut Registry) {
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
+    // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
+    // to the registered target only when the feature is on (else the alias is
+    // inert), the same first-registered rule as the VA-API names above.
+    reg.register_alias("nvh264dec", &["nvdec"]);
+    reg.register_alias("nvh264enc", &["nvenc"]);
+    reg.register_alias("nvv4l2h264enc", &["nvenc"]);
 }
 
 /// Register the feature- and platform-gated elements. Each block compiles only
@@ -512,6 +530,12 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
         Box::new(VaapiH264Dec::new())
     }));
+    // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
+    // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
+    #[cfg(all(target_os = "linux", feature = "nvdec"))]
+    reg.register_launch(LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new())));
+    #[cfg(all(target_os = "linux", feature = "nvenc"))]
+    reg.register_launch(LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new())));
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())
@@ -529,4 +553,23 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())));
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
     reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || Box::new(PulseSink::new())));
+}
+
+#[cfg(all(test, target_os = "linux", feature = "nvenc", feature = "nvdec"))]
+mod nv_registry_tests {
+    use super::*;
+
+    /// The native NVENC / NVDEC elements (M269 / M270) and their gst-canonical
+    /// aliases resolve to constructible elements. `new()` touches no CUDA (the
+    /// session / context open lazily at configure), so this runs without a GPU.
+    #[test]
+    fn nvcodec_elements_and_aliases_resolve() {
+        let reg = default_registry();
+        for name in ["nvenc", "nvdec", "nvh264enc", "nvh264dec", "nvv4l2h264enc"] {
+            assert!(reg.make_element(name).is_some(), "registry resolves `{name}`");
+        }
+        // The native decoder is also an auto-plug candidate (registered after the
+        // CPU decoders so it does not out-rank them; see register_autoplug_candidates).
+        assert!(reg.element_names().contains(&"nvdec"), "nvdec is an autoplug factory");
+    }
 }

@@ -301,10 +301,15 @@ leverage first:
   demo encodes with no read-back, and promote `WgpuToCuda` to a pipeline element
   (`MemoryDomain::WgpuTexture` input + a linear-buffer reuse pool; one is
   alloc/freed per frame today).
-  - `NvDec`: mid-stream resolution change (decoder reconfigure), HEVC / other
-    codecs via the codec enum, 10-bit output, and a configurable display delay
-    (fixed at a low-latency 1 today). Registry / auto-plug wiring so `decodebin`
-    can pick `NvDec` over `FfmpegH264Dec(NvdecCuda)` on NVIDIA.
+- `NvDec` depth: mid-stream resolution change (decoder reconfigure), HEVC / other
+  codecs via the codec enum, 10-bit output, and a configurable display delay
+  (fixed at a low-latency 1 today). Registry wiring is done (M272: `nvdec` /
+  `nvh264dec` names + an auto-plug candidate); the remaining auto-plug piece is a
+  caps memory-feature (`memory:CUDAMemory`-style) so `decodebin` can *prefer*
+  `NvDec` on NVIDIA without hijacking system-memory pipelines (it emits
+  `MemoryDomain::Cuda`, which caps do not encode today).
+- Register `FfmpegH264Enc` (M266) in the registry (`ffmpegenc` launch + `x264enc`
+  / `avenc_h264` aliases); it was never wired, surfaced during M272.
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
