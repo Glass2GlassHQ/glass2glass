@@ -1862,6 +1862,14 @@ it benches the PR head and its base and fails if any benchmark's mean regressed
 more than 50% (a loose threshold tuned to shared-runner noise, catching a lost
 fast path rather than drift).
 
+`RunStats::report()` formats the end-of-run telemetry the runner already gathers,
+frame counts + drop rate, the aggregated *declared* latency window (the
+per-element `latency()` fold), the elected clock, and the head allocation, which
+`g2g-launch` prints at end alongside the measured wall-clock throughput. Measured
+per-element / per-link p50 / p99 + channel fill-level needs frame-level
+instrumentation in the runner arms (the `LatencyHistogram` collector in
+`metrics.rs` wired in) and is a follow-up.
+
 ---
 
 ## 5. First-Class Machine Learning Integration

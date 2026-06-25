@@ -311,6 +311,47 @@ pub struct RunStats {
     pub coordinator_events: u64,
 }
 
+impl RunStats {
+    /// A human-readable end-of-run summary of the pipeline telemetry (M287):
+    /// frame counts + drop rate, the aggregated declared latency window, the
+    /// elected clock, and the negotiated head allocation. `g2g-launch` prints
+    /// this at end (and a host can log it). The latency is the chain's
+    /// *declared* min/max fold (each element's `latency()`), not a measured
+    /// runtime histogram; per-element / per-link p50/p99 is a follow-up.
+    pub fn report(&self) -> alloc::string::String {
+        use alloc::format;
+        let ms = |ns: u64| ns as f64 / 1.0e6;
+        let seen = self.frames_consumed + self.frames_dropped;
+        let drop_pct = if seen > 0 { self.frames_dropped as f64 * 100.0 / seen as f64 } else { 0.0 };
+
+        let mut s = alloc::string::String::from("pipeline run summary:\n");
+        s.push_str(&format!(
+            "  frames:  emitted {}, consumed {}, dropped {} ({drop_pct:.1}% drop)\n",
+            self.frames_emitted, self.frames_consumed, self.frames_dropped
+        ));
+        let max = match self.latency.max_ns {
+            Some(m) => format!("{:.1} ms", ms(m)),
+            None => alloc::string::String::from("unbounded"),
+        };
+        s.push_str(&format!(
+            "  latency: {:.1} ms .. {max} ({}) [declared]\n",
+            ms(self.latency.min_ns),
+            if self.latency.live { "live" } else { "non-live" },
+        ));
+        s.push_str(&format!(
+            "  clock:   {:?} (base {} ns)\n",
+            self.clock_priority, self.base_time_ns
+        ));
+        if let Some(a) = &self.allocation {
+            s.push_str(&format!(
+                "  alloc:   {} B x {}, {:?}, align {}\n",
+                a.size_bytes, a.min_buffers, a.domain, a.align
+            ));
+        }
+        s
+    }
+}
+
 /// M16 workaround #3 Phase B helper: re-solve the downstream subgraph
 /// when a forward `CapsChanged` crosses a format boundary mid-stream.
 ///
@@ -1481,6 +1522,34 @@ mod profile_tests {
     #[test]
     fn live_profile_maps_to_capacity_2() {
         assert_eq!(LatencyProfile::Live.link_capacity().get(), 2);
+    }
+
+    #[test]
+    fn run_stats_report_formats_drops_and_latency() {
+        let stats = RunStats {
+            frames_emitted: 100,
+            frames_consumed: 90,
+            frames_dropped: 10,
+            latency: LatencyReport { live: true, min_ns: 5_000_000, max_ns: Some(20_000_000) },
+            ..RunStats::default()
+        };
+        let r = stats.report();
+        // Frame line with the computed drop rate (10 / (90 + 10) = 10%).
+        assert!(r.contains("emitted 100, consumed 90, dropped 10 (10.0% drop)"), "{r}");
+        // Declared latency window + live flag.
+        assert!(r.contains("5.0 ms .. 20.0 ms (live) [declared]"), "{r}");
+        assert!(r.contains("clock:"), "{r}");
+
+        // An unbounded-latency, lossless pipeline reads cleanly too.
+        let clean = RunStats {
+            frames_emitted: 5,
+            frames_consumed: 5,
+            latency: LatencyReport { live: false, min_ns: 0, max_ns: None },
+            ..RunStats::default()
+        };
+        let r = clean.report();
+        assert!(r.contains("(0.0% drop)"), "{r}");
+        assert!(r.contains("0.0 ms .. unbounded (non-live)"), "{r}");
     }
 
     #[test]

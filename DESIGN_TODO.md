@@ -418,10 +418,13 @@ ffi-probe`), the DOT visualizer (with negotiated caps + per-edge memory domains
 via `negotiate_graph`), the caps explainer, and the criterion benches now exist;
 the remaining items extend them. Highest leverage first:
 
-- **Latency / throughput report.** Surface the existing `LatencyProfile` as a
-  per-element / per-link p50 / p99 + dropped-frames + fill-level breakdown on run
-  end (or live). The glass-to-glass analyses (NVDEC floor, `link_capacity`
-  dominance) are done by hand today.
+- **Measured per-element latency report.** `RunStats::report()` (M287) surfaces
+  the frame counts, drop rate, and *declared* latency fold at run end. Add
+  frame-level instrumentation in the runner (timestamp each frame per edge) to
+  report measured per-element / per-link p50 / p99 + channel fill-level, the
+  glass-to-glass analyses (NVDEC floor, `link_capacity` dominance) done by hand
+  today. The `LatencyHistogram` in `metrics.rs` is the collector; it needs wiring
+  into the arms.
 - **Element scaffolding.** `xtask new-element` (a new subcommand) stamps the
   `AsyncElement` / `SourceLoop` impl + pad templates + registry stub + milestone
   test file (the boilerplate every `Mn` repeats).

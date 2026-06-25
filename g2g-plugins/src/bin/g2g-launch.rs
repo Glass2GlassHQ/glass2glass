@@ -240,13 +240,21 @@ fn main() {
         println!("Setting pipeline to PLAYING ...");
     }
     let clock = WallClock::new();
+    let started = std::time::Instant::now();
     match rt.block_on(run_graph(graph, &clock, LINK_CAPACITY)) {
         Ok(stats) => {
             if !opts.quiet {
-                println!(
-                    "Done. frames emitted: {}, consumed: {}, dropped: {}",
-                    stats.frames_emitted, stats.frames_consumed, stats.frames_dropped
-                );
+                // End-of-run report (M287): the RunStats telemetry plus the
+                // measured wall-clock throughput this run achieved.
+                let elapsed = started.elapsed().as_secs_f64();
+                print!("{}", stats.report());
+                if elapsed > 0.0 {
+                    println!(
+                        "  run:     {:.2} s wall, {:.1} fps",
+                        elapsed,
+                        stats.frames_consumed as f64 / elapsed
+                    );
+                }
             }
         }
         Err(err) => {
