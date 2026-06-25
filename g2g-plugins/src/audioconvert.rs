@@ -182,8 +182,17 @@ impl AsyncElement for AudioConvert {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, channels, rate) = self.accept_input(&c)?;
-                    self.input = Some((format, channels, rate));
+                    // The runner's transform arm calls `configure_pipeline` (input)
+                    // then `configure_output` (output) immediately before pushing
+                    // this packet, whose caps `c` is the arm's pre-fixed forward
+                    // *output*, not a new input. Forward it and record `last_caps`
+                    // to suppress the duplicate emit from the data path. Do NOT
+                    // `accept_input` here: `c` is our output, and adopting it as
+                    // the input corrupts the next frame (the stacked-convert bug;
+                    // see videoconvert.rs). The real input is set by
+                    // `configure_pipeline`.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

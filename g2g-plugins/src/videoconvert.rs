@@ -280,8 +280,22 @@ impl AsyncElement for VideoConvert {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, w, h, framerate) = self.accept_input(&c)?;
-                    self.input = Some((format, w, h, framerate));
+                    // The runner's transform arm always calls `configure_pipeline`
+                    // (input) then `configure_output` (output) immediately before
+                    // pushing this packet, whose caps `c` is the arm's pre-fixed
+                    // forward *output* (`forward_caps`), not a new input. Forward
+                    // it so a strict downstream sees the converted format before
+                    // the first frame, and record `last_caps` to suppress the
+                    // duplicate emit from the data path. Do NOT call
+                    // `accept_input` here: `c` is our output (e.g. NV12), and
+                    // adopting it as the input would make the next RGBA frame a
+                    // bogus NV12->NV12 passthrough (the stacked-convert bug). The
+                    // real input is already set by `configure_pipeline`. Both our
+                    // input and output are `Caps::RawVideo`, so unlike a decoder
+                    // we cannot disambiguate the two by variant; we rely on the
+                    // arm's ordering instead.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

@@ -1026,6 +1026,23 @@ format-changing element moves its derivation into the declared constraint
 (`Mapping` / `DerivedOutput`) as the single source of truth; the solver
 already consumes it at startup and at re-solve.
 
+This fixes the element-side contract for `process(CapsChanged(c))`. The arm
+calls `configure_pipeline(in)` (the element's new *input*) and then
+`process(CapsChanged(fixated_output))` (its pre-fixed *output*). So `c` is the
+element's **output** caps, not its input: the element forwards `c` downstream
+(letting a strict sink reconfigure before the first frame) and records it as
+`last_caps` to suppress the duplicate emit from its data path; the input is
+already set by `configure_pipeline`. A format-changing transform must **not**
+re-derive its input from `c` (e.g. `videoconvert` calling `accept_input`):
+when its input and output are the same `Caps` variant (raw->raw), adopting the
+output as the input silently turns the next frame into an unconverted
+`X->X` passthrough. This only bites when an upstream transform emits a
+`CapsChanged` mid-stream (the first of two stacked auto `videoconvert`s does so
+on its first frame); a lone convert right after a source never receives one,
+which is why the single-convert case was always correct. A decoder, whose
+input (`CompressedVideo`) and output (`RawVideo`) are distinct variants, can
+safely disambiguate the two callers by inspecting `c` (see `ffmpegdec`).
+
 The **CapsChanged ordering invariant** is the load-bearing correctness
 property. `Caps` are not stamped on each frame; they live on the link as
 the most recently received `CapsChanged` packet. Correctness across a

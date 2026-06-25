@@ -34,31 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Stacked auto-converter cascade bug (RCA done; fix pending).** Two chained
-  auto `videoconvert`s into a format-changing sink corrupt output: `videotestsrc !
-  videoconvert ! videoconvert ! capsfilter caps=video/x-raw,format=nv12 ! filesink`
-  emits the raw RGBA bytes mislabeled NV12 (no conversion), while a single
-  `videoconvert` is correct. Byte proof: single -> Y=proper luma, chroma=0x80
-  (grey); double -> Y/chroma = raw `00 01 02..` gradient bytes.
-  **Mechanism:** the transform arm (`graph_runner.rs` ~L1206-1216, the
-  `CapsChanged(new_caps)` branch) does `configure_pipeline(&new_caps)` [sets input
-  = RGBA, correct] then `elem.process(CapsChanged(forward_caps))` passing the
-  element's *output* caps (NV12). There are two `process(CapsChanged)` conventions:
-  input-update elements (`videoconvert`/`videoscale`/`audioconvert`) read the arg
-  as the new *input* and set `self.input` (don't forward; they re-emit output caps
-  on the next DataFrame), while forwarding elements (`identity`/`capsfilter`/
-  `h264parse`) `out.push` it downstream. So the arm feeding `forward_caps` (NV12)
-  clobbers videoconvert's input to NV12; its next DataFrame does
-  `convert(rgba_bytes, NV12, NV12)` = passthrough of unconverted bytes. Only
-  triggers when an upstream transform emits a `CapsChanged` (a 1st videoconvert
-  does, on its first frame); a lone convert right after the source never gets one.
-  **Candidate fix:** pass `new_caps` (the input), not `forward_caps`, to
-  `process(CapsChanged(..))` in that arm. Forwarding elements are input==output so
-  forwarding the input caps stays correct; input-update elements get the right
-  input and still emit their output caps on the next frame. **Risk:** the whole
-  mid-stream caps-change suite (decoder SPS retype, `m227` field coupling, Caps-α
-  tests) must stay green, decoders forward `CapsChanged` and are themselves the
-  format-changer. Add a byte-compare 1-vs-2-convert regression test first.
 - **Closure-free `FieldTransform` refactor.** Make forward derivation
   declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
 - **Dynamic pads / request pads.** `tee` / `mux` runtime branch/input addition;

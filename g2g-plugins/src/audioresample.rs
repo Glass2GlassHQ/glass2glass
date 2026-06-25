@@ -241,10 +241,17 @@ impl AsyncElement for AudioResample {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, channels, rate) = self.accept_input(&c)?;
-                    self.input = Some((format, channels, rate));
-                    // A rate / format change invalidates the carried sample.
-                    self.reset_state();
+                    // The runner's transform arm calls `configure_pipeline` (input)
+                    // then `configure_output` (output) immediately before pushing
+                    // this packet, whose caps `c` is the arm's pre-fixed forward
+                    // *output*, not a new input. `configure_pipeline` already set
+                    // the input and reset the resampler state, so just forward the
+                    // output caps and record `last_caps`. Do NOT `accept_input`
+                    // here: `c` is our output, and adopting it as the input
+                    // corrupts the next frame (the stacked-transform bug; see
+                    // videoconvert.rs).
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.reset_state();

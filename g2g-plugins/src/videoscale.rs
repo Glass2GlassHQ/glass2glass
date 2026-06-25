@@ -290,11 +290,18 @@ impl AsyncElement for VideoScale {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, w, h, rate) = self.accept_input(&c)?;
-                    if !self.is_auto() {
-                        self.validate_target(format)?;
-                    }
-                    self.input = Some((format, w, h, rate));
+                    // The runner's transform arm always calls `configure_pipeline`
+                    // (input) then `configure_output` (output) immediately before
+                    // pushing this packet, whose caps `c` is the arm's pre-fixed
+                    // forward *output* (`forward_caps`), not a new input. Forward
+                    // it and record `last_caps` to suppress the duplicate emit
+                    // from the data path. Do NOT call `accept_input`: `c` carries
+                    // our output geometry, and adopting it as the input would make
+                    // the next frame scale from the wrong source dims (the stacked
+                    // auto-transform bug). The real input is already set by
+                    // `configure_pipeline`.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
