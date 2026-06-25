@@ -3,8 +3,17 @@ name: bench
 # Criterion microbenchmark regression guard for the hot paths (caps solve,
 # frame convert, runner channel). Separate from the main CI so the lean
 # check/test/clippy jobs never build criterion. Runs only when the benched code
-# (or the bench crate) changes, plus on manual dispatch.
+# (or the bench crate) changes. Compares against the previous commit on a master
+# push (this repo commits direct to master) or the PR base, and fails on a large
+# regression; a manual dispatch just runs the benches.
 on:
+  push:
+    branches: [master]
+    paths:
+      - 'g2g-core/**'
+      - 'g2g-plugins/**'
+      - 'g2g-bench/**'
+      - '.github/workflows/bench.yml'
   pull_request:
     paths:
       - 'g2g-core/**'
@@ -13,7 +22,6 @@ on:
       - '.github/workflows/bench.yml'
   workflow_dispatch:
 
-# A later push to the same PR supersedes an in-flight bench run.
 concurrency:
   group: bench-${{ github.ref }}
   cancel-in-progress: true
@@ -37,17 +45,32 @@ jobs:
         with:
           workspaces: g2g-bench
 
-      # Head (the PR / current commit): save the criterion baseline "head".
+      # The commit to compare against: the PR base, or the push's previous
+      # commit. Empty (no compare) on manual dispatch or a first commit.
+      - name: resolve base
+        id: base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            sha="${{ github.event.before }}"
+            # All-zeros = no parent (branch creation); skip.
+            case "$sha" in 0000000000000000000000000000000000000000) sha="" ;; esac
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Head (the current commit): save the criterion baseline "head".
       - name: bench head
         run: cargo bench --manifest-path g2g-bench/Cargo.toml -- --save-baseline head $CRIT_ARGS
 
-      # Base (the PR target): check it out (target/ is gitignored, so the "head"
-      # baseline survives) and save the baseline "base". Skipped on dispatch,
-      # where there is no base to compare against.
+      # Base: check it out (target/ is gitignored, so the "head" baseline
+      # survives) and save the baseline "base".
       - name: bench base
-        if: github.event_name == 'pull_request'
+        if: steps.base.outputs.sha != ''
         run: |
-          git checkout --quiet ${{ github.event.pull_request.base.sha }}
+          git checkout --quiet ${{ steps.base.outputs.sha }}
           cargo bench --manifest-path g2g-bench/Cargo.toml -- --save-baseline base $CRIT_ARGS
           git checkout --quiet -
 
@@ -55,5 +78,5 @@ jobs:
       # is deliberately loose: shared CI runners are noisy, so this catches gross
       # regressions (an accidental O(n^2), a lost fast path), not small drift.
       - name: compare
-        if: github.event_name == 'pull_request'
+        if: steps.base.outputs.sha != ''
         run: python3 .github/workflows/bench_compare.py g2g-bench/target/criterion 1.5
