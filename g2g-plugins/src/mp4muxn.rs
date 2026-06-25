@@ -50,14 +50,15 @@ const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
 #[derive(Debug, Clone, Copy)]
 enum PadKind {
     Video(VideoCodec),
-    Audio { channels: u8, rate: u32 },
+    Audio { format: AudioFormat, channels: u8, rate: u32 },
 }
 
-/// A track's `moov` init data, captured from its first access unit.
+/// A track's `moov` init data, captured from its first access unit. `asc` is the
+/// AAC AudioSpecificConfig (empty for Opus, whose `dOps` is built from the caps).
 #[derive(Debug, Clone)]
 enum TrackInit {
     Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
-    Audio { channels: u8, rate: u32, asc: Vec<u8> },
+    Audio { format: AudioFormat, channels: u8, rate: u32, asc: Vec<u8> },
 }
 
 impl TrackInit {
@@ -121,9 +122,11 @@ impl Mp4MuxN {
             Caps::CompressedVideo { codec: c @ (VideoCodec::H264 | VideoCodec::H265), .. } => {
                 Some(PadKind::Video(*c))
             }
-            Caps::Audio { format: AudioFormat::Aac, channels, sample_rate } => {
-                Some(PadKind::Audio { channels: *channels, rate: *sample_rate })
-            }
+            Caps::Audio {
+                format: format @ (AudioFormat::Aac | AudioFormat::Opus),
+                channels,
+                sample_rate,
+            } => Some(PadKind::Audio { format: *format, channels: *channels, rate: *sample_rate }),
             _ => None,
         }
     }
@@ -150,11 +153,20 @@ impl Mp4MuxN {
                     self.inits[input] = Some(TrackInit::Video { codec, width: w, height: h, param_sets: owned });
                 }
             }
-            Some(PadKind::Audio { channels, rate }) => {
-                if let Some(asc) = asc_from_adts(au) {
-                    self.inits[input] = Some(TrackInit::Audio { channels, rate, asc: asc.to_vec() });
+            Some(PadKind::Audio { format, channels, rate }) => match format {
+                // AAC's AudioSpecificConfig is synthesised from the first ADTS header.
+                AudioFormat::Aac => {
+                    if let Some(asc) = asc_from_adts(au) {
+                        self.inits[input] =
+                            Some(TrackInit::Audio { format, channels, rate, asc: asc.to_vec() });
+                    }
                 }
-            }
+                // Opus needs no in-band init; its `dOps` comes from the caps.
+                _ => {
+                    self.inits[input] =
+                        Some(TrackInit::Audio { format, channels, rate, asc: Vec::new() });
+                }
+            },
             None => {}
         }
     }
@@ -168,8 +180,10 @@ impl Mp4MuxN {
                 let is_sync = nalus.iter().any(|n| is_keyframe_nal(codec, n));
                 (avcc_sample(&nalus), is_sync)
             }
-            // Audio access units are always sync samples; strip the ADTS header.
-            _ => (strip_adts(au).to_vec(), true),
+            // Audio access units are always sync samples. AAC strips its ADTS
+            // header; Opus packets are stored raw.
+            Some(PadKind::Audio { format: AudioFormat::Aac, .. }) => (strip_adts(au).to_vec(), true),
+            _ => (au.to_vec(), true),
         }
     }
 
@@ -194,6 +208,10 @@ impl Mp4MuxN {
         let track = &self.inits[input];
         let timescale = track.as_ref().map(TrackInit::timescale).unwrap_or(VIDEO_TIMESCALE);
         let default_dur_ns = match self.kinds[input] {
+            // Opus frames are 20 ms (960 samples @ 48 kHz); AAC frames 1024 samples.
+            Some(PadKind::Audio { format: AudioFormat::Opus, rate, .. }) => {
+                960 * 1_000_000_000 / rate.max(1) as u64
+            }
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
@@ -391,30 +409,52 @@ fn trak_media(init: &TrackInit) -> TrakMedia {
                 is_video: true,
             }
         }
-        TrackInit::Audio { channels, rate, asc } => {
-            let mp4a = {
-                let mut p = Vec::new();
-                p.extend_from_slice(&[0u8; 6]); // reserved
-                p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
-                p.extend_from_slice(&[0u8; 8]); // reserved
-                p.extend_from_slice(&(*channels as u16).to_be_bytes());
-                p.extend_from_slice(&16u16.to_be_bytes()); // sample size
-                p.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
-                p.extend_from_slice(&0u16.to_be_bytes()); // reserved
-                p.extend_from_slice(&(*rate << 16).to_be_bytes()); // 16.16 sample rate
-                p.extend_from_slice(&esds(asc));
-                mp4_box(b"mp4a", &p)
+        TrackInit::Audio { format, channels, rate, asc } => {
+            let sample_entry = match format {
+                AudioFormat::Opus => audio_sample_entry(b"Opus", *channels, *rate, &dops(*channels, *rate)),
+                _ => audio_sample_entry(b"mp4a", *channels, *rate, &esds(asc)),
             };
             TrakMedia {
                 handler: b"soun",
                 media_header: full_box(b"smhd", 0, 0, &[0u8; 4]),
-                sample_entry: mp4a,
+                sample_entry,
                 timescale: *rate,
                 dims: (0, 0),
                 is_video: false,
             }
         }
     }
+}
+
+/// An `AudioSampleEntry` box (`mp4a` / `Opus`): the shared sample-entry header
+/// then the codec-specific config box (`esds` / `dOps`).
+fn audio_sample_entry(fourcc: &[u8; 4], channels: u8, rate: u32, config: &[u8]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0u8; 6]); // reserved
+    p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
+    p.extend_from_slice(&[0u8; 8]); // reserved
+    p.extend_from_slice(&(channels as u16).to_be_bytes());
+    p.extend_from_slice(&16u16.to_be_bytes()); // sample size
+    p.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
+    p.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    p.extend_from_slice(&(rate << 16).to_be_bytes()); // 16.16 sample rate
+    p.extend_from_slice(config);
+    mp4_box(fourcc, &p)
+}
+
+/// The `dOps` OpusSpecificBox (RFC 8316): the Opus init data in an MP4 audio
+/// sample entry. Fields are big-endian (unlike the little-endian Ogg/WebM
+/// `OpusHead`); channel mapping family 0 (mono/stereo), a conventional 80 ms
+/// pre-skip (the exact encoder delay is not surfaced in caps).
+fn dops(channels: u8, rate: u32) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.push(0); // Version
+    b.push(channels.max(1)); // OutputChannelCount
+    b.extend_from_slice(&3840u16.to_be_bytes()); // PreSkip
+    b.extend_from_slice(&rate.to_be_bytes()); // InputSampleRate
+    b.extend_from_slice(&0i16.to_be_bytes()); // OutputGain
+    b.push(0); // ChannelMappingFamily
+    mp4_box(b"dOps", &b)
 }
 
 /// One `trak` for a track (`track_ID` 1-based).
@@ -542,7 +582,12 @@ mod tests {
                 height: 240,
                 param_sets: alloc::vec![alloc::vec![0x67, 0x42, 0x00, 0x1e], alloc::vec![0x68, 0xce]],
             },
-            TrackInit::Audio { channels: 2, rate: 48000, asc: alloc::vec![0x11, 0x90] },
+            TrackInit::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                rate: 48000,
+                asc: alloc::vec![0x11, 0x90],
+            },
         ];
         let moov = av_moov(&tracks);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
@@ -552,5 +597,21 @@ mod tests {
         assert_eq!(count(b"esds"), 1, "audio sample entry");
         assert_eq!(count(b"soun"), 1);
         assert_eq!(count(b"vide"), 1);
+    }
+
+    #[test]
+    fn opus_track_writes_an_opus_sample_entry_with_dops() {
+        let tracks = [TrackInit::Audio {
+            format: AudioFormat::Opus,
+            channels: 2,
+            rate: 48000,
+            asc: Vec::new(),
+        }];
+        let moov = av_moov(&tracks);
+        let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(count(b"Opus"), 1, "Opus sample entry");
+        assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
+        assert_eq!(count(b"esds"), 0, "no AAC descriptor for an Opus track");
+        assert_eq!(count(b"soun"), 1, "sound handler");
     }
 }
