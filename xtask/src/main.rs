@@ -9,6 +9,10 @@
 //!   test --here    probe this host (NVIDIA / VAAPI / cameras / GPU / audio /
 //!                  ffmpeg) and run exactly the feature-gated tests it supports.
 //!                  `--dry-run` prints the detected plan without running.
+//!   install-launch probe the host and `cargo install` the `g2g-launch` binary
+//!                  with every element that builds here; reports each skipped
+//!                  element and the dev package it needs. `--enable`/`--disable`
+//!                  override the auto-detected set; `--dry-run` just prints it.
 //!   size           build the embedded footprint harness for Cortex-M and
 //!                  report the gc-sectioned `.text` size.
 //!   wasm           build the wasm32 targets (core `runtime`, plugins `web` /
@@ -33,6 +37,7 @@ fn main() {
     let code = match cmd {
         "ci" => cmd_ci(),
         "test" => cmd_test_here(rest),
+        "install-launch" => cmd_install_launch(rest),
         "size" => cmd_size(),
         "wasm" => cmd_wasm(),
         "bench" => cmd_bench(rest),
@@ -56,6 +61,8 @@ fn print_help() {
          commands:\n  \
            ci             run locally what CI runs (stops at first failure)\n  \
            test --here    run the feature tests this host supports (--dry-run to just probe)\n  \
+           install-launch install g2g-launch with every element that builds here\n                 \
+                          (--dry-run to just probe; --enable/--disable f to override; --bin N)\n  \
            size           build + measure the Cortex-M footprint harness\n  \
            wasm           build the wasm32 targets (core + web plugins)\n  \
            bench [args]   run the criterion benchmarks (caps solve, frame convert)\n  \
@@ -135,6 +142,12 @@ struct Capabilities {
     pulse: bool,
     wayland: bool,
     ffmpeg: bool,
+    // Additional build prerequisites the install-launch feature set needs but
+    // the test plan does not gate on. `pipewire` / `vpx` already fold in the
+    // clang (bindgen) requirement at probe time.
+    pipewire: bool,
+    vpx: bool,
+    openssl: bool,
 }
 
 fn cmd_test_here(rest: &[String]) -> i32 {
@@ -242,6 +255,9 @@ fn host_test_features(c: &Capabilities) -> Vec<&'static str> {
 }
 
 fn probe_host() -> Capabilities {
+    // clang is a build prerequisite for the bindgen-based features (vpx,
+    // pipewire), so fold it into their availability rather than report it alone.
+    let clang = cmd_ok("clang", &["--version"]);
     Capabilities {
         nvidia: cmd_ok("nvidia-smi", &["-L"]),
         vaapi: pkg_exists("libva"),
@@ -252,11 +268,169 @@ fn probe_host() -> Capabilities {
         pulse: pkg_exists("libpulse"),
         wayland: pkg_exists("wayland-client"),
         ffmpeg: pkg_exists("libavcodec"),
+        pipewire: pkg_exists("libpipewire-0.3") && clang,
+        vpx: pkg_exists("libvpx") && clang,
+        openssl: pkg_exists("openssl"),
     }
 }
 
 fn report_cap(label: &str, present: bool) {
     println!("  [{}] {label}", if present { "x" } else { " " });
+}
+
+// --- install-launch -----------------------------------------------------
+
+/// A buildable `g2g-launch` feature and whether this host satisfies its build
+/// prerequisites. `note` documents the dep (shown when skipped), the meson-style
+/// "checking for X ... no" line.
+#[derive(Debug, Clone, Copy)]
+struct LaunchFeature {
+    name: &'static str,
+    available: bool,
+    note: &'static str,
+}
+
+/// Map probed capabilities to the full set of launch features and whether each
+/// builds here. Pure-Rust std features (no system prerequisite) are always
+/// available; the rest are gated on the matching probe, so the caller installs
+/// exactly what compiles. This is the auto-detect half of the meson analog; the
+/// static `linux-full` cargo feature is the "assume all deps present" bundle.
+fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
+    let lf = |name, available, note| LaunchFeature { name, available, note };
+    vec![
+        // Pure-Rust std elements: no system library, always build.
+        lf("multi-thread", true, ""),
+        lf("plugin-loader", true, ""),
+        lf("rtsp", true, ""),
+        lf("rtsp-server", true, ""),
+        lf("srt", true, ""),
+        lf("udp-egress", true, ""),
+        lf("udp-ingress", true, ""),
+        lf("rtmp", true, ""),
+        lf("av1-encode", true, ""),
+        lf("mjpeg", true, ""),
+        lf("mjpeg-encode", true, ""),
+        lf("analytics", true, ""),
+        // v4l crate is pure-Rust (the camera device is a runtime, not build, dep).
+        lf("v4l2", true, ""),
+        // reqwest's default TLS links system OpenSSL on Linux.
+        lf("http-src", c.openssl, "needs openssl-devel"),
+        lf("hls", c.openssl, "needs openssl-devel"),
+        lf("dash", c.openssl, "needs openssl-devel"),
+        lf("webrtc", c.openssl, "needs openssl-devel (str0m uses rust-crypto)"),
+        // System A/V libraries.
+        lf("ffmpeg", c.ffmpeg, "needs ffmpeg-free-devel (libavcodec)"),
+        lf("vaapi", c.vaapi, "needs libva-devel"),
+        lf("opus", c.opus, "needs opus-devel"),
+        lf("vpx", c.vpx, "needs libvpx-devel + clang"),
+        // Audio render.
+        lf("alsa-sink", c.alsa, "needs alsa-lib-devel"),
+        lf("pulse-sink", c.pulse, "needs pulseaudio-libs-devel"),
+        lf("pipewire", c.pipewire, "needs pipewire-devel + clang"),
+        // Display.
+        lf("wayland-sink", c.wayland, "needs wayland-devel"),
+        lf("kms-sink", c.gpu_drm, "needs a DRM render node (/dev/dri)"),
+        lf("wgpu-sink", c.gpu_drm, "needs a GPU render node (/dev/dri)"),
+        lf("vello-overlay", c.gpu_drm, "needs a GPU render node (/dev/dri)"),
+        // Proprietary NVIDIA Video Codec stack: hardware + driver libraries.
+        lf("cuda", c.nvidia, "needs an NVIDIA GPU + libcuda"),
+        lf("nvenc", c.nvidia, "needs libnvidia-encode"),
+        lf("nvdec", c.nvidia, "needs libnvcuvid"),
+        lf("cuda-wgpu", c.nvidia && c.gpu_drm, "needs NVIDIA + a Vulkan device"),
+        lf("cuda-gl", c.nvidia && c.wayland, "needs NVIDIA + Wayland EGL"),
+        lf("cuda-kms", c.nvidia && c.gpu_drm, "needs NVIDIA + DRM master"),
+    ]
+}
+
+/// `cargo xtask install-launch`: probe the host, build the largest feature set
+/// that compiles here, and `cargo install` the `g2g-launch` (or `--bin`) binary
+/// with it. `--enable f[,g]` forces a feature on (e.g. after a `dnf install`),
+/// `--disable f[,g]` drops one, `--dry-run` prints the plan without building.
+fn cmd_install_launch(rest: &[String]) -> i32 {
+    let mut dry_run = false;
+    let mut bin = String::from("g2g-launch");
+    let mut enable: Vec<String> = Vec::new();
+    let mut disable: Vec<String> = Vec::new();
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--dry-run" => dry_run = true,
+            "--bin" => match it.next() {
+                Some(v) => bin = v.clone(),
+                None => return arg_err("--bin needs a value"),
+            },
+            "--enable" => match it.next() {
+                Some(v) => push_csv(&mut enable, v),
+                None => return arg_err("--enable needs a value"),
+            },
+            "--disable" => match it.next() {
+                Some(v) => push_csv(&mut disable, v),
+                None => return arg_err("--disable needs a value"),
+            },
+            other => eprintln!("xtask install-launch: ignoring unknown argument '{other}'"),
+        }
+    }
+
+    let caps = probe_host();
+    let candidates = host_launch_features(&caps);
+
+    // Report each candidate the way meson reports a dependency check, so a
+    // skipped feature names the package to install rather than vanishing.
+    println!("detected build prerequisites:");
+    for lf in &candidates {
+        if lf.available {
+            println!("  [x] {}", lf.name);
+        } else if lf.note.is_empty() {
+            println!("  [ ] {} (skipped)", lf.name);
+        } else {
+            println!("  [ ] {} (skipped: {})", lf.name, lf.note);
+        }
+    }
+
+    // Auto-detected set, then apply the user's overrides on top.
+    let mut features: Vec<String> =
+        candidates.iter().filter(|lf| lf.available).map(|lf| lf.name.to_string()).collect();
+    for e in &enable {
+        if !features.iter().any(|f| f == e) {
+            features.push(e.clone());
+        }
+    }
+    if !disable.is_empty() {
+        features.retain(|f| !disable.iter().any(|d| d == f));
+    }
+    if !enable.is_empty() {
+        println!("\nforced on (--enable): {}", enable.join(", "));
+    }
+    if !disable.is_empty() {
+        println!("dropped (--disable): {}", disable.join(", "));
+    }
+
+    let feat_csv = features.join(",");
+    println!("\nplan:");
+    println!("  cargo install --path g2g-plugins --bin {bin} --force \\");
+    println!("    --features {feat_csv}");
+
+    if dry_run {
+        println!("\n(--dry-run: nothing installed)");
+        return 0;
+    }
+    run(
+        "install g2g-launch",
+        "cargo",
+        &["install", "--path", "g2g-plugins", "--bin", &bin, "--force", "--features", &feat_csv],
+        &[],
+    )
+}
+
+/// Append comma- or space-separated feature names from one CLI value to `out`.
+fn push_csv(out: &mut Vec<String>, value: &str) {
+    for f in value.split([',', ' ']) {
+        let f = f.trim();
+        if !f.is_empty() {
+            out.push(f.to_string());
+        }
+    }
 }
 
 // --- size ---------------------------------------------------------------
@@ -607,6 +781,35 @@ mod tests {
         assert!(!f.contains(&"vaapi"));
         assert!(!f.contains(&"ffmpeg"));
         assert!(!f.contains(&"alsa-sink"));
+    }
+
+    #[test]
+    fn launch_features_skip_unsatisfied_deps_with_a_note() {
+        // A bare host: only the pure-Rust std features are available, and every
+        // syslib-gated one is marked unavailable with a dev-package hint.
+        let bare = host_launch_features(&Capabilities::default());
+        let opus = bare.iter().find(|f| f.name == "opus").expect("opus listed");
+        assert!(!opus.available);
+        assert!(opus.note.contains("opus-devel"));
+        let rtsp = bare.iter().find(|f| f.name == "rtsp").expect("rtsp listed");
+        assert!(rtsp.available, "pure-Rust std feature builds anywhere");
+
+        // With the deps present, the feature flips to available.
+        let caps = Capabilities { opus: true, nvidia: true, ..Capabilities::default() };
+        let avail = host_launch_features(&caps);
+        assert!(avail.iter().find(|f| f.name == "opus").unwrap().available);
+        assert!(avail.iter().find(|f| f.name == "nvenc").unwrap().available);
+    }
+
+    #[test]
+    fn push_csv_splits_on_comma_and_space() {
+        let mut v = Vec::new();
+        push_csv(&mut v, "opus, vpx pipewire");
+        assert_eq!(v, vec!["opus", "vpx", "pipewire"]);
+        // Empty fragments are ignored.
+        let mut v2 = Vec::new();
+        push_csv(&mut v2, " ,, opus ,");
+        assert_eq!(v2, vec!["opus"]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ cargo xtask <command>
 | :--- | :--- |
 | `ci` | Runs locally what CI runs (workspace check / test / clippy, the Linux feature build, the embassy no-alloc tests, the wasm core check), `--locked` like CI, stopping at the first failure. A red CI reproduced offline. |
 | `test --here` | Probes this host (NVIDIA via `nvidia-smi`; VAAPI / Opus / ALSA / Pulse / Wayland / ffmpeg via `pkg-config`; `/dev/video*` cameras; `/dev/dri` GPU nodes) and runs exactly the feature-gated tests it supports. `--dry-run` prints the detected plan without running. |
+| `install-launch` | The meson-style "build everything this platform supports" install. Probes the host (same probes as `test --here`, plus OpenSSL / libvpx / PipeWire / clang) and `cargo install`s `g2g-launch` with every element that compiles here, reporting each skipped element and the dev package it needs (`[ ] vpx (skipped: needs libvpx-devel + clang)`). `--enable`/`--disable f[,g]` override the detected set, `--bin N` targets another binary, `--dry-run` just prints the plan. The static `linux-full` cargo feature is the "assume all deps present" bundle counterpart. |
 | `size` | Builds the `examples/g2g-size` Cortex-M footprint harness and reports the gc-sectioned `.text` size (locating `rust-lld` in the toolchain sysroot). |
 | `wasm` | Builds the wasm32 targets (core `runtime`, plugins `web` / `web-codecs`). |
 | `bench` | Runs the criterion benchmarks (see below). Extra args pass through, e.g. `cargo xtask bench -- --save-baseline main`. |

@@ -10,6 +10,25 @@ repository.workspace = true
 
 [features]
 default = []
+# Convenience bundle: every element that builds on a Linux desktop with the
+# usual `-devel` packages present (ffmpeg, VAAPI, ALSA / Pulse / PipeWire,
+# libvpx, libopus, Wayland / DRM, OpenSSL). The meson "build everything for this
+# platform" analog. It ASSUMES those system libs are installed; a missing one
+# fails the build on that feature. For an auto-detecting install that probes and
+# skips whatever is absent (and adds the NVIDIA stack when present), use
+# `cargo xtask install-launch` instead. Deliberately excludes the
+# Windows / macOS / Android / wasm features (other platforms), the proprietary
+# NVIDIA Video Codec stack (needs the SDK + hardware: add `nvenc,nvdec,cuda,...`
+# explicitly), and the no_std `embassy*` RTOS backends.
+linux-full = [
+    "multi-thread", "plugin-loader",
+    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "http-src", "hls", "dash",
+    "ffmpeg", "vaapi", "v4l2",
+    "opus", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
+    "alsa-sink", "pulse-sink", "pipewire",
+    "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
+]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
 # Dynamic plugin loader (M201): `dlopen`s third-party `cdylib` plugins built
