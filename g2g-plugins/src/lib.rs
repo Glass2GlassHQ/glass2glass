@@ -409,6 +409,14 @@ pub mod cuda;
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 pub mod nvenc;
 
+// Native NVDEC H.264 decode (M270): `NvDec` is the decode half of the
+// gst-`nvcodec`-style pair, mirror of `NvEnc`. It drives the NVCUVID
+// parser+decoder API directly (no libavcodec), emitting CUDA NV12 surfaces
+// (`MemoryDomain::Cuda`) for a zero-copy handoff to the GPU consumers / `NvEnc`.
+// Hand-rolled libnvcuvid + libcuda FFI; Linux + NVIDIA only.
+#[cfg(all(target_os = "linux", feature = "nvdec"))]
+pub mod nvdec;
+
 // Shared NV12 GL ES render state for the CUDA-GL sinks (program + textures +
 // per-frame CUDA upload + draw); the platform present stays in each sink.
 #[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "cuda-kms")))]

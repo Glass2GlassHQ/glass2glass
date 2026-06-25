@@ -140,6 +140,12 @@ cuda = ["std"]
 # layouts asserted against the installed `nvEncodeAPI.h`. Linux + NVIDIA only,
 # implies std (via `cuda`). CI-excluded like `ffmpeg` (no NVENC runtime in CI).
 nvenc = ["cuda"]
+# Native NVDEC H.264 decode (`NvDec`, M270): the decode half of the gst-`nvcodec`
+# pair, mirror of `NvEnc`. Drives the NVCUVID parser+decoder API directly (no
+# libavcodec), emitting CUDA NV12 surfaces (`MemoryDomain::Cuda`). Hand-rolled FFI
+# linking `libnvcuvid` + `libcuda`, struct layouts asserted against cuviddec.h /
+# nvcuvid.h. Linux + NVIDIA only, implies std (via `cuda`). CI-excluded.
+nvdec = ["cuda"]
 # CUDA-GL zero-copy-ish display sink (`CudaGlSink`, C3 Phase 3 step 2). Keeps
 # decoded NV12 on the GPU and presents via CUDA-GL interop (device->texture
 # copy + NV12->RGB fragment shader) on a Wayland EGL surface, removing the
