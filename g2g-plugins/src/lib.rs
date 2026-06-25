@@ -356,6 +356,10 @@ pub mod ffmpegdec;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegenc;
 
+// AAC-LC audio encode via libavcodec, the audio companion of ffmpegenc (M292).
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+pub mod ffmpegaacenc;
+
 // Pure chroma-resampling math for the decoders (YUV444P -> 4:2:0 downsample).
 // Compiled for the Linux ffmpeg build that uses it and under cfg(test) so the
 // resampling logic is host-testable without libavcodec.

@@ -409,6 +409,8 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("avenc_h264", &["x264enc", "ffmpegenc"]);
     // QuickTime / MP4 muxer names -> the one fMP4 muxer (inert without std).
     reg.register_alias("qtmux", &["mp4mux"]);
+    // gst's short AAC encoder name -> the libavcodec AAC encoder.
+    reg.register_alias("aacenc", &["avenc_aac"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve
     // to the registered target only when the feature is on (else the alias is
     // inert), the same first-registered rule as the VA-API names above.
@@ -562,6 +564,13 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Enc>("x264enc", || {
         Box::new(FfmpegH264Enc::new().with_backend(FfmpegEncBackend::Software))
+    }));
+    // libavcodec AAC-LC audio encoder (M292), the gst `avenc_aac` analog and the
+    // Linux audio-encode path for the A/V muxers; the `aacenc` alias is added in
+    // `register_aliases`.
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<crate::ffmpegaacenc::FfmpegAacEnc>("avenc_aac", || {
+        Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new())
     }));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
