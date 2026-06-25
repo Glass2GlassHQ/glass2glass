@@ -36,10 +36,14 @@
 //! through `&mut self` only and never shared; `unsafe impl Send` rests on the
 //! same ownership-transfer contract as `FfmpegH264Enc` / `FfmpegVideoDec`.
 //!
+//! The output bitstream buffer is pooled (created once at session open, reused
+//! every frame; M277), and the target bitrate retargets a live session via
+//! `nvEncReconfigureEncoder` (M277): a `set_property("bitrate", ..)` (e.g. a
+//! WebRTC BWE drop) is applied before the next frame with no session re-open.
+//!
 //! Deferred (v1): system-memory NV12 input (host upload, already covered by
-//! `FfmpegH264Enc` for I420), HEVC via the HEVC GUID, finite-GOP periodic IDRs
-//! with `repeatSPSPPS`, an output-bitstream-buffer pool (one is allocated and
-//! freed per frame today), and runtime bitrate retarget via `nvEncReconfigureEncoder`.
+//! `FfmpegH264Enc` for I420), finite-GOP periodic IDRs with `repeatSPSPPS`,
+//! 10-bit (P010 / Main10), and mid-stream resolution reconfigure.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -73,6 +77,11 @@ pub struct NvEnc {
     /// codec GUID and the announced output caps.
     codec: VideoCodec,
     bitrate_bps: u32,
+    /// The bitrate currently programmed into the open session's rate control. The
+    /// target (`bitrate_bps`) is applied at session open and re-applied live via
+    /// `nvEncReconfigureEncoder` when it diverges (M277, runtime retarget for an
+    /// adaptive sink, e.g. a WebRTC BWE drop). `0` until a session is open.
+    applied_bitrate_bps: u32,
     /// Open NVENC session (lazy): the SDK function table, the encoder handle, and
     /// the CUDA context it was opened on. `None` until the first frame.
     session: Option<Session>,
@@ -92,6 +101,11 @@ struct Session {
     funcs: Box<ffi::NvEncodeApiFunctionList>,
     encoder: *mut core::ffi::c_void,
     context: u64,
+    /// Output bitstream buffer, created once at session open and reused every
+    /// frame (M277): NVENC runs in sync mode (one locked + copied output per
+    /// encode), so a single buffer suffices and the per-frame create / destroy
+    /// the v1 path paid is gone. Destroyed with the session.
+    output: *mut core::ffi::c_void,
 }
 
 // SAFETY: `Session` holds raw NVENC/CUDA handles. The runner moves `NvEnc`
@@ -128,6 +142,7 @@ impl NvEnc {
             input_format: RawVideoFormat::Nv12,
             codec: VideoCodec::H264,
             bitrate_bps: DEFAULT_BITRATE_BPS,
+            applied_bitrate_bps: 0,
             session: None,
             frame_no: 0,
             emitted: 0,
@@ -161,6 +176,16 @@ impl NvEnc {
     /// Count of H.264 access units emitted.
     pub fn emitted(&self) -> u64 {
         self.emitted
+    }
+
+    /// The bitrate currently programmed into the live session's rate control (`0`
+    /// before the session opens). Diverges from the target ([`with_bitrate`] /
+    /// `set_property("bitrate")`) only between a retarget request and the next
+    /// encoded frame, which re-applies it. Exposed for observability / tests.
+    ///
+    /// [`with_bitrate`]: Self::with_bitrate
+    pub fn applied_bitrate_bps(&self) -> u32 {
+        self.applied_bitrate_bps
     }
 
     /// The accepted input formats: NV12 (the NVDEC hwframe domain) and packed
@@ -250,8 +275,8 @@ impl NvEnc {
         }
 
         // Build the session now so a failure below still destroys the handle on
-        // drop.
-        self.session = Some(Session { funcs, encoder, context });
+        // drop. `output` is filled once the bitstream buffer is created below.
+        self.session = Some(Session { funcs, encoder, context, output: core::ptr::null_mut() });
 
         // Pull the low-latency preset config (the driver fills the codec-specific
         // union for us), then tweak rate control + GOP.
@@ -275,6 +300,38 @@ impl NvEnc {
         })?;
 
         let mut config = preset.preset_cfg;
+        self.fill_encode_config(&mut config);
+
+        // SAFETY: the NVENC param structs are plain old data (ints, pointers,
+        // reserved arrays); all-zero is a valid initial state we then version-tag.
+        let mut init: ffi::InitializeParams = unsafe { core::mem::zeroed() };
+        self.fill_init_params(&mut init, &mut config);
+        let init_fn = funcs.nv_enc_initialize_encoder.ok_or(hw())?;
+        // SAFETY: valid encoder handle; `init` and the `config` it points at are
+        // fully initialized and live across this call (the driver copies them).
+        nvchk(unsafe { init_fn(encoder, &mut init) })?;
+        self.applied_bitrate_bps = self.bitrate_bps;
+
+        // Create the reusable output bitstream buffer once (M277): sync-mode
+        // encode locks + copies + unlocks one output per frame, so one buffer
+        // serves the whole session. Destroyed with the session.
+        let funcs = &self.session.as_ref().unwrap().funcs;
+        let create_fn = funcs.nv_enc_create_bitstream_buffer.ok_or(hw())?;
+        // SAFETY: the NVENC param structs are plain old data; all-zero is valid
+        // until version-tagged.
+        let mut create_bs: ffi::CreateBitstreamBuffer = unsafe { core::mem::zeroed() };
+        create_bs.version = ffi::NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+        // SAFETY: valid encoder + version-tagged struct.
+        nvchk(unsafe { create_fn(encoder, &mut create_bs) })?;
+        self.session.as_mut().unwrap().output = create_bs.bitstream_buffer;
+        Ok(())
+    }
+
+    /// Fill an `NV_ENC_CONFIG` (from the preset) with this element's rate control
+    /// and GOP structure. Shared by [`open_session`](Self::open_session) and the
+    /// live [`reconfigure_bitrate`](Self::reconfigure_bitrate) so the two stay in
+    /// lock-step.
+    fn fill_encode_config(&self, config: &mut ffi::Config) {
         config.version = ffi::NV_ENC_CONFIG_VER;
         config.rc_params.version = ffi::NV_ENC_RC_PARAMS_VER;
         // Infinite GOP: IDRs only on demand (first frame + downstream PLI), the
@@ -285,27 +342,67 @@ impl NvEnc {
         config.rc_params.rate_control_mode = ffi::NV_ENC_PARAMS_RC_CBR;
         config.rc_params.average_bit_rate = self.bitrate_bps;
         config.rc_params.max_bit_rate = self.bitrate_bps;
+    }
 
-        let fps = self.fps();
-        // SAFETY: the NVENC param structs are plain old data (ints, pointers,
-        // reserved arrays); all-zero is a valid initial state we then version-tag.
-        let mut init: ffi::InitializeParams = unsafe { core::mem::zeroed() };
+    /// Fill an `NV_ENC_INITIALIZE_PARAMS` for this element's geometry / codec,
+    /// pointing at `config`. Shared by session open and live reconfigure; `config`
+    /// must outlive the call that consumes the params (the driver copies them).
+    fn fill_init_params(&self, init: &mut ffi::InitializeParams, config: *mut ffi::Config) {
         init.version = ffi::NV_ENC_INITIALIZE_PARAMS_VER;
-        init.encode_guid = encode_guid;
+        init.encode_guid = self.encode_guid();
         init.preset_guid = ffi::NV_ENC_PRESET_P4_GUID;
         init.encode_width = self.width;
         init.encode_height = self.height;
         init.dar_width = self.width;
         init.dar_height = self.height;
-        init.frame_rate_num = fps;
+        init.frame_rate_num = self.fps();
         init.frame_rate_den = 1;
         init.enable_ptd = 1; // let NVENC decide picture types (we force IDRs per-pic)
         init.tuning_info = ffi::NV_ENC_TUNING_INFO_LOW_LATENCY;
-        init.encode_config = &mut config;
-        let init_fn = funcs.nv_enc_initialize_encoder.ok_or(hw())?;
-        // SAFETY: valid encoder handle; `init` and the `config` it points at are
-        // fully initialized and live across this call (the driver copies them).
-        nvchk(unsafe { init_fn(encoder, &mut init) })?;
+        init.encode_config = config;
+    }
+
+    /// Re-apply the target bitrate to a live session via `nvEncReconfigureEncoder`
+    /// (M277), so an adaptive sink (e.g. a WebRTC BWE drop routed through
+    /// `set_property("bitrate", ..)`) retargets the rate control without a session
+    /// re-open or a forced IDR. No-op if the applied bitrate already matches.
+    fn reconfigure_bitrate(&mut self) -> Result<(), G2gError> {
+        let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
+        let enc = session.encoder;
+        let reconf_fn = session.funcs.nv_enc_reconfigure_encoder.ok_or(hw())?;
+        let preset_fn = session.funcs.nv_enc_get_encode_preset_config_ex.ok_or(hw())?;
+        let _ctx = ContextGuard::push(session.context)?;
+
+        // Re-derive the preset config, then overlay the (new) rate control, exactly
+        // as session open does, so only the bitrate differs from the live config.
+        // SAFETY: NVENC param structs are POD; all-zero until version-tagged.
+        let mut preset: ffi::PresetConfig = unsafe { core::mem::zeroed() };
+        preset.version = ffi::NV_ENC_PRESET_CONFIG_VER;
+        preset.preset_cfg.version = ffi::NV_ENC_CONFIG_VER;
+        // SAFETY: valid encoder; GUIDs by value; driver writes `preset.preset_cfg`.
+        nvchk(unsafe {
+            preset_fn(
+                enc,
+                self.encode_guid(),
+                ffi::NV_ENC_PRESET_P4_GUID,
+                ffi::NV_ENC_TUNING_INFO_LOW_LATENCY,
+                &mut preset,
+            )
+        })?;
+        let mut config = preset.preset_cfg;
+        self.fill_encode_config(&mut config);
+
+        // SAFETY: NVENC param structs are POD; all-zero until version-tagged.
+        let mut reconf: ffi::ReconfigureParams = unsafe { core::mem::zeroed() };
+        reconf.version = ffi::NV_ENC_RECONFIGURE_PARAMS_VER;
+        self.fill_init_params(&mut reconf.re_init_encode_params, &mut config);
+        // flags = 0: no encoder reset, no forced IDR. A CBR retarget is applied
+        // smoothly from the next frame.
+        reconf.flags = 0;
+        // SAFETY: valid encoder; `reconf` and the `config` it points at are fully
+        // initialized and live across the call (the driver copies them).
+        nvchk(unsafe { reconf_fn(enc, &mut reconf) })?;
+        self.applied_bitrate_bps = self.bitrate_bps;
         Ok(())
     }
 
@@ -314,6 +411,10 @@ impl NvEnc {
     fn encode(&mut self, buf: &OwnedCudaBuffer, pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         if self.session.is_none() {
             self.open_session(buf.context)?;
+        }
+        // Apply a pending bitrate retarget to the live session before encoding.
+        if self.bitrate_bps != self.applied_bitrate_bps {
+            self.reconfigure_bitrate()?;
         }
         let session = self.session.as_ref().ok_or(G2gError::NotConfigured)?;
         if session.context != buf.context {
@@ -381,22 +482,17 @@ impl NvEnc {
         }
         let mapped = map.mapped_resource;
 
-        // Allocate an output bitstream buffer.
-        // SAFETY: the NVENC param structs are plain old data (ints, pointers,
-        // reserved arrays); all-zero is a valid initial state we then version-tag.
-        let mut create_bs: ffi::CreateBitstreamBuffer = unsafe { core::mem::zeroed() };
-        create_bs.version = ffi::NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
-        let create_fn = f.nv_enc_create_bitstream_buffer.ok_or(hw())?;
-        // SAFETY: valid encoder + version-tagged struct.
-        if let Err(e) = nvchk(unsafe { create_fn(enc, &mut create_bs) }) {
+        // Reuse the session's pooled output bitstream buffer (M277): created once
+        // at session open, locked + copied + unlocked per frame below.
+        let output = session.output;
+        if output.is_null() {
             // SAFETY: `mapped`/`registered` are the live handles from above.
             unsafe {
                 self.unmap(mapped);
                 self.unregister(registered);
             }
-            return Err(e);
+            return Err(hw());
         }
-        let output = create_bs.bitstream_buffer;
 
         // Submit the picture.
         // SAFETY: the NVENC param structs are plain old data (ints, pointers,
@@ -429,9 +525,10 @@ impl NvEnc {
                 // SAFETY: `output` was just produced; `mapped`/`registered` are live.
                 let bytes = unsafe { self.lock_copy(output) };
                 let ts = bytes.as_ref().map(|(_, t)| *t).unwrap_or(pts_ns);
-                // SAFETY: `output`/`mapped`/`registered` are this frame's live handles.
+                // The output buffer is pooled (destroyed with the session); only
+                // the per-frame input handles are released here.
+                // SAFETY: `mapped`/`registered` are this frame's live handles.
                 unsafe {
-                    self.destroy_bitstream(output);
                     self.unmap(mapped);
                     self.unregister(registered);
                 }
@@ -445,18 +542,16 @@ impl NvEnc {
                 // keep no per-frame state for this path in v1, so we cannot emit
                 // the deferred output; treat as no packet this call. This is a
                 // structural no-op for the low-latency config we initialize.
-                // SAFETY: `output`/`mapped`/`registered` are this frame's live handles.
+                // SAFETY: `mapped`/`registered` are this frame's live handles.
                 unsafe {
-                    self.destroy_bitstream(output);
                     self.unmap(mapped);
                     self.unregister(registered);
                 }
                 Ok(Vec::new())
             }
             _ => {
-                // SAFETY: `output`/`mapped`/`registered` are this frame's live handles.
+                // SAFETY: `mapped`/`registered` are this frame's live handles.
                 unsafe {
-                    self.destroy_bitstream(output);
                     self.unmap(mapped);
                     self.unregister(registered);
                 }
@@ -516,16 +611,6 @@ impl NvEnc {
         }
     }
 
-    /// # Safety: `output` must be a live bitstream buffer of the session.
-    unsafe fn destroy_bitstream(&self, output: *mut core::ffi::c_void) {
-        if let Some(s) = self.session.as_ref() {
-            if let Some(destroy) = s.funcs.nv_enc_destroy_bitstream_buffer {
-                // SAFETY: valid encoder + output handle; best-effort cleanup.
-                let _ = unsafe { destroy(s.encoder, output) };
-            }
-        }
-    }
-
     async fn emit(
         &mut self,
         packets: Vec<(Vec<u8>, u64)>,
@@ -552,6 +637,13 @@ impl Drop for NvEnc {
         if let Some(s) = self.session.take() {
             // Destroy on the session's context, best-effort.
             if let Ok(_ctx) = ContextGuard::push(s.context) {
+                // The pooled output buffer must be destroyed before the encoder.
+                if !s.output.is_null() {
+                    if let Some(destroy_bs) = s.funcs.nv_enc_destroy_bitstream_buffer {
+                        // SAFETY: `s.output` is the live pooled bitstream buffer.
+                        let _ = unsafe { destroy_bs(s.encoder, s.output) };
+                    }
+                }
                 if let Some(destroy) = s.funcs.nv_enc_destroy_encoder {
                     // SAFETY: `s.encoder` was opened and not yet destroyed.
                     let _ = unsafe { destroy(s.encoder) };
@@ -810,6 +902,7 @@ mod ffi {
     pub const NV_ENC_MAP_INPUT_RESOURCE_VER: u32 = struct_version(4);
     pub const NV_ENC_PIC_PARAMS_VER: u32 = struct_version_hi(7);
     pub const NV_ENC_LOCK_BITSTREAM_VER: u32 = struct_version_hi(2);
+    pub const NV_ENC_RECONFIGURE_PARAMS_VER: u32 = struct_version_hi(2);
 
     // Enum values used (all int-sized C enums).
     pub const NV_ENC_DEVICE_TYPE_CUDA: u32 = 0x1;
@@ -973,6 +1066,20 @@ mod ffi {
     }
     const _: () = assert!(core::mem::size_of::<InitializeParams>() == 1800);
 
+    /// `NV_ENC_RECONFIGURE_PARAMS` (1816 bytes): a full re-init params block plus a
+    /// flags word (`resetEncoder:1`, `forceIDR:1`, reserved). Used to retarget the
+    /// rate control of a live session without a re-open. `version` is at offset 0
+    /// and `re_init_encode_params` at 8 (4 bytes auto-padding, matching the C
+    /// struct); the trailing flags word pads the struct to its 8-byte alignment.
+    #[repr(C)]
+    pub struct ReconfigureParams {
+        pub version: u32,
+        pub re_init_encode_params: InitializeParams,
+        /// Bitfield word: bit 0 `resetEncoder`, bit 1 `forceIDR`, rest reserved.
+        pub flags: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<ReconfigureParams>() == 1816);
+
     /// `NV_ENC_OPEN_ENCODE_SESSIONEX_PARAMS` (1552 bytes).
     #[repr(C)]
     pub struct OpenEncodeSessionExParams {
@@ -1117,6 +1224,8 @@ mod ffi {
     pub type FnMap = unsafe extern "C" fn(*mut c_void, *mut MapInputResource) -> NvEncStatus;
     pub type FnEncode = unsafe extern "C" fn(*mut c_void, *mut PicParams) -> NvEncStatus;
     pub type FnLock = unsafe extern "C" fn(*mut c_void, *mut LockBitstream) -> NvEncStatus;
+    pub type FnReconfigure =
+        unsafe extern "C" fn(*mut c_void, *mut ReconfigureParams) -> NvEncStatus;
     /// Handle-only calls: unlock / unmap / unregister / destroy-buffer take
     /// `(encoder, handle)`; destroy-encoder takes `(encoder)`.
     pub type FnHandle = unsafe extern "C" fn(*mut c_void, *mut c_void) -> NvEncStatus;
@@ -1161,7 +1270,7 @@ mod ffi {
         pub nv_enc_open_encode_session_ex: Option<FnOpenSessionEx>,
         pub nv_enc_register_resource: Option<FnRegister>,
         pub nv_enc_unregister_resource: Option<FnHandle>,
-        pub nv_enc_reconfigure_encoder: *mut c_void,
+        pub nv_enc_reconfigure_encoder: Option<FnReconfigure>,
         pub reserved1: *mut c_void,
         pub nv_enc_create_mv_buffer: *mut c_void,
         pub nv_enc_destroy_mv_buffer: *mut c_void,
@@ -1222,6 +1331,7 @@ mod tests {
         assert_eq!(ffi::NV_ENC_MAP_INPUT_RESOURCE_VER, 1879310349);
         assert_eq!(ffi::NV_ENC_PIC_PARAMS_VER, 4026990605);
         assert_eq!(ffi::NV_ENC_LOCK_BITSTREAM_VER, 4026662925);
+        assert_eq!(ffi::NV_ENC_RECONFIGURE_PARAMS_VER, 4026662925);
         assert_eq!(ffi::NVENCAPI_VERSION, 13);
     }
 
@@ -1500,10 +1610,17 @@ mod tests {
             }
         }
 
+        const RETARGET_BPS: u32 = 1_000_000; // drop from the 4 Mbps default mid-stream
         let mut enc = NvEnc::new();
         enc.configure_pipeline(&nv12(W, H)).unwrap();
         let mut sink = CaptureSink::default();
         for i in 0..10u64 {
+            // Retarget the bitrate mid-stream (M277): the next frame reconfigures
+            // the live session. The stream is decoded back below, proving the
+            // post-retarget bitstream is still valid.
+            if i == 5 {
+                enc.set_property("bitrate", PropValue::Uint(RETARGET_BPS as u64)).unwrap();
+            }
             let Some(frame) = make_frame(i) else {
                 std::eprintln!("skipping: CUDA alloc/upload failed");
                 return;
@@ -1515,6 +1632,12 @@ mod tests {
             }
         }
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        // The live reconfigure ran: the applied bitrate now tracks the new target.
+        assert_eq!(
+            enc.applied_bitrate_bps(),
+            RETARGET_BPS,
+            "nvEncReconfigureEncoder retargeted the live session"
+        );
 
         assert!(!sink.frames.is_empty(), "NVENC produced H.264 access units");
         assert_eq!(

@@ -289,26 +289,21 @@ leverage first:
 - The native gst-`nvcodec`-style pair is done: `NvEnc` (zero-copy CUDA NV12 ->
   H.264, M269) and `NvDec` (H.264 -> CUDA NV12 via NVCUVID, M270). Remaining
   extensions on both:
-  - `NvEnc`: system-memory NV12 input (host upload), 10-bit, finite-GOP periodic
-    IDRs with `repeatSPSPPS`, an output-bitstream-buffer pool (one is alloc/freed
-    per frame today), and runtime bitrate retarget via `nvEncReconfigureEncoder`.
-    (RGBA input + the wgpu->CUDA `WgpuToCuda` bridge are done, M271; HEVC is done,
-    M273. NVENC AV1 needs RTX 40-series.)
+  - `NvEnc`: system-memory NV12 input (host upload), 10-bit (P010 / Main10), and
+    finite-GOP periodic IDRs with `repeatSPSPPS`. (RGBA input + the wgpu->CUDA
+    `WgpuToCuda` bridge are done, M271; HEVC is done, M273; the output-bitstream
+    pool + runtime bitrate retarget are done, M277. NVENC AV1 needs RTX 40-series.)
 - Finish the zero-copy GPU-render egress (M271 shipped the `WgpuToCuda` bridge +
-  `NvEnc` RGBA, validated standalone): rewire `examples/bevy-g2g-stream` to render
-  on the interop device into the bridge texture via `RenderCreation::Manual` so the
-  demo encodes with no read-back, and promote `WgpuToCuda` to a pipeline element
-  (`MemoryDomain::WgpuTexture` input + a linear-buffer reuse pool; one is
-  alloc/freed per frame today).
+  `NvEnc` RGBA; M275 promoted `WgpuToCuda` to a pipeline element with a
+  linear-buffer reuse pool): rewire `examples/bevy-g2g-stream` to render on the
+  interop device into the bridge texture via `RenderCreation::Manual` so the demo
+  encodes with no read-back (it would just consume the M275 element).
 - `NvDec` depth: mid-stream resolution change (decoder reconfigure), AV1 / other
   codecs via the codec enum, 10-bit output, and a configurable display delay
-  (fixed at a low-latency 1 today). (HEVC is done, M273.) Registry wiring is done (M272: `nvdec` /
-  `nvh264dec` names + an auto-plug candidate); the remaining auto-plug piece is a
-  caps memory-feature (`memory:CUDAMemory`-style) so `decodebin` can *prefer*
-  `NvDec` on NVIDIA without hijacking system-memory pipelines (it emits
-  `MemoryDomain::Cuda`, which caps do not encode today).
-- Register `FfmpegH264Enc` (M266) in the registry (`ffmpegenc` launch + `x264enc`
-  / `avenc_h264` aliases); it was never wired, surfaced during M272.
+  (fixed at a low-latency 1 today). (HEVC is done, M273; registry + domain-aware
+  auto-plug are done, M272 / M276: `decodebin_preferring(.., Cuda)` prefers
+  `NvDec`. The remaining piece is deriving that preference automatically from a
+  downstream consumer's accepted input memory.)
 - A blob header registry (decode known `BlobMeta` headers into typed structures).
 
 ## Clock-synchronised presentation
