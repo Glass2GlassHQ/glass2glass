@@ -411,6 +411,45 @@ leverage first:
   surface directly into the compute pass; needs the surface-import handshake + a
   GPU tensor output domain).
 
+## Developer tooling
+
+No `xtask` / `justfile`, pipeline visualization, caps tracing, or benchmarks
+exist today; the dev workflow is shell-history tribal knowledge. Highest leverage
+first:
+
+- **Pipeline -> DOT/SVG visualizer** (the `GST_DEBUG_DUMP_DOT_DIR` equivalent).
+  `Graph::to_dot()` rendering nodes, links, the *negotiated caps on each edge*,
+  memory domains, and `link_capacity`. g2g has a `Graph` but no way to see it or
+  the caps that got chosen. Self-contained, CI-safe.
+- **Caps-negotiation explainer** (`G2G_CAPS_TRACE=1`). Narrate each
+  `intersect` / `fixate` decision so a `CapsMismatch` is a readable log, not a
+  guess (e.g. `h264parse.src ∩ nvdec.sink ✓ … fixate W=Any -> REJECTED`). Highest
+  absolute leverage (caps nego is the hardest code, with accumulating workarounds);
+  more invasive (threads through the solver).
+- **`xtask` dev-command crate** consolidating the bespoke invocations:
+  `test --here` (probe the host for NVENC headers / VAAPI / wgpu adapters /
+  cameras and run exactly the feature-gated tests this machine supports,
+  automating the "validate on this host" dance); `ci` (run locally what CI runs);
+  `size` / `wasm` (wrap the embedded-footprint + wasm builds, baking in the Fedora
+  `PATH="$HOME/.cargo/bin:$PATH"` rustup gotcha).
+- **FFI struct-probe automation.** `xtask ffi-probe <header> <struct>` compiles a
+  C probe against the installed SDK header and emits / verifies the `repr(C)`
+  size + offset asserts (the hand-rolled-FFI ritual, done manually per struct
+  today; also catches SDK version drift).
+- **Latency / throughput report.** Surface the existing `LatencyProfile` as a
+  per-element / per-link p50 / p99 + dropped-frames + fill-level breakdown on run
+  end (or live). The glass-to-glass analyses (NVDEC floor, `link_capacity`
+  dominance) are done by hand today.
+- **criterion benchmarks + baseline** for the hot paths (caps solve, runner loop,
+  frame convert) so the latency moat is regression-guarded.
+- **Element scaffolding.** `xtask new-element` stamps the `AsyncElement` /
+  `SourceLoop` impl + pad templates + registry stub + milestone test file (the
+  boilerplate every `Mn` repeats).
+- Longer tail: a live pipeline TUI (`gst-launch -v` on steroids); a gst-parity
+  differ (same launch line through real GStreamer vs g2g, diff caps / behaviour);
+  a codec golden-fixture / PSNR conformance harness; an MCP server exposing
+  `inspect` / `launch` / `validate` for agent-driven dev.
+
 ## Documentation
 
 - Architecture diagrams in [docs/](docs/) (the Pages site is text-only).
