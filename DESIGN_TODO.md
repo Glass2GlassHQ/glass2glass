@@ -421,10 +421,6 @@ explainer now exist; the remaining items extend them. Highest leverage first:
   the per-edge caps, but not each link's memory domain (that rides the auto-plug
   metadata, not `Caps`). Thread the chosen domain per edge so the dump can mark
   the GPU / zero-copy links bold (the renderer's `edge_memory` is already there).
-- **FFI struct-probe automation.** `xtask ffi-probe <header> <struct>` compiles a
-  C probe against the installed SDK header and emits / verifies the `repr(C)`
-  size + offset asserts (the hand-rolled-FFI ritual, done manually per struct
-  today; also catches SDK version drift).
 - **Latency / throughput report.** Surface the existing `LatencyProfile` as a
   per-element / per-link p50 / p99 + dropped-frames + fill-level breakdown on run
   end (or live). The glass-to-glass analyses (NVDEC floor, `link_capacity`

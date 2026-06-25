@@ -35,6 +35,7 @@ fn main() {
         "test" => cmd_test_here(rest),
         "size" => cmd_size(),
         "wasm" => cmd_wasm(),
+        "ffi-probe" => cmd_ffi_probe(rest),
         "help" | "-h" | "--help" => {
             print_help();
             0
@@ -56,7 +57,12 @@ fn print_help() {
            test --here    run the feature tests this host supports (--dry-run to just probe)\n  \
            size           build + measure the Cortex-M footprint harness\n  \
            wasm           build the wasm32 targets (core + web plugins)\n  \
-           help           show this message"
+           ffi-probe      sizeof/offsetof a C SDK struct, emit the repr(C) size assert\n  \
+           help           show this message\n\n\
+         ffi-probe usage:\n  \
+           cargo xtask ffi-probe --header <h> --struct <S> [--field <f>]... [-I <dir>]... [--cc <cc>]\n  \
+           e.g. cargo xtask ffi-probe --header ffnvcodec/nvEncodeAPI.h \\\n       \
+                  --struct NV_ENC_INITIALIZE_PARAMS --field encodeGUID -I /usr/include/ffnvcodec"
     );
 }
 
@@ -348,6 +354,132 @@ fn cmd_wasm() -> i32 {
     )
 }
 
+// --- ffi-probe ----------------------------------------------------------
+
+fn cmd_ffi_probe(rest: &[String]) -> i32 {
+    let mut headers: Vec<String> = Vec::new();
+    let mut struct_name: Option<String> = None;
+    let mut fields: Vec<String> = Vec::new();
+    let mut includes: Vec<String> = Vec::new();
+    let mut cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--header" => match it.next() {
+                Some(v) => headers.push(v.clone()),
+                None => return arg_err("--header needs a value"),
+            },
+            "--struct" => match it.next() {
+                Some(v) => struct_name = Some(v.clone()),
+                None => return arg_err("--struct needs a value"),
+            },
+            "--field" => match it.next() {
+                Some(v) => fields.push(v.clone()),
+                None => return arg_err("--field needs a value"),
+            },
+            "-I" | "--include" => match it.next() {
+                Some(v) => includes.push(v.clone()),
+                None => return arg_err("-I needs a value"),
+            },
+            "--cc" => match it.next() {
+                Some(v) => cc = v.clone(),
+                None => return arg_err("--cc needs a value"),
+            },
+            other => {
+                // Also accept the glued `-I/path` form gcc/clang take.
+                if let Some(dir) = other.strip_prefix("-I") {
+                    includes.push(dir.to_string());
+                } else {
+                    return arg_err(&format!("unknown argument '{other}'"));
+                }
+            }
+        }
+    }
+
+    let (headers, struct_name) = match (headers.is_empty(), struct_name) {
+        (false, Some(s)) => (headers, s),
+        _ => return arg_err("--header and --struct are required"),
+    };
+
+    let src = generate_probe_c(&headers, &struct_name, &fields);
+    let dir = std::env::temp_dir();
+    let c_path = dir.join("g2g-ffi-probe.c");
+    let bin_path = dir.join("g2g-ffi-probe.bin");
+    if let Err(e) = std::fs::write(&c_path, &src) {
+        eprintln!("xtask ffi-probe: cannot write probe: {e}");
+        return 1;
+    }
+
+    let mut cc_args: Vec<String> =
+        vec![c_path.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into()];
+    for inc in &includes {
+        cc_args.push(format!("-I{inc}"));
+    }
+    let cc_args_ref: Vec<&str> = cc_args.iter().map(String::as_str).collect();
+    let code = run(&format!("compile probe ({struct_name})"), &cc, &cc_args_ref, &[]);
+    if code != 0 {
+        eprintln!("xtask ffi-probe: probe failed to compile; check the header path / -I flags.");
+        return code;
+    }
+
+    let out = match capture(&bin_path.to_string_lossy(), &[], &[]) {
+        Some(o) => o,
+        None => {
+            eprintln!("xtask ffi-probe: probe binary did not run.");
+            return 1;
+        }
+    };
+    println!("\n{out}");
+
+    // Emit the ready-to-paste compile-time size assert (offsets are correct by
+    // faithful transcription; MSRV 1.75 has no `offset_of!`, see project memory).
+    if let Some(size) = parse_struct_size(&out, &struct_name) {
+        println!(
+            "// paste into the `ffi` module:\nconst _: () = assert!(core::mem::size_of::<{struct_name}>() == {size});"
+        );
+    }
+    0
+}
+
+/// Generate the C probe: include the headers, then print `sizeof` of the struct
+/// and `offsetof` of each requested field. Pure, so it is unit-tested.
+fn generate_probe_c(headers: &[String], struct_name: &str, fields: &[String]) -> String {
+    let mut s = String::from("#include <stdio.h>\n#include <stddef.h>\n");
+    for h in headers {
+        s.push_str(&format!("#include <{h}>\n"));
+    }
+    s.push_str("int main(void) {\n");
+    s.push_str(&format!(
+        "    printf(\"sizeof({0}) = %zu\\n\", sizeof({0}));\n",
+        struct_name
+    ));
+    for f in fields {
+        s.push_str(&format!(
+            "    printf(\"offsetof({0}, {1}) = %zu\\n\", offsetof({0}, {1}));\n",
+            struct_name, f
+        ));
+    }
+    s.push_str("    return 0;\n}\n");
+    s
+}
+
+/// Parse `sizeof(<struct>) = <n>` out of the probe output.
+fn parse_struct_size(output: &str, struct_name: &str) -> Option<usize> {
+    let needle = format!("sizeof({struct_name}) = ");
+    for line in output.lines() {
+        if let Some(rest) = line.trim().strip_prefix(&needle) {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
+fn arg_err(msg: &str) -> i32 {
+    eprintln!("xtask ffi-probe: {msg}");
+    2
+}
+
 // --- command helpers ----------------------------------------------------
 
 /// Run a command, streaming its output, after announcing it. Returns the exit
@@ -468,6 +600,30 @@ mod tests {
         let path = "/usr/bin:/bin";
         let joined = format!("{home}/.cargo/bin:{path}");
         assert!(joined.starts_with("/home/u/.cargo/bin:"));
+    }
+
+    #[test]
+    fn ffi_probe_c_includes_headers_and_probes_struct_and_fields() {
+        let c = generate_probe_c(
+            &["ffnvcodec/nvEncodeAPI.h".into()],
+            "NV_ENC_INITIALIZE_PARAMS",
+            &["encodeGUID".into(), "encodeWidth".into()],
+        );
+        assert!(c.contains("#include <ffnvcodec/nvEncodeAPI.h>"));
+        assert!(c.contains("sizeof(NV_ENC_INITIALIZE_PARAMS)"));
+        assert!(c.contains("offsetof(NV_ENC_INITIALIZE_PARAMS, encodeGUID)"));
+        assert!(c.contains("offsetof(NV_ENC_INITIALIZE_PARAMS, encodeWidth)"));
+        // No fields requested => sizeof only, no offsetof.
+        let c2 = generate_probe_c(&["stdint.h".into()], "uint32_t", &[]);
+        assert!(c2.contains("sizeof(uint32_t)"));
+        assert!(!c2.contains("offsetof"));
+    }
+
+    #[test]
+    fn ffi_probe_parses_struct_size_from_output() {
+        let out = "sizeof(NV_ENC_INITIALIZE_PARAMS) = 1816\noffsetof(NV_ENC_INITIALIZE_PARAMS, encodeWidth) = 24";
+        assert_eq!(parse_struct_size(out, "NV_ENC_INITIALIZE_PARAMS"), Some(1816));
+        assert_eq!(parse_struct_size(out, "OTHER"), None);
     }
 
     #[test]

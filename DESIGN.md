@@ -1832,6 +1832,14 @@ prepend `~/.cargo/bin` to `PATH` so cargo selects the rustup toolchain over a
 distro `rustc` that lacks the target std, and `wasm` passes
 `--cfg=web_sys_unstable_apis` for the `web-codecs` build.
 
+`ffi-probe <header> <struct> [--field f]...` automates the hand-rolled-FFI
+ritual (§4.11 / the `cuda.rs` / `nvenc.rs` convention): it generates a C program
+that includes the header and prints `sizeof` of the struct plus `offsetof` of
+each field, compiles and runs it, and emits the `const _: () = assert!(size_of::
+<Struct>() == N)` to paste alongside the `#[repr(C)]` transcription. Layout is
+locked down before it is trusted, and an SDK version bump that resizes a struct
+fails the build rather than the GPU.
+
 ---
 
 ## 5. First-Class Machine Learning Integration
