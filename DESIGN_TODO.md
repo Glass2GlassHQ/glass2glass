@@ -77,8 +77,8 @@ leverage first:
 
 ## Platform: Android
 
-- `MediaCodecDec`: HEVC; an `AHardwareBuffer` / `SurfaceTexture` zero-copy
-  domain; the `Surface` present sink.
+- `MediaCodecDec`: an `AHardwareBuffer` / `SurfaceTexture` zero-copy domain;
+  the `Surface` present sink.
 - Encode, Camera2 capture, AAudio, Surface present.
 
 ## Receive / decode

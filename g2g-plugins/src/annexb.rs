@@ -149,6 +149,37 @@ pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     (sps, pps)
 }
 
+/// The H.265 (HEVC) NAL unit type: bits 1..=6 of the first header byte
+/// (`(b >> 1) & 0x3F`), where H.264 uses the low 5 bits.
+#[cfg(any(all(target_os = "android", feature = "mediacodec"), test))]
+pub(crate) fn h265_nal_type(nal: &[u8]) -> Option<u8> {
+    nal.first().map(|b| (b >> 1) & 0x3F)
+}
+
+/// VPS, SPS, and PPS NAL lists: the H.265 parameter sets.
+#[cfg(any(all(target_os = "android", feature = "mediacodec"), test))]
+pub(crate) type H265ParameterSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
+
+/// Collect the H.265 VPS (32), SPS (33), and PPS (34) NAL units from an access
+/// unit, as owned copies the caller caches across frames. MediaCodec takes them
+/// as the `csd-0` codec-specific data (VPS+SPS+PPS concatenated), the HEVC analog
+/// of H.264's separate SPS / PPS.
+#[cfg(any(all(target_os = "android", feature = "mediacodec"), test))]
+pub(crate) fn h265_parameter_sets(au: &[u8]) -> H265ParameterSets {
+    let mut vps = Vec::new();
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
+    for nal in nal_units_any(au) {
+        match h265_nal_type(nal) {
+            Some(32) => vps.push(nal.to_vec()),
+            Some(33) => sps.push(nal.to_vec()),
+            Some(34) => pps.push(nal.to_vec()),
+            _ => {}
+        }
+    }
+    (vps, sps, pps)
+}
+
 /// Convert an access unit (Annex-B or AVCC) to AVCC form, each retained NAL
 /// preceded by its 4-byte big-endian length (`lengthSizeMinusOne = 3`), keeping
 /// only NALs for which `keep` returns true. VideoToolbox decode samples carry the
@@ -382,6 +413,26 @@ mod tests {
             au.extend_from_slice(nal);
         }
         let (got_sps, got_pps) = h264_parameter_sets(&au);
+        assert_eq!(got_sps, vec![sps.to_vec()]);
+        assert_eq!(got_pps, vec![pps.to_vec()]);
+    }
+
+    #[test]
+    fn h265_parameter_sets_extracted_from_mixed_au() {
+        // VPS (32), SPS (33), PPS (34), SEI (39), IDR slice (19), in Annex-B.
+        // H.265 NAL header is 2 bytes; type = (byte0 >> 1) & 0x3F.
+        let vps: &[u8] = &[0x40, 0x01, 0x0c];
+        let sps: &[u8] = &[0x42, 0x01, 0x01];
+        let pps: &[u8] = &[0x44, 0x01, 0xc0];
+        let sei: &[u8] = &[0x4e, 0x01, 0x05];
+        let idr: &[u8] = &[0x26, 0x01, 0xaf];
+        let mut au = Vec::new();
+        for nal in [vps, sps, pps, sei, idr] {
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(nal);
+        }
+        let (got_vps, got_sps, got_pps) = h265_parameter_sets(&au);
+        assert_eq!(got_vps, vec![vps.to_vec()]);
         assert_eq!(got_sps, vec![sps.to_vec()]);
         assert_eq!(got_pps, vec![pps.to_vec()]);
     }

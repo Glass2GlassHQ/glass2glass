@@ -57,7 +57,7 @@ use g2g_core::{
     RawVideoFormat, VideoCodec,
 };
 
-use crate::annexb::h264_parameter_sets;
+use crate::annexb::{h264_parameter_sets, h265_parameter_sets};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -97,8 +97,10 @@ struct CodecState {
     reader: ImageReader,
     /// The reader's Surface, handed to `configure`; kept resident for the codec.
     _window: NativeWindow,
-    sps: Vec<Vec<u8>>,
-    pps: Vec<Vec<u8>>,
+    /// The codec-specific data the codec was configured with (Annex-B), kept so a
+    /// mid-stream parameter-set change rebuilds it. `csd-0` and optional `csd-1`.
+    csd0: Vec<u8>,
+    csd1: Option<Vec<u8>>,
     width: u32,
     height: u32,
 }
@@ -138,11 +140,20 @@ impl Default for MediaCodecDec {
 }
 
 impl MediaCodecDec {
-    /// An H.264 MediaCodec decoder. (HEVC is a follow-up: `video/hevc` + the
-    /// VPS/SPS/PPS csd; the element shape is identical.)
+    /// An H.264 MediaCodec decoder.
     pub fn h264() -> Self {
+        Self::new(VideoCodec::H264)
+    }
+
+    /// An H.265 / HEVC MediaCodec decoder. Same shape as H.264; differs only in
+    /// the MIME type and that the VPS+SPS+PPS pack into a single `csd-0`.
+    pub fn h265() -> Self {
+        Self::new(VideoCodec::H265)
+    }
+
+    fn new(codec: VideoCodec) -> Self {
         Self {
-            codec: VideoCodec::H264,
+            codec,
             width: 0,
             height: 0,
             configured: false,
@@ -150,6 +161,40 @@ impl MediaCodecDec {
             last_caps: None,
             input_caps: None,
             emitted: 0,
+        }
+    }
+
+    /// The MediaCodec MIME type for this element's codec.
+    fn mime(&self) -> &'static str {
+        match self.codec {
+            VideoCodec::H265 => "video/hevc",
+            _ => "video/avc",
+        }
+    }
+
+    /// Extract the codec-specific data (`csd-0`, optional `csd-1`) for the current
+    /// codec from an access unit, or `None` until every parameter set has been
+    /// seen. H.264 splits SPS (`csd-0`) and PPS (`csd-1`); H.265 concatenates
+    /// VPS+SPS+PPS into `csd-0`. Each NAL is re-prefixed with an Annex-B start code.
+    fn codec_specific_data(&self, au: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        match self.codec {
+            VideoCodec::H265 => {
+                let (vps, sps, pps) = h265_parameter_sets(au);
+                if vps.is_empty() || sps.is_empty() || pps.is_empty() {
+                    return None;
+                }
+                let mut csd0 = annexb_join(&vps);
+                csd0.extend_from_slice(&annexb_join(&sps));
+                csd0.extend_from_slice(&annexb_join(&pps));
+                Some((csd0, None))
+            }
+            _ => {
+                let (sps, pps) = h264_parameter_sets(au);
+                if sps.is_empty() || pps.is_empty() {
+                    return None;
+                }
+                Some((annexb_join(&sps), Some(annexb_join(&pps))))
+            }
         }
     }
 
@@ -168,12 +213,12 @@ impl MediaCodecDec {
     }
 
     /// (Re)create the codec when the parameter sets first appear or change.
-    fn ensure_codec(&mut self, sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Result<(), G2gError> {
-        if sps.is_empty() || pps.is_empty() {
+    fn ensure_codec(&mut self, au: &[u8]) -> Result<(), G2gError> {
+        let Some((csd0, csd1)) = self.codec_specific_data(au) else {
             return Ok(()); // wait for a keyframe's parameter sets
-        }
+        };
         if let Some(st) = self.state.as_ref() {
-            if st.sps == sps && st.pps == pps {
+            if st.csd0 == csd0 && st.csd1 == csd1 {
                 return Ok(());
             }
         }
@@ -184,7 +229,7 @@ impl MediaCodecDec {
             return Err(G2gError::NotConfigured);
         }
 
-        let codec = MediaCodec::from_decoder_type("video/avc").ok_or(G2gError::NotConfigured)?;
+        let codec = MediaCodec::from_decoder_type(self.mime()).ok_or(G2gError::NotConfigured)?;
 
         // Decode into an ImageReader's Surface, not ByteBuffers: modern vendor
         // decoders only deliver graphic buffers (a no-Surface configure stalls on
@@ -200,14 +245,13 @@ impl MediaCodecDec {
         let window = reader.window().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         let mut format = MediaFormat::new();
-        format.set_str("mime", "video/avc");
+        format.set_str("mime", self.mime());
         format.set_i32("width", self.width as i32);
         format.set_i32("height", self.height as i32);
-        // csd-0 = SPS, csd-1 = PPS, each as Annex-B (start-code prefixed), the
-        // MediaCodec convention. h264_parameter_sets strips the start codes, so
-        // re-add them.
-        format.set_buffer("csd-0", &annexb_join(sps));
-        format.set_buffer("csd-1", &annexb_join(pps));
+        format.set_buffer("csd-0", &csd0);
+        if let Some(csd1) = &csd1 {
+            format.set_buffer("csd-1", csd1);
+        }
 
         codec
             .configure(&format, Some(&window), MediaCodecDirection::Decoder)
@@ -218,8 +262,8 @@ impl MediaCodecDec {
             codec,
             reader,
             _window: window,
-            sps: sps.to_vec(),
-            pps: pps.to_vec(),
+            csd0,
+            csd1,
             width: self.width,
             height: self.height,
         });
@@ -228,8 +272,7 @@ impl MediaCodecDec {
 
     /// Submit one Annex-B access unit, then drain whatever output is ready.
     fn feed(&mut self, au: &[u8], pts_ns: u64, out: &mut Vec<DecodedFrame>) -> Result<(), G2gError> {
-        let (sps, pps) = h264_parameter_sets(au);
-        self.ensure_codec(&sps, &pps)?;
+        self.ensure_codec(au)?;
         if self.state.is_none() {
             return Ok(()); // pre-keyframe: nothing to decode yet
         }

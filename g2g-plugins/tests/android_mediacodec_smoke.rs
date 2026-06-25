@@ -56,11 +56,12 @@ fn start_binder_threadpool() {
     }
 }
 
-/// A short H.264 Annex-B clip (640x480, 10 frames, baseline: SPS/PPS + IDR +
-/// P-frames), committed under `tests/fixtures/` and embedded so the test binary
-/// needs no companion file on the device. 640x480 (not a tiny size) because
-/// hardware decoders' graphic-buffer allocators reject sub-minimum dimensions.
+/// Short Annex-B clips (640x480, 10 frames: parameter sets + IDR + inter frames),
+/// committed under `tests/fixtures/` and embedded so the test binary needs no
+/// companion file on the device. 640x480 (not a tiny size) because hardware
+/// decoders' graphic-buffer allocators reject sub-minimum dimensions.
 const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
+const H265: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 
 /// `OutputSink` that records every packet the decoder pushes (CapsChanged +
 /// DataFrames), the same collector the other decode smoke tests use.
@@ -79,12 +80,18 @@ impl OutputSink for Collect {
 }
 
 /// Split an Annex-B byte stream into access units. A new AU begins at the first
-/// VCL NAL (types 1..=5) once the current AU already holds one, so each AU
-/// groups its leading SPS/PPS/SEI with the slice. This matters because
-/// `MediaCodecDec` reads the parameter sets from the AU it is fed: the first AU
-/// must carry SPS+PPS+IDR together for the codec to configure. Returns
-/// contiguous sub-slices of `s` (NALs are already contiguous in the stream).
-fn access_units(s: &[u8]) -> Vec<&[u8]> {
+/// VCL NAL once the current AU already holds one, so each AU groups its leading
+/// parameter sets / SEI with the slice. This matters because `MediaCodecDec`
+/// reads the parameter sets from the AU it is fed: the first AU must carry them
+/// alongside the IDR for the codec to configure. Returns contiguous sub-slices
+/// of `s` (NALs are already contiguous in the stream). `codec` selects the NAL
+/// header parse: H.264 uses the low 5 bits (VCL = 1..=5); H.265 uses bits 1..=6
+/// (VCL = 0..=31).
+fn access_units(s: &[u8], codec: VideoCodec) -> Vec<&[u8]> {
+    let is_h265 = codec == VideoCodec::H265;
+    let nal_type = |hdr: u8| if is_h265 { (hdr >> 1) & 0x3f } else { hdr & 0x1f };
+    let is_vcl = |t: u8| if is_h265 { t <= 31 } else { (1..=5).contains(&t) };
+
     // Offsets of each NAL's start code, paired with the NAL type.
     let mut nals: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
@@ -101,7 +108,7 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
             Some(len) => {
                 let hdr = i + len;
                 if hdr < s.len() {
-                    nals.push((i, s[hdr] & 0x1f));
+                    nals.push((i, nal_type(s[hdr])));
                 }
                 i = hdr + 1;
             }
@@ -113,13 +120,13 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
     let mut starts: Vec<usize> = Vec::new();
     let mut has_vcl = false;
     for &(off, t) in &nals {
-        let is_vcl = (1..=5).contains(&t);
+        let vcl = is_vcl(t);
         if starts.is_empty() {
             starts.push(off);
-            has_vcl = is_vcl;
-        } else if is_vcl && has_vcl {
+            has_vcl = vcl;
+        } else if vcl && has_vcl {
             starts.push(off); // new frame: start a new AU
-        } else if is_vcl {
+        } else if vcl {
             has_vcl = true; // first VCL of the current AU
         }
     }
@@ -134,27 +141,26 @@ fn access_units(s: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-#[tokio::test]
-async fn mediacodec_decodes_h264_to_nv12() {
+/// Drive `dec` with the access units of `stream` and assert it emits NV12 frames
+/// of the right geometry. Shared by the H.264 and H.265 tests.
+async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec, w: u32, h: u32) {
     start_binder_threadpool();
 
-    let aus = access_units(H264);
+    let aus = access_units(stream, codec);
     assert!(aus.len() > 1, "fixture must split into multiple access units, got {}", aus.len());
 
-    let mut dec = MediaCodecDec::h264();
-
-    // Negotiation surrogate: upstream H.264 with the fixture's geometry, as
-    // `h264parse` would emit from the SPS. MediaCodec's `configure()` requires
-    // width/height (it returns EINVAL without them), so the geometry is not
-    // optional here, unlike the codec-private SPS/PPS which ride the stream.
+    // Negotiation surrogate: upstream caps carry the fixture's geometry, as a
+    // parser would emit from the SPS. MediaCodec's `configure()` requires
+    // width/height (it returns EINVAL without them), unlike the codec-private
+    // parameter sets which ride the stream.
     let upstream = Caps::CompressedVideo {
-        codec: VideoCodec::H264,
-        width: Dim::Fixed(640),
-        height: Dim::Fixed(480),
+        codec,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
         framerate: Rate::Any,
     };
-    let narrowed = dec.intercept_caps(&upstream).expect("intercept H.264");
-    let outcome = dec.configure_pipeline(&narrowed).expect("configure H.264 decoder");
+    let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
+    let outcome = dec.configure_pipeline(&narrowed).expect("configure decoder");
     assert!(matches!(outcome, ConfigureOutcome::Accepted));
 
     let mut sink = Collect::default();
@@ -189,19 +195,22 @@ async fn mediacodec_decodes_h264_to_nv12() {
         })
         .collect();
 
-    eprintln!("decoded {} frame(s); {} CapsChanged emitted", data_frames.len(), caps_changes.len());
+    eprintln!(
+        "{:?}: decoded {} frame(s); {} CapsChanged emitted",
+        codec,
+        data_frames.len(),
+        caps_changes.len()
+    );
     assert!(!caps_changes.is_empty(), "expected at least one NV12 CapsChanged");
     assert!(!data_frames.is_empty(), "expected at least one decoded frame");
 
     // The first CapsChanged advertises the decoded NV12 geometry; the first
-    // frame's buffer must match it (Y + interleaved UV = w*h*3/2). On a device
-    // whose decoder emits a vendor / flexible colour format the element does not
-    // yet repack, this length check is exactly what would catch it.
+    // frame's buffer must match it (Y + interleaved UV = w*h*3/2).
     match caps_changes.first().unwrap() {
-        Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(w), height: Dim::Fixed(h), .. } => {
-            eprintln!("first NV12 caps: {}x{}", w, h);
-            assert!(*w > 0 && *h > 0);
-            let expected = (*w as usize) * (*h as usize) * 3 / 2;
+        Caps::RawVideo { format: RawVideoFormat::Nv12, width: Dim::Fixed(fw), height: Dim::Fixed(fh), .. } => {
+            eprintln!("first NV12 caps: {}x{}", fw, fh);
+            assert!(*fw > 0 && *fh > 0);
+            let expected = (*fw as usize) * (*fh as usize) * 3 / 2;
             match &data_frames.first().unwrap().domain {
                 MemoryDomain::System(slice) => {
                     assert_eq!(slice.as_slice().len(), expected, "NV12 byte length mismatch");
@@ -211,4 +220,14 @@ async fn mediacodec_decodes_h264_to_nv12() {
         }
         other => panic!("expected NV12 fixed caps, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn mediacodec_decodes_h264_to_nv12() {
+    decode_to_nv12(MediaCodecDec::h264(), H264, VideoCodec::H264, 640, 480).await;
+}
+
+#[tokio::test]
+async fn mediacodec_decodes_h265_to_nv12() {
+    decode_to_nv12(MediaCodecDec::h265(), H265, VideoCodec::H265, 640, 480).await;
 }

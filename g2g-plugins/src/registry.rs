@@ -407,11 +407,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
             .produces(g2g_core::MemoryDomainKind::Cuda),
     );
-    // Android hardware H.264 decode via the NDK MediaCodec (M219). Reachable
-    // from g2g-launch on-device; the gst analog is `amcviddec`.
+    // Android hardware video decode via the NDK MediaCodec (M219/M302); one
+    // factory per codec (the MIME is fixed at construction). Reachable from
+    // g2g-launch on-device; the gst analog is `amcviddec-<component>`.
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
     reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdec", |_| {
         Box::new(MediaCodecDec::h264())
+    }));
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| {
+        Box::new(MediaCodecDec::h265())
     }));
 }
 
