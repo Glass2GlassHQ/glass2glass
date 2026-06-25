@@ -77,12 +77,15 @@ const MAX_OUTPUT_POLLS: u32 = 256;
 /// codec surfaces as an error rather than spinning forever.
 const MAX_INPUT_RETRIES: u32 = 100;
 
+/// One decoded frame ready to emit: NV12 bytes in the CPU path, or (in the M304
+/// zero-copy GPU path) the decoded `AHardwareBuffer` to convert to a wgpu texture.
 #[derive(Debug)]
-struct DecodedFrame {
-    nv12: Box<[u8]>,
-    width: u32,
-    height: u32,
-    pts_ns: u64,
+enum DecodedFrame {
+    Nv12 { nv12: Box<[u8]>, width: u32, height: u32, pts_ns: u64 },
+    /// An acquired reference to a decoded frame's `AHardwareBuffer`, held so it
+    /// outlives the transient `Image`; converted to RGBA on the GPU in `process`.
+    #[cfg(feature = "mediacodec-wgpu")]
+    Ahb { ahb: ndk::hardware_buffer::HardwareBufferRef, width: u32, height: u32, pts_ns: u64 },
 }
 
 /// Live codec plus the parameter sets it was configured with (so a mid-stream
@@ -130,6 +133,19 @@ pub struct MediaCodecDec {
     /// so it outlives the transient `Image` it came from.
     #[cfg(feature = "mediacodec-wgpu")]
     captured_ahb: Option<ndk::hardware_buffer::HardwareBufferRef>,
+    /// M304 zero-copy output: when set, each decoded frame is converted to an
+    /// RGBA `wgpu::Texture` on the GPU (no CPU NV12 pack) and emitted as
+    /// `MemoryDomain::WgpuTexture` instead of system memory.
+    #[cfg(feature = "mediacodec-wgpu")]
+    gpu_output: bool,
+    /// The wgpu/Vulkan interop device, created lazily on the first decoded frame
+    /// in GPU-output mode (its creation is async).
+    #[cfg(feature = "mediacodec-wgpu")]
+    interop: Option<crate::mediacodec_wgpu::InteropDevice>,
+    /// The reusable YCbCr -> RGBA converter, built lazily once the first decoded
+    /// buffer's external format + geometry are known.
+    #[cfg(feature = "mediacodec-wgpu")]
+    converter: Option<crate::mediacodec_wgpu::YcbcrToRgba>,
 }
 
 // SAFETY: `ndk::media::MediaCodec` wraps a raw `AMediaCodec` pointer and is not
@@ -169,7 +185,66 @@ impl MediaCodecDec {
             emitted: 0,
             #[cfg(feature = "mediacodec-wgpu")]
             captured_ahb: None,
+            #[cfg(feature = "mediacodec-wgpu")]
+            gpu_output: false,
+            #[cfg(feature = "mediacodec-wgpu")]
+            interop: None,
+            #[cfg(feature = "mediacodec-wgpu")]
+            converter: None,
         }
+    }
+
+    /// Enable the M304 zero-copy GPU output path: decoded frames are converted to
+    /// RGBA `wgpu::Texture`s on the GPU (importing each `AHardwareBuffer` through
+    /// an immutable YCbCr-conversion sampler) and emitted as
+    /// `MemoryDomain::WgpuTexture`, instead of the default CPU NV12 pack. The
+    /// element must run on a single-thread executor in this mode (it submits to
+    /// the wgpu device's queue directly), the same contract the codec pointer
+    /// already requires.
+    #[cfg(feature = "mediacodec-wgpu")]
+    pub fn with_gpu_output(mut self) -> Self {
+        self.gpu_output = true;
+        self
+    }
+
+    /// Convert a decoded `AHardwareBuffer` to an RGBA `wgpu::Texture` on the GPU
+    /// and wrap it as a `MemoryDomain::WgpuTexture`. Creates the interop device
+    /// (async) and the reusable converter lazily on the first frame. The buffer
+    /// is released back to the decoder as soon as the conversion completes.
+    #[cfg(feature = "mediacodec-wgpu")]
+    async fn convert_ahb_to_domain(
+        &mut self,
+        ahb: ndk::hardware_buffer::HardwareBufferRef,
+        width: u32,
+        height: u32,
+    ) -> Result<MemoryDomain, G2gError> {
+        use crate::mediacodec_wgpu::{
+            ahb_format_info, create_android_interop_device, WgpuRgbaTexture, YcbcrToRgba,
+        };
+
+        if self.interop.is_none() {
+            self.interop = Some(create_android_interop_device().await?);
+        }
+        let ahb_ptr = ahb.as_ptr() as *const ash::vk::AHardwareBuffer;
+        if self.converter.is_none() {
+            let dev = self.interop.as_ref().unwrap();
+            // SAFETY: `dev` is the interop device; `ahb` is a live decoded buffer.
+            let info = unsafe { ahb_format_info(dev, ahb_ptr)? };
+            // SAFETY: same device; `info` is this buffer's format.
+            self.converter = Some(unsafe { YcbcrToRgba::new(dev, &info, width, height)? });
+        }
+        let dev = self.interop.as_ref().unwrap();
+        // SAFETY: `ahb` is live (held here); the converter was built on `dev` for
+        // this format / geometry. `convert` waits on its fence before returning.
+        let texture = unsafe { self.converter.as_ref().unwrap().convert(ahb_ptr)? };
+        // The conversion is done; release the buffer back to the decoder.
+        drop(ahb);
+        let owner = WgpuRgbaTexture::new(dev.device.clone(), dev.queue.clone(), texture);
+        Ok(MemoryDomain::WgpuTexture(g2g_core::OwnedWgpuTexture::new(
+            width,
+            height,
+            alloc::sync::Arc::new(owner),
+        )))
     }
 
     /// M304 probe accessor: the first decoded frame's `AHardwareBuffer` (owned
@@ -397,6 +472,18 @@ impl MediaCodecDec {
                 }
             }
             let pts_ns = img.timestamp().unwrap_or(0).max(0) as u64;
+            // Zero-copy GPU path: hand the decoded AHardwareBuffer downstream as
+            // an acquired reference (converted to a wgpu texture in `process`),
+            // skipping the CPU NV12 pack.
+            #[cfg(feature = "mediacodec-wgpu")]
+            if self.gpu_output {
+                if let Ok(hb) = img.hardware_buffer() {
+                    let w = img.width().unwrap_or(0).max(0) as u32;
+                    let h = img.height().unwrap_or(0).max(0) as u32;
+                    out.push(DecodedFrame::Ahb { ahb: hb.acquire(), width: w, height: h, pts_ns });
+                }
+                continue;
+            }
             if let Some(frame) = image_to_nv12(&img, pts_ns) {
                 out.push(frame);
             }
@@ -483,18 +570,31 @@ impl AsyncElement for MediaCodecDec {
             }
 
             for d in decoded {
-                let new_caps = nv12_caps(d.width, d.height);
+                let (new_caps, domain, pts_ns) = match d {
+                    DecodedFrame::Nv12 { nv12, width, height, pts_ns } => (
+                        nv12_caps(width, height),
+                        MemoryDomain::System(SystemSlice::from_boxed(nv12)),
+                        pts_ns,
+                    ),
+                    // Zero-copy GPU path: convert the decoded AHardwareBuffer to an
+                    // RGBA wgpu texture and emit it as MemoryDomain::WgpuTexture.
+                    #[cfg(feature = "mediacodec-wgpu")]
+                    DecodedFrame::Ahb { ahb, width, height, pts_ns } => {
+                        let domain = self.convert_ahb_to_domain(ahb, width, height).await?;
+                        (rgba_caps(width, height), domain, pts_ns)
+                    }
+                };
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
                     self.last_caps = Some(new_caps);
                 }
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(d.nv12)),
+                    domain,
                     timing: FrameTiming {
-                        pts_ns: d.pts_ns,
-                        dts_ns: d.pts_ns,
+                        pts_ns,
+                        dts_ns: pts_ns,
                         duration_ns: 0,
-                        capture_ns: d.pts_ns,
+                        capture_ns: pts_ns,
                         ..FrameTiming::default()
                     },
                     sequence: self.emitted,
@@ -571,12 +671,29 @@ fn image_to_nv12(img: &Image, pts_ns: u64) -> Option<DecodedFrame> {
             nv12.push(*v.get(row * v_rs + col * v_ps)?);
         }
     }
-    Some(DecodedFrame { nv12: nv12.into_boxed_slice(), width: w as u32, height: h as u32, pts_ns })
+    Some(DecodedFrame::Nv12 {
+        nv12: nv12.into_boxed_slice(),
+        width: w as u32,
+        height: h as u32,
+        pts_ns,
+    })
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Any,
+    }
+}
+
+/// Caps for the M304 zero-copy GPU path: RGBA (the converter's output format),
+/// carried on a `MemoryDomain::WgpuTexture` frame.
+#[cfg(feature = "mediacodec-wgpu")]
+fn rgba_caps(w: u32, h: u32) -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,

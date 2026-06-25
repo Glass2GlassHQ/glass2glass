@@ -77,19 +77,17 @@ leverage first:
 
 ## Platform: Android
 
-- `MediaCodecDec` zero-copy to GPU (M304): the bridge + on-device probe landed
-  (`mediacodec_wgpu`). Probe verdict on the Pixel 10a: the decoded
-  `AHardwareBuffer` imports as an *opaque* buffer (`VkFormat::UNDEFINED`,
-  `externalFormat != 0`, suggested YCbCr 601 / narrow), so there is no per-plane
-  image access and the planned per-plane `vkCmdCopyImage` device-local copy is
-  out. The raw-Vulkan `VkSamplerYcbcrConversion` + immutable-sampler convert-to-RGBA
-  compute pass is built and validated on device (`ahb_to_rgba_readback`: a real
-  frame -> RGBA, full per-channel range, no CPU readback of the YUV). Remaining:
-  wrap the RGBA storage image as a `wgpu::Texture` (`MemoryDomain::WgpuTexture`,
-  the cudawgpu `texture_from_raw` pattern) for `WgpuPreprocess`, reuse the
-  pipeline objects per frame instead of rebuilding, and wire it into
-  `MediaCodecDec` as the zero-copy output path. The `Surface` present sink is
-  still separate.
+- `MediaCodecDec` zero-copy to GPU (M304): DONE. `with_gpu_output()` emits
+  decoded frames as `MemoryDomain::WgpuTexture` (RGBA) via the `YcbcrToRgba`
+  converter (opaque AHB import -> immutable `VkSamplerYcbcrConversion` compute
+  pass -> RGBA `wgpu::Texture`), no CPU NV12 pack. Validated on the Pixel 10a
+  (9 frames, read back through wgpu, content survives). Follow-up: `WgpuPreprocess`
+  only imports NV12 today, so consuming the RGBA `WgpuRgbaTexture` keep-alive in
+  the inference path is an ML-on-Android task; and the converter blocks on a
+  per-frame fence (correctness over throughput) which a future ring of in-flight
+  conversions could pipeline.
+- Android `Surface` present sink (the on-screen output half; the decode-to-GPU
+  side is done above).
 - Encode, Camera2 capture, AAudio, Surface present.
 
 ## Receive / decode

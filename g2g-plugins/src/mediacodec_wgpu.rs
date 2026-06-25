@@ -634,3 +634,629 @@ pub unsafe fn ahb_to_rgba_readback(
         Ok(out)
     }
 }
+
+/// A converted RGBA frame living in a `wgpu::Texture`, with the device / queue it
+/// lives on. Boxed as the [`WgpuKeepAlive`](g2g_core::WgpuKeepAlive) of a
+/// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain::WgpuTexture): a consumer
+/// that links wgpu (e.g. a future RGBA import path in `WgpuPreprocess`) downcasts
+/// via [`as_any`](g2g_core::WgpuKeepAlive::as_any) to recover the texture and
+/// adopt the device (a texture is bindable only on its own device). The RGBA
+/// analog of g2g-ml's `WgpuNv12Texture`: the ycbcr conversion already happened in
+/// [`YcbcrToRgba`], so the consumer samples RGBA directly with no YUV math.
+pub struct WgpuRgbaTexture {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
+}
+
+impl core::fmt::Debug for WgpuRgbaTexture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WgpuRgbaTexture").field("texture", &self.texture).finish_non_exhaustive()
+    }
+}
+
+impl WgpuRgbaTexture {
+    /// Wrap an RGBA texture with the device / queue it lives on.
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
+        Self { device, queue, texture }
+    }
+
+    /// The backing RGBA (`Rgba8Unorm`) texture, for the importer to sample.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    /// The device the texture lives on; the importer adopts it to bind the
+    /// texture rather than uploading to its own device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue paired with [`device`](Self::device).
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+}
+
+impl g2g_core::WgpuKeepAlive for WgpuRgbaTexture {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+/// A reusable YCbCr -> RGBA converter for a fixed external format + geometry: the
+/// steady-state form of [`ahb_to_rgba_readback`]. Builds the ycbcr conversion,
+/// immutable sampler, descriptor layout, and compute pipeline once, then
+/// [`convert`](Self::convert) imports each decoded `AHardwareBuffer`, runs the
+/// compute pass into a fresh RGBA `wgpu::Texture`, and hands it downstream. No
+/// CPU / PCIe readback of the decoded frame is involved.
+///
+/// The conversion is synchronous: each [`convert`](Self::convert) submits to the
+/// device's queue and waits on a fence before returning, so the imported buffer
+/// can be released back to the decoder immediately and the texture is ready for
+/// the consumer. Because it submits to the wgpu device's queue directly (raw
+/// Vulkan, bypassing wgpu's queue mutex), the owning element must run on a
+/// single-thread executor, the same contract `MediaCodecDec` already documents.
+pub struct YcbcrToRgba {
+    device: wgpu::Device,
+    raw: ash::Device,
+    queue_raw: vk::Queue,
+    mem_props: vk::PhysicalDeviceMemoryProperties,
+    width: u32,
+    height: u32,
+    /// Probed once: the opaque buffer's external format and the import allocation
+    /// size / memory-type bits (constant for a fixed format + geometry stream).
+    external_format: u64,
+    allocation_size: u64,
+    import_mem_type_bits: u32,
+    conversion: vk::SamplerYcbcrConversion,
+    sampler: vk::Sampler,
+    dsl: vk::DescriptorSetLayout,
+    pipeline_layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    shader: vk::ShaderModule,
+    cmd_pool: vk::CommandPool,
+    cmd_buf: vk::CommandBuffer,
+    desc_pool: vk::DescriptorPool,
+    desc_set: vk::DescriptorSet,
+    fence: vk::Fence,
+}
+
+impl core::fmt::Debug for YcbcrToRgba {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("YcbcrToRgba")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+impl YcbcrToRgba {
+    /// Build the reusable conversion pipeline for an opaque AHardwareBuffer of
+    /// `info`'s external format and the given geometry.
+    ///
+    /// # Safety
+    /// `dev` must be the interop device from [`create_android_interop_device`];
+    /// `info` must be the [`ahb_format_info`] of the buffers this will convert.
+    pub unsafe fn new(
+        dev: &InteropDevice,
+        info: &AhbFormatInfo,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, G2gError> {
+        // SAFETY: caller guarantees a Vulkan interop device; the hal guard is held
+        // only to read the raw handles, which we clone / copy out.
+        unsafe {
+            let hal = dev
+                .device
+                .as_hal::<wgpu_hal::api::Vulkan>()
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let d: ash::Device = hal.raw_device().clone();
+            let inst: &ash::Instance = hal.shared_instance().raw_instance();
+            let phys = hal.raw_physical_device();
+            let qfi = hal.queue_family_index();
+            let queue_raw = hal.raw_queue();
+            let mem_props = inst.get_physical_device_memory_properties(phys);
+
+            let conversion = create_ycbcr_conversion(&d, info)?;
+            let mut conv_for_sampler =
+                vk::SamplerYcbcrConversionInfo::default().conversion(conversion);
+            let sampler_info = vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .unnormalized_coordinates(false)
+                .push_next(&mut conv_for_sampler);
+            let sampler = d.create_sampler(&sampler_info, None).map_err(gpu_err)?;
+
+            let immutable = [sampler];
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .immutable_samplers(&immutable),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            ];
+            let dsl = d
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            let set_layouts = [dsl];
+            let pipeline_layout = d
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
+                    None,
+                )
+                .map_err(gpu_err)?;
+
+            let code =
+                ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV)).map_err(gpu_err)?;
+            let shader = d
+                .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
+                .map_err(gpu_err)?;
+            let entry = CStr::from_bytes_with_nul(b"main\0").map_err(gpu_err)?;
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(shader)
+                .name(entry);
+            let pipeline = d
+                .create_compute_pipelines(
+                    vk::PipelineCache::null(),
+                    &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(pipeline_layout)],
+                    None,
+                )
+                .map_err(|(_, e)| gpu_err(e))?[0];
+
+            let pool_sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(1),
+            ];
+            let desc_pool = d
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            let desc_set = d
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(desc_pool)
+                        .set_layouts(&set_layouts),
+                )
+                .map_err(gpu_err)?[0];
+
+            let cmd_pool = d
+                .create_command_pool(
+                    &vk::CommandPoolCreateInfo::default().queue_family_index(qfi),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            let cmd_buf = d
+                .allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(cmd_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+                .map_err(gpu_err)?[0];
+            let fence =
+                d.create_fence(&vk::FenceCreateInfo::default(), None).map_err(gpu_err)?;
+
+            Ok(Self {
+                device: dev.device.clone(),
+                raw: d,
+                queue_raw,
+                mem_props,
+                width,
+                height,
+                external_format: info.external_format,
+                allocation_size: info.allocation_size,
+                import_mem_type_bits: info.memory_type_bits,
+                conversion,
+                sampler,
+                dsl,
+                pipeline_layout,
+                pipeline,
+                shader,
+                cmd_pool,
+                cmd_buf,
+                desc_pool,
+                desc_set,
+                fence,
+            })
+        }
+    }
+
+    /// The geometry this converter was built for.
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Import one decoded `AHardwareBuffer`, convert it to RGBA on the GPU, and
+    /// return the result as a `wgpu::Texture` (`Rgba8Unorm`), ready to sample.
+    /// Blocks until the conversion completes (fence wait), so `ahb` may be
+    /// released immediately after.
+    ///
+    /// # Safety
+    /// `ahb` must point to a live `AHardwareBuffer` of this converter's external
+    /// format and geometry (hold an acquired reference across the call).
+    pub unsafe fn convert(&self, ahb: *const vk::AHardwareBuffer) -> Result<wgpu::Texture, G2gError> {
+        let d = &self.raw;
+        let extent = vk::Extent3D { width: self.width, height: self.height, depth: 1 };
+        let color_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        // SAFETY: persistent objects were built on `d` in `new`; `ahb` is a live
+        // buffer per the contract; transient objects are destroyed after the
+        // fence signals (GPU idle), and the output image+memory transfer into the
+        // returned texture's drop callback.
+        unsafe {
+            // ---- import the AHB as a sampled image ----
+            let mut ext_fmt_img =
+                vk::ExternalFormatANDROID::default().external_format(self.external_format);
+            let mut ext_mem_img = vk::ExternalMemoryImageCreateInfo::default()
+                .handle_types(vk::ExternalMemoryHandleTypeFlags::ANDROID_HARDWARE_BUFFER_ANDROID);
+            let in_image = d
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::UNDEFINED)
+                        .extent(extent)
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::SAMPLED)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED)
+                        .push_next(&mut ext_mem_img)
+                        .push_next(&mut ext_fmt_img),
+                    None,
+                )
+                .map_err(gpu_err)?;
+
+            // Import allocation size / memory type were probed once at build time
+            // (constant for this stream's format + geometry).
+            let mem_type = first_memory_type(self.import_mem_type_bits)
+                .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let mut import =
+                vk::ImportAndroidHardwareBufferInfoANDROID::default().buffer(ahb as *mut _);
+            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(in_image);
+            let in_mem = d
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(self.allocation_size)
+                        .memory_type_index(mem_type)
+                        .push_next(&mut dedicated)
+                        .push_next(&mut import),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            d.bind_image_memory(in_image, in_mem, 0).map_err(gpu_err)?;
+
+            let mut conv_for_view =
+                vk::SamplerYcbcrConversionInfo::default().conversion(self.conversion);
+            let in_view = d
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(in_image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::UNDEFINED)
+                        .subresource_range(color_range)
+                        .push_next(&mut conv_for_view),
+                    None,
+                )
+                .map_err(gpu_err)?;
+
+            // ---- output RGBA image (handed to wgpu) ----
+            let out_image = d
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .extent(extent)
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(
+                            vk::ImageUsageFlags::STORAGE
+                                | vk::ImageUsageFlags::SAMPLED
+                                | vk::ImageUsageFlags::TRANSFER_SRC,
+                        )
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                        .initial_layout(vk::ImageLayout::UNDEFINED),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            let out_reqs = d.get_image_memory_requirements(out_image);
+            let out_mt = find_memory_type(
+                &self.mem_props,
+                out_reqs.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let out_mem = d
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(out_reqs.size)
+                        .memory_type_index(out_mt),
+                    None,
+                )
+                .map_err(gpu_err)?;
+            d.bind_image_memory(out_image, out_mem, 0).map_err(gpu_err)?;
+            let out_view = d
+                .create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(out_image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .subresource_range(color_range),
+                    None,
+                )
+                .map_err(gpu_err)?;
+
+            // ---- bind + record ----
+            let in_desc = [vk::DescriptorImageInfo::default()
+                .sampler(self.sampler)
+                .image_view(in_view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let out_desc = [vk::DescriptorImageInfo::default()
+                .image_view(out_view)
+                .image_layout(vk::ImageLayout::GENERAL)];
+            d.update_descriptor_sets(
+                &[
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.desc_set)
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&in_desc),
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.desc_set)
+                        .dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                        .image_info(&out_desc),
+                ],
+                &[],
+            );
+
+            d.reset_command_pool(self.cmd_pool, vk::CommandPoolResetFlags::empty())
+                .map_err(gpu_err)?;
+            let cb = self.cmd_buf;
+            d.begin_command_buffer(
+                cb,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .map_err(gpu_err)?;
+
+            let to_read = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(in_image)
+                .subresource_range(color_range);
+            let to_general = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(out_image)
+                .subresource_range(color_range);
+            d.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_read, to_general],
+            );
+            d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+            d.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline_layout,
+                0,
+                &[self.desc_set],
+                &[],
+            );
+            d.cmd_dispatch(cb, self.width.div_ceil(8), self.height.div_ceil(8), 1);
+            // Leave the output in SHADER_READ_ONLY_OPTIMAL: a tidy layout for the
+            // wgpu consumer (which still re-transitions from UNDEFINED on first use).
+            let to_sampled = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(out_image)
+                .subresource_range(color_range);
+            d.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_sampled],
+            );
+            d.end_command_buffer(cb).map_err(gpu_err)?;
+
+            d.reset_fences(&[self.fence]).map_err(gpu_err)?;
+            let cbs = [cb];
+            d.queue_submit(
+                self.queue_raw,
+                &[vk::SubmitInfo::default().command_buffers(&cbs)],
+                self.fence,
+            )
+            .map_err(gpu_err)?;
+            d.wait_for_fences(&[self.fence], true, u64::MAX).map_err(gpu_err)?;
+
+            // ---- transient cleanup (GPU idle past the fence) ----
+            d.destroy_image_view(in_view, None);
+            d.destroy_image(in_image, None);
+            d.free_memory(in_mem, None);
+            d.destroy_image_view(out_view, None);
+
+            // ---- wrap the output image as a wgpu texture ----
+            Ok(self.wrap_rgba_texture(out_image, out_mem))
+        }
+    }
+
+    /// Wrap a self-allocated RGBA image as a `wgpu::Texture` owning its memory via
+    /// a drop callback (the cudawgpu `texture_from_raw` pattern).
+    fn wrap_rgba_texture(&self, image: vk::Image, memory: vk::DeviceMemory) -> wgpu::Texture {
+        let size = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        let raw = self.raw.clone();
+        // SAFETY: `image` / `memory` were allocated on this device and are
+        // transferred into the drop callback (fired once when wgpu drops the
+        // texture, after the GPU is done with it).
+        let hal_texture = unsafe {
+            let hal_device =
+                self.device.as_hal::<wgpu_hal::api::Vulkan>().expect("vulkan wgpu device");
+            let drop_cb: wgpu_hal::DropCallback = Box::new(move || {
+                raw.destroy_image(image, None);
+                raw.free_memory(memory, None);
+            });
+            hal_device.texture_from_raw(
+                image,
+                &wgpu_hal::TextureDescriptor {
+                    label: Some("mediacodec-rgba"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+                    memory_flags: wgpu_hal::MemoryFlags::empty(),
+                    view_formats: Vec::new(),
+                },
+                Some(drop_cb),
+                wgpu_hal::vulkan::TextureMemory::External,
+            )
+        };
+        // SAFETY: `hal_texture` was just produced by this device's hal.
+        unsafe {
+            self.device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some("mediacodec-rgba"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                },
+            )
+        }
+    }
+}
+
+impl Drop for YcbcrToRgba {
+    fn drop(&mut self) {
+        // SAFETY: the element owns this converter and drops it only when idle (no
+        // in-flight conversion); every handle was created on `self.raw`.
+        unsafe {
+            let _ = self.raw.device_wait_idle();
+            self.raw.destroy_fence(self.fence, None);
+            self.raw.destroy_command_pool(self.cmd_pool, None);
+            self.raw.destroy_descriptor_pool(self.desc_pool, None);
+            self.raw.destroy_pipeline(self.pipeline, None);
+            self.raw.destroy_shader_module(self.shader, None);
+            self.raw.destroy_pipeline_layout(self.pipeline_layout, None);
+            self.raw.destroy_descriptor_set_layout(self.dsl, None);
+            self.raw.destroy_sampler(self.sampler, None);
+            self.raw.destroy_sampler_ycbcr_conversion(self.conversion, None);
+        }
+    }
+}
+
+
+/// Read a converted [`WgpuRgbaTexture`] back to host memory through wgpu, for
+/// on-device validation of the zero-copy output path: a normal
+/// `copy_texture_to_buffer` + map on the texture's own device proves wgpu can
+/// consume the externally-written texture (and that its content survived the
+/// adoption). Returns `width * height * 4` bytes (`Rgba8Unorm`), de-padded from
+/// the 256-byte row alignment wgpu requires.
+pub fn readback_rgba_texture(owner: &WgpuRgbaTexture) -> Result<Vec<u8>, G2gError> {
+    let device = owner.device();
+    let queue = owner.queue();
+    let texture = owner.texture();
+    let w = texture.width();
+    let h = texture.height();
+    let unpadded = w * 4;
+    let padded = unpadded.div_ceil(256) * 256;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rgba-readback"),
+        size: (padded as u64) * (h as u64),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rgba-readback") });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit([enc.finish()]);
+
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+        .map_err(gpu_err)?;
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((unpadded as usize) * (h as usize));
+    for row in 0..h as usize {
+        let start = row * padded as usize;
+        out.extend_from_slice(&data[start..start + unpadded as usize]);
+    }
+    drop(data);
+    buffer.unmap();
+    Ok(out)
+}

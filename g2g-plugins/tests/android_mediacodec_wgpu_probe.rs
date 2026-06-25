@@ -21,9 +21,10 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, VideoCodec};
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate, VideoCodec};
 use g2g_plugins::mediacodec_wgpu::{
-    ahb_format_info, ahb_to_rgba_readback, create_android_interop_device,
+    ahb_format_info, ahb_to_rgba_readback, create_android_interop_device, readback_rgba_texture,
+    WgpuRgbaTexture,
 };
 use g2g_plugins::mediacodecdec::MediaCodecDec;
 
@@ -73,6 +74,21 @@ struct Discard;
 impl OutputSink for Discard {
     fn push<'a>(&'a mut self, _packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
         Box::pin(async move { Ok(PushOutcome::Accepted) })
+    }
+}
+
+/// Sink that records every packet, to inspect the emitted WgpuTexture frames.
+#[derive(Default)]
+struct Collect {
+    packets: Vec<PipelinePacket>,
+}
+
+impl OutputSink for Collect {
+    fn push<'a>(&'a mut self, packet: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+        Box::pin(async move {
+            self.packets.push(packet);
+            Ok(PushOutcome::Accepted)
+        })
     }
 }
 
@@ -247,4 +263,103 @@ async fn probe_ahb_vulkan_format() {
     let has_variance = (0..3).any(|c| max[c] > min[c]);
     assert!(has_variance, "converted RGBA must vary (got a flat image: min={min:?} max={max:?})");
     eprintln!(">>> ycbcr -> rgba conversion validated on device.");
+}
+
+/// End-to-end M304: drive `MediaCodecDec` in zero-copy GPU-output mode and assert
+/// it emits `MemoryDomain::WgpuTexture` RGBA frames whose content survives the
+/// wgpu hand-off (read back through wgpu on the texture's own device).
+#[tokio::test]
+async fn mediacodec_gpu_output_emits_wgpu_texture() {
+    start_binder_threadpool();
+
+    let (w, h) = (640u32, 480u32);
+    let mut dec = MediaCodecDec::h264().with_gpu_output();
+    let upstream = Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Any,
+    };
+    let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
+    assert!(matches!(
+        dec.configure_pipeline(&narrowed).expect("configure decoder"),
+        ConfigureOutcome::Accepted
+    ));
+
+    let mut sink = Collect::default();
+    let mut pts_ns = 0u64;
+    for au in access_units(H264) {
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(au.to_vec().into_boxed_slice())),
+            timing: FrameTiming { pts_ns, dts_ns: pts_ns, capture_ns: pts_ns, ..FrameTiming::default() },
+            sequence: 0,
+            meta: Default::default(),
+        };
+        dec.process(PipelinePacket::DataFrame(frame), &mut sink).await.expect("process access unit");
+        pts_ns += 33_366_700;
+    }
+    dec.process(PipelinePacket::Eos, &mut sink).await.expect("Eos drains the codec");
+
+    // The first CapsChanged advertises RGBA (the converter's output), not NV12.
+    let first_caps = sink.packets.iter().find_map(|p| match p {
+        PipelinePacket::CapsChanged(c) => Some(c.clone()),
+        _ => None,
+    });
+    match first_caps {
+        Some(Caps::RawVideo { format: RawVideoFormat::Rgba8, width: Dim::Fixed(cw), height: Dim::Fixed(ch), .. }) => {
+            assert_eq!((cw, ch), (w, h), "RGBA caps geometry");
+        }
+        other => panic!("expected RGBA caps in GPU-output mode, got {other:?}"),
+    }
+
+    // Collect the emitted WgpuTexture frames.
+    let textures: Vec<_> = sink
+        .packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::DataFrame(f) => match &f.domain {
+                MemoryDomain::WgpuTexture(t) => Some(t),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    eprintln!("=== M304 GPU output: {} WgpuTexture frame(s) ===", textures.len());
+    assert!(!textures.is_empty(), "expected at least one WgpuTexture frame");
+
+    // Recover the texture via the keep-alive downcast (the consumer's path) and
+    // read it back through wgpu: proves wgpu consumes the externally-written
+    // texture and its content survived adoption.
+    let owned = textures[0];
+    assert_eq!((owned.width, owned.height), (w, h), "frame dimensions");
+    let owner = owned
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuRgbaTexture>()
+        .expect("WgpuTexture keep-alive must be a WgpuRgbaTexture");
+    let rgba = readback_rgba_texture(owner).expect("read RGBA texture back through wgpu");
+    assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA byte length");
+
+    let alpha_all_opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
+    assert!(alpha_all_opaque, "shader writes opaque alpha");
+    let mut min = [255u8; 3];
+    let mut max = [0u8; 3];
+    let mut sum = [0u64; 3];
+    for px in rgba.chunks_exact(4) {
+        for c in 0..3 {
+            min[c] = min[c].min(px[c]);
+            max[c] = max[c].max(px[c]);
+            sum[c] += px[c] as u64;
+        }
+    }
+    let n = (w * h) as u64;
+    eprintln!(
+        "R mean={} [{}..{}]  G mean={} [{}..{}]  B mean={} [{}..{}]",
+        sum[0] / n, min[0], max[0],
+        sum[1] / n, min[1], max[1],
+        sum[2] / n, min[2], max[2],
+    );
+    let has_variance = (0..3).any(|c| max[c] > min[c]);
+    assert!(has_variance, "converted texture must vary (min={min:?} max={max:?})");
+    eprintln!(">>> MediaCodecDec GPU-output (WgpuTexture) validated on device.");
 }
