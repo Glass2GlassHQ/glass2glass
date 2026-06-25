@@ -21,14 +21,15 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat,
+    MemoryDomain, OutputSink, PassthroughFields, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 #[derive(Debug)]
@@ -46,6 +47,11 @@ pub struct VideoRate {
     /// fails loud at negotiation / configure.
     rate_q16: u32,
     dt_ns: u64,
+    /// Caps-driven (M290): take the target framerate from the negotiated output
+    /// caps (a downstream capsfilter), the gst `videorate ! caps,framerate=N`
+    /// idiom, instead of the `framerate` property. With no downstream pin it
+    /// defaults to passthrough (the input rate, no retiming).
+    auto: bool,
     input: Option<(RawVideoFormat, u32, u32)>,
     /// The most recent input frame, held one step so the next frame's PTS
     /// decides how many output slots it serves.
@@ -74,6 +80,7 @@ impl VideoRate {
         Self {
             rate_q16,
             dt_ns,
+            auto: false,
             input: None,
             prev: None,
             next_pts: None,
@@ -81,6 +88,33 @@ impl VideoRate {
             last_caps: None,
             emitted: 0,
         }
+    }
+
+    /// Caps-driven (M290): take the target framerate from the negotiated output
+    /// caps (a downstream capsfilter). With no downstream pin it passes the
+    /// input rate through unchanged.
+    pub fn auto() -> Self {
+        Self {
+            rate_q16: 0,
+            dt_ns: 0,
+            auto: true,
+            input: None,
+            prev: None,
+            next_pts: None,
+            configured: false,
+            last_caps: None,
+            emitted: 0,
+        }
+    }
+
+    /// Set the effective target framerate (Q16 fps) and matching frame interval.
+    fn set_rate_q16(&mut self, rate_q16: u32) {
+        self.rate_q16 = rate_q16;
+        self.dt_ns = if rate_q16 > 0 {
+            (1_000_000_000u64 << 16) / rate_q16 as u64
+        } else {
+            0
+        };
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
@@ -187,27 +221,64 @@ impl AsyncElement for VideoRate {
     /// loud.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let rate = self.rate_q16;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            Caps::RawVideo { format, width, height, .. } if rate > 0 => {
-                CapsSet::one(Caps::RawVideo {
+        let auto = self.auto;
+        // Passthrough format + geometry (retarget framerate only), so a
+        // downstream geometry pin still couples back through this rate-only
+        // element. Framerate is the changed field.
+        let passthrough = PassthroughFields::NONE.with_format().with_width().with_height();
+        let derive = Box::new(move |input: &Caps| match input {
+            Caps::RawVideo { format, width, height, framerate } => {
+                let mk = |fr: Rate| Caps::RawVideo {
                     format: *format,
                     width: width.clone(),
                     height: height.clone(),
-                    framerate: Rate::Fixed(rate),
-                })
+                    framerate: fr,
+                };
+                if auto {
+                    // Caps-driven: default to passthrough (the input rate, no
+                    // retiming), but advertise "any rate" so a downstream
+                    // capsfilter pins the target. Passthrough is preferred (first).
+                    CapsSet::from_alternatives(vec![mk(framerate.clone()), mk(Rate::Any)])
+                } else if rate > 0 {
+                    // Property-driven: the fixed target framerate.
+                    CapsSet::one(mk(Rate::Fixed(rate)))
+                } else {
+                    // Invalid (non-positive property, not auto): fail loud.
+                    CapsSet::from_alternatives(Vec::new())
+                }
             }
             _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        });
+        CapsConstraint::DerivedCoupled { derive, passthrough }
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.rate_q16 == 0 {
+        // A non-auto instance needs a positive target; an auto instance gets its
+        // rate from `configure_output` (the downstream pin), so 0 is fine here.
+        if !self.auto && self.rate_q16 == 0 {
             return Err(G2gError::CapsMismatch);
         }
         let (format, w, h) = self.accept_input(absolute_caps)?;
         self.input = Some((format, w, h));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// M290: in auto mode, take the target framerate from the negotiated output
+    /// caps (a downstream capsfilter). The framerate is fixated by the solver, so
+    /// it is concrete here. No-op for the property-driven instance.
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        if !self.auto {
+            return Ok(());
+        }
+        let Caps::RawVideo { framerate: Rate::Fixed(q), .. } = output_caps else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if *q == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.set_rate_q16(*q);
+        Ok(())
     }
 
     fn process<'a>(
@@ -221,6 +292,12 @@ impl AsyncElement for VideoRate {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    // An auto instance with no downstream framerate pin never
+                    // resolved a target (dt_ns == 0); fail loud rather than hold
+                    // every frame forever.
+                    if self.rate_q16 == 0 {
+                        return Err(G2gError::NotConfigured);
+                    }
                     let (format, w, h) = self.input.ok_or(G2gError::NotConfigured)?;
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
@@ -309,12 +386,9 @@ impl AsyncElement for VideoRate {
                 if n <= 0 || d <= 0 {
                     return Err(PropError::Value);
                 }
-                self.rate_q16 = (((n as u64) << 16) / d as u64) as u32;
-                self.dt_ns = if self.rate_q16 > 0 {
-                    (1_000_000_000u64 << 16) / self.rate_q16 as u64
-                } else {
-                    0
-                };
+                // An explicit framerate property overrides caps-driven mode.
+                self.auto = false;
+                self.set_rate_q16((((n as u64) << 16) / d as u64) as u32);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -446,26 +520,56 @@ mod tests {
         assert!(r.configure_pipeline(&caps).is_ok());
     }
 
-    #[test]
-    fn derived_output_replaces_framerate_only() {
-        let r = VideoRate::new(10.0);
-        let CapsConstraint::DerivedOutput(f) = r.caps_constraint_as_transform() else {
-            panic!("expected DerivedOutput");
-        };
-        let out = f(&Caps::RawVideo {
+    fn nv12_320x240(rate: Rate) -> Caps {
+        Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
-            framerate: Rate::Fixed(30 << 16),
-        });
+            framerate: rate,
+        }
+    }
+
+    #[test]
+    fn derived_output_replaces_framerate_only() {
+        let r = VideoRate::new(10.0);
+        let CapsConstraint::DerivedCoupled { derive, passthrough } = r.caps_constraint_as_transform()
+        else {
+            panic!("expected DerivedCoupled");
+        };
+        // format + geometry pass through; framerate is the retargeted field.
+        assert_eq!(passthrough, PassthroughFields::NONE.with_format().with_width().with_height());
+        let out = derive(&nv12_320x240(Rate::Fixed(30 << 16)));
+        assert_eq!(out.alternatives(), &[nv12_320x240(Rate::Fixed(10 << 16))]);
+    }
+
+    #[test]
+    fn auto_advertises_passthrough_then_any_and_resolves_from_output() {
+        // M290 caps-driven: with no property, the derive prefers the input rate
+        // (passthrough) and also advertises `Rate::Any` so a downstream
+        // framerate pin couples back.
+        let mut r = VideoRate::auto();
+        {
+            let CapsConstraint::DerivedCoupled { derive, .. } = r.caps_constraint_as_transform()
+            else {
+                panic!("expected DerivedCoupled");
+            };
+            let out = derive(&nv12_320x240(Rate::Fixed(30 << 16)));
+            assert_eq!(
+                out.alternatives(),
+                &[nv12_320x240(Rate::Fixed(30 << 16)), nv12_320x240(Rate::Any)],
+                "passthrough preferred, then any-rate for a downstream pin"
+            );
+        }
+        // The solver fixates the output to the pinned 15 fps; configure_output
+        // captures it as the effective target.
+        r.configure_output(&nv12_320x240(Rate::Fixed(15 << 16))).expect("fixed output rate");
+        assert_eq!(r.rate_q16, 15 << 16);
+        assert_eq!(r.dt_ns, (1_000_000_000u64 << 16) / (15 << 16) as u64);
+        // An un-fixated (Any) output rate is rejected loud.
+        let mut r2 = VideoRate::auto();
         assert_eq!(
-            out.alternatives(),
-            &[Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(320),
-                height: Dim::Fixed(240),
-                framerate: Rate::Fixed(10 << 16),
-            }]
+            r2.configure_output(&nv12_320x240(Rate::Any)).expect_err("any rate"),
+            G2gError::CapsMismatch
         );
     }
 }

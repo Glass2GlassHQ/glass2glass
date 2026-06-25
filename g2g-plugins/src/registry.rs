@@ -197,7 +197,10 @@ pub fn default_registry() -> Registry {
     }));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
-        Box::new(VideoRate::new(30.0))
+        // Caps-driven by default (M290): `videorate ! caps,framerate=N` sets the
+        // rate; `videorate framerate=N` still works via the property; bare
+        // `videorate` passes the input rate through.
+        Box::new(VideoRate::auto())
     }));
 
     // Audio transforms.
