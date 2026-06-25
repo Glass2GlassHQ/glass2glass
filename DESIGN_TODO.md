@@ -425,8 +425,10 @@ explainer now exist; the remaining items extend them. Highest leverage first:
   per-element / per-link p50 / p99 + dropped-frames + fill-level breakdown on run
   end (or live). The glass-to-glass analyses (NVDEC floor, `link_capacity`
   dominance) are done by hand today.
-- **criterion benchmarks + baseline** for the hot paths (caps solve, runner loop,
-  frame convert) so the latency moat is regression-guarded.
+- **Runner-loop throughput bench.** The `g2g-bench` crate (M284) benches the
+  caps solve and frame convert; add a runner / bounded-channel throughput bench
+  (it needs an async harness, so it was deferred), and wire a CI baseline-compare
+  step so a regression fails loudly.
 - **Element scaffolding.** `xtask new-element` (a new subcommand) stamps the
   `AsyncElement` / `SourceLoop` impl + pad templates + registry stub + milestone
   test file (the boilerplate every `Mn` repeats).

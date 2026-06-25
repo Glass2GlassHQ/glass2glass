@@ -381,8 +381,9 @@ impl PadTemplates for VideoConvert {
 }
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
-/// input frame; dims are even whenever a 4:2:0 format is involved.
-pub(crate) fn convert(
+/// input frame; dims are even whenever a 4:2:0 format is involved. Public so the
+/// `convert` benchmark (M284) can exercise this hot path directly.
+pub fn convert(
     src: &[u8],
     from: RawVideoFormat,
     to: RawVideoFormat,

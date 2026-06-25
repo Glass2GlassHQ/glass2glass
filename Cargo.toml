@@ -25,6 +25,9 @@ exclude = [
     # Cortex-M footprint-measurement harness (M268): a no_std staticlib measured
     # with size+gc-sections, kept out of the normal build.
     "examples/g2g-size",
+    # Criterion benchmark harness (M284): criterion pulls plotters / rayon, kept
+    # out of the normal build / CI. Run via `cargo xtask bench`.
+    "g2g-bench",
 ]
 
 [workspace.package]

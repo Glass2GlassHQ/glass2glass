@@ -35,6 +35,7 @@ fn main() {
         "test" => cmd_test_here(rest),
         "size" => cmd_size(),
         "wasm" => cmd_wasm(),
+        "bench" => cmd_bench(rest),
         "ffi-probe" => cmd_ffi_probe(rest),
         "help" | "-h" | "--help" => {
             print_help();
@@ -57,6 +58,7 @@ fn print_help() {
            test --here    run the feature tests this host supports (--dry-run to just probe)\n  \
            size           build + measure the Cortex-M footprint harness\n  \
            wasm           build the wasm32 targets (core + web plugins)\n  \
+           bench [args]   run the criterion benchmarks (caps solve, frame convert)\n  \
            ffi-probe      sizeof/offsetof a C SDK struct, emit the repr(C) size assert\n  \
            help           show this message\n\n\
          ffi-probe usage:\n  \
@@ -352,6 +354,20 @@ fn cmd_wasm() -> i32 {
         &["check", "-p", "g2g-plugins", "--target", "wasm32-unknown-unknown", "--features", "web-codecs"],
         &env_wc,
     )
+}
+
+// --- bench --------------------------------------------------------------
+
+/// Run the criterion benchmarks. They live in the standalone `g2g-bench` crate
+/// (excluded from the workspace so criterion's plotters / rayon are never built
+/// by a normal CI run), so this drives them by manifest path. Extra args pass
+/// through to criterion (e.g. `cargo xtask bench -- --save-baseline main`).
+fn cmd_bench(rest: &[String]) -> i32 {
+    let mut args: Vec<&str> = vec!["bench", "--manifest-path", "g2g-bench/Cargo.toml"];
+    for a in rest {
+        args.push(a);
+    }
+    run("benchmarks (g2g-bench)", "cargo", &args, &[])
 }
 
 // --- ffi-probe ----------------------------------------------------------

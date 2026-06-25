@@ -1838,7 +1838,16 @@ that includes the header and prints `sizeof` of the struct plus `offsetof` of
 each field, compiles and runs it, and emits the `const _: () = assert!(size_of::
 <Struct>() == N)` to paste alongside the `#[repr(C)]` transcription. Layout is
 locked down before it is trusted, and an SDK version bump that resizes a struct
-fails the build rather than the GPU.
+fails the build rather than the GPU. `bench` runs the criterion benchmarks.
+
+The criterion benchmarks live in a standalone `g2g-bench` crate, excluded from
+the workspace (like `examples/g2g-size`) because criterion pulls plotters / rayon
+that a `--all-targets` CI job would otherwise build on every push, and Cargo's
+`required-features` does not gate a dev-dependency under `--all-targets`. They
+guard the latency moat's hot paths: the caps algebra + linear / DAG solvers
+(`benches/caps.rs`) and the per-pixel software frame conversion
+(`benches/convert.rs`). `cargo xtask bench` drives them by manifest path, passing
+criterion args through (e.g. `--save-baseline`).
 
 ---
 

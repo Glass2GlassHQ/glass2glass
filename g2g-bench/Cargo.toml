@@ -1,0 +1,31 @@
+# Criterion benchmark harness (M284), not a workspace member (see root
+# `exclude`). criterion pulls plotters / rayon, which would otherwise be built by
+# every `cargo *--all-targets` CI job (required-features does not gate dev-deps
+# under `--all-targets`); keeping it standalone keeps the core CI jobs lean, the
+# same reason `examples/g2g-size` and the bevy demo are excluded.
+#
+# Run: `cargo bench --manifest-path g2g-bench/Cargo.toml` (or `cargo xtask bench`).
+[package]
+name = "g2g-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+# dyn-slot gives the full std + multi-thread + runtime combo the solver + lib
+# build need; the benches call the caps solver under `runtime`.
+g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+
+[[bench]]
+name = "caps"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
