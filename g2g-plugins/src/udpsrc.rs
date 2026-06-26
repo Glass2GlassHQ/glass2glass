@@ -325,16 +325,21 @@ impl SourceLoop for UdpSrc {
                     (None, None) => None,
                 };
 
-                let recv = socket.recv_from(&mut buf);
                 let received = match timeout {
                     Some(delay) if delay > 0 => {
                         // Err (deadline elapsed, no packet) => None: loop to flush / report.
-                        tokio::time::timeout(core::time::Duration::from_nanos(delay), recv)
-                            .await
-                            .ok()
+                        tokio::time::timeout(
+                            core::time::Duration::from_nanos(delay),
+                            socket.recv_from(&mut buf),
+                        )
+                        .await
+                        .ok()
                     }
-                    Some(_) => Some(recv.await),
-                    None => Some(recv.await),
+                    // Deadline already elapsed (delay == 0): don't block on recv;
+                    // loop back so the jitter flush / receiver report at the top
+                    // of the loop fires now instead of waiting for a packet.
+                    Some(_) => None,
+                    None => Some(socket.recv_from(&mut buf).await),
                 };
 
                 let Some(r) = received else { continue };
