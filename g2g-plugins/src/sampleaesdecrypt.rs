@@ -380,6 +380,32 @@ mod tests {
     }
 
     #[test]
+    fn avc_pattern_encrypts_only_the_spec_offsets() {
+        // Pin the SAMPLE-AES AVC pattern to literal spec offsets, independent of
+        // the offset loop the encrypt oracle and decrypt share: a 32-byte clear
+        // leader, then a 16-byte encrypted block every 160 bytes, the trailing
+        // short run left clear. For a 452-byte de-escaped RBSP that is exactly
+        // blocks at 32, 192, 352. A geometry bug shared by both sides would still
+        // round-trip cleanly, so the round-trip test alone cannot catch it; this
+        // checks the actual encrypted positions against the hand-derived spec.
+        let n = 452usize;
+        let clear: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(7)).collect();
+        let mut buf = clear.clone();
+        encrypt_avc_pattern(&mut buf, &KEY, &IV);
+
+        const ENCRYPTED: [usize; 3] = [32, 192, 352];
+        for off in 0..n {
+            let in_block = ENCRYPTED.iter().any(|&b| off >= b && off < b + 16);
+            if !in_block {
+                assert_eq!(buf[off], clear[off], "byte {off} outside the pattern must stay clear");
+            }
+        }
+        for &b in &ENCRYPTED {
+            assert_ne!(buf[b..b + 16], clear[b..b + 16], "the spec block at {b} must be encrypted");
+        }
+    }
+
+    #[test]
     fn avc_leaves_short_and_non_slice_nals_clear() {
         // SPS (type 7), a short slice (<= 48), and a parameter-set NAL must pass
         // through untouched.
