@@ -441,7 +441,9 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
             for (p, px) in buf.chunks_exact_mut(4).enumerate() {
                 let x = p % w;
                 // Distance from the bar's left edge, modulo width (so it wraps).
-                let within = x.wrapping_sub(bar_x) % w < bar_w;
+                // Add `w` before subtracting so x < bar_x stays modular in w
+                // instead of wrapping through 2^usize.
+                let within = (x + w - bar_x) % w < bar_w;
                 let v = if within { 255 } else { 32 };
                 px[0] = v;
                 px[1] = v;
@@ -573,6 +575,19 @@ mod tests {
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             // Alpha stays opaque so the content survives a compositor blend.
             assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
+        }
+    }
+
+    #[test]
+    fn moving_bar_wraps_modulo_width_not_2_pow_64() {
+        // Width 10 is not a power of two, so the old `wrapping_sub % w` mislit a
+        // column left of the bar origin. seq=2 -> bar_x=8, bar_w=1: only column
+        // 8 is bright; the buggy code also lit column 2.
+        let mut buf = [0u8; 40];
+        fill_pattern(Pattern::MovingBar, &mut buf, 10, 2);
+        for (x, px) in buf.chunks_exact(4).enumerate() {
+            let expected = if x == 8 { 255 } else { 32 };
+            assert_eq!(px[0], expected, "column {x}");
         }
     }
 
