@@ -16,6 +16,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -46,8 +47,12 @@ pub struct Av1Enc {
     height: u32,
     framerate: Rate,
     ctx: Option<Context<u8>>,
-    /// Source PTS per input frame number, indexed by `Packet::input_frameno`.
-    pts_by_frameno: Vec<u64>,
+    /// Source PTS keyed by `Packet::input_frameno`. Entries are removed as their
+    /// packet is emitted, so this stays bounded to the encoder's lookahead window
+    /// rather than growing one slot per frame for the stream lifetime.
+    pts_by_frameno: BTreeMap<u64, u64>,
+    /// Next input frame number to assign (resets with the rav1e context).
+    next_frameno: u64,
     emitted: u64,
     caps_sent: bool,
     /// A downstream element (e.g. a WebRTC sink on a remote PLI) asked for a
@@ -86,7 +91,8 @@ impl Av1Enc {
             height: 0,
             framerate: Rate::Any,
             ctx: None,
-            pts_by_frameno: Vec::new(),
+            pts_by_frameno: BTreeMap::new(),
+            next_frameno: 0,
             emitted: 0,
             caps_sent: false,
             force_keyframe: false,
@@ -140,6 +146,7 @@ impl Av1Enc {
         let ctx = cfg.new_context::<u8>().map_err(|_| G2gError::CapsMismatch)?;
         self.ctx = Some(ctx);
         self.pts_by_frameno.clear();
+        self.next_frameno = 0;
         Ok(())
     }
 
@@ -151,7 +158,8 @@ impl Av1Enc {
         if i420.len() < y_size + 2 * c_size {
             return Err(G2gError::CapsMismatch);
         }
-        self.pts_by_frameno.push(pts_ns);
+        self.pts_by_frameno.insert(self.next_frameno, pts_ns);
+        self.next_frameno += 1;
         // A pending keyframe request (downstream PLI) overrides this frame's type
         // to Key; consume the flag now. `FrameParameters` is not `Clone`, so it is
         // rebuilt per `send_frame` attempt below (the loop retries on EnoughData).
@@ -194,11 +202,9 @@ impl Av1Enc {
         Ok(self.map_pts(raw))
     }
 
-    fn map_pts(&self, raw: Vec<(Vec<u8>, u64)>) -> Vec<(Vec<u8>, u64)> {
+    fn map_pts(&mut self, raw: Vec<(Vec<u8>, u64)>) -> Vec<(Vec<u8>, u64)> {
         raw.into_iter()
-            .map(|(data, frameno)| {
-                (data, self.pts_by_frameno.get(frameno as usize).copied().unwrap_or(0))
-            })
+            .map(|(data, frameno)| (data, self.pts_by_frameno.remove(&frameno).unwrap_or(0)))
             .collect()
     }
 
@@ -466,6 +472,49 @@ mod tests {
             _ => None,
         });
         assert_eq!(geometry, Some((64, 64)), "av1parse recovers the encoded 64x64 geometry");
+    }
+
+    #[tokio::test]
+    async fn pts_map_is_bounded_and_round_trips() {
+        #[derive(Default)]
+        struct PtsSink {
+            pts: Vec<u64>,
+        }
+        impl OutputSink for PtsSink {
+            fn push<'a>(
+                &'a mut self,
+                packet: PipelinePacket,
+            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+                Box::pin(async move {
+                    if let PipelinePacket::DataFrame(f) = packet {
+                        self.pts.push(f.timing.pts_ns);
+                    }
+                    Ok(PushOutcome::Accepted)
+                })
+            }
+        }
+
+        let mut enc = Av1Enc::new().with_speed(10);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        let mut sink = PtsSink::default();
+        let n = 40u64;
+        for i in 0..n {
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(i420_grey(64, 64).into_boxed_slice())),
+                FrameTiming { pts_ns: (i + 1) * 33_000_000, ..FrameTiming::default() },
+                i,
+            );
+            enc.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+            // The map holds only the in-flight lookahead, never one slot per frame.
+            assert!(enc.pts_by_frameno.len() < n as usize, "pts map stays bounded");
+        }
+        enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let mut got = sink.pts.clone();
+        got.sort_unstable();
+        let expected: Vec<u64> = (0..n).map(|i| (i + 1) * 33_000_000).collect();
+        assert_eq!(got, expected, "each source pts is emitted exactly once");
+        assert!(enc.pts_by_frameno.is_empty(), "pts map fully drains at EOS");
     }
 
     #[test]
