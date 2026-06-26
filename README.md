@@ -398,6 +398,57 @@ out-of-order packets, and NACK-driven recovery (a lossy relay drops chosen
 sequences; the receiver NACKs, the sender retransmits, every access unit is
 recovered in order).
 
+## Android on-device testing
+
+The Android elements (`mediacodec` decode/encode, `mediacodec-wgpu` zero-copy
+decode->GPU, `aaudio` audio, `camera2` capture) are cross-compiled in CI but
+validated on a real device. Each ships an on-device probe + a smoke script that
+builds just that test binary, `adb push`es it to `/data/local/tmp`, runs it, and
+checks the libtest summary.
+
+**Prerequisites:**
+
+- `adb` on `PATH` with a phone attached and USB debugging authorised
+  (`adb devices` lists it as `device`).
+- `cargo-ndk` (`cargo install cargo-ndk`).
+- The rustup target: `rustup target add aarch64-linux-android`.
+- The Android NDK, with `ANDROID_NDK_HOME` pointing at it (cargo-ndk uses that to
+  find the toolchain), e.g. `export ANDROID_NDK_HOME=$HOME/android-ndk-r27c`.
+
+**Run a probe:**
+
+```sh
+export ANDROID_NDK_HOME=$HOME/android-ndk-r27c
+
+tools/android-mediacodec-smoke.sh        # decode  (H.264 + HEVC -> NV12)
+tools/android-mediacodec-enc-smoke.sh    # encode  (NV12 -> Annex-B H.264)
+tools/android-aaudio-smoke.sh            # audio   (render; mic capture best-effort)
+tools/android-camera2-smoke.sh           # camera  (caps + FFI; capture best-effort)
+tools/android-surface-present-smoke.sh   # decode -> GPU -> on-screen present
+```
+
+Each takes an optional ABI argument (default `arm64-v8a`; also `x86_64`,
+`armeabi-v7a`). To drive an element by hand, build the test the same way and push
+the binary yourself:
+
+```sh
+cargo ndk --platform 26 -t arm64-v8a build --release \
+  -p g2g-plugins --features camera2 --test android_camera2_probe
+adb push target/aarch64-linux-android/release/deps/android_camera2_probe-<hash> /data/local/tmp/probe
+adb shell /data/local/tmp/probe --nocapture --test-threads=1
+```
+
+(`--platform`: 24 for `AImageReader`, 26 for `AHardwareBuffer` / AAudio.)
+
+**Permission caveats.** A bare `/data/local/tmp` binary has no app manifest, so
+the permission-gated capture paths can't run there: **mic capture** needs
+`RECORD_AUDIO` and **camera capture** needs `CAMERA`. Those probes assert the
+parts they can check headlessly (device open, caps, FFI linkage, encode/render)
+and report the denial rather than failing; full capture and a true on-screen
+`SurfaceView` present need an APK harness. If `adb` reports "insufficient
+permissions", run `adb kill-server && adb start-server` and re-accept the prompt
+on the phone.
+
 ## System dependencies
 
 The cargo features pull pure Rust crates; OS-level dependencies must be

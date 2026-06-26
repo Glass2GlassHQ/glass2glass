@@ -92,3 +92,14 @@ describes only the current design.
   the API surface, grep the fetched crate source under
   `~/.cargo/registry/src/.../windows-0.62.*/src/Windows/Win32/Media/MediaFoundation/mod.rs`
   rather than guessing signatures.
+
+- **Android elements** (`mediacodec` / `mediacodec-wgpu` / `aaudio` / `camera2`):
+  CI only cross-compiles them (`cargo check --target aarch64-linux-android`);
+  real validation is on a device. See the "Android on-device testing" section in
+  `README.md` for the build/push/run recipe (`tools/android-*-smoke.sh`). Key
+  agent-facing caveats: a bare native binary has no binder threadpool (Codec2
+  needs it to allocate the decoder's graphic buffers, so the decode probes dlsym
+  `ABinderProcess_startThreadPool` from `libbinder_ndk.so`); the permission-gated
+  capture paths (mic = `RECORD_AUDIO`, camera = `CAMERA`) and a true on-screen
+  `SurfaceView` present cannot run from `/data/local/tmp` and need an APK harness,
+  so those probes report the denial and assert only the parts they can check.
