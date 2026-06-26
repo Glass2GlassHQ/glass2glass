@@ -358,11 +358,16 @@ fn build_nak_cif(loss: &[u32]) -> Vec<u8> {
     cif
 }
 
+/// Upper bound on a materialized loss list. A real NAK never exceeds the flow
+/// window (thousands of packets); the cap stops an attacker-chosen range or a
+/// far-ahead sequence from expanding to billions of entries (OOM / CPU DoS).
+const MAX_LOSS_LIST: usize = 1 << 16;
+
 /// Expand a NAK loss-report CIF back into the explicit list of lost sequences.
 fn parse_nak_cif(cif: &[u8]) -> Vec<u32> {
     let mut loss = Vec::new();
     let mut i = 0;
-    while i + 4 <= cif.len() {
+    while i + 4 <= cif.len() && loss.len() < MAX_LOSS_LIST {
         let word = u32::from_be_bytes(cif[i..i + 4].try_into().unwrap());
         i += 4;
         if word & 0x8000_0000 != 0 {
@@ -373,6 +378,9 @@ fn parse_nak_cif(cif: &[u8]) -> Vec<u32> {
                 i += 4;
                 for s in start..=end {
                     loss.push(s);
+                    if loss.len() >= MAX_LOSS_LIST {
+                        break;
+                    }
                 }
             } else {
                 loss.push(start);
@@ -771,7 +779,7 @@ impl SrtReceiver {
             return loss;
         }
         let mut s = self.next_deliver;
-        while seq_gt(self.max_seen, s) {
+        while seq_gt(self.max_seen, s) && loss.len() < MAX_LOSS_LIST {
             if !self.pending.contains_key(&s) {
                 loss.push(s);
             }
@@ -962,6 +970,32 @@ mod tests {
         );
         assert!(receiver.missing().is_empty(), "no gaps remain");
         assert_eq!(sender.retransmits(), 1);
+    }
+
+    #[test]
+    fn parse_nak_cif_bounds_an_adversarial_range() {
+        // A NAK range spanning nearly the whole sequence space must cap the
+        // expansion instead of materializing billions of entries.
+        let mut cif = Vec::new();
+        cif.extend_from_slice(&0x8000_0000u32.to_be_bytes()); // range start 0 (high bit set)
+        cif.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes()); // inclusive end
+        assert_eq!(parse_nak_cif(&cif).len(), MAX_LOSS_LIST, "loss list is capped");
+    }
+
+    #[test]
+    fn missing_is_bounded_by_a_far_ahead_packet() {
+        let mut receiver = SrtReceiver::new();
+        let pkt = |seq| DataPacket {
+            seq,
+            retransmit: false,
+            kk: 0,
+            timestamp: 0,
+            dst_socket_id: 0,
+            payload: vec![0],
+        };
+        receiver.on_data(pkt(10)); // delivery base
+        receiver.on_data(pkt(10 + 3_000_000)); // one far-ahead packet jumps max_seen
+        assert_eq!(receiver.missing().len(), MAX_LOSS_LIST, "loss list is capped, not the full gap");
     }
 
     #[test]
