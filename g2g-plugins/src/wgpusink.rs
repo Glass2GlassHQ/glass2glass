@@ -238,11 +238,18 @@ impl WgpuSink {
         // until after submit so it can be presented.
         let surface_frame = match &self.target {
             Target::Offscreen { .. } => None,
-            Target::Surface { surface, .. } => match surface.get_current_texture() {
+            Target::Surface { surface, config } => match surface.get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(t)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
-                // Transient acquisition states: skip this frame rather than fail
-                // the pipeline (the next frame re-acquires).
+                // Stale / lost surface (e.g. a window resize): reconfigure and
+                // skip this frame, so the next acquire targets the refreshed
+                // surface instead of freezing on a permanently-Outdated one.
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    surface.configure(&self.ctx.device, config);
+                    return Ok(());
+                }
+                // Other transient states (Timeout / Occluded / Validation): skip
+                // and re-acquire next frame.
                 _ => return Ok(()),
             },
         };
