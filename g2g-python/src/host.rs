@@ -490,7 +490,7 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
 /// Without the `analytics` feature `FrameMetaSet` is the ZST, so staged results
 /// are dropped.
 #[cfg(not(feature = "analytics"))]
-fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>) {}
+fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_w: u32, _frame_h: u32) {}
 
 /// Pull the fixed `(width, height, format)` out of negotiated raw-video caps.
 fn raw_video_dims(caps: &Caps) -> Result<(u32, u32, RawVideoFormat), G2gError> {
