@@ -908,6 +908,12 @@ where
     }
 
     let results = join_all(arms).await;
+    // M81: a real branch error closes the shared links, surfacing as Shutdown on
+    // the sibling arms; surface the substantive error rather than whichever arm
+    // the count loop unwraps first (consistent with the linear path).
+    if let Some(e) = substantive_error(results.iter().map(|r| r.as_ref().err())) {
+        return Err(e);
+    }
     let mut counts = Vec::with_capacity(results.len());
     for r in results {
         counts.push(r?);
