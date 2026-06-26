@@ -132,6 +132,76 @@ async fn streams_selected_variant_segments_in_order() {
     assert_eq!(sink.body, expected, "segments delivered in playlist order, byte-exact");
 }
 
+/// Like `serve` but counts how many times the media playlist is fetched, to
+/// prove the negotiation probe and `run()` share one fetch.
+fn serve_counting(seg0: Vec<u8>, seg1: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let media_fetches = Arc::new(AtomicUsize::new(0));
+    let counter = media_fetches.clone();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = match path {
+                "/master.m3u8" => MASTER.as_bytes().to_vec(),
+                "/v/high.m3u8" => {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    MEDIA_HIGH.as_bytes().to_vec()
+                }
+                "/v/seg0.ts" => seg0.clone(),
+                "/v/seg1.ts" => seg1.clone(),
+                _ => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    (format!("http://127.0.0.1:{port}/master.m3u8"), media_fetches)
+}
+
+#[tokio::test]
+async fn probe_playlist_is_reused_by_run_not_refetched() {
+    let seg0: Vec<u8> = (0..1000u32).map(|i| i as u8).collect();
+    let seg1: Vec<u8> = (0..1000u32).map(|i| (i as u8) ^ 0x5a).collect();
+    let (url, media_fetches) = serve_counting(seg0, seg1);
+
+    let mut src = HlsSrc::new(url);
+    // Negotiation probe resolves the media playlist once.
+    let _ = src.caps_constraint().await.unwrap();
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos);
+    assert_eq!(
+        media_fetches.load(Ordering::SeqCst),
+        1,
+        "media playlist fetched once at probe and reused by run, not refetched"
+    );
+}
+
 /// The live media playlist returned on the Nth reload: a 2-segment sliding
 /// window that advances each time and adds ENDLIST on the third fetch.
 fn live_playlist(reload: usize) -> String {

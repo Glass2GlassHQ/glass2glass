@@ -54,6 +54,9 @@ pub struct HlsSrc {
     /// media playlist has an `#EXT-X-MAP` init segment (fMP4/CMAF), else `MpegTs`.
     /// Memoized so a re-fixate retry skips the probe.
     container: Option<ByteStreamEncoding>,
+    /// The resolved playlist the probe already fetched, handed to `run()` so it
+    /// reuses the negotiation fetch instead of resolving the same URL again.
+    probed: Option<(MediaPlaylist, String)>,
     /// SAMPLE-AES key sink: when set, a `METHOD=SAMPLE-AES` segment publishes its
     /// fetched key/IV here (for a downstream `SampleAesDecrypt`) and the bytes are
     /// forwarded undecrypted. Without it a SAMPLE-AES playlist is rejected.
@@ -68,6 +71,7 @@ impl HlsSrc {
             max_bandwidth: 0,
             reload_interval_ms: 0,
             container: None,
+            probed: None,
             sample_aes_key: None,
             configured: false,
         }
@@ -106,13 +110,14 @@ impl HlsSrc {
             return Ok(enc);
         }
         let client = reqwest::Client::new();
-        let (media, _) = resolve_media(&client, &self.url, self.cap()).await?;
+        let (media, media_url) = resolve_media(&client, &self.url, self.cap()).await?;
         let enc = if media.map_uri.is_some() {
             ByteStreamEncoding::IsoBmff
         } else {
             ByteStreamEncoding::MpegTs
         };
         self.container = Some(enc);
+        self.probed = Some((media, media_url));
         Ok(enc)
     }
 }
@@ -214,7 +219,12 @@ impl SourceLoop for HlsSrc {
                 return Err(G2gError::NotConfigured);
             }
             let client = reqwest::Client::new();
-            let (mut media, media_url) = resolve_media(&client, &self.url, self.cap()).await?;
+            // Reuse the playlist the probe already fetched at negotiation; only
+            // resolve again if run() is entered without a prior probe.
+            let (mut media, media_url) = match self.probed.take() {
+                Some(probed) => probed,
+                None => resolve_media(&client, &self.url, self.cap()).await?,
+            };
 
             let mut sequence = 0u64;
             // AES-128 keys fetched once per URI and reused across segments.
