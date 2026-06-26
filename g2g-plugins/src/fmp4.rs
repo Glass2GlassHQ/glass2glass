@@ -337,6 +337,146 @@ pub(crate) fn parse_fragments(
     Ok(samples)
 }
 
+/// Parse a *progressive* (non-fragmented) MP4: the classic `ftyp/moov/mdat`
+/// layout where the `moov`'s sample tables (`stbl`) describe every sample's size
+/// (`stsz`), decode duration (`stts`), composition offset (`ctts`), sync flag
+/// (`stss`), and chunk layout (`stsc` + `stco`/`co64`), with the elementary data
+/// sitting in `mdat` addressed by absolute file offset. This is what most tools
+/// write by default (what `Mp4Src` falls back to when a file has no `moof`).
+/// Returns the samples in decode order as Annex-B, the same shape
+/// [`parse_fragments`] yields, so `Mp4Src::run` is identical downstream.
+///
+/// Single video track (the first `trak`, matching [`parse_header`]); the absolute
+/// chunk offsets are read straight from `data`, so the `mdat` box framing (and
+/// any 64-bit `largesize`) never matters.
+pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sample>, G2gError> {
+    let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
+    let trak = find_box(moov, b"trak").ok_or(G2gError::CapsMismatch)?;
+    let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
+    let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+
+    // stsz: per-sample sizes. A non-zero `default_size` means every sample is
+    // that size (no table); otherwise a `sample_count`-long table follows.
+    let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
+    let default_size = be32(stsz, 4)?;
+    let sample_count = be32(stsz, 8)? as usize;
+    let sizes: Vec<u32> = if default_size != 0 {
+        alloc::vec![default_size; sample_count]
+    } else {
+        (0..sample_count).map(|i| be32(stsz, 12 + i * 4)).collect::<Result<_, _>>()?
+    };
+
+    // stts: decode durations, run-length encoded, expanded to one per sample.
+    let stts = find_box(stbl, b"stts").ok_or(G2gError::CapsMismatch)?;
+    let mut durations: Vec<u32> = Vec::with_capacity(sample_count);
+    for e in 0..be32(stts, 4)? as usize {
+        let cnt = be32(stts, 8 + e * 8)? as usize;
+        let delta = be32(stts, 12 + e * 8)?;
+        durations.resize(durations.len().saturating_add(cnt).min(sample_count), delta);
+    }
+    durations.resize(sample_count, 0);
+
+    // ctts (optional): composition-time offsets for B-frame reorder. v0 carries
+    // them unsigned, v1 signed; `pts = dts + ctts`. Absent => pts == dts.
+    let ctts_offsets: Vec<i64> = match find_box(stbl, b"ctts") {
+        Some(ctts) => {
+            let signed = ctts.first() == Some(&1);
+            let mut out: Vec<i64> = Vec::with_capacity(sample_count);
+            for e in 0..be32(ctts, 4)? as usize {
+                let cnt = be32(ctts, 8 + e * 8)? as usize;
+                let raw = be32(ctts, 12 + e * 8)?;
+                let off = if signed { raw as i32 as i64 } else { raw as i64 };
+                let target = out.len().saturating_add(cnt).min(sample_count);
+                out.resize(target, off);
+            }
+            out.resize(sample_count, 0);
+            out
+        }
+        None => alloc::vec![0i64; sample_count],
+    };
+
+    // stco (32-bit) or co64 (64-bit): per-chunk file offsets.
+    let chunk_offsets: Vec<u64> = if let Some(stco) = find_box(stbl, b"stco") {
+        (0..be32(stco, 4)? as usize)
+            .map(|c| be32(stco, 8 + c * 4).map(u64::from))
+            .collect::<Result<_, _>>()?
+    } else {
+        let co64 = find_box(stbl, b"co64").ok_or(G2gError::CapsMismatch)?;
+        (0..be32(co64, 4)? as usize)
+            .map(|c| be64(co64, 8 + c * 8))
+            .collect::<Result<_, _>>()?
+    };
+
+    // stsc: how many samples sit in each chunk, run-length over chunk ranges.
+    // Resolve to a samples-per-chunk count for every chunk.
+    let stsc = find_box(stbl, b"stsc").ok_or(G2gError::CapsMismatch)?;
+    let stsc_n = be32(stsc, 4)? as usize;
+    if stsc_n == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let stsc_entry = |i: usize| -> Result<(u32, u32), G2gError> {
+        Ok((be32(stsc, 8 + i * 12)?, be32(stsc, 12 + i * 12)?))
+    };
+    // Place each sample at its file offset: within a chunk samples are
+    // contiguous, so offset advances by the running sample size.
+    let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
+    let mut si = 0usize;
+    'chunks: for (ci, &chunk_off) in chunk_offsets.iter().enumerate() {
+        // The samples-per-chunk for this chunk is the last stsc entry whose
+        // (1-based) first_chunk does not exceed it.
+        let chunk_1based = (ci + 1) as u32;
+        let mut spc = 0u32;
+        for e in 0..stsc_n {
+            let (first_chunk, samples_per_chunk) = stsc_entry(e)?;
+            if first_chunk <= chunk_1based {
+                spc = samples_per_chunk;
+            } else {
+                break;
+            }
+        }
+        let mut at = chunk_off;
+        for _ in 0..spc {
+            if si >= sample_count {
+                break 'chunks;
+            }
+            sample_offsets.push(at);
+            at = at.saturating_add(sizes[si] as u64);
+            si += 1;
+        }
+    }
+    if sample_offsets.len() != sample_count {
+        return Err(G2gError::CapsMismatch); // stsc/stco disagree with stsz
+    }
+
+    // stss: 1-based sync-sample numbers (ascending). Absent => every sample is a
+    // sync sample (e.g. all-intra). Used as the keyframe flag (seek snap points).
+    let sync: Option<Vec<u32>> = find_box(stbl, b"stss").map(|stss| {
+        (0..be32(stss, 4).unwrap_or(0) as usize)
+            .filter_map(|i| be32(stss, 8 + i * 4).ok())
+            .collect()
+    });
+
+    let mut samples = Vec::with_capacity(sample_count);
+    let mut dts: u64 = 0;
+    for i in 0..sample_count {
+        let off = sample_offsets[i] as usize;
+        let raw = data.get(off..off + sizes[i] as usize).ok_or(G2gError::CapsMismatch)?;
+        let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
+        let keyframe = match &sync {
+            Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
+            None => true,
+        };
+        samples.push(Sample {
+            annexb: avcc_to_annexb(raw)?,
+            pts_ns: timescale_to_ns(pts, timescale),
+            duration_ns: timescale_to_ns(durations[i] as u64, timescale),
+            keyframe,
+        });
+        dts = dts.saturating_add(durations[i] as u64);
+    }
+    Ok(samples)
+}
+
 /// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations) with
 /// a zero duration when the stream omits it. v0 and v1 differ only in the sign of
 /// the per-sample composition-time-offset field, which this skips (PTS is taken
@@ -507,5 +647,76 @@ mod tests {
         let v1 = parse_trun(&build(1)).expect("v1 parses");
         assert_eq!(v0, (alloc::vec![1000, 1200], alloc::vec![33, 33]));
         assert_eq!(v0, v1, "v0 and v1 parse identically (cts field is skipped)");
+    }
+
+    /// A minimal progressive (`moov` + `mdat`, no `moof`) file with two AVCC
+    /// samples in one chunk parses to two Annex-B samples with the right sizes,
+    /// timing, and sync flag (sample 1 only, from `stss`).
+    #[test]
+    fn parse_progressive_reads_stbl_sample_tables() {
+        use crate::mp4box::{full_box, mp4_box};
+        // Two AVCC samples: [len=2][0x65 IDR][0xAA], [len=2][0x41 non-IDR][0xBB].
+        let mut mdat_body = Vec::new();
+        for nal in [[0x65u8, 0xAA], [0x41, 0xBB]] {
+            mdat_body.extend_from_slice(&2u32.to_be_bytes());
+            mdat_body.extend_from_slice(&nal);
+        }
+        let sample_size = 6u32; // 4-byte length prefix + 2-byte NAL
+
+        let stsz = {
+            let mut b = alloc::vec![0u8; 8]; // default_size = 0, then count
+            b[4..8].copy_from_slice(&2u32.to_be_bytes());
+            b.extend_from_slice(&sample_size.to_be_bytes());
+            b.extend_from_slice(&sample_size.to_be_bytes());
+            full_box(b"stsz", 0, 0, &b)
+        };
+        let stts = {
+            let mut b = 1u32.to_be_bytes().to_vec(); // one run
+            b.extend_from_slice(&2u32.to_be_bytes()); // count
+            b.extend_from_slice(&1000u32.to_be_bytes()); // delta
+            full_box(b"stts", 0, 0, &b)
+        };
+        let stsc = {
+            let mut b = 1u32.to_be_bytes().to_vec(); // one entry
+            b.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
+            b.extend_from_slice(&2u32.to_be_bytes()); // samples_per_chunk = 2
+            b.extend_from_slice(&1u32.to_be_bytes()); // sample_desc_index
+            full_box(b"stsc", 0, 0, &b)
+        };
+        let stss = {
+            let mut b = 1u32.to_be_bytes().to_vec(); // one sync sample
+            b.extend_from_slice(&1u32.to_be_bytes()); // sample number 1 (1-based)
+            full_box(b"stss", 0, 0, &b)
+        };
+        // stco offset is filled once the moov length is known (it is constant in
+        // the offset value, so a placeholder build gives the right length).
+        let build = |chunk_off: u32| {
+            let mut stco_body = 1u32.to_be_bytes().to_vec();
+            stco_body.extend_from_slice(&chunk_off.to_be_bytes());
+            let stco = full_box(b"stco", 0, 0, &stco_body);
+            let mut stbl = Vec::new();
+            for t in [&stsz, &stts, &stsc, &stco, &stss] {
+                stbl.extend_from_slice(t);
+            }
+            let stbl = mp4_box(b"stbl", &stbl);
+            let minf = mp4_box(b"minf", &stbl);
+            let mdia = mp4_box(b"mdia", &minf);
+            let trak = mp4_box(b"trak", &mdia);
+            mp4_box(b"moov", &trak)
+        };
+        let moov_len = build(0).len();
+        let chunk_off = (moov_len + 8) as u32; // mdat payload starts after its header
+        let mut file = build(chunk_off);
+        file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
+
+        let samples = parse_progressive(&file, 1000).expect("progressive parse");
+        assert_eq!(samples.len(), 2);
+        // AVCC length prefixes became Annex-B start codes.
+        assert_eq!(samples[0].annexb, alloc::vec![0, 0, 0, 1, 0x65, 0xAA]);
+        assert_eq!(samples[1].annexb, alloc::vec![0, 0, 0, 1, 0x41, 0xBB]);
+        assert!(samples[0].keyframe, "sample 1 is in stss");
+        assert!(!samples[1].keyframe, "sample 2 is not in stss");
+        assert_eq!(samples[0].pts_ns, 0);
+        assert_eq!(samples[1].pts_ns, 1_000_000_000); // 1000 / timescale 1000 s
     }
 }

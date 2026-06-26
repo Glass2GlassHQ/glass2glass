@@ -33,7 +33,9 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::fmp4::{parse_fragments, parse_header, starts_with_param_set, Header, Sample};
+use crate::fmp4::{
+    parse_fragments, parse_header, parse_progressive, starts_with_param_set, Header, Sample,
+};
 use crate::mp4box::{find_box, parse_ilst_tags};
 
 #[derive(Debug)]
@@ -148,10 +150,16 @@ impl SourceLoop for Mp4Src {
                 }
             }
             let header = self.header.as_ref().expect("parsed above");
+            // A `moof` marks a fragmented / CMAF file (the live-recording shape);
+            // its absence is the classic progressive `ftyp/moov/mdat` layout most
+            // tools write, parsed from the `moov` sample tables instead.
             // No decryptor here: an encrypted (cbcs) file fails loud rather than
             // emitting garbage. Decryption lives in `fmp4demux` (the HLS path).
-            let samples =
-                parse_fragments(&data, header.timescale, header.codec, header.cenc.as_ref(), None)?;
+            let samples = if find_box(&data, b"moof").is_some() {
+                parse_fragments(&data, header.timescale, header.codec, header.cenc.as_ref(), None)?
+            } else {
+                parse_progressive(&data, header.timescale)?
+            };
 
             let mut sequence = 0u64;
             // The next emitted frame is a (re)start: prepend the out-of-band
