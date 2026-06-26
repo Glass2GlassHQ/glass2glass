@@ -141,7 +141,7 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
     drop(reg);
 
     let (bus, bus_handle) = Bus::new(BUS_CAPACITY);
-    let join = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("g2g-capi-run".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -150,8 +150,16 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
                 .expect("build tokio runtime");
             let clock = WallClock::new();
             rt.block_on(run_graph_with_bus(graph, &clock, LINK_CAPACITY, &bus_handle))
-        })
-        .expect("spawn g2g run thread");
+        });
+    // Returning null (not panicking across the FFI boundary) is the documented
+    // failure contract.
+    let join = match spawned {
+        Ok(j) => j,
+        Err(e) => {
+            set_err(err_out, &format!("failed to spawn run thread: {e}"));
+            return ptr::null_mut();
+        }
+    };
 
     let p = Box::new(Pipeline { bus, join: Some(join), result: None, last_text: None });
     Box::into_raw(p)
