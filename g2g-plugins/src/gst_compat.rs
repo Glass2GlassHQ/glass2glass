@@ -55,12 +55,9 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("avenc_aac", GstEquivalent::Renamed("mfaacencode")),
     ("faac", GstEquivalent::Renamed("mfaacencode")),
     ("souphttpsrc", GstEquivalent::Renamed("httpsrc")),
-    ("appsrc", GstEquivalent::Unsupported(
-        "no appsrc; push from a programmatic `Graph` source, a `SourceLoop`, or `pysrc` (a Python source)",
-    )),
-    ("appsink", GstEquivalent::Unsupported(
-        "no appsink; pull from a programmatic sink, an `AsyncElement` sink, or `pyelement`",
-    )),
+    // appsrc / appsink are registered elements, so gst_equivalent resolves them
+    // to Available before this table; no row is needed (and an Unsupported one
+    // would contradict reality).
     ("rtph264depay", GstEquivalent::Unsupported("RTP depayloading is built into `udpsrc` / `rtspsrc`")),
     ("rtph264pay", GstEquivalent::Unsupported("RTP payloading is built into `udpsink`")),
 ];
@@ -188,5 +185,12 @@ mod tests {
         assert_eq!(gst_equivalent(&reg, "tee"), GstEquivalent::Available);
         assert_eq!(gst_equivalent(&reg, "videoconvert"), GstEquivalent::Available);
         assert_eq!(gst_equivalent(&reg, "totally-made-up"), GstEquivalent::Unknown);
+    }
+
+    #[test]
+    fn registered_appsrc_appsink_are_available_not_unsupported() {
+        let reg = default_registry();
+        assert_eq!(gst_equivalent(&reg, "appsrc"), GstEquivalent::Available);
+        assert_eq!(gst_equivalent(&reg, "appsink"), GstEquivalent::Available);
     }
 }
