@@ -36,7 +36,7 @@ use crate::graph::Graph;
 use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{bounded, link, Receiver, Sender, SenderSink};
+use crate::runtime::channel::{bounded, link, Receiver, SendError, Sender, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
@@ -994,7 +994,9 @@ impl<'a> DynamicFaninHandle<'a> {
     /// aggregator. Reserves the next pad index atomically and hands the source to
     /// the aggregator arm, which fixates it and configures the pad before its
     /// first frame. Returns [`G2gError::Shutdown`] if every declared pad is
-    /// already in use, or if the aggregator has already finished.
+    /// already in use or the aggregator has already finished, and
+    /// [`G2gError::PoolExhausted`] if the add channel is transiently full (the
+    /// aggregator has not drained pending adds yet); retry the latter.
     pub fn add_input(
         &self,
         source: Box<dyn DynSourceLoop + 'a>,
@@ -1006,7 +1008,22 @@ impl<'a> DynamicFaninHandle<'a> {
         if pad >= self.max_inputs {
             return Err(G2gError::Shutdown);
         }
-        self.new_input_tx.try_send((pad, source)).map_err(|_| G2gError::Shutdown)
+        match self.new_input_tx.try_send((pad, source)) {
+            Ok(()) => Ok(()),
+            Err((_, SendError::Closed)) => Err(G2gError::Shutdown),
+            Err((_, SendError::Full)) => {
+                // Transient backpressure, not a teardown. Roll back the pad we
+                // reserved (only when no later add claimed one) so a retry does
+                // not permanently shrink the usable pad count.
+                let _ = self.next_pad.compare_exchange(
+                    pad + 1,
+                    pad,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                Err(G2gError::PoolExhausted)
+            }
+        }
     }
 }
 
