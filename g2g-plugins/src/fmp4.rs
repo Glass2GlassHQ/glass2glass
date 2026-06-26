@@ -463,11 +463,14 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
 
     // stss: 1-based sync-sample numbers (ascending). Absent => every sample is a
     // sync sample (e.g. all-intra). Used as the keyframe flag (seek snap points).
-    let sync: Option<Vec<u32>> = find_box(stbl, b"stss").map(|stss| {
-        (0..be32(stss, 4).unwrap_or(0) as usize)
-            .filter_map(|i| be32(stss, 8 + i * 4).ok())
-            .collect()
-    });
+    // Short-circuit on the first out-of-range entry (like stco/stsz) so a bogus
+    // count fails loud instead of spinning the full untrusted range.
+    let sync: Option<Vec<u32>> = match find_box(stbl, b"stss") {
+        Some(stss) => {
+            Some((0..be32(stss, 4)? as usize).map(|i| be32(stss, 8 + i * 4)).collect::<Result<_, _>>()?)
+        }
+        None => None,
+    };
 
     let mut samples = Vec::with_capacity(sample_count);
     let mut dts: u64 = 0;
