@@ -43,6 +43,10 @@ pub struct AudioConvert {
 impl AudioConvert {
     pub fn new(target_format: AudioFormat, target_channels: u8) -> Self {
         assert!(target_channels > 0, "target channels must be non-zero");
+        assert!(
+            FORMATS.contains(&target_format),
+            "AudioConvert is a raw-PCM converter; target must be a PCM format"
+        );
         Self {
             target_format,
             target_channels,
@@ -248,7 +252,7 @@ impl AsyncElement for AudioConvert {
 
 /// `AudioConvert`'s settable properties (M107).
 static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("format", PropKind::Str, "output sample format: S16LE | F32LE | AAC | OPUS"),
+    PropertySpec::new("format", PropKind::Str, "output sample format: S16LE | F32LE"),
     PropertySpec::new("channels", PropKind::Uint, "output channel count"),
 ];
 
@@ -256,11 +260,11 @@ static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
 /// `gst-launch` DSL. GStreamer names raw sample formats uppercase (S16LE,
 /// F32LE); accept any case and the historical lowercase spellings as aliases.
 pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
+    // Only the PCM formats are valid AudioConvert targets; AAC/OPUS are encoder
+    // outputs, not something a raw-sample converter can produce.
     match s.to_ascii_lowercase().as_str() {
         "s16le" => Some(AudioFormat::PcmS16Le),
         "f32le" => Some(AudioFormat::PcmF32Le),
-        "aac" => Some(AudioFormat::Aac),
-        "opus" => Some(AudioFormat::Opus),
         _ => None,
     }
 }
@@ -372,6 +376,17 @@ mod tests {
             channels,
             sample_rate: rate,
         }
+    }
+
+    #[test]
+    fn rejects_compressed_target_format() {
+        let mut conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
+        // AAC/OPUS are not raw-PCM formats; setting them must fail loud rather
+        // than silently emit empty frames.
+        assert_eq!(conv.set_property("format", PropValue::Str("aac".into())), Err(PropError::Value));
+        assert_eq!(conv.set_property("format", PropValue::Str("opus".into())), Err(PropError::Value));
+        assert!(conv.set_property("format", PropValue::Str("f32le".into())).is_ok());
+        assert_eq!(conv.target_format(), AudioFormat::PcmF32Le);
     }
 
     #[test]
