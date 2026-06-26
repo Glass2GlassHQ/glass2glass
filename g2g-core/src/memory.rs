@@ -246,21 +246,27 @@ impl SystemSlice {
         };
         if needs_cow {
             let taken = core::mem::replace(&mut self.inner, SystemSliceInner::Owned(empty_boxed()));
-            let owned: Box<[u8]> = match taken {
-                SystemSliceInner::Foreign(f) => f.as_slice().to_vec().into_boxed_slice(),
+            self.inner = match taken {
+                SystemSliceInner::Foreign(f) => {
+                    SystemSliceInner::Owned(f.as_slice().to_vec().into_boxed_slice())
+                }
                 // Unique share: reclaim the boxed bytes with no copy; otherwise
                 // (a sibling branch still holds it) deep-copy.
                 SystemSliceInner::Shared(arc) => match Arc::try_unwrap(arc) {
-                    Ok(b) => b,
-                    Err(arc) => arc.as_ref().clone(),
+                    Ok(b) => SystemSliceInner::Owned(b),
+                    Err(arc) => SystemSliceInner::Owned(arc.as_ref().clone()),
                 },
                 #[cfg(feature = "runtime")]
-                SystemSliceInner::SharedPooled { buffer, len } => {
-                    buffer.as_ref().as_ref()[..len].to_vec().into_boxed_slice()
-                }
+                SystemSliceInner::SharedPooled { buffer, len } => match Arc::try_unwrap(buffer) {
+                    // Unique pooled share: reclaim the pooled buffer mutably with
+                    // no copy (and keep it pooled); otherwise deep-copy.
+                    Ok(buffer) => SystemSliceInner::Pooled { buffer, len },
+                    Err(arc) => SystemSliceInner::Owned(
+                        arc.as_ref().as_ref()[..len].to_vec().into_boxed_slice(),
+                    ),
+                },
                 _ => unreachable!("needs_cow only set for Foreign / Shared / SharedPooled"),
             };
-            self.inner = SystemSliceInner::Owned(owned);
         }
         match &mut self.inner {
             SystemSliceInner::Owned(b) => b,
