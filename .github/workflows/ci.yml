@@ -147,6 +147,18 @@ jobs:
         run: >
           cargo check -p g2g-ml --locked --all-targets
           --target aarch64-linux-android --features mediacodec-wgpu
+      # M306/M307/M308: MediaCodec encode + AAudio + Camera2 capture. Cross-check
+      # each element and its on-device probe; running them is validated on a device
+      # separately. Encode rides the `mediacodec` feature above; build the audio /
+      # camera features here.
+      - name: check g2g-plugins (aaudio)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features aaudio
+      - name: check g2g-plugins (camera2)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features camera2
 
   # The no_std + wasm pillar: the core builds for the browser target. (A bare-
   # metal target like thumbv7em needs the critical-section feature + a CS impl, so

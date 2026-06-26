@@ -3344,6 +3344,7 @@ dependencies = [
  "libpulse-simple-binding",
  "md-5",
  "ndk",
+ "ndk-sys",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-media",

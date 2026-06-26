@@ -250,6 +250,21 @@ pub mod vtencode;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 pub mod mediacodecdec;
 
+// M306: Android MediaCodec H.264/H.265 encode (NV12 -> Annex-B), the encode
+// mirror of mediacodecdec and the Android analog of mfencode / vtencode.
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+pub mod mediacodecenc;
+
+// M307: Android AAudio PCM render (AAudioSink) + capture (AAudioSrc), the Android
+// analog of the WASAPI / ALSA / PulseAudio audio elements.
+#[cfg(all(target_os = "android", feature = "aaudio"))]
+pub mod aaudio;
+
+// M308: Android camera capture via the NDK Camera2 API (raw ndk-sys), capturing
+// YUV_420_888 into an ImageReader and packing NV12. The Android analog of v4l2src.
+#[cfg(all(target_os = "android", feature = "camera2"))]
+pub mod camera2src;
+
 // M304: Android MediaCodec -> wgpu/Vulkan zero-copy bridge. Imports the decoded
 // AImage's AHardwareBuffer into a wgpu Vulkan device for a device-local copy
 // into a sampled texture (no CPU NV12 readback). The Android analog of cudawgpu.

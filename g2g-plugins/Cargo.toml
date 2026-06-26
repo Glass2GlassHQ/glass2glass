@@ -102,6 +102,16 @@ vtencode = [
 # first element of the Android platform track. See DESIGN_TODO.md "Platform:
 # Android".
 mediacodec = ["std", "dep:ndk"]
+# Android AAudio PCM render (AAudioSink) + capture (AAudioSrc) (M307), via the
+# `ndk` crate's `audio` module (AAudioStream). `ndk/audio` implies api-level-26.
+# Android-only (the ndk dep is target-gated), implies std. The Android analog of
+# the WASAPI / ALSA / PulseAudio audio elements.
+aaudio = ["std", "dep:ndk", "ndk/audio"]
+# Android camera capture (Camera2Src) (M308) via the NDK Camera2 API
+# (libcamera2ndk) through ndk-sys, capturing YUV_420_888 into a safe ndk
+# ImageReader and packing NV12. Android-only, implies std. The Android analog of
+# v4l2src / avfvideosrc. `ndk/api-level-24` gives ImageReader.
+camera2 = ["std", "dep:ndk", "dep:ndk-sys", "ndk/api-level-24"]
 # Android zero-copy decode -> GPU (M304): keep MediaCodec output on the GPU by
 # importing the decoded AImage's AHardwareBuffer into wgpu/Vulkan
 # (VK_ANDROID_external_memory_android_hardware_buffer), then a device-local copy
@@ -488,6 +498,12 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
 # bindings, so a cross-compile `cargo check` needs only the rustup target, no NDK).
 [target.'cfg(target_os = "android")'.dependencies]
 ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-24"] }
+# Raw NDK Camera2 bindings (libcamera2ndk) for the `camera2` element (M308). The
+# safe `ndk` crate wraps MediaCodec / ImageReader / AAudio but not Camera2, so
+# Camera2Src calls ACameraManager / ACameraDevice / ACameraCaptureSession through
+# ndk-sys directly (the same ndk-sys the `ndk` crate already pulls; the camera
+# symbols are not behind a feature). It captures into a safe ndk `ImageReader`.
+ndk-sys = { version = "0.6", optional = true }
 
 # VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
 # to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).

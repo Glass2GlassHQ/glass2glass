@@ -126,6 +126,12 @@ use crate::nvdec::NvDec;
 use crate::nvenc::NvEnc;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 use crate::mediacodecdec::MediaCodecDec;
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+use crate::mediacodecenc::MediaCodecEnc;
+#[cfg(all(target_os = "android", feature = "aaudio"))]
+use crate::aaudio::{AAudioSink, AAudioSrc};
+#[cfg(all(target_os = "android", feature = "camera2"))]
+use crate::camera2src::Camera2Src;
 
 /// A [`Registry`] pre-populated with the standard elements, ready for
 /// [`parse_launch`](g2g_core::runtime::parse_launch) and
@@ -158,6 +164,27 @@ pub fn default_registry() -> Registry {
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst audiotestsrc; a launch line bounds it with `num-buffers=N`.
         || Box::new(AudioTestSrc::new(48_000, 2, 440, u64::MAX)),
+    ));
+    // Android AAudio mic capture (M307); the device may open with different
+    // actuals, reported as the produced caps. `aaudiosrc` is the gst analog.
+    #[cfg(all(target_os = "android", feature = "aaudio"))]
+    reg.register_source(SourceFactory::new(
+        "aaudiosrc",
+        Caps::Audio { format: AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 },
+        || Box::new(AAudioSrc::new(48_000, 2, u64::MAX)),
+    ));
+    // Android camera capture (M308); 640x480 NV12 default. `camerasrc` /
+    // `ahcsrc` are the gst analogs.
+    #[cfg(all(target_os = "android", feature = "camera2"))]
+    reg.register_source(SourceFactory::new(
+        "camera2src",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Any,
+        },
+        || Box::new(Camera2Src::new(640, 480, u64::MAX)),
     ));
     // The output caps are a nominal default; the `bytestream-format` property
     // (incl. `auto`) sets the real container per instance before negotiation.
@@ -418,6 +445,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| {
         Box::new(MediaCodecDec::h265())
     }));
+    // Android hardware video encode via the NDK MediaCodec (M306); launch-only
+    // (encoders are not auto-plug candidates), one factory per codec. The gst
+    // analog is `amcvidenc-<component>`.
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>("mediacodecenc", || {
+        Box::new(MediaCodecEnc::h264())
+    }));
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>("mediacodecench265", || {
+        Box::new(MediaCodecEnc::h265())
+    }));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -640,6 +678,9 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())));
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
     reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || Box::new(PulseSink::new())));
+    // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
+    #[cfg(all(target_os = "android", feature = "aaudio"))]
+    reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || Box::new(AAudioSink::new())));
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nvenc", feature = "nvdec"))]

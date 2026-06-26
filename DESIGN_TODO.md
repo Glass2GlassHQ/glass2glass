@@ -96,7 +96,16 @@ leverage first:
   Validated headless on the `android_surface_present_probe` (an `ImageReader`-backed
   surface, `presented_count() > 0`). Remaining: a real on-screen `SurfaceView` /
   `NativeActivity` run (needs an APK harness, no headless equivalent).
-- Encode, Camera2 capture, AAudio.
+- Encode (M306): `MediaCodecEnc` (NV12 -> Annex-B H.264/H.265, `mediacodec`
+  feature), the encode mirror of `MediaCodecDec`. Registered `mediacodecenc` /
+  `mediacodecench265`. Probe `android_mediacodec_enc_probe`.
+- AAudio (M307): `AAudioSink` (PCM render) + `AAudioSrc` (PCM capture), `aaudio`
+  feature. Registered `aaudiosink` / `aaudiosrc`. Probe `android_aaudio_probe`.
+- Camera2 capture (M308): `Camera2Src` (YUV_420_888 -> NV12 via the NDK Camera2
+  API through ndk-sys, `camera2` feature). Registered `camera2src`. Probe
+  `android_camera2_probe`. Remaining for all three: on-device runs from an APK
+  harness for the permission-gated paths (mic capture = `RECORD_AUDIO`, camera =
+  `CAMERA`); render + encode are validated by the bare-binary probes.
 
 ## Receive / decode
 
