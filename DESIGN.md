@@ -752,11 +752,12 @@ the camera does not offer NV12 (mapping whatever survives `validate()` to
 capture thread owns the whole libcamera object graph (manager, camera, a
 request-buffer ring, and the completion callback) rather than a single device
 handle. Each completed request's planes are packed contiguously (Y then
-interleaved UV for NV12) before being forwarded over the bounded channel.
-libcamera frame-duration enforcement (`FrameDurationLimits`) is a follow-up; the
-advertised frame rate is advisory (PTS / latency) today. The `libcamera` crate
-requires libcamera `>= 0.4`, newer than some distro packages, so the feature is
-host-validated (like the NVIDIA stack) rather than built in CI.
+interleaved UV for NV12) before being forwarded over the bounded channel. The
+requested frame rate is enforced on the camera with a fixed `FrameDurationLimits`
+(min == max, microseconds) passed as a start control, which the `uvcvideo`
+handler maps to the UVC frame interval. The `libcamera` crate requires libcamera
+`>= 0.4`, newer than some distro packages, so the feature is host-validated (like
+the NVIDIA stack) rather than built in CI.
 
 Two more capture sources follow the same blocking-work-off-the-async-path shape:
 `PipeWireSrc` (`pipewire` feature, Linux) captures interleaved PCM off the

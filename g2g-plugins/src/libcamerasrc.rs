@@ -40,6 +40,8 @@ use g2g_core::{
 
 use libcamera::camera::CameraConfigurationStatus;
 use libcamera::camera_manager::CameraManager;
+use libcamera::control::ControlList;
+use libcamera::controls::FrameDurationLimits;
 use libcamera::framebuffer::AsFrameBuffer;
 use libcamera::framebuffer_allocator::{FrameBuffer, FrameBufferAllocator};
 use libcamera::framebuffer_map::MemoryMappedFrameBuffer;
@@ -91,9 +93,10 @@ pub struct LibCameraSrc {
     /// Requested geometry; `0` means "let libcamera pick its default".
     req_width: u32,
     req_height: u32,
-    /// Best-effort frame rate, used for PTS stamping and the latency report.
-    /// libcamera frame-duration enforcement (`FrameDurationLimits`) is a
-    /// follow-up; the camera captures at its own default cadence today.
+    /// Capture frame rate. Enforced on the camera via a fixed
+    /// `FrameDurationLimits` (min == max) at `start`, and also used for PTS
+    /// stamping and the latency report. `0` lets the camera run at its default
+    /// cadence.
     req_fps: u32,
     /// Stop after this many frames; `0` = run until the pipeline shuts down.
     frame_limit: u64,
@@ -131,7 +134,8 @@ impl LibCameraSrc {
         self
     }
 
-    /// Set the advisory frame rate (PTS / latency only for now).
+    /// Set the capture frame rate. Enforced on the camera via
+    /// `FrameDurationLimits`; `0` keeps the camera's default cadence.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
         self
@@ -340,7 +344,7 @@ impl SourceLoop for LibCameraSrc {
             // All libcamera interaction lives on this thread: the objects are
             // thread-affine and completions arrive on a libcamera callback.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
-                capture_loop(index, pf, w, h, limit, tx)
+                capture_loop(index, pf, w, h, fps, limit, tx)
             });
 
             let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
@@ -387,6 +391,7 @@ fn capture_loop(
     pf: PixelFormat,
     w: u32,
     h: u32,
+    fps: u32,
     limit: u64,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<(), G2gError> {
@@ -435,7 +440,19 @@ fn capture_loop(
         let _ = done_tx.send(req);
     });
 
-    cam.start(None).map_err(|e| lc_err(&e))?;
+    // Pin the capture rate when a frame rate was requested: a fixed
+    // FrameDurationLimits (min == max, in microseconds) tells libcamera (and,
+    // for a UVC camera, the uvcvideo handler underneath) to hold that exact
+    // frame interval instead of the sensor's default cadence.
+    let start_controls = if fps > 0 {
+        let us = (1_000_000 / fps as i64).max(1);
+        let mut ctrls = ControlList::new();
+        ctrls.set(FrameDurationLimits([us, us])).map_err(|_| lc_other())?;
+        Some(ctrls)
+    } else {
+        None
+    };
+    cam.start(start_controls.as_deref()).map_err(|e| lc_err(&e))?;
     for req in reqs.drain(..) {
         cam.queue_request(req).map_err(|(_, e)| lc_err(&e))?;
     }
@@ -490,7 +507,7 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("camera", PropKind::Uint, "camera index (libcamera enumeration order)"),
     PropertySpec::new("width", PropKind::Uint, "requested capture width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "requested capture height in pixels"),
-    PropertySpec::new("framerate", PropKind::Uint, "advisory frame rate (PTS / latency)"),
+    PropertySpec::new("framerate", PropKind::Uint, "capture frame rate (enforced via FrameDurationLimits)"),
 ];
 
 #[cfg(test)]
