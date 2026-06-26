@@ -8,11 +8,14 @@ use alloc::string::String;
 
 use core::time::Duration;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+use std::time::Instant;
 
 use tokio::net::UdpSocket;
 
-use str0m::{Candidate, Rtc};
+use str0m::net::{Protocol, Receive, Transmit};
+use str0m::{Candidate, Input, Rtc};
 
+use crate::turn::TurnClient;
 use g2g_core::{G2gError, HardwareError};
 
 /// STUN magic cookie (RFC 5389).
@@ -77,6 +80,60 @@ pub(crate) async fn add_ice_candidates(
         }
     }
     Ok(())
+}
+
+/// Send one str0m `Transmit`: a relay-sourced datagram goes through TURN (a Send
+/// indication to the server, after ensuring a permission for the peer); a direct
+/// host/srflx datagram goes straight out. Shared by every webrtc element's poll
+/// loop.
+pub(crate) async fn send_transmit(socket: &UdpSocket, turn: &mut Option<TurnClient>, t: &Transmit) {
+    match turn.as_mut() {
+        Some(tc) if t.source == tc.relay_addr() => {
+            let _ = tc.ensure_permission(socket, t.destination).await;
+            let wrapped = tc.wrap_send(t.destination, &t.contents);
+            let _ = socket.send_to(&wrapped, tc.server_addr()).await;
+        }
+        _ => {
+            let _ = socket.send_to(&t.contents, t.destination).await;
+        }
+    }
+}
+
+/// Feed one received UDP datagram into `rtc`. A datagram from the TURN server is
+/// unwrapped to its (peer, payload) Data indication and fed as if it arrived on
+/// the relay candidate (control responses unwrap to `None` and are dropped); any
+/// other datagram is fed directly from `source` to `local`. Returns `false` when
+/// str0m rejects the input, so a caller that tears down on error can stop; the
+/// callers that ignore transient input errors discard the result.
+pub(crate) fn feed_datagram(
+    rtc: &mut Rtc,
+    turn: &mut Option<TurnClient>,
+    local: SocketAddr,
+    datagram: &[u8],
+    source: SocketAddr,
+) -> bool {
+    let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
+    if from_turn {
+        if let Some(tc) = turn.as_mut() {
+            if let Some((peer, payload)) = tc.parse_data(datagram) {
+                let relay = tc.relay_addr();
+                if let Ok(contents) = payload.as_slice().try_into() {
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
+                    );
+                    return rtc.handle_input(input).is_ok();
+                }
+            }
+        }
+    } else if let Ok(contents) = datagram.try_into() {
+        let input = Input::Receive(
+            Instant::now(),
+            Receive { proto: Protocol::Udp, source, destination: local, contents },
+        );
+        return rtc.handle_input(input).is_ok();
+    }
+    true
 }
 
 /// Discover this socket's server-reflexive (public) address via a STUN Binding

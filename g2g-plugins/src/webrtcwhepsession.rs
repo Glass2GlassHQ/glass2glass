@@ -32,7 +32,6 @@ use tokio::net::UdpSocket;
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::Direction;
-use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
@@ -44,7 +43,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
+use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
 
 /// Output port for the H.264 video track.
 const VIDEO_PORT: usize = 0;
@@ -217,16 +216,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => match turn.as_mut() {
-                            Some(tc) if t.source == tc.relay_addr() => {
-                                let _ = tc.ensure_permission(&socket, t.destination).await;
-                                let wrapped = tc.wrap_send(t.destination, &t.contents);
-                                let _ = socket.send_to(&wrapped, tc.server_addr()).await;
-                            }
-                            _ => {
-                                let _ = socket.send_to(&t.contents, t.destination).await;
-                            }
-                        },
+                        Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
                             let denom = d.time.denom().max(1) as u128;
                             let pts_ns = (d.time.numer() as u128 * 1_000_000_000 / denom) as u64;
@@ -275,23 +265,7 @@ impl MultiOutputSource for WebRtcWhepSessionSrc {
                 tokio::select! {
                     r = socket.recv_from(&mut buf) => {
                         let Ok((n, source)) = r else { finish!() };
-                        let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
-                        if from_turn {
-                            if let Some(tc) = turn.as_mut() {
-                                if let Some((peer, payload)) = tc.parse_data(&buf[..n]) {
-                                    let relay = tc.relay_addr();
-                                    if let Ok(contents) = payload.as_slice().try_into() {
-                                        let input = Input::Receive(Instant::now(),
-                                            Receive { proto: Protocol::Udp, source: peer, destination: relay, contents });
-                                        let _ = rtc.handle_input(input);
-                                    }
-                                }
-                            }
-                        } else if let Ok(contents) = (&buf[..n]).try_into() {
-                            let input = Input::Receive(Instant::now(),
-                                Receive { proto: Protocol::Udp, source, destination: local, contents });
-                            let _ = rtc.handle_input(input);
-                        }
+                        let _ = feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source);
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
                         if let Some(tc) = turn.as_mut() {

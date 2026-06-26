@@ -50,7 +50,6 @@ use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::crypto::from_feature_flags;
 use str0m::format::Codec;
 use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid, Pt};
-use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use g2g_core::{
@@ -61,7 +60,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
+use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
 
 /// Default bounded depth of the element->session media channel. Backpressures
 /// the pipeline if the session task falls behind the encoder.
@@ -522,20 +521,7 @@ async fn run_session(
         let deadline = loop {
             match rtc.poll_output() {
                 Ok(Output::Timeout(t)) => break t,
-                Ok(Output::Transmit(t)) => {
-                    // Relay-sourced datagrams go through TURN (Send indication to
-                    // the server); direct host/srflx datagrams go straight out.
-                    match turn.as_mut() {
-                        Some(tc) if t.source == tc.relay_addr() => {
-                            let _ = tc.ensure_permission(&socket, t.destination).await;
-                            let wrapped = tc.wrap_send(t.destination, &t.contents);
-                            let _ = socket.send_to(&wrapped, tc.server_addr()).await;
-                        }
-                        _ => {
-                            let _ = socket.send_to(&t.contents, t.destination).await;
-                        }
-                    }
-                }
+                Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                 Ok(Output::Event(Event::IceConnectionStateChange(
                     IceConnectionState::Disconnected,
                 ))) => return,
@@ -569,34 +555,8 @@ async fn run_session(
             // traffic from the relay server).
             r = socket.recv_from(&mut buf) => {
                 let Ok((n, source)) = r else { return };
-                let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
-                if from_turn {
-                    // Unwrap a Data indication to (peer, payload) and feed str0m
-                    // as if it arrived directly on the relay candidate. Control
-                    // responses (CreatePermission / Refresh success) parse to None
-                    // and are discarded.
-                    if let Some(tc) = turn.as_mut() {
-                        if let Some((peer, payload)) = tc.parse_data(&buf[..n]) {
-                            let relay = tc.relay_addr();
-                            if let Ok(contents) = payload.as_slice().try_into() {
-                                let input = Input::Receive(
-                                    Instant::now(),
-                                    Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
-                                );
-                                if rtc.handle_input(input).is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                } else if let Ok(contents) = (&buf[..n]).try_into() {
-                    let input = Input::Receive(
-                        Instant::now(),
-                        Receive { proto: Protocol::Udp, source, destination: local, contents },
-                    );
-                    if rtc.handle_input(input).is_err() {
-                        return;
-                    }
+                if !feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source) {
+                    return;
                 }
             }
             // Keep the TURN allocation + permissions alive.

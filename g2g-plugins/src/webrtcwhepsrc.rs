@@ -38,7 +38,6 @@ use tokio::net::UdpSocket;
 use str0m::change::SdpAnswer;
 use str0m::crypto::from_feature_flags;
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind, Mid};
-use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
@@ -52,7 +51,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::turn::{self, TurnClient};
-use crate::webrtc_util::{add_ice_candidates, post_sdp, select_host_ip};
+use crate::webrtc_util::{add_ice_candidates, feed_datagram, post_sdp, select_host_ip, send_transmit};
 
 /// Minimum gap between keyframe (PLI) requests while waiting for the first one,
 /// so a slow producer is not spammed every frame period.
@@ -366,20 +365,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 let deadline = loop {
                     match rtc.poll_output() {
                         Ok(Output::Timeout(t)) => break t,
-                        Ok(Output::Transmit(t)) => {
-                            // Relay-sourced datagrams go through TURN; direct ones
-                            // (host / srflx) go straight out.
-                            match turn.as_mut() {
-                                Some(tc) if t.source == tc.relay_addr() => {
-                                    let _ = tc.ensure_permission(&socket, t.destination).await;
-                                    let wrapped = tc.wrap_send(t.destination, &t.contents);
-                                    let _ = socket.send_to(&wrapped, tc.server_addr()).await;
-                                }
-                                _ => {
-                                    let _ = socket.send_to(&t.contents, t.destination).await;
-                                }
-                            }
-                        }
+                        Ok(Output::Transmit(t)) => send_transmit(&socket, &mut turn, &t).await,
                         Ok(Output::Event(Event::MediaData(d))) => {
                             // d.time is the RTP MediaTime (90 kHz for H.264);
                             // map its rational value to nanoseconds.
@@ -455,30 +441,7 @@ impl SourceLoop for WebRtcWhepSrc {
                             out.push(PipelinePacket::Eos).await?;
                             return Ok(seq);
                         };
-                        let from_turn = turn.as_ref().is_some_and(|tc| tc.is_server(source));
-                        if from_turn {
-                            // Unwrap a relayed Data indication and feed str0m as
-                            // if it arrived on the relay candidate; control
-                            // responses parse to None and are discarded.
-                            if let Some(tc) = turn.as_mut() {
-                                if let Some((peer, payload)) = tc.parse_data(&buf[..n]) {
-                                    let relay = tc.relay_addr();
-                                    if let Ok(contents) = payload.as_slice().try_into() {
-                                        let input = Input::Receive(
-                                            Instant::now(),
-                                            Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
-                                        );
-                                        let _ = rtc.handle_input(input);
-                                    }
-                                }
-                            }
-                        } else if let Ok(contents) = (&buf[..n]).try_into() {
-                            let input = Input::Receive(
-                                Instant::now(),
-                                Receive { proto: Protocol::Udp, source, destination: local, contents },
-                            );
-                            let _ = rtc.handle_input(input);
-                        }
+                        let _ = feed_datagram(&mut rtc, &mut turn, local, &buf[..n], source);
                     }
                     // Keep the TURN allocation + permissions alive.
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)), if turn.is_some() => {
