@@ -222,8 +222,7 @@ impl MultiInputElement for FlvMuxN {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let MemoryDomain::System(s) = &frame.domain {
-                        let au = s.as_slice().to_vec();
-                        self.capture_init(input, &au);
+                        self.capture_init(input, s.as_slice());
                     }
                     self.agg.push(input, frame);
                 }

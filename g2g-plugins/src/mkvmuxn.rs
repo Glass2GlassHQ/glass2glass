@@ -325,8 +325,7 @@ impl MultiInputElement for MkvMuxN {
                 PipelinePacket::DataFrame(frame) => {
                     // Capture this track's init from its first AU before queueing.
                     if let MemoryDomain::System(s) = &frame.domain {
-                        let au = s.as_slice().to_vec();
-                        self.capture_init(input, &au);
+                        self.capture_init(input, s.as_slice());
                     }
                     self.agg.push(input, frame);
                 }
