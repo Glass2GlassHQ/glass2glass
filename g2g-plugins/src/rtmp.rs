@@ -19,6 +19,7 @@
 //! handshake ffmpeg/OBS use. Scope: one stream, H.264 + AAC, AMF0 only. Verified
 //! against the Adobe RTMP 1.0 spec.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -88,12 +89,12 @@ enum ChunkStep {
 struct ChunkReader {
     inbound: Vec<u8>,
     chunk_size: usize,
-    streams: Vec<(u32, ChunkStream)>,
+    streams: BTreeMap<u32, ChunkStream>,
 }
 
 impl ChunkReader {
     fn new() -> Self {
-        Self { inbound: Vec::new(), chunk_size: DEFAULT_CHUNK_SIZE, streams: Vec::new() }
+        Self { inbound: Vec::new(), chunk_size: DEFAULT_CHUNK_SIZE, streams: BTreeMap::new() }
     }
 
     fn push(&mut self, data: &[u8]) {
@@ -121,9 +122,7 @@ impl ChunkReader {
     }
 
     fn ensure_stream(&mut self, csid: u32) {
-        if !self.streams.iter().any(|(id, _)| *id == csid) {
-            self.streams.push((csid, ChunkStream::default()));
-        }
+        self.streams.entry(csid).or_default();
     }
 
     /// Parse one chunk from `inbound`, returning what it produced.
@@ -164,7 +163,7 @@ impl ChunkReader {
         // borrow of `self` is held while reading the header and chunk size.
         self.ensure_stream(csid);
         let prev = {
-            let s = &self.streams.iter().find(|(id, _)| *id == csid).expect("inserted").1;
+            let s = &self.streams[&csid];
             (s.timestamp, s.msg_length, s.msg_type, s.msg_stream_id, s.ext_timestamp, s.payload.len())
         };
         let (prev_ts, prev_len, prev_type, prev_msid, prev_ext, prev_payload) = prev;
@@ -215,12 +214,7 @@ impl ChunkReader {
         let payload_bytes = self.inbound[header_total..header_total + fragment].to_vec();
         self.inbound.drain(..header_total + fragment);
 
-        let stream = &mut self
-            .streams
-            .iter_mut()
-            .find(|(id, _)| *id == csid)
-            .expect("inserted")
-            .1;
+        let stream = self.streams.get_mut(&csid).expect("inserted");
         if !in_progress {
             stream.timestamp = timestamp;
             stream.msg_length = msg_length;
