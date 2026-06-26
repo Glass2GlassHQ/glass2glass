@@ -44,6 +44,10 @@ const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 const DEFAULT_MAX_PAYLOAD: usize = 1400;
 /// TCP read buffer for RTSP control requests.
 const CTRL_BUF: usize = 8192;
+/// Cap on buffered-but-unparsed control bytes. A real RTSP request (even an
+/// ANNOUNCE carrying SDP) is far smaller; the bound reaps a client that drips a
+/// never-terminating request or an oversized Content-Length (slow-loris DoS).
+const MAX_PENDING: usize = 64 * 1024;
 
 /// H.264-at-any-geometry caps (geometry rides in-band in the SPS).
 fn h264_any() -> Caps {
@@ -105,6 +109,10 @@ impl Client {
                 RtspEvent::Teardown => return false,
                 _ => {}
             }
+        }
+        // A partial request that never completes must not grow without bound.
+        if self.pending.len() > MAX_PENDING {
+            return false;
         }
         true
     }
@@ -403,5 +411,50 @@ impl AsyncElement for RtspServerSink {
 impl PadTemplates for RtspServerSink {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::sink(CapsSet::one(h264_any()))])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use tokio::io::AsyncWriteExt;
+
+    async fn client_pair() -> (Client, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let client = Client {
+            control: server,
+            responder: RtspResponder::new(sdp_h264(96), 6000, 0x1234_5678),
+            pending: Vec::new(),
+            peer_ip: std::net::IpAddr::from([127, 0, 0, 1]),
+            dest: None,
+            packetizer: None,
+        };
+        (client, peer)
+    }
+
+    #[tokio::test]
+    async fn oversized_pending_request_reaps_the_client() {
+        let (mut client, mut peer) = client_pair().await;
+        // A never-terminating request (no double CRLF): the writer keeps the
+        // connection open, so any reap is from the buffer cap, not a close.
+        let writer = tokio::spawn(async move {
+            let junk = vec![b'A'; MAX_PENDING + CTRL_BUF + 16];
+            let _ = peer.write_all(&junk).await;
+            peer // hold the socket open
+        });
+        let mut reaped = false;
+        for _ in 0..10_000 {
+            if !client.advance(96, 0x1234_5678, 1400).await {
+                reaped = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(reaped, "a client overflowing the control buffer is reaped");
+        let _ = writer.await;
     }
 }
