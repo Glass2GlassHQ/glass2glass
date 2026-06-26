@@ -118,9 +118,13 @@ impl LogLevel {
 /// `&'static str` (a slice into the static type name).
 pub fn short_type_name<T: ?Sized>() -> &'static str {
     let full = core::any::type_name::<T>();
-    match full.rsplit("::").next() {
+    // Strip generic parameters first (`Foo<Bar>` -> `Foo`); otherwise the last
+    // `::` segment is the parameter's path tail (e.g. `SystemClock>`), not the
+    // element type's own name.
+    let base = full.split_once('<').map_or(full, |(head, _)| head);
+    match base.rsplit("::").next() {
         Some(s) if !s.is_empty() => s,
-        _ => full,
+        _ => base,
     }
 }
 
@@ -546,6 +550,15 @@ mod tests {
     use super::*;
     use alloc::format;
     use alloc::sync::Arc;
+
+    #[test]
+    fn short_type_name_strips_generics_and_path() {
+        struct Inner;
+        struct Outer<T>(core::marker::PhantomData<T>);
+        assert_eq!(short_type_name::<Inner>(), "Inner");
+        // A generic element keys on its own name, not the parameter's path tail.
+        assert_eq!(short_type_name::<Outer<Inner>>(), "Outer");
+    }
 
     #[test]
     fn level_parse_accepts_names_and_numbers() {
