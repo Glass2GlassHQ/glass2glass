@@ -81,8 +81,14 @@ impl AsyncElement for FileSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let file = File::create(&self.path).map_err(io_err)?;
-        self.writer = Some(BufWriter::new(file));
+        // The runner re-invokes configure_pipeline on a mid-stream caps change.
+        // Create (and truncate) the file only on the first negotiation so a
+        // later re-negotiation keeps the open writer and what was already
+        // recorded, instead of truncating it.
+        if self.writer.is_none() {
+            let file = File::create(&self.path).map_err(io_err)?;
+            self.writer = Some(BufWriter::new(file));
+        }
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -159,5 +165,47 @@ impl PadTemplates for FileSink {
     /// Wildcard sink, matching the runtime `AcceptsAny` constraint.
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::sink_any()])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::{ByteStreamEncoding, Frame, FrameTiming, PushOutcome, SystemSlice};
+
+    struct NullSink;
+    impl OutputSink for NullSink {
+        fn push<'a>(
+            &'a mut self,
+            _packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async { Ok(PushOutcome::Accepted) })
+        }
+    }
+
+    fn frame(bytes: &[u8]) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    #[tokio::test]
+    async fn midstream_caps_change_does_not_truncate() {
+        let path = std::env::temp_dir().join("g2g_filesink_recfg.bin");
+        let _ = std::fs::remove_file(&path);
+        let mut sink = FileSink::new(&path);
+        let caps = Caps::ByteStream { encoding: ByteStreamEncoding::Ogg };
+        sink.configure_pipeline(&caps).unwrap();
+        let mut out = NullSink;
+        sink.process(frame(b"first"), &mut out).await.unwrap();
+        // A mid-stream caps change re-invokes configure_pipeline; the already
+        // written bytes must survive instead of being truncated away.
+        sink.configure_pipeline(&caps).unwrap();
+        sink.process(frame(b"second"), &mut out).await.unwrap();
+        sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"firstsecond");
+        let _ = std::fs::remove_file(&path);
     }
 }
