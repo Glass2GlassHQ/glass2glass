@@ -276,6 +276,9 @@ impl SourceLoop for MfVideoSrc {
                 seq += 1;
             }
 
+            // Close the receiver so the worker's next send fails and it stops,
+            // instead of capturing forever (frame_limit==0) and hanging join().
+            drop(frame_rx);
             let _ = worker.join();
             if downstream_open {
                 out.push(PipelinePacket::Eos).await?;
