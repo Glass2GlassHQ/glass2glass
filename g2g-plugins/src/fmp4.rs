@@ -179,6 +179,13 @@ pub(crate) fn parse_senc(senc: &[u8], per_sample_iv_size: u8) -> Result<Vec<Vec<
     let has_subsamples = flags & 0x2 != 0;
     let count = be32(senc, 4)? as usize;
     let mut at = 8usize;
+    // Each sample consumes at least its IV plus a subsample-count field, so an
+    // untrusted `count` cannot exceed the remaining bytes. Reject a lying count
+    // before reserving capacity for it.
+    let min_bytes = (per_sample_iv_size as usize + if has_subsamples { 2 } else { 0 }).max(1);
+    if count > senc.len().saturating_sub(at) / min_bytes {
+        return Err(G2gError::CapsMismatch);
+    }
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         at += per_sample_iv_size as usize;
@@ -360,6 +367,12 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
     let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
     let default_size = be32(stsz, 4)?;
     let sample_count = be32(stsz, 8)? as usize;
+    // A sample needs at least one byte of media data, so the count cannot exceed
+    // the file size. Reject a lying stsz before the per-sample allocations below
+    // (the default_size branch fills the Vec, committing physical pages).
+    if sample_count > data.len() {
+        return Err(G2gError::CapsMismatch);
+    }
     let sizes: Vec<u32> = if default_size != 0 {
         alloc::vec![default_size; sample_count]
     } else {
@@ -498,6 +511,16 @@ pub(crate) fn parse_trun(trun: &[u8]) -> Result<(Vec<u32>, Vec<u32>), G2gError> 
     }
     if flags & 0x4 != 0 {
         at += 4; // first sample flags
+    }
+    // Each sample consumes at least its 4-byte size plus the optional per-sample
+    // fields, so an untrusted `count` cannot exceed the bytes that remain. Reject
+    // a lying count before reserving capacity for it.
+    let per_sample = 4
+        + if flags & 0x100 != 0 { 4 } else { 0 }
+        + if flags & 0x400 != 0 { 4 } else { 0 }
+        + if flags & 0x800 != 0 { 4 } else { 0 };
+    if count > trun.len().saturating_sub(at) / per_sample {
+        return Err(G2gError::CapsMismatch);
     }
     let mut sizes = Vec::with_capacity(count);
     let mut durations = Vec::with_capacity(count);
@@ -647,6 +670,17 @@ mod tests {
         let v1 = parse_trun(&build(1)).expect("v1 parses");
         assert_eq!(v0, (alloc::vec![1000, 1200], alloc::vec![33, 33]));
         assert_eq!(v0, v1, "v0 and v1 parse identically (cts field is skipped)");
+    }
+
+    #[test]
+    fn parse_trun_rejects_oversized_count() {
+        // flags 0x201 (data-offset + sizes), a huge count but only one sample's
+        // worth of bytes: reject instead of reserving gigabytes.
+        let mut t = alloc::vec![0u8, 0x00, 0x02, 0x01];
+        t.extend_from_slice(&u32::MAX.to_be_bytes()); // count
+        t.extend_from_slice(&0u32.to_be_bytes()); // data offset
+        t.extend_from_slice(&16u32.to_be_bytes()); // a single sample size
+        assert!(parse_trun(&t).is_err());
     }
 
     /// A minimal progressive (`moov` + `mdat`, no `moof`) file with two AVCC
