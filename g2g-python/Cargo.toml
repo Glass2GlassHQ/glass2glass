@@ -25,6 +25,25 @@ python = ["std", "dep:pyo3"]
 # `Frame::meta` as an `AnalyticsMeta`. Pulls g2g-core's `metadata` feature (so
 # `FrameMetaSet` is the real typed container, not the ZST) and implies `python`.
 analytics = ["python", "g2g-core/metadata"]
+# Build the `g2g-launch-py` binary: a `gst-launch` analog that registers the
+# g2g-plugins elements PLUS the hosted Python elements (`pyelement` / `pysrc` /
+# `pyaggregator`), so a single text pipeline can run a gst-python-ml detector ->
+# `analyticsoverlay` -> `autovideosink` end to end in pure g2g. Pulls g2g-plugins
+# (a normal, no longer dev-only edge; g2g-plugins still does not depend on us, so
+# it stays acyclic) with the host Linux media features, plus a tokio runtime.
+launch = [
+    "analytics",
+    "dep:tokio",
+    "dep:g2g-plugins",
+    "g2g-plugins/ffmpeg",
+    "g2g-plugins/v4l2",
+    "g2g-plugins/wayland-sink",
+    "g2g-plugins/analytics",
+]
+
+[[bin]]
+name = "g2g-launch-py"
+required-features = ["launch"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
@@ -34,6 +53,11 @@ g2g-core = { path = "../g2g-core" }
 # the host hands Python a writable buffer and Python's own numpy consumes it via
 # `np.frombuffer`, no Rust-side numpy crate needed.
 pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
+# The `launch` feature only (the `g2g-launch-py` binary). g2g-plugins supplies
+# `default_registry` + `WallClock`; tokio drives the run loop. Both optional so
+# the library / host build keeps its lean dependency set.
+tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
+g2g-plugins = { path = "../g2g-plugins", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

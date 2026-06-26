@@ -71,7 +71,9 @@ fn detection_from_python_lands_in_frame_metadata() {
     let dets: Vec<_> = analytics.detections().collect();
     assert_eq!(dets.len(), 1, "exactly one detection attached");
     assert_eq!(dets[0].label, 7);
-    assert_eq!(dets[0].bbox.x, 1.0);
+    // The fixture stages pixel coords (x=1, h=4); the host normalizes them to
+    // g2g's [0,1] `BBox` by the frame dims (2x1 here), so x = 1/2, h = 4/1.
+    assert_eq!(dets[0].bbox.x, 0.5);
     assert_eq!(dets[0].bbox.h, 4.0);
     assert!((dets[0].confidence - 0.9).abs() < 1e-6);
 

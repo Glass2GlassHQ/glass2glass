@@ -84,7 +84,11 @@ impl Mp4Src {
             codec: h.codec,
             width: Dim::Fixed(h.width),
             height: Dim::Fixed(h.height),
-            framerate: Rate::Any,
+            // Advisory only: per-frame PTS (from each sample's `duration_ns`)
+            // carries the real timing. Advertise a Range, not `Any`, so the caps
+            // survive fixate when nothing downstream pins the rate (same pattern
+            // as `RtspSrc`); `Any` aborts negotiation with "cannot fixate".
+            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
         })
     }
 }

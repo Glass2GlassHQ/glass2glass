@@ -337,11 +337,15 @@ pub(crate) fn parse_fragments(
     Ok(samples)
 }
 
-/// `trun` v0 with explicit sample sizes; returns (sizes, durations) with a
-/// zero duration when the stream omits it.
+/// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations) with
+/// a zero duration when the stream omits it. v0 and v1 differ only in the sign of
+/// the per-sample composition-time-offset field, which this skips (PTS is taken
+/// from `tfdt` + decode-order durations and the decoder reorders), so both parse
+/// identically. Real-world muxers (ffmpeg) emit v1 whenever B-frames are present.
 pub(crate) fn parse_trun(trun: &[u8]) -> Result<(Vec<u32>, Vec<u32>), G2gError> {
-    if trun.first() != Some(&0) {
-        return Err(G2gError::CapsMismatch); // v1 (signed cts) unsupported
+    match trun.first() {
+        Some(0) | Some(1) => {}
+        _ => return Err(G2gError::CapsMismatch), // unknown trun version
     }
     let flags = be32(trun, 0)? & 0x00FF_FFFF;
     if flags & 0x200 == 0 {
@@ -481,5 +485,27 @@ mod tests {
         }
         let sets = parse_hvcc(&p).unwrap();
         assert_eq!(sets, vec![vps.to_vec(), sps.to_vec(), pps.to_vec()]);
+    }
+
+    /// A `trun` v1 (signed composition offsets, what ffmpeg writes for B-frame
+    /// streams) parses the same as v0: the cts field is skipped either way, so
+    /// sizes and durations come out identically. Guards the version gate.
+    #[test]
+    fn parse_trun_accepts_v0_and_v1() {
+        // flags 0x301: data-offset(0x1) + sample-duration(0x100) + sample-size(0x200).
+        let build = |version: u8| {
+            let mut t = alloc::vec![version, 0x00, 0x03, 0x01];
+            t.extend_from_slice(&2u32.to_be_bytes()); // sample count
+            t.extend_from_slice(&0u32.to_be_bytes()); // data offset
+            for (dur, size) in [(33u32, 1000u32), (33, 1200)] {
+                t.extend_from_slice(&dur.to_be_bytes());
+                t.extend_from_slice(&size.to_be_bytes());
+            }
+            t
+        };
+        let v0 = parse_trun(&build(0)).expect("v0 parses");
+        let v1 = parse_trun(&build(1)).expect("v1 parses");
+        assert_eq!(v0, (alloc::vec![1000, 1200], alloc::vec![33, 33]));
+        assert_eq!(v0, v1, "v0 and v1 parse identically (cts field is skipped)");
     }
 }

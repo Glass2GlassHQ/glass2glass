@@ -433,8 +433,9 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
 
     match produced {
         Ok(true) => {
+            let (w, h) = (job.width, job.height);
             if let Some(anchor) = job.frames.first_mut() {
-                attach_metadata(anchor, staged);
+                attach_metadata(anchor, staged, w, h);
             }
             Ok(job.frames)
         }
@@ -447,19 +448,26 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
 /// Materialize staged results onto the frame: detections / classifications into
 /// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
 #[cfg(feature = "analytics")]
-fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>) {
+fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h: u32) {
     use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection};
 
     if staged.is_empty() {
         return;
     }
+    // The Python side reports detection boxes in pixels of the processed frame
+    // (the gst-python-ml / GstAnalytics convention); g2g's `BBox` is normalized
+    // to [0, 1] so it survives a downstream scale / crop. Divide by the frame
+    // dims here (the one place that knows them), so an `analyticsoverlay`
+    // denormalizes back to the right pixels. Guard against a zero dim.
+    let sx = if frame_w > 0 { 1.0 / frame_w as f32 } else { 0.0 };
+    let sy = if frame_h > 0 { 1.0 / frame_h as f32 } else { 0.0 };
     let mut analytics = AnalyticsMeta::new();
     let mut blobs = BlobMeta::new();
     for s in staged {
         match s {
             Staged::Object { label, x, y, w, h, score } => {
                 analytics.add_detection(ObjectDetection {
-                    bbox: BBox { x, y, w, h },
+                    bbox: BBox { x: x * sx, y: y * sy, w: w * sx, h: h * sy },
                     label,
                     confidence: score,
                 });

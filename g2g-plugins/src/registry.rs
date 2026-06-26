@@ -230,6 +230,15 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
         Box::new(TextOverlay::new())
     }));
+    // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
+    // boxes onto the RGBA frame, so a detector's output is visible downstream
+    // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad
+    // templates declared (caps-driven via intercept_caps). Gated on `analytics`,
+    // the metadata graph it reads.
+    #[cfg(feature = "analytics")]
+    reg.register_launch(LaunchFactory::new("analyticsoverlay", Vec::new(), || {
+        Box::new(crate::analyticsoverlay::AnalyticsOverlay::new())
+    }));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         // Caps-driven by default (M290): `videorate ! caps,framerate=N` sets the

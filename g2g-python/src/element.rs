@@ -17,8 +17,8 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
+    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
     PropertySpec, Rate, RawVideoFormat,
 };
 
@@ -117,6 +117,24 @@ impl AsyncElement for PyTransform {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// Passthrough identity: the hosted element reads and writes the frame in
+    /// place, so the output caps equal the input (when it is in the accepted
+    /// set). Declaring this native constraint (rather than the default legacy
+    /// intercept-only path, whose output the solver leaves unconstrained) lets
+    /// the graph solver derive this element's output edge and lets the runtime
+    /// forward-caps resolve steer a mid-stream `CapsChanged` (e.g. an upstream
+    /// decoder's first-frame caps) cleanly through it, instead of stalling on an
+    /// unconstrained boundary.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let accept = self.accept.clone();
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            match input.intersect(&accept) {
+                Ok(_) => CapsSet::one(input.clone()),
+                Err(_) => CapsSet::from_alternatives(Vec::new()),
+            }
+        }))
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.accept)

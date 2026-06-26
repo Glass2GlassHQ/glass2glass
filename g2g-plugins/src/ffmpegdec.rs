@@ -860,8 +860,21 @@ impl AsyncElement for FfmpegH264Dec {
             }
 
             let out_format = self.output_format;
+            // Carry the negotiated framerate (from the input caps) into the
+            // output caps. Emitting `Rate::Any` here breaks the mid-stream
+            // forward-caps resolve downstream: a format/geometry-changing
+            // transform (videoconvert / videoscale) cannot `fixate()` an `Any`
+            // framerate, so it falls back to forwarding our caps verbatim, and a
+            // constraining capsfilter then rejects them (the decode -> scale ->
+            // fixed-format chain). A compressed stream's rate is advisory anyway
+            // (per-frame PTS carries the real timing); default to 30/1 when the
+            // container did not declare one.
+            let out_framerate = match &self.input_caps {
+                Some(Caps::CompressedVideo { framerate: Rate::Fixed(q), .. }) => Rate::Fixed(*q),
+                _ => Rate::Fixed(30 << 16),
+            };
             for d in decoded {
-                let new_caps = yuv420_caps(out_format, d.width, d.height);
+                let new_caps = yuv420_caps(out_format, d.width, d.height, out_framerate.clone());
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion: the
                     // decode-time output caps must be consistent with
@@ -976,12 +989,12 @@ fn derive_output_caps(input: &Caps, out_fmt: RawVideoFormat) -> CapsSet {
     }
 }
 
-fn yuv420_caps(format: OutputFormat, w: u32, h: u32) -> Caps {
+fn yuv420_caps(format: OutputFormat, w: u32, h: u32, framerate: Rate) -> Caps {
     Caps::RawVideo {
         format: format.raw_format(),
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
-        framerate: Rate::Any,
+        framerate,
     }
 }
 
@@ -1357,12 +1370,12 @@ mod tests {
     #[test]
     fn i420_caps_are_fixed() {
         assert_eq!(
-            yuv420_caps(OutputFormat::I420, 640, 480),
+            yuv420_caps(OutputFormat::I420, 640, 480, Rate::Fixed(30 << 16)),
             Caps::RawVideo {
                 format: RawVideoFormat::I420,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
-                framerate: Rate::Any,
+                framerate: Rate::Fixed(30 << 16),
             }
         );
     }
@@ -1370,12 +1383,12 @@ mod tests {
     #[test]
     fn nv12_caps_advertise_nv12_format() {
         assert_eq!(
-            yuv420_caps(OutputFormat::Nv12, 1280, 720),
+            yuv420_caps(OutputFormat::Nv12, 1280, 720, Rate::Fixed(30 << 16)),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
-                framerate: Rate::Any,
+                framerate: Rate::Fixed(30 << 16),
             }
         );
     }
