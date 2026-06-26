@@ -101,18 +101,25 @@ impl SourceLoop for WebRtcSrc {
                 .set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
             let mut sequence = 0u64;
-            while let Some(bytes) = inbox.next().await {
-                let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                    // Raw ingest carries no timing; recovered downstream by the
-                    // parser/decoder, as with FileSrc / WebSocketSrc.
-                    timing: FrameTiming::default(),
-                    sequence,
-                    meta: Default::default(),
-                };
-                sequence += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
-            }
+            // Pump frames in an inner scope so its result is captured: the
+            // channel callbacks must be detached before the closures drop on
+            // *every* exit, including a downstream-closed early return.
+            let pump = async {
+                while let Some(bytes) = inbox.next().await {
+                    let frame = Frame {
+                        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                        // Raw ingest carries no timing; recovered downstream by the
+                        // parser/decoder, as with FileSrc / WebSocketSrc.
+                        timing: FrameTiming::default(),
+                        sequence,
+                        meta: Default::default(),
+                    };
+                    sequence += 1;
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                }
+                Ok::<(), G2gError>(())
+            };
+            let result = pump.await;
 
             // Detach the callbacks before dropping them, then keep them alive to
             // exactly here (the channel held raw references for its lifetime).
@@ -122,6 +129,7 @@ impl SourceLoop for WebRtcSrc {
             drop(on_close);
             self.channel.close();
 
+            result?;
             out.push(PipelinePacket::Eos).await?;
             Ok(sequence)
         })
