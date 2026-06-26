@@ -213,8 +213,13 @@ impl RtpJitterBuffer {
         let mut out = Vec::new();
         let Some(next) = self.next else { return out };
         let Some((&last, _)) = self.packets.iter().next_back() else { return out };
+        // Bound the scan to a NACK window: a single far-ahead packet must not
+        // make us walk (and reflect) a billion-entry gap. We buffer at most
+        // max_depth packets, so holes past that window are lost, not NACKed.
+        let window = self.config.max_depth.max(1) as u64;
+        let end = last.min(next.saturating_add(window));
         let mut ext = next;
-        while ext < last {
+        while ext < end {
             if !self.packets.contains_key(&ext) {
                 out.push((ext & 0xFFFF) as u16);
             }
@@ -350,6 +355,19 @@ mod tests {
         assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0), "release the contiguous head");
         // Now next=1; holes before the highest buffered (4) are 1 and 3.
         assert_eq!(jb.missing_seqs(), alloc::vec![1, 3]);
+    }
+
+    #[test]
+    fn missing_seqs_is_bounded_by_window_not_the_gap() {
+        let mut jb = RtpJitterBuffer::new(JitterConfig::new(50, 64));
+        jb.push(&pkt(0, 0), 0);
+        assert_eq!(jb.pop(0).map(|p| tag(&p)), Some(0)); // next = 1
+        // A single far-ahead packet must not make the NACK list span the whole
+        // gap; it is bounded by the depth window.
+        jb.push(&pkt(5000, 1), 0);
+        let missing = jb.missing_seqs();
+        assert_eq!(missing.len(), 64, "bounded to the depth window, not ~5000");
+        assert_eq!(missing[0], 1);
     }
 
     #[test]
