@@ -231,9 +231,13 @@ impl AsyncElement for VideoBox {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    let (format, w, h, rate) = self.accept_input(&c)?;
-                    self.out_dims(w, h).ok_or(G2gError::CapsMismatch)?;
-                    self.input = Some((format, w, h, rate));
+                    // `c` is the runner arm's forward *output* caps (it already
+                    // called configure_pipeline for our input). Forward it and
+                    // record last_caps to suppress the data path's duplicate
+                    // emit; do NOT accept_input, which would clobber the input
+                    // with our own (boxed) output and corrupt the next frame.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
