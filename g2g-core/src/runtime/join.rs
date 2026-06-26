@@ -6,6 +6,7 @@ use core::task::{Context, Poll};
 use alloc::vec::Vec;
 
 use crate::element::BoxFuture;
+#[cfg(feature = "std")]
 use crate::runtime::channel::Receiver;
 
 /// Polls a homogeneous set of boxed futures concurrently to completion,

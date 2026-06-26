@@ -14,14 +14,14 @@ use crate::frame::PipelinePacket;
 use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{bounded, link, Sender, SenderSink};
+use crate::runtime::channel::{link, SenderSink};
 use crate::runtime::coordinator::{
     coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
     report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
-use crate::runtime::join::{dynamic_join, select2, Either, Join2};
+use crate::runtime::join::{select2, Either, Join2};
 use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
 };
@@ -57,7 +57,9 @@ use crate::graph::Graph;
 #[cfg(feature = "std")]
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 #[cfg(feature = "std")]
-use crate::runtime::join::join_all;
+use crate::runtime::channel::{bounded, Sender};
+#[cfg(feature = "std")]
+use crate::runtime::join::{dynamic_join, join_all};
 
 /// Source-side element trait. Sources have no input pad, so the packet-in /
 /// packet-out shape of [`AsyncElement`] does not fit them. A `SourceLoop`
