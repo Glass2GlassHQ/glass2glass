@@ -179,6 +179,11 @@ pub mod wavsink;
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
 
+// ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Resolves a
+// camera's RTSP URL over SOAP, then delegates to RtspSrc; implies `rtsp`.
+#[cfg(feature = "onvif")]
+pub mod onvif;
+
 // Sans-IO RTSP 1.0 server responder (always compiled) and the tokio TCP serving
 // sink (egress: hosts a pipeline's H.264 as an RTSP endpoint).
 pub mod rtspserver;

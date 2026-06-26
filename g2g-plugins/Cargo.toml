@@ -70,6 +70,13 @@ udp-ingress = ["std", "tokio/net"]
 # feature is off by default, so the no_std baseline and MSRV floor are unaffected
 # (same situation noted for AudioResample / rubato).
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
+# ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
+# WS-Discovery Probe (UDP multicast) and the two media SOAP calls
+# (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
+# Reuses reqwest for the SOAP HTTP POST, roxmltree to read the responses, sha1
+# for the password digest, getrandom for the nonce, and base64. Resolves a URI
+# then delegates to RtspSrc (so it implies the `rtsp` feature). Implies std.
+onvif = ["std", "rtsp", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:sha1", "dep:getrandom", "dep:base64"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
@@ -390,8 +397,11 @@ pbkdf2 = { version = "0.12", optional = true, default-features = false }
 # name `md5`), distinct from the unrelated `md5` 0.7 crate elsewhere in the tree.
 md-5 = { version = "0.10", optional = true }
 aes-kw = { version = "0.2", optional = true, features = ["alloc"] }
-# OS RNG for the random stream key + salt the SRT caller generates.
+# OS RNG for the random stream key + salt the SRT caller generates, and the
+# WS-Security nonce the ONVIF UsernameToken digest needs.
 getrandom = { version = "0.2", optional = true }
+# Base64 for the ONVIF WS-Security nonce + PasswordDigest (onvif feature).
+base64 = { version = "0.22", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }

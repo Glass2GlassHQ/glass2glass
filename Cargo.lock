@@ -3318,6 +3318,7 @@ dependencies = [
  "alsa",
  "ash",
  "audiopus",
+ "base64 0.22.1",
  "bytes",
  "cbc",
  "critical-section",

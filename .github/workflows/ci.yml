@@ -73,7 +73,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
+          rtsp,onvif,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
@@ -82,6 +82,11 @@ jobs:
       # driver, so CI guards the embedded story (M45 / M260 / M264).
       - name: test g2g-plugins (embassy-link, no-alloc embedded path)
         run: cargo test -p g2g-plugins --locked --features embassy-link --test m45_embassy_link --test m260_dma_ring --test m264_embassy_multitask
+      # ONVIF SOAP/WS-Discovery is hand-rolled, so guard the deterministic
+      # parts (envelope build, password digest, response parsing) in CI. The
+      # live discovery / resolve tests are #[ignore] (need a camera on the LAN).
+      - name: test g2g-plugins (onvif, offline)
+        run: cargo test -p g2g-plugins --locked --features onvif --lib onvif --test onvif_smoke
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no

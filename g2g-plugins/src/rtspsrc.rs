@@ -95,6 +95,11 @@ pub struct RtspSrc {
     user_agent: String,
     target_frames: Option<u64>,
     reconnect: ReconnectPolicy,
+    /// Optional RTSP authentication. ONVIF cameras almost always gate the
+    /// media stream behind the same user/pass as the device service, so
+    /// `OnvifSrc` resolves a URI and threads these through. `None` =
+    /// anonymous DESCRIBE (the historical default).
+    creds: Option<retina::client::Credentials>,
     /// Caller-supplied expected geometry. When set, `intercept_caps`
     /// returns these as fixed dims without performing a network probe
     /// (useful for tests and known cameras). The SDP's actual dims still
@@ -119,6 +124,7 @@ impl RtspSrc {
             user_agent: "glass2glass/0.1".to_string(),
             target_frames: None,
             reconnect: ReconnectPolicy::DISABLED,
+            creds: None,
             expected_dims: None,
             discovered_caps: None,
             stashed_session: None,
@@ -135,6 +141,18 @@ impl RtspSrc {
 
     pub fn with_user_agent<S: Into<String>>(mut self, ua: S) -> Self {
         self.user_agent = ua.into();
+        self
+    }
+
+    /// Supply RTSP DESCRIBE/SETUP credentials (digest or basic, negotiated
+    /// by retina). Used by [`OnvifSrc`](crate::onvif::OnvifSrc) after it
+    /// resolves a stream URI: ONVIF cameras gate the RTSP media behind the
+    /// same account as the device service.
+    pub fn with_credentials<U: Into<String>, P: Into<String>>(mut self, user: U, pass: P) -> Self {
+        self.creds = Some(retina::client::Credentials {
+            username: user.into(),
+            password: pass.into(),
+        });
         self
     }
 
@@ -213,8 +231,13 @@ impl SourceLoop for RtspSrc {
             if let Some(c) = &self.discovered_caps {
                 return Ok(c.clone());
             }
-            let stashed =
-                probe_session_with_reconnect(&self.url, &self.user_agent, &self.reconnect).await?;
+            let stashed = probe_session_with_reconnect(
+                &self.url,
+                &self.user_agent,
+                self.creds.as_ref(),
+                &self.reconnect,
+            )
+            .await?;
             let caps = stashed.caps.clone();
             self.discovered_caps = Some(caps.clone());
             self.stashed_session = Some(stashed);
@@ -371,7 +394,7 @@ async fn run_session(
     // `None` for any later session.
     let (session, video_idx, current_caps) = match src.stashed_session.take() {
         Some(stashed) => (stashed.session, stashed.video_idx, Some(stashed.caps)),
-        None => match connect_describe_setup(&src.url, &src.user_agent).await {
+        None => match connect_describe_setup(&src.url, &src.user_agent, src.creds.as_ref()).await {
             Ok((s, idx)) => {
                 let caps = caps_from_video_params(video_params_for(s.streams(), idx));
                 (s, idx, caps)
@@ -495,13 +518,14 @@ async fn run_session(
 async fn probe_session_with_reconnect(
     url: &str,
     user_agent: &str,
+    creds: Option<&retina::client::Credentials>,
     policy: &ReconnectPolicy,
 ) -> Result<StashedSession, G2gError> {
     let mut attempt: u32 = 0;
     let mut backoff_ms = policy.initial_backoff_ms.max(1);
     let max_attempts = policy.max_attempts;
     loop {
-        match probe_session(url, user_agent).await {
+        match probe_session(url, user_agent, creds).await {
             Ok(stashed) => return Ok(stashed),
             // `CapsMismatch` is a structural problem (bad URL, no H.264
             // stream): retrying won't help, surface immediately.
@@ -528,8 +552,12 @@ async fn probe_session_with_reconnect(
 /// the source has no caps to advertise, so the runner fails negotiation
 /// cleanly. A caller that wants to advertise fixed caps without I/O
 /// should use [`RtspSrc::with_expected_dims`] instead.
-async fn probe_session(url: &str, user_agent: &str) -> Result<StashedSession, G2gError> {
-    let (session, video_idx) = connect_describe_setup(url, user_agent).await?;
+async fn probe_session(
+    url: &str,
+    user_agent: &str,
+    creds: Option<&retina::client::Credentials>,
+) -> Result<StashedSession, G2gError> {
+    let (session, video_idx) = connect_describe_setup(url, user_agent, creds).await?;
     let caps = caps_from_video_params(video_params_for(session.streams(), video_idx))
         .ok_or(G2gError::CapsMismatch)?;
     Ok(StashedSession { session, video_idx, caps })
@@ -542,11 +570,13 @@ async fn probe_session(url: &str, user_agent: &str) -> Result<StashedSession, G2
 async fn connect_describe_setup(
     url: &str,
     user_agent: &str,
+    creds: Option<&retina::client::Credentials>,
 ) -> Result<(Session<Described>, usize), G2gError> {
     let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
     let session_group = Arc::new(SessionGroup::default());
     let opts = SessionOptions::default()
         .session_group(session_group)
+        .creds(creds.cloned())
         .user_agent(user_agent.to_string());
     let mut session = Session::describe(url, opts)
         .await

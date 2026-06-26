@@ -78,6 +78,8 @@ use crate::mjpegenc::MjpegEnc;
 use crate::fmp4demux::Fmp4Demux;
 #[cfg(feature = "rtsp")]
 use crate::rtspsrc::RtspSrc;
+#[cfg(feature = "onvif")]
+use crate::onvif::OnvifSrc;
 #[cfg(feature = "udp-ingress")]
 use crate::udpsrc::UdpSrc;
 #[cfg(feature = "udp-egress")]
@@ -532,6 +534,20 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
         },
         || Box::new(RtspSrc::new("")),
+    ));
+    // ONVIF camera source: set the device service URL + account via
+    // `onvifsrc location=... user=... password=...`. The H.264 output caps
+    // match RtspSrc (the resolved RTSP stream the element delegates to).
+    #[cfg(feature = "onvif")]
+    reg.register_source(SourceFactory::new(
+        "onvifsrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(OnvifSrc::new("")),
     ));
     #[cfg(feature = "udp-ingress")]
     reg.register_source(SourceFactory::new(

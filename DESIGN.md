@@ -618,7 +618,9 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 | Linux + VAAPI | `VaapiH264Dec` | `vaapi` | `System` / NV12 |
 | Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
-`RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE` (Annex-B) or accepts AVCC framing detected per buffer. The first SPS the parser sees provides geometry; framerate is recovered from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when present, or left as `Rate::Any` when the VUI is absent.
+`RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE` (Annex-B) or accepts AVCC framing detected per buffer. The first SPS the parser sees provides geometry; framerate is recovered from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when present, or left as `Rate::Any` when the VUI is absent. `RtspSrc::with_credentials` supplies the DESCRIBE/SETUP account (threaded into retina's `SessionOptions`).
+
+`OnvifSrc` (`onvif` feature) is the ONVIF *control plane* in front of `RtspSrc`. An ONVIF camera does not stream over ONVIF; its SOAP services tell you the RTSP URL. `discover` sends one WS-Discovery `Probe` to the `239.255.255.250:3702` multicast group and collects each camera's device-service URL from the `ProbeMatch` `XAddrs`; `resolve_stream_uri` then runs `GetCapabilities` → `GetProfiles` → `GetStreamUri`, authenticated with a WS-Security `UsernameToken` digest (`Base64(SHA1(nonce ++ created ++ password))`). The element resolves the RTSP URI lazily during negotiation (`intercept_caps`), builds an inner `RtspSrc` once (forwarding the same credentials, since cameras gate the media stream behind the device account), and delegates the rest of the `SourceLoop` to it. The SOAP layer is hand-rolled (fixed request templates + `roxmltree` response reads) to avoid the git-only `onvif`/`schema` crate tree; the footprint is reqwest + roxmltree + sha1 + base64 + getrandom. Scope is discovery + stream-URI resolution; PTZ and event subscriptions are not implemented.
 
 #### 4.11.5 Zero-copy NVDEC → CUDA → GPU display
 
