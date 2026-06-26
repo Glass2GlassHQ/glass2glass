@@ -57,6 +57,29 @@ const ID_TIMESTAMP: u32 = 0x00E7;
 const ID_SIMPLE_BLOCK: u32 = 0x00A3;
 const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
+const ID_SEEK_HEAD: u32 = 0x114D_9B74;
+const ID_CUES: u32 = 0x1C53_BB6B;
+const ID_CHAPTERS: u32 = 0x1043_A770;
+const ID_ATTACHMENTS: u32 = 0x1941_A469;
+
+/// Whether `id` is a Segment-level (level-1) element. Used to decide when an
+/// unknown-size (live) Cluster ends: only a real level-1 sibling closes it, so a
+/// benign Cluster child (Void, CRC-32, Position, PrevSize) is skipped instead.
+fn is_level1_element(id: u32) -> bool {
+    matches!(
+        id,
+        ID_EBML
+            | ID_SEGMENT
+            | ID_SEEK_HEAD
+            | ID_INFO
+            | ID_TRACKS
+            | ID_CUES
+            | ID_CHAPTERS
+            | ID_TAGS
+            | ID_ATTACHMENTS
+            | ID_CLUSTER
+    )
+}
 
 /// The default `TimestampScale` (ns per timestamp unit) when `Info` omits it.
 const DEFAULT_TIMESTAMP_SCALE: u64 = 1_000_000;
@@ -267,7 +290,22 @@ impl MatroskaDemuxer {
                         self.buf.drain(..total);
                         continue;
                     }
-                    _ => self.open_cluster_ts = None, // end the Cluster, handle id below
+                    // A real level-1 sibling ends the Cluster; handle it below.
+                    id if is_level1_element(id) => self.open_cluster_ts = None,
+                    // A benign Cluster child (Void, CRC-32, Position, PrevSize) or
+                    // an element we do not decode: skip its bytes and keep the
+                    // Cluster open so the following blocks still parse.
+                    _ => {
+                        if unknown {
+                            return; // need a definite size to skip
+                        }
+                        let Some(total) = header.checked_add(size as usize) else { return };
+                        if self.buf.len() < total {
+                            return;
+                        }
+                        self.buf.drain(..total);
+                        continue;
+                    }
                 }
             }
 
@@ -1152,6 +1190,36 @@ mod tests {
         assert_eq!(frames[1].pts_ns, 10 * 1_000_000);
         assert_eq!(frames[2].data, vec![0xCC]);
         assert_eq!(frames[2].pts_ns, 100 * 1_000_000, "second cluster's Timestamp applies");
+    }
+
+    #[test]
+    fn unknown_size_cluster_skips_benign_children() {
+        // A live Cluster may carry CRC-32 / Void children among its blocks; these
+        // must be skipped, not treated as the Cluster end (which would drop every
+        // following block).
+        let tracks =
+            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((64, 48)), None));
+        let cluster = unknown_size_elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            1,
+            &[
+                elem(&[0xBF], &[0x12, 0x34, 0x56, 0x78]), // CRC-32 (benign, often first)
+                elem(&[0xE7], &uint_body(0)),             // Timestamp
+                elem(&[0xA3], &block_body(1, 0, true, &[0xAA])),
+                elem(&[0xEC], &[0x00, 0x00]), // Void (benign padding)
+                elem(&[0xA3], &block_body(1, 10, false, &[0xBB])),
+            ]
+            .concat(),
+        );
+        let segment =
+            unknown_size_elem(&[0x18, 0x53, 0x80, 0x67], 8, &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 2, "benign children are skipped; both blocks demux");
+        assert_eq!(frames[0].data, vec![0xAA]);
+        assert_eq!(frames[1].data, vec![0xBB]);
     }
 
     #[test]
