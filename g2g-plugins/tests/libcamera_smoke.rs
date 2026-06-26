@@ -97,6 +97,13 @@ async fn libcamera_fps_limit_is_enforced() {
         .with_fps(fps)
         .with_mjpeg(mjpeg)
         .with_frame_limit(target);
+    // Optional manual exposure (us) / gain to lift the auto-exposure fps cap.
+    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE").ok().and_then(|s| s.parse().ok()) {
+        src = src.with_exposure(e);
+    }
+    if let Some(g) = std::env::var("G2G_LIBCAMERA_GAIN").ok().and_then(|s| s.parse().ok()) {
+        src = src.with_gain(g);
+    }
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
 
@@ -137,6 +144,54 @@ async fn libcamera_fps_limit_is_enforced() {
             "rate collapsed to {actual_fps:.1} fps under a {fps} fps cap"
         );
     }
+}
+
+/// Prove manual exposure lifts the frame rate that auto-exposure caps in low
+/// light. Two back-to-back captures at a 30 fps request: one with AE on
+/// (default), one with a fixed short exposure (AE off). A short exposure
+/// removes the per-frame exposure time as the bottleneck, so it reaches a
+/// rate the AE run cannot in a dim room. (Unsupported controls like
+/// `AnalogueGain` on this UVC cam are skipped, not set, so this never aborts.)
+#[tokio::test]
+#[ignore = "needs a real camera; the effect is clearest in a dim room"]
+async fn libcamera_manual_exposure_lifts_fps() {
+    async fn measure(exposure_us: Option<i32>) -> f64 {
+        let target: u64 = 40;
+        let mut src = LibCameraSrc::new()
+            .with_camera(camera_index())
+            .with_size(640, 480)
+            .with_fps(30)
+            .with_frame_limit(target);
+        if let Some(e) = exposure_us {
+            src = src.with_exposure(e);
+        }
+        let mut sink = FakeSink::new();
+        let clock = ZeroClock;
+        let start = std::time::Instant::now();
+        let stats = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            run_simple_pipeline(&mut src, &mut sink, &clock, LatencyProfile::Live.link_capacity()),
+        )
+        .await
+        .expect("finishes in 30s")
+        .expect("capture succeeds");
+        stats.frames_emitted as f64 / start.elapsed().as_secs_f64()
+    }
+
+    let rate_ae = measure(None).await;
+    let rate_manual = measure(Some(8_000)).await; // 8 ms exposure -> up to 125 fps
+    eprintln!("auto-exposure: {rate_ae:.1} fps, manual 8ms exposure: {rate_manual:.1} fps");
+
+    // A fixed short exposure is not exposure-bound, so it reaches a high rate
+    // regardless of lighting; in a dim room it clearly beats the AE rate.
+    assert!(
+        rate_manual > 15.0,
+        "manual exposure did not lift the rate: {rate_manual:.1} fps"
+    );
+    assert!(
+        rate_manual >= rate_ae - 1.0,
+        "manual exposure ({rate_manual:.1}) slower than auto ({rate_ae:.1})"
+    );
 }
 
 /// MJPEG path: the source negotiates `CompressedVideo{Mjpeg}` and `MjpegDec`
@@ -228,6 +283,10 @@ async fn libcamera_capture_displays_in_a_window() {
         .with_size(640, 480)
         .with_fps(fps)
         .with_frame_limit(target);
+    // Optional manual exposure (us) to keep the rate up in low light.
+    if let Some(e) = std::env::var("G2G_LIBCAMERA_EXPOSURE").ok().and_then(|s| s.parse().ok()) {
+        src = src.with_exposure(e);
+    }
     // libcamera gives YUYV on this UVC cam; WaylandSink wants NV12.
     let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
     let mut sink = WaylandSink::new().with_title("glass2glass libcamera capture");

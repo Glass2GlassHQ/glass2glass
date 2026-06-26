@@ -756,9 +756,19 @@ capture thread owns the whole libcamera object graph (manager, camera, a
 request-buffer ring, and the completion callback) rather than a single device
 handle. Each completed request's planes are packed contiguously (Y then
 interleaved UV for NV12) before being forwarded over the bounded channel. The
-requested frame rate is enforced on the camera with a fixed `FrameDurationLimits`
-(min == max, microseconds) passed as a start control, which the `uvcvideo`
-handler maps to the UVC frame interval. The `libcamera` crate requires libcamera
+requested frame rate is bounded on the camera with a `FrameDurationLimits` start
+control (the minimum frame duration caps the fastest rate; the maximum is left
+generous so an unachievable request degrades to the camera's own ceiling instead
+of collapsing). Manual exposure / gain (`with_exposure` / `with_gain`, which turn
+auto-exposure off) ride the same start-control path and are the real frame-rate
+lever in low light: with auto-exposure on the camera lengthens exposure until the
+rate collapses (~9 fps on a dim webcam, the same rate in every format and
+resolution), while a fixed short exposure restores a high rate (measured 8.8 ->
+24.9 fps on the developer's webcam). Start controls are applied through a support
+check against the camera's `ControlInfoMap`, because libcamera aborts the process
+(a C++ exception across the FFI boundary) if a control list carries an id the
+pipeline handler does not advertise (a UVC webcam may expose `ExposureTime` but
+not `AnalogueGain`). The `libcamera` crate requires libcamera
 `>= 0.4`, newer than some distro packages, so the feature is host-validated (like
 the NVIDIA stack) rather than built in CI. The camera also feeds the GPU/ML path:
 the g2g-ml `libcamera-wgpu` feature chains `LibCameraSrc -> VideoConvert(NV12) ->

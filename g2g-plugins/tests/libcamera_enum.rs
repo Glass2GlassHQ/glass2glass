@@ -28,4 +28,8 @@ fn enumerate_formats() {
             println!("    {}x{}", s.width, s.height);
         }
     }
+    println!("supported controls:");
+    for (key, info) in cam.controls().into_iter() {
+        println!("    {key}: {info:?}");
+    }
 }

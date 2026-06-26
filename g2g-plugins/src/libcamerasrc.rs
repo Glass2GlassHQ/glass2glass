@@ -40,8 +40,8 @@ use g2g_core::{
 
 use libcamera::camera::CameraConfigurationStatus;
 use libcamera::camera_manager::CameraManager;
-use libcamera::control::ControlList;
-use libcamera::controls::FrameDurationLimits;
+use libcamera::control::{Control, ControlInfoMap, ControlList};
+use libcamera::controls::{AeEnable, AnalogueGain, ExposureTime, FrameDurationLimits};
 use libcamera::framebuffer::AsFrameBuffer;
 use libcamera::framebuffer_allocator::{FrameBuffer, FrameBufferAllocator};
 use libcamera::framebuffer_map::MemoryMappedFrameBuffer;
@@ -124,6 +124,21 @@ fn lc_other() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
+/// Set a control only if the camera advertises it. libcamera throws a C++
+/// `std::out_of_range` (aborting the process across the FFI boundary) when a
+/// control list passed to `start` carries an id the pipeline handler does not
+/// support, so an unsupported control (e.g. `AnalogueGain` on a UVC webcam that
+/// exposes only exposure) must be skipped, not set. Returns whether it was set.
+fn set_if_supported<C: Control>(ctrls: &mut ControlList, infos: &ControlInfoMap, val: C) -> bool {
+    if infos.count(C::ID) > 0 {
+        // `set` only fails on a value/type mismatch we control here, so ignore.
+        let _ = ctrls.set(val);
+        true
+    } else {
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct LibCameraSrc {
     /// Index into libcamera's enumerated camera list (default 0).
@@ -142,6 +157,18 @@ pub struct LibCameraSrc {
     /// high frame rates / resolutions over USB that uncompressed YUYV cannot;
     /// `MjpegDec` decodes it downstream.
     prefer_mjpeg: bool,
+    /// Auto-exposure override. `None` = leave libcamera's default (AE on); a
+    /// manual `exposure_us` / `gain` implies AE off. With AE on in a dim room
+    /// the camera lengthens exposure and the frame rate collapses, so capping
+    /// exposure is the real lever for high fps in low light.
+    ae_enable: Option<bool>,
+    /// Manual exposure time in microseconds (implies AE off). A short exposure
+    /// lets the camera hit a high frame rate; pair with `gain` to keep the
+    /// image bright.
+    exposure_us: Option<i32>,
+    /// Manual analogue gain (sensor ISO multiplier; implies AE off). Brightens a
+    /// short exposure at the cost of noise.
+    gain: Option<f32>,
     /// Cached negotiation result: (output kind, width, height, fps). Set by
     /// [`negotiate`](Self::negotiate), consumed by `run`.
     negotiated: Option<(OutKind, u32, u32, u32)>,
@@ -158,6 +185,9 @@ impl LibCameraSrc {
             req_fps: DEFAULT_FPS,
             frame_limit: 0,
             prefer_mjpeg: false,
+            ae_enable: None,
+            exposure_us: None,
+            gain: None,
             negotiated: None,
             configured: false,
         }
@@ -195,6 +225,32 @@ impl LibCameraSrc {
     /// the uncompressed YUYV mode cannot sustain over USB.
     pub fn with_mjpeg(mut self, on: bool) -> Self {
         self.prefer_mjpeg = on;
+        self
+    }
+
+    /// Turn auto-exposure on or off explicitly. With AE on (the default) the
+    /// camera lengthens exposure in low light and the frame rate drops; turn it
+    /// off and set [`with_exposure`](Self::with_exposure) to hold a high rate.
+    pub fn with_auto_exposure(mut self, on: bool) -> Self {
+        self.ae_enable = Some(on);
+        self
+    }
+
+    /// Set a manual exposure time in microseconds (disables auto-exposure). A
+    /// short exposure (e.g. 8000 us) keeps the frame interval short enough for a
+    /// high frame rate even in a dim room; compensate brightness with
+    /// [`with_gain`](Self::with_gain).
+    pub fn with_exposure(mut self, micros: i32) -> Self {
+        self.exposure_us = Some(micros);
+        self.ae_enable = Some(false);
+        self
+    }
+
+    /// Set a manual analogue gain (disables auto-exposure). Brightens a short
+    /// exposure at the cost of sensor noise.
+    pub fn with_gain(mut self, gain: f32) -> Self {
+        self.gain = Some(gain);
+        self.ae_enable = Some(false);
         self
     }
 
@@ -368,6 +424,21 @@ impl SourceLoop for LibCameraSrc {
                 };
                 Ok(())
             }
+            "auto-exposure" => {
+                self.ae_enable = Some(value.as_bool().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            // Manual exposure (us) / gain both imply auto-exposure off.
+            "exposure" => {
+                self.exposure_us = Some(value.as_int().ok_or(PropError::Type)? as i32);
+                self.ae_enable = Some(false);
+                Ok(())
+            }
+            "gain" => {
+                self.gain = Some(value.as_double().ok_or(PropError::Type)? as f32);
+                self.ae_enable = Some(false);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -379,6 +450,9 @@ impl SourceLoop for LibCameraSrc {
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
             "format" => Some(PropValue::Str(if self.prefer_mjpeg { "mjpeg" } else { "raw" }.into())),
+            "auto-exposure" => self.ae_enable.map(PropValue::Bool),
+            "exposure" => self.exposure_us.map(|e| PropValue::Int(e as i64)),
+            "gain" => self.gain.map(|g| PropValue::Double(g as f64)),
             _ => None,
         }
     }
@@ -392,6 +466,12 @@ impl SourceLoop for LibCameraSrc {
             let limit = self.frame_limit;
             let index = self.camera_index;
             let pf = kind.pixel_format();
+            let controls = CamControls {
+                fps,
+                ae_enable: self.ae_enable,
+                exposure_us: self.exposure_us,
+                gain: self.gain,
+            };
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so memory stays bounded (backpressure).
@@ -400,7 +480,7 @@ impl SourceLoop for LibCameraSrc {
             // All libcamera interaction lives on this thread: the objects are
             // thread-affine and completions arrive on a libcamera callback.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
-                capture_loop(index, pf, w, h, fps, limit, tx)
+                capture_loop(index, pf, w, h, controls, limit, tx)
             });
 
             let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
@@ -442,12 +522,22 @@ impl SourceLoop for LibCameraSrc {
 /// camera, configures it for `pf` at `w`x`h`, allocates and queues a request
 /// ring, and forwards each completed frame's packed bytes over `tx` until the
 /// frame limit is hit or the receiver is dropped.
+/// Camera-side controls applied at `start`: the frame-rate cap plus the
+/// exposure / gain overrides. All `Copy`, so they cross to the capture thread.
+#[derive(Debug, Clone, Copy)]
+struct CamControls {
+    fps: u32,
+    ae_enable: Option<bool>,
+    exposure_us: Option<i32>,
+    gain: Option<f32>,
+}
+
 fn capture_loop(
     index: usize,
     pf: PixelFormat,
     w: u32,
     h: u32,
-    fps: u32,
+    controls: CamControls,
     limit: u64,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<(), G2gError> {
@@ -496,24 +586,40 @@ fn capture_loop(
         let _ = done_tx.send(req);
     });
 
-    // Cap the capture rate when a frame rate was requested. The minimum frame
-    // duration (microseconds) bounds the *fastest* rate, so it caps fps at the
-    // request; the maximum is left generous (a 1 fps floor) so a camera that
-    // cannot sustain the requested rate falls back to its own ceiling instead
-    // of collapsing. Setting min == max forces an exact interval, which a UVC
-    // camera that cannot meet it (e.g. 30 fps uncompressed at higher
-    // resolutions) handles by dropping to a much lower rate, so we avoid that.
-    let start_controls = if fps > 0 {
-        let min_us = (1_000_000 / fps as i64).max(1);
-        let max_us = 1_000_000i64; // 1 fps floor; does not bind in practice.
-        let mut ctrls = ControlList::new();
-        ctrls
-            .set(FrameDurationLimits([min_us, max_us.max(min_us)]))
-            .map_err(|_| lc_other())?;
-        Some(ctrls)
-    } else {
-        None
-    };
+    // Build the start controls: the frame-rate cap plus any exposure / gain
+    // overrides, each applied only if the camera advertises it (see
+    // `set_if_supported`). With auto-exposure on (the default) the camera
+    // lengthens exposure in low light and the frame rate collapses, so a manual
+    // short exposure (AE off) is the real lever for a high rate in a dim room;
+    // the FrameDurationLimits cap alone cannot beat the exposure-bound rate.
+    let infos = cam.controls();
+    let mut ctrls = ControlList::new();
+    let mut any = false;
+
+    if controls.fps > 0 {
+        // Minimum frame duration (microseconds) bounds the *fastest* rate, so
+        // it caps fps at the request; the maximum is left generous (a 1 fps
+        // floor) so a camera that cannot sustain the requested rate falls back
+        // to its own ceiling instead of collapsing on an exact min == max.
+        let min_us = (1_000_000 / controls.fps as i64).max(1);
+        let max_us = 1_000_000i64.max(min_us);
+        any |= set_if_supported(&mut ctrls, infos, FrameDurationLimits([min_us, max_us]));
+    }
+    // A manual exposure or gain implies auto-exposure off (AE would otherwise
+    // override the fixed values); an explicit `ae_enable` always wins.
+    let ae = controls
+        .ae_enable
+        .or_else(|| (controls.exposure_us.is_some() || controls.gain.is_some()).then_some(false));
+    if let Some(ae) = ae {
+        any |= set_if_supported(&mut ctrls, infos, AeEnable(ae));
+    }
+    if let Some(us) = controls.exposure_us {
+        any |= set_if_supported(&mut ctrls, infos, ExposureTime(us));
+    }
+    if let Some(g) = controls.gain {
+        any |= set_if_supported(&mut ctrls, infos, AnalogueGain(g));
+    }
+    let start_controls = any.then_some(ctrls);
     cam.start(start_controls.as_deref()).map_err(|e| lc_err(&e))?;
     for req in reqs.drain(..) {
         cam.queue_request(req).map_err(|(_, e)| lc_err(&e))?;
@@ -571,6 +677,9 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("height", PropKind::Uint, "requested capture height in pixels"),
     PropertySpec::new("framerate", PropKind::Uint, "capture frame rate (enforced via FrameDurationLimits)"),
     PropertySpec::new("format", PropKind::Str, "output: raw (NV12/YUYV) | mjpeg (pair with mjpegdec)"),
+    PropertySpec::new("auto-exposure", PropKind::Bool, "auto-exposure on/off (off lifts the low-light fps cap)"),
+    PropertySpec::new("exposure", PropKind::Int, "manual exposure time in microseconds (disables AE)"),
+    PropertySpec::new("gain", PropKind::Double, "manual analogue gain (disables AE)"),
 ];
 
 #[cfg(test)]
@@ -640,5 +749,33 @@ mod tests {
     fn with_mjpeg_sets_preference() {
         let src = LibCameraSrc::new().with_mjpeg(true);
         assert_eq!(src.get_property("format"), Some(PropValue::Str("mjpeg".into())));
+    }
+
+    #[test]
+    fn manual_exposure_implies_ae_off() {
+        // A bare source reports no exposure overrides.
+        let src = LibCameraSrc::new();
+        assert_eq!(src.get_property("auto-exposure"), None);
+        assert_eq!(src.get_property("exposure"), None);
+
+        // Setting exposure or gain turns auto-exposure off automatically.
+        let src = LibCameraSrc::new().with_exposure(8000);
+        assert_eq!(src.get_property("exposure"), Some(PropValue::Int(8000)));
+        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
+
+        let src = LibCameraSrc::new().with_gain(4.0);
+        assert_eq!(src.get_property("gain"), Some(PropValue::Double(4.0)));
+        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
+
+        // The property setters mirror the builders.
+        let mut src = LibCameraSrc::new();
+        src.set_property("exposure", PropValue::Int(5000)).unwrap();
+        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(false)));
+        src.set_property("auto-exposure", PropValue::Bool(true)).unwrap();
+        assert_eq!(src.get_property("auto-exposure"), Some(PropValue::Bool(true)));
+        assert_eq!(
+            src.set_property("gain", PropValue::Str("x".into())),
+            Err(PropError::Type)
+        );
     }
 }
