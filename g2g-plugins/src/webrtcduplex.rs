@@ -226,6 +226,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     ) -> Self::RunFuture<'a> {
         let role = self.role;
         let track_count = self.track_count;
+        let inputs = self.inputs.clone();
         let stun = self.stun_server.clone();
         let linger = self.linger;
         let sig = self.sig.take();
@@ -397,7 +398,14 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                 drain_deadline = Some(Instant::now() + linger);
                             }
                             Some((idx, PipelinePacket::DataFrame(frame))) => {
-                                let kind = KINDS[idx.min(track_count - 1)];
+                                // Route by the track configured for this send pad,
+                                // not the fixed KINDS position (a pipeline may wire
+                                // audio to pad 0 and video to pad 1).
+                                let kind = inputs
+                                    .get(idx)
+                                    .copied()
+                                    .flatten()
+                                    .unwrap_or(KINDS[idx.min(track_count - 1)]);
                                 let (mid, pt_slot) = match kind {
                                     Track::Video => (video_mid, &mut video_pt),
                                     Track::Audio => (audio_mid, &mut audio_pt),
