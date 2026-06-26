@@ -133,7 +133,7 @@ impl Fmp4Demux {
 
     /// Process every complete top-level box now buffered, emitting access units.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        while let Some(total) = next_box_len(&self.buffer) {
+        while let Some(total) = next_box_len(&self.buffer)? {
             if self.buffer.len() < total {
                 break; // wait for the rest of this box
             }
@@ -206,24 +206,28 @@ impl Fmp4Demux {
     }
 }
 
-/// Total length of the box at the start of `buf`, or `None` if the 8-byte header
-/// (or the 64-bit large-size header) isn't fully buffered yet. A size below 8
-/// (including the size-0 "to end of stream" form) can't be framed and returns
-/// `None`; the writer profile we consume always uses explicit sizes.
-fn next_box_len(buf: &[u8]) -> Option<usize> {
+/// Total length of the box at the start of `buf`. `Ok(None)` means the 8-byte
+/// header (or the 64-bit large-size header) isn't fully buffered yet. Once the
+/// size field is in hand, a value below 8 (including the size-0 "to end of
+/// stream" form) is malformed and fails loud rather than stalling the demuxer
+/// with an unconsumable box.
+fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
     if buf.len() < 8 {
-        return None;
+        return Ok(None);
     }
     let size = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
     let total = if size == 1 {
         if buf.len() < 16 {
-            return None;
+            return Ok(None);
         }
         u64::from_be_bytes(buf[8..16].try_into().expect("8 bytes")) as usize
     } else {
         size as usize
     };
-    (total >= 8).then_some(total)
+    if total < 8 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(Some(total))
 }
 
 /// Decrypt one cbcs sample in place: walk its `senc` subsamples, decrypting each
@@ -360,5 +364,23 @@ impl PadTemplates for Fmp4Demux {
                 video(VideoCodec::H265),
             ]))),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_box_len_distinguishes_incomplete_from_malformed() {
+        // Fewer than 8 bytes: header not yet buffered, keep waiting.
+        assert_eq!(next_box_len(&[0, 0, 0, 16, b'm']), Ok(None));
+        // size==1 large-size form without the full 64-bit field yet: keep waiting.
+        assert_eq!(next_box_len(&[0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0, 0]), Ok(None));
+        // A framed box reports its total length.
+        assert_eq!(next_box_len(&[0, 0, 0, 16, b'f', b't', b'y', b'p']), Ok(Some(16)));
+        // size < 8 is malformed: fail loud instead of stalling the demuxer.
+        assert_eq!(next_box_len(&[0, 0, 0, 0, b'm', b'o', b'o', b'v']), Err(G2gError::CapsMismatch));
+        assert_eq!(next_box_len(&[0, 0, 0, 7, b'f', b'r', b'e', b'e']), Err(G2gError::CapsMismatch));
     }
 }
