@@ -748,7 +748,10 @@ the async path; up-front negotiation, re-configure for capture), but differs in
 two ways: it asks libcamera for **NV12** and falls back to **YUYV** only when
 the camera does not offer NV12 (mapping whatever survives `validate()` to
 `Caps::RawVideo`), so a camera that produces planar frames needs no
-`VideoConvert`; and because libcamera is callback-driven and thread-affine, the
+`VideoConvert`; or, with `with_mjpeg(true)` / `format=mjpeg`, it negotiates
+**MJPEG** and emits `CompressedVideo{Mjpeg}` for `MjpegDec` downstream (the
+on-camera-compression path for resolutions / frame rates uncompressed YUYV
+cannot sustain over USB). Because libcamera is callback-driven and thread-affine, the
 capture thread owns the whole libcamera object graph (manager, camera, a
 request-buffer ring, and the completion callback) rather than a single device
 handle. Each completed request's planes are packed contiguously (Y then

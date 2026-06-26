@@ -88,10 +88,14 @@ async fn libcamera_fps_limit_is_enforced() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(24);
+    let mjpeg = std::env::var("G2G_LIBCAMERA_MJPEG").is_ok();
+    let w: u32 = std::env::var("G2G_LIBCAMERA_W").ok().and_then(|s| s.parse().ok()).unwrap_or(640);
+    let h: u32 = std::env::var("G2G_LIBCAMERA_H").ok().and_then(|s| s.parse().ok()).unwrap_or(480);
     let mut src = LibCameraSrc::new()
         .with_camera(camera_index())
-        .with_size(640, 480)
+        .with_size(w, h)
         .with_fps(fps)
+        .with_mjpeg(mjpeg)
         .with_frame_limit(target);
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
@@ -106,16 +110,19 @@ async fn libcamera_fps_limit_is_enforced() {
     .expect("libcamera capture pipeline should succeed");
     let elapsed = start.elapsed();
 
-    let expected = target as f64 / fps as f64;
     let actual_fps = stats.frames_emitted as f64 / elapsed.as_secs_f64();
     eprintln!(
-        "captured {} frames at {fps} fps in {:.2}s (expected ~{:.1}s, actual {:.1} fps)",
+        "captured {} frames {w}x{h} {} at cap={fps} in {:.2}s (actual {:.1} fps)",
         stats.frames_emitted,
+        if mjpeg { "mjpeg" } else { "raw" },
         elapsed.as_secs_f64(),
-        expected,
         actual_fps,
     );
     assert_eq!(stats.frames_emitted, target);
+    // fps == 0 is a diagnostic free-run (no cap): just report, no bounds.
+    if fps == 0 {
+        return;
+    }
     // Ceiling: never faster than the requested cap (a frame or two of slack).
     assert!(
         actual_fps <= fps as f64 + 2.0,
@@ -130,6 +137,68 @@ async fn libcamera_fps_limit_is_enforced() {
             "rate collapsed to {actual_fps:.1} fps under a {fps} fps cap"
         );
     }
+}
+
+/// MJPEG path: the source negotiates `CompressedVideo{Mjpeg}` and `MjpegDec`
+/// decodes the camera's real JPEGs to raw frames end to end. (MJPEG's frame-rate
+/// benefit over uncompressed YUYV is real but only shows when the camera is not
+/// otherwise limited, e.g. by auto-exposure in low light, which caps this
+/// developer's webcam to ~9 fps in every format, so the fps is reported, not
+/// asserted.)
+#[cfg(feature = "mjpeg")]
+#[tokio::test]
+#[ignore = "needs a real camera that offers MJPEG (most UVC webcams do)"]
+async fn libcamera_mjpeg_capture_decodes() {
+    use g2g_core::runtime::{run_source_transform_sink, SourceLoop as _};
+    use g2g_core::{Caps, VideoCodec};
+    use g2g_plugins::mjpegdec::MjpegDec;
+
+    // The source must advertise MJPEG (compressed) caps in MJPEG mode.
+    let mut probe = LibCameraSrc::new()
+        .with_camera(camera_index())
+        .with_size(640, 480)
+        .with_mjpeg(true);
+    let caps = probe.intercept_caps().await.expect("negotiate mjpeg");
+    assert!(
+        matches!(caps, Caps::CompressedVideo { codec: VideoCodec::Mjpeg, .. }),
+        "expected CompressedVideo(Mjpeg), got {caps:?}"
+    );
+
+    let target: u64 = 30;
+    let mut src = LibCameraSrc::new()
+        .with_camera(camera_index())
+        .with_size(640, 480)
+        .with_fps(30)
+        .with_mjpeg(true)
+        .with_frame_limit(target);
+    let mut dec = MjpegDec::new();
+    let mut sink = FakeSink::new();
+    let clock = ZeroClock;
+
+    let start = std::time::Instant::now();
+    let stats = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_source_transform_sink(
+            &mut src,
+            &mut dec,
+            &mut sink,
+            &clock,
+            LatencyProfile::Live.link_capacity(),
+        ),
+    )
+    .await
+    .expect("capture should finish within 30s")
+    .expect("libcamera mjpeg -> mjpegdec pipeline should succeed");
+    let actual_fps = stats.frames_emitted as f64 / start.elapsed().as_secs_f64();
+
+    eprintln!(
+        "mjpeg: {} frames captured + decoded, sink received {} ({:.1} fps)",
+        stats.frames_emitted,
+        sink.received(),
+        actual_fps,
+    );
+    assert_eq!(stats.frames_emitted, target, "all MJPEG frames captured");
+    assert_eq!(sink.received(), target, "all frames decoded to the sink");
 }
 
 #[cfg(feature = "wayland-sink")]

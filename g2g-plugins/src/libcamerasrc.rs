@@ -35,7 +35,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     HardwareError, LatencyReport, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use libcamera::camera::CameraConfigurationStatus;
@@ -58,10 +58,60 @@ const DEFAULT_FPS: u32 = 30;
 /// pipeline.
 const BUFFER_COUNT: usize = 4;
 
-/// NV12 (planar 4:2:0), the preferred output: Y plane then interleaved UV.
+/// NV12 (planar 4:2:0), the preferred raw output: Y plane then interleaved UV.
 const PF_NV12: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'N', b'V', b'1', b'2']), 0);
-/// YUYV (packed 4:2:2), the UVC-universal fallback.
+/// YUYV (packed 4:2:2), the UVC-universal raw fallback.
 const PF_YUYV: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'Y', b'U', b'Y', b'V']), 0);
+/// MJPEG (on-camera baseline JPEG per frame). The UVC high-frame-rate path:
+/// compressing on the camera fits resolutions over USB that uncompressed YUYV
+/// cannot. Decoded downstream by `MjpegDec`. Note the fourcc is `MJPG`.
+const PF_MJPEG: PixelFormat = PixelFormat::new(u32::from_le_bytes([b'M', b'J', b'P', b'G']), 0);
+
+/// The output the source negotiates with the camera. Carries the libcamera
+/// pixel format and the `Caps` it maps to (raw vs compressed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutKind {
+    Nv12,
+    Yuyv,
+    Mjpeg,
+}
+
+impl OutKind {
+    fn pixel_format(self) -> PixelFormat {
+        match self {
+            OutKind::Nv12 => PF_NV12,
+            OutKind::Yuyv => PF_YUYV,
+            OutKind::Mjpeg => PF_MJPEG,
+        }
+    }
+
+    fn from_pixel_format(pf: PixelFormat) -> Option<Self> {
+        if pf == PF_NV12 {
+            Some(OutKind::Nv12)
+        } else if pf == PF_YUYV {
+            Some(OutKind::Yuyv)
+        } else if pf == PF_MJPEG {
+            Some(OutKind::Mjpeg)
+        } else {
+            None
+        }
+    }
+
+    /// The `Caps` this output produces at the negotiated geometry / rate. Raw
+    /// formats map to `RawVideo`; MJPEG to `CompressedVideo{Mjpeg}`.
+    fn caps(self, w: u32, h: u32, fps: u32) -> Caps {
+        let width = Dim::Fixed(w);
+        let height = Dim::Fixed(h);
+        let framerate = Rate::Fixed(fps << 16);
+        match self {
+            OutKind::Nv12 => Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, framerate },
+            OutKind::Yuyv => Caps::RawVideo { format: RawVideoFormat::Yuyv, width, height, framerate },
+            OutKind::Mjpeg => {
+                Caps::CompressedVideo { codec: VideoCodec::Mjpeg, width, height, framerate }
+            }
+        }
+    }
+}
 
 /// Map a libcamera / OS failure to the generic hardware-error arm. libcamera
 /// has no dedicated `HardwareError` variant; errno is preserved where one is
@@ -72,18 +122,6 @@ fn lc_err(e: &std::io::Error) -> G2gError {
 
 fn lc_other() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
-}
-
-/// Translate a libcamera `PixelFormat` to our `RawVideoFormat`. Only the two
-/// formats the source negotiates are recognised.
-fn map_format(pf: PixelFormat) -> Option<RawVideoFormat> {
-    if pf == PF_NV12 {
-        Some(RawVideoFormat::Nv12)
-    } else if pf == PF_YUYV {
-        Some(RawVideoFormat::Yuyv)
-    } else {
-        None
-    }
 }
 
 #[derive(Debug)]
@@ -100,9 +138,13 @@ pub struct LibCameraSrc {
     req_fps: u32,
     /// Stop after this many frames; `0` = run until the pipeline shuts down.
     frame_limit: u64,
-    /// Cached negotiation result: (format, width, height, fps). Set by
+    /// Request MJPEG (compressed) output instead of raw NV12/YUYV. MJPEG fits
+    /// high frame rates / resolutions over USB that uncompressed YUYV cannot;
+    /// `MjpegDec` decodes it downstream.
+    prefer_mjpeg: bool,
+    /// Cached negotiation result: (output kind, width, height, fps). Set by
     /// [`negotiate`](Self::negotiate), consumed by `run`.
-    negotiated: Option<(RawVideoFormat, u32, u32, u32)>,
+    negotiated: Option<(OutKind, u32, u32, u32)>,
     configured: bool,
 }
 
@@ -115,6 +157,7 @@ impl LibCameraSrc {
             req_height: 0,
             req_fps: DEFAULT_FPS,
             frame_limit: 0,
+            prefer_mjpeg: false,
             negotiated: None,
             configured: false,
         }
@@ -147,13 +190,21 @@ impl LibCameraSrc {
         self
     }
 
+    /// Request MJPEG output (compressed, `CompressedVideo{Mjpeg}`) instead of
+    /// raw NV12/YUYV. Pair with `MjpegDec` downstream. Enables high frame rates
+    /// the uncompressed YUYV mode cannot sustain over USB.
+    pub fn with_mjpeg(mut self, on: bool) -> Self {
+        self.prefer_mjpeg = on;
+        self
+    }
+
     /// Probe the camera: acquire it, generate a ViewFinder configuration, try
     /// NV12 then YUYV, validate, and read back the format libcamera settled on.
     /// The camera is released before `run`. Caches the result for `run` and for
     /// repeat `caps_constraint` calls during re-fixate.
     fn negotiate(&mut self) -> Result<Caps, G2gError> {
-        if let Some((format, w, h, fps)) = self.negotiated {
-            return Ok(raw_caps(format, w, h, fps));
+        if let Some((kind, w, h, fps)) = self.negotiated {
+            return Ok(kind.caps(w, h, fps));
         }
 
         let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
@@ -161,16 +212,22 @@ impl LibCameraSrc {
         let cam = cameras.get(self.camera_index).ok_or_else(lc_other)?;
         let cam = cam.acquire().map_err(|e| lc_err(&e))?;
 
-        // Try NV12 first, then YUYV; accept whichever survives validation
-        // unchanged. Fall back to libcamera's default format if neither holds.
-        let mut chosen: Option<(RawVideoFormat, u32, u32)> = None;
-        for pf in [PF_NV12, PF_YUYV] {
+        // MJPEG mode asks for MJPEG only; raw mode prefers NV12 then YUYV.
+        // Accept whichever candidate survives validation unchanged.
+        let candidates: &[OutKind] = if self.prefer_mjpeg {
+            &[OutKind::Mjpeg]
+        } else {
+            &[OutKind::Nv12, OutKind::Yuyv]
+        };
+
+        let mut chosen: Option<(OutKind, u32, u32)> = None;
+        for &kind in candidates {
             let mut cfgs = cam
                 .generate_configuration(&[StreamRole::ViewFinder])
                 .ok_or_else(lc_other)?;
             {
                 let mut cfg = cfgs.get_mut(0).ok_or_else(lc_other)?;
-                cfg.set_pixel_format(pf);
+                cfg.set_pixel_format(kind.pixel_format());
                 if self.req_width > 0 && self.req_height > 0 {
                     cfg.set_size(Size {
                         width: self.req_width,
@@ -182,17 +239,20 @@ impl LibCameraSrc {
                 continue;
             }
             let cfg = cfgs.get(0).ok_or_else(lc_other)?;
-            if cfg.get_pixel_format() == pf {
+            if cfg.get_pixel_format() == kind.pixel_format() {
                 let size = cfg.get_size();
-                chosen = Some((map_format(pf).unwrap(), size.width, size.height));
+                chosen = Some((kind, size.width, size.height));
                 break;
             }
         }
 
-        // Fallback: whatever the default ViewFinder config validates to, if it
-        // is a format we can carry.
-        let (format, w, h) = match chosen {
+        let (kind, w, h) = match chosen {
             Some(c) => c,
+            // MJPEG mode is explicit: if the camera does not offer MJPEG there
+            // is no sensible raw fallback (the caller asked for compressed).
+            None if self.prefer_mjpeg => return Err(G2gError::CapsMismatch),
+            // Raw mode: take whatever the default ViewFinder config validates
+            // to, if it is a format we can carry.
             None => {
                 let mut cfgs = cam
                     .generate_configuration(&[StreamRole::ViewFinder])
@@ -208,30 +268,21 @@ impl LibCameraSrc {
                     return Err(G2gError::CapsMismatch);
                 }
                 let cfg = cfgs.get(0).ok_or_else(lc_other)?;
-                let format = map_format(cfg.get_pixel_format()).ok_or(G2gError::CapsMismatch)?;
+                let kind =
+                    OutKind::from_pixel_format(cfg.get_pixel_format()).ok_or(G2gError::CapsMismatch)?;
                 let size = cfg.get_size();
-                (format, size.width, size.height)
+                (kind, size.width, size.height)
             }
         };
 
-        self.negotiated = Some((format, w, h, self.req_fps));
-        Ok(raw_caps(format, w, h, self.req_fps))
+        self.negotiated = Some((kind, w, h, self.req_fps));
+        Ok(kind.caps(w, h, self.req_fps))
     }
 }
 
 impl Default for LibCameraSrc {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Build the `Caps::RawVideo` for a negotiated format/geometry/rate.
-fn raw_caps(format: RawVideoFormat, w: u32, h: u32, fps: u32) -> Caps {
-    Caps::RawVideo {
-        format,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Fixed(fps << 16),
     }
 }
 
@@ -273,7 +324,7 @@ impl SourceLoop for LibCameraSrc {
         ElementMetadata::new(
             "libcamera camera source",
             "Source/Video",
-            "Captures video from a camera via libcamera (NV12 / YUYV)",
+            "Captures video from a camera via libcamera (NV12 / YUYV / MJPEG)",
             "g2g",
         )
     }
@@ -308,6 +359,15 @@ impl SourceLoop for LibCameraSrc {
                 self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            // "mjpeg" / "raw" select the output kind; raw auto-picks NV12/YUYV.
+            "format" => {
+                self.prefer_mjpeg = match value.as_str().ok_or(PropError::Type)? {
+                    "mjpeg" => true,
+                    "raw" => false,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -318,6 +378,7 @@ impl SourceLoop for LibCameraSrc {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
+            "format" => Some(PropValue::Str(if self.prefer_mjpeg { "mjpeg" } else { "raw" }.into())),
             _ => None,
         }
     }
@@ -327,15 +388,10 @@ impl SourceLoop for LibCameraSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let (format, w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
+            let (kind, w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
             let limit = self.frame_limit;
             let index = self.camera_index;
-            let pf = match format {
-                RawVideoFormat::Nv12 => PF_NV12,
-                RawVideoFormat::Yuyv => PF_YUYV,
-                // negotiate only ever stores Nv12 / Yuyv.
-                _ => return Err(G2gError::CapsMismatch),
-            };
+            let pf = kind.pixel_format();
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so memory stays bounded (backpressure).
@@ -440,14 +496,20 @@ fn capture_loop(
         let _ = done_tx.send(req);
     });
 
-    // Pin the capture rate when a frame rate was requested: a fixed
-    // FrameDurationLimits (min == max, in microseconds) tells libcamera (and,
-    // for a UVC camera, the uvcvideo handler underneath) to hold that exact
-    // frame interval instead of the sensor's default cadence.
+    // Cap the capture rate when a frame rate was requested. The minimum frame
+    // duration (microseconds) bounds the *fastest* rate, so it caps fps at the
+    // request; the maximum is left generous (a 1 fps floor) so a camera that
+    // cannot sustain the requested rate falls back to its own ceiling instead
+    // of collapsing. Setting min == max forces an exact interval, which a UVC
+    // camera that cannot meet it (e.g. 30 fps uncompressed at higher
+    // resolutions) handles by dropping to a much lower rate, so we avoid that.
     let start_controls = if fps > 0 {
-        let us = (1_000_000 / fps as i64).max(1);
+        let min_us = (1_000_000 / fps as i64).max(1);
+        let max_us = 1_000_000i64; // 1 fps floor; does not bind in practice.
         let mut ctrls = ControlList::new();
-        ctrls.set(FrameDurationLimits([us, us])).map_err(|_| lc_other())?;
+        ctrls
+            .set(FrameDurationLimits([min_us, max_us.max(min_us)]))
+            .map_err(|_| lc_other())?;
         Some(ctrls)
     } else {
         None
@@ -508,6 +570,7 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("width", PropKind::Uint, "requested capture width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "requested capture height in pixels"),
     PropertySpec::new("framerate", PropKind::Uint, "capture frame rate (enforced via FrameDurationLimits)"),
+    PropertySpec::new("format", PropKind::Str, "output: raw (NV12/YUYV) | mjpeg (pair with mjpegdec)"),
 ];
 
 #[cfg(test)]
@@ -518,7 +581,7 @@ mod tests {
     fn run_before_negotiation_is_not_configured() {
         // configure_pipeline must reject until intercept_caps has probed.
         let mut src = LibCameraSrc::new();
-        let caps = raw_caps(RawVideoFormat::Nv12, 640, 480, 30);
+        let caps = OutKind::Nv12.caps(640, 480, 30);
         let err = src
             .configure_pipeline(&caps)
             .expect_err("configure without negotiate must fail");
@@ -536,6 +599,14 @@ mod tests {
         assert_eq!(src.get_property("width"), Some(PropValue::Uint(1280)));
         assert_eq!(src.get_property("height"), Some(PropValue::Uint(720)));
         assert_eq!(src.get_property("framerate"), Some(PropValue::Uint(60)));
+        // format property toggles MJPEG output.
+        assert_eq!(src.get_property("format"), Some(PropValue::Str("raw".into())));
+        src.set_property("format", PropValue::Str("mjpeg".into())).unwrap();
+        assert_eq!(src.get_property("format"), Some(PropValue::Str("mjpeg".into())));
+        assert_eq!(
+            src.set_property("format", PropValue::Str("bogus".into())),
+            Err(PropError::Value)
+        );
         assert_eq!(
             src.set_property("nope", PropValue::Uint(0)),
             Err(PropError::Unknown)
@@ -547,10 +618,27 @@ mod tests {
     }
 
     #[test]
-    fn maps_known_formats_only() {
-        assert_eq!(map_format(PF_NV12), Some(RawVideoFormat::Nv12));
-        assert_eq!(map_format(PF_YUYV), Some(RawVideoFormat::Yuyv));
+    fn outkind_maps_pixel_formats_and_caps() {
+        assert_eq!(OutKind::from_pixel_format(PF_NV12), Some(OutKind::Nv12));
+        assert_eq!(OutKind::from_pixel_format(PF_YUYV), Some(OutKind::Yuyv));
+        assert_eq!(OutKind::from_pixel_format(PF_MJPEG), Some(OutKind::Mjpeg));
         let rgb = PixelFormat::new(u32::from_le_bytes([b'R', b'G', b'2', b'4']), 0);
-        assert_eq!(map_format(rgb), None);
+        assert_eq!(OutKind::from_pixel_format(rgb), None);
+
+        // Raw kinds produce RawVideo; MJPEG produces CompressedVideo{Mjpeg}.
+        assert!(matches!(
+            OutKind::Nv12.caps(640, 480, 30),
+            Caps::RawVideo { format: RawVideoFormat::Nv12, .. }
+        ));
+        assert!(matches!(
+            OutKind::Mjpeg.caps(1280, 720, 30),
+            Caps::CompressedVideo { codec: VideoCodec::Mjpeg, .. }
+        ));
+    }
+
+    #[test]
+    fn with_mjpeg_sets_preference() {
+        let src = LibCameraSrc::new().with_mjpeg(true);
+        assert_eq!(src.get_property("format"), Some(PropValue::Str("mjpeg".into())));
     }
 }
