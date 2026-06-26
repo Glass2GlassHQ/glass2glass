@@ -262,8 +262,10 @@ impl Segment {
     /// seek, which keeps the running-time clock advancing, see
     /// [`accumulate_seek`](Self::accumulate_seek).
     pub fn for_flush_seek(seek: &Seek, duration: Option<u64>) -> Segment {
-        // A flushing seek restarts the running-time clock: base = 0.
-        Segment::from_seek(seek, duration, 0)
+        // A flushing seek restarts the running-time clock: base = 0. No prior
+        // segment is threaded here, so `None` edges resolve to the default
+        // (start 0, stop open) as documented above.
+        Segment::from_seek(seek, duration, 0, 0, None)
     }
 
     /// Build the segment produced by a **non-flushing (accumulating)** seek
@@ -274,24 +276,31 @@ impl Segment {
     /// time stays monotonic across the seek. This is the gapless / segment-seek
     /// case (looping, playlists), the `gst_segment_do_seek` non-flush path. If
     /// `self.position` is somehow outside `self`, `base` falls back to `self.base`
-    /// (no negative jump).
+    /// (no negative jump). A `SeekType::None` edge keeps `self`'s current
+    /// `start` / `stop` (the "leave this edge unchanged" contract).
     pub fn accumulate_seek(&self, seek: &Seek, duration: Option<u64>) -> Segment {
         let base = self.to_running_time(self.position).unwrap_or(self.base);
-        Segment::from_seek(seek, duration, base)
+        Segment::from_seek(seek, duration, base, self.start, self.stop)
     }
 
     /// Shared construction for [`for_flush_seek`](Self::for_flush_seek) and
     /// [`accumulate_seek`](Self::accumulate_seek): resolve the seek's edges
-    /// (`End` relative to `duration`, `None` leaving the default) and place the
-    /// segment at running-time `base`.
-    fn from_seek(seek: &Seek, duration: Option<u64>, base: u64) -> Segment {
+    /// (`End` relative to `duration`, `None` keeping the prior edge `prev_start`
+    /// / `prev_stop`) and place the segment at running-time `base`.
+    fn from_seek(
+        seek: &Seek,
+        duration: Option<u64>,
+        base: u64,
+        prev_start: u64,
+        prev_stop: Option<u64>,
+    ) -> Segment {
         let start = match seek.start_type {
-            SeekType::None => 0,
+            SeekType::None => prev_start,
             SeekType::Set => seek.start,
             SeekType::End => duration.unwrap_or(0).saturating_sub(seek.start),
         };
         let stop = match seek.stop_type {
-            SeekType::None => None,
+            SeekType::None => prev_stop,
             SeekType::Set => Some(seek.stop),
             SeekType::End => Some(duration.unwrap_or(0).saturating_sub(seek.stop)),
         };
@@ -482,6 +491,38 @@ mod tests {
         // The first post-seek frame (pts == target) continues at running time
         // 3_000, monotonic with the pre-seek timeline (gapless).
         assert_eq!(seg.to_running_time(8_000), Some(3_000));
+    }
+
+    #[test]
+    fn accumulate_seek_none_edge_keeps_current_bounds() {
+        // A bounded segment [10_000, 100_000): a seek that only repositions
+        // start (stop_type None) must keep the existing stop, not open it.
+        let current =
+            Segment { start: 10_000, stop: Some(100_000), position: 20_000, ..Segment::new() };
+        let move_start = Seek {
+            rate: 1.0,
+            flags: SeekFlags::NONE,
+            start_type: SeekType::Set,
+            start: 50_000,
+            stop_type: SeekType::None,
+            stop: 0,
+        };
+        let seg = current.accumulate_seek(&move_start, None);
+        assert_eq!(seg.start, 50_000);
+        assert_eq!(seg.stop, Some(100_000), "None stop keeps the current segment's stop");
+
+        // Symmetrically, a None start keeps the current start.
+        let move_stop = Seek {
+            rate: 1.0,
+            flags: SeekFlags::NONE,
+            start_type: SeekType::None,
+            start: 0,
+            stop_type: SeekType::Set,
+            stop: 80_000,
+        };
+        let seg2 = current.accumulate_seek(&move_stop, None);
+        assert_eq!(seg2.start, 10_000, "None start keeps the current segment's start");
+        assert_eq!(seg2.stop, Some(80_000));
     }
 
     #[test]
