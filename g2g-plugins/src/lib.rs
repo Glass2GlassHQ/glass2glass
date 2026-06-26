@@ -30,6 +30,9 @@ pub mod identity;
 pub mod mux;
 pub mod streamdemux;
 pub mod tsmuxn;
+// Shared integer source-over blend used by the compositor and CPU overlays.
+mod paint;
+
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
 // Analytics overlay (M101): draws AnalyticsMeta detection boxes onto RGBA8.

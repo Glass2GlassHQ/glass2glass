@@ -34,6 +34,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::paint::blend_px;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -253,20 +254,6 @@ fn blend_over(
             blend_px(canvas, d, px, galpha);
         }
     }
-}
-
-/// Source-over blend of one RGBA `src` pixel onto the canvas at byte offset `d`,
-/// modulating the source alpha by `galpha`. Integer math; keeps an opaque canvas
-/// opaque. Shared by the native and scaled blend paths.
-#[inline]
-fn blend_px(canvas: &mut [u8], d: usize, src: [u8; 4], galpha: u8) {
-    // Effective source alpha = src_a * galpha (0..=255).
-    let a = (src[3] as u32 * galpha as u32 + 127) / 255;
-    let inv = 255 - a;
-    for c in 0..3 {
-        canvas[d + c] = ((src[c] as u32 * a + canvas[d + c] as u32 * inv + 127) / 255) as u8;
-    }
-    canvas[d + 3] = (a + canvas[d + 3] as u32 * inv / 255) as u8;
 }
 
 /// Alpha-blend a `sw` x `sh` RGBA8 source onto the canvas, resampled (bilinear)

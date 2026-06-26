@@ -30,6 +30,7 @@ use g2g_core::{
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
+use crate::paint::blend_px;
 use crate::subparse::{parse_srt, parse_webvtt, Cue, TextAlign};
 // Only the std `load_location` path sniffs the format; gate the import to match.
 #[cfg(feature = "std")]
@@ -248,7 +249,7 @@ impl TextOverlay {
                 if px < 0 || px >= w {
                     continue;
                 }
-                blend_px(buf, ((py * w + px) * 4) as usize, color);
+                blend_px(buf, ((py * w + px) * 4) as usize, color, 255);
             }
         }
     }
@@ -287,21 +288,6 @@ fn align_left(align: TextAlign, anchor: i32, block_w: i32) -> i32 {
         TextAlign::Start => anchor,
         TextAlign::End => anchor - block_w,
     }
-}
-
-/// Source-over blend of one RGBA pixel `color` onto `buf` at byte offset `d`,
-/// integer math (the same blend the analytics overlay / compositor use).
-#[inline]
-fn blend_px(buf: &mut [u8], d: usize, color: [u8; 4]) {
-    if d + 3 >= buf.len() {
-        return;
-    }
-    let a = color[3] as u32;
-    let inv = 255 - a;
-    for c in 0..3 {
-        buf[d + c] = ((color[c] as u32 * a + buf[d + c] as u32 * inv + 127) / 255) as u8;
-    }
-    buf[d + 3] = (a + buf[d + 3] as u32 * inv / 255) as u8;
 }
 
 impl PadTemplates for TextOverlay {

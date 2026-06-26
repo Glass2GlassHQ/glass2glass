@@ -26,6 +26,8 @@ use g2g_core::{
     MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
+use crate::paint::blend_px;
+
 /// Draws detection bounding boxes from an attached [`AnalyticsMeta`] onto an
 /// RGBA8 frame. Box outline thickness is configurable; the colour is chosen per
 /// class label from a fixed palette so different classes are distinguishable.
@@ -112,19 +114,6 @@ impl AnalyticsOverlay {
     }
 }
 
-/// Source-over blend of one RGBA pixel `color` onto `buf` at byte offset `d`,
-/// integer math (the same blend the compositor uses). An opaque colour fully
-/// overwrites; a partial alpha tints. Keeps an opaque canvas opaque.
-#[inline]
-fn blend_px(buf: &mut [u8], d: usize, color: [u8; 4]) {
-    let a = color[3] as u32;
-    let inv = 255 - a;
-    for c in 0..3 {
-        buf[d + c] = ((color[c] as u32 * a + buf[d + c] as u32 * inv + 127) / 255) as u8;
-    }
-    buf[d + 3] = (a + buf[d + 3] as u32 * inv / 255) as u8;
-}
-
 /// Blend a horizontal run `x0..=x1` at row `y`, clipped to the canvas.
 fn hspan(buf: &mut [u8], w: i32, h: i32, x0: i32, x1: i32, y: i32, color: [u8; 4]) {
     if y < 0 || y >= h {
@@ -133,7 +122,7 @@ fn hspan(buf: &mut [u8], w: i32, h: i32, x0: i32, x1: i32, y: i32, color: [u8; 4
     let xs = x0.max(0);
     let xe = x1.min(w - 1);
     for x in xs..=xe {
-        blend_px(buf, ((y * w + x) * 4) as usize, color);
+        blend_px(buf, ((y * w + x) * 4) as usize, color, 255);
     }
 }
 
@@ -145,7 +134,7 @@ fn vspan(buf: &mut [u8], w: i32, h: i32, y0: i32, y1: i32, x: i32, color: [u8; 4
     let ys = y0.max(0);
     let ye = y1.min(h - 1);
     for y in ys..=ye {
-        blend_px(buf, ((y * w + x) * 4) as usize, color);
+        blend_px(buf, ((y * w + x) * 4) as usize, color, 255);
     }
 }
 
