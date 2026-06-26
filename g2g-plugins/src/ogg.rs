@@ -16,6 +16,10 @@ use alloc::vec::Vec;
 
 const CAPTURE_PATTERN: [u8; 4] = *b"OggS";
 const HEADER_LEN: usize = 27; // fixed header before the segment table
+// Cap cross-page packet reassembly. No real codec packet approaches this; the
+// bound just stops a never-terminating run of continued pages from growing the
+// partial packet without limit.
+const MAX_PACKET_BYTES: usize = 8 * 1024 * 1024;
 
 /// The codec of an Ogg logical bitstream, sniffed from its first packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +153,10 @@ impl OggDemuxer {
             }
         }
         // A trailing 255-segment leaves an incomplete packet for the next page.
+        // Drop and resync if it grew past the cap (malformed or abusive stream).
+        if acc.len() > MAX_PACKET_BYTES {
+            acc.clear();
+        }
         self.partial = acc;
     }
 
@@ -287,6 +295,38 @@ mod tests {
         d.push_data(&page1);
         d.push_data(&page2);
         assert_eq!(d.take_packets(), vec![big], "packet reassembled across the page boundary");
+    }
+
+    /// A page filled with 255-byte segments (no terminator), so its whole body
+    /// continues the current packet into the next page.
+    fn full_continued_page(header_type: u8, serial: u32, seq: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&CAPTURE_PATTERN);
+        out.extend_from_slice(&[0, header_type]);
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&serial.to_le_bytes());
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.push(255); // 255 segments...
+        out.extend_from_slice(&[255u8; 255]); // ...all max, so the packet never terminates
+        out.extend_from_slice(&vec![0u8; 255 * 255]);
+        out
+    }
+
+    #[test]
+    fn unbounded_continuation_run_is_capped() {
+        let serial = 7;
+        let mut d = OggDemuxer::new();
+        d.push_data(&full_continued_page(0x00, serial, 0));
+        let pages = MAX_PACKET_BYTES / (255 * 255) + 2;
+        for seq in 1..=pages as u32 {
+            d.push_data(&full_continued_page(0x01, serial, seq));
+        }
+        assert!(
+            d.partial.len() <= MAX_PACKET_BYTES,
+            "reassembly buffer stays bounded, got {}",
+            d.partial.len()
+        );
     }
 
     #[test]
