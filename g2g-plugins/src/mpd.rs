@@ -42,6 +42,11 @@ pub struct SegmentTemplate {
     pub timeline: Vec<TimelineEntry>,
 }
 
+/// Cap on segments materialized from one manifest. A real presentation has far
+/// fewer (1M two-second segments is ~23 days); the bound stops an untrusted
+/// `@r` repeat or a tiny `@duration` from forcing an unbounded allocation.
+const MAX_SEGMENTS: u64 = 1 << 20;
+
 /// One `SegmentTimeline` `<S>` entry: a start time `t` (absent = continue from
 /// the previous entry), a duration `d`, and `r` additional repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,22 +113,26 @@ impl SegmentTemplate {
         let mut out = Vec::new();
         let mut number = self.start_number;
         if self.timeline.is_empty() {
+            let count = self.segment_count(total_secs).min(MAX_SEGMENTS);
             let mut time = 0u64;
-            for _ in 0..self.segment_count(total_secs) {
+            for _ in 0..count {
                 out.push(SegmentRef { number, time });
                 number += 1;
-                time += self.duration;
+                time = time.saturating_add(self.duration);
             }
         } else {
             let mut time = 0u64;
-            for entry in &self.timeline {
+            'timeline: for entry in &self.timeline {
                 if let Some(t) = entry.t {
                     time = t;
                 }
                 for _ in 0..=entry.r {
+                    if out.len() as u64 >= MAX_SEGMENTS {
+                        break 'timeline;
+                    }
                     out.push(SegmentRef { number, time });
                     number += 1;
-                    time += entry.d;
+                    time = time.saturating_add(entry.d);
                 }
             }
         }
@@ -333,6 +342,31 @@ mod tests {
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
         assert_eq!(segs[2], SegmentRef { number: 3, time: 8000 });
+    }
+
+    #[test]
+    fn adversarial_segment_counts_are_capped() {
+        // A crafted @r repeat must not expand to billions of segments.
+        let timeline = SegmentTemplate {
+            initialization: None,
+            media: String::from("seg-$Number$.m4s"),
+            start_number: 1,
+            duration: 0,
+            timescale: 1000,
+            timeline: Vec::from([TimelineEntry { t: Some(0), d: 1000, r: u64::MAX }]),
+        };
+        assert_eq!(timeline.segments(10.0).len() as u64, MAX_SEGMENTS);
+
+        // A near-zero @duration must not expand the @duration profile either.
+        let tiny = SegmentTemplate {
+            initialization: None,
+            media: String::from("seg-$Number$.m4s"),
+            start_number: 1,
+            duration: 1,
+            timescale: u64::MAX,
+            timeline: Vec::new(),
+        };
+        assert_eq!(tiny.segments(1.0e9).len() as u64, MAX_SEGMENTS);
     }
 
     const TIMELINE_MPD: &str = r#"<?xml version="1.0"?>
