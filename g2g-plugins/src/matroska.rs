@@ -573,7 +573,9 @@ fn parse_block(
     // A single (unlaced) frame keeps the block timestamp; laced frames advance by
     // DefaultDuration when known (i == 0 leaves the first at the block timestamp).
     for (i, data) in frames.into_iter().enumerate() {
-        let frame_pts = pts_ns.saturating_add(i as u64 * default_duration_ns);
+        // default_duration_ns is untrusted; saturate the spacing multiply too,
+        // not just the add.
+        let frame_pts = pts_ns.saturating_add((i as u64).saturating_mul(default_duration_ns));
         out.push(MkvFrame { track, codec, pts_ns: frame_pts, keyframe, data: data.to_vec() });
     }
 }
