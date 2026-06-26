@@ -1,8 +1,10 @@
 //! M311: smoke tests for the ONVIF source element.
 //!
-//! The element-wiring tests run always (no network): property round-trip and
-//! the unconfigured-source error path. The live tests are `#[ignore]` and need
-//! a real camera on the LAN. Override the target via env vars:
+//! The offline tests run always: property round-trip, the unconfigured-source
+//! error path, and `resolve_uri_against_mock_server` (drives the full
+//! GetCapabilities -> GetProfiles -> GetStreamUri sequence over real loopback
+//! sockets against an in-process SOAP mock). The live tests are `#[ignore]` and
+//! need a real camera on the LAN. Override the target via env vars:
 //!
 //! ```sh
 //! # WS-Discovery (cameras must answer on the LAN multicast group):
@@ -66,6 +68,108 @@ async fn unconfigured_source_errors_cleanly() {
         other => panic!("expected NotConfigured, got {other:?}"),
     }
     let _ = ConfigureOutcome::Accepted; // keep the import meaningful
+}
+
+/// Drive `resolve_stream_uri` against an in-process mock ONVIF device: a tiny
+/// loopback HTTP server returns canned SOAP keyed on the request's action, so
+/// the real reqwest client + WS-Security digest + response parsing all run over
+/// real sockets through the full three-call sequence (GetCapabilities ->
+/// GetProfiles -> GetStreamUri). No camera, no external tooling; runs in CI.
+#[tokio::test]
+async fn resolve_uri_against_mock_server() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    // Every request body the mock received, so the test can assert the client
+    // sent the right actions *and* an authenticated header.
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let cap = captured.clone();
+    std::thread::spawn(move || {
+        // The GetCapabilities reply points the Media service back at this same
+        // mock, so calls 2 and 3 land here too.
+        let media_resp = std::format!(
+            r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+              <s:Body><tds:GetCapabilitiesResponse xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+                <tds:Capabilities xmlns:tt="http://www.onvif.org/ver10/schema">
+                  <tt:Media><tt:XAddr>http://127.0.0.1:{port}/onvif/Media</tt:XAddr></tt:Media>
+                </tds:Capabilities>
+              </tds:GetCapabilitiesResponse></s:Body></s:Envelope>"#
+        );
+        let profiles_resp = r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+          <s:Body><trt:GetProfilesResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+            <trt:Profiles token="MainStream"/></trt:GetProfilesResponse></s:Body></s:Envelope>"#;
+        let stream_resp = r#"<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+          <s:Body><trt:GetStreamUriResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl">
+            <trt:MediaUri xmlns:tt="http://www.onvif.org/ver10/schema">
+              <tt:Uri>rtsp://192.168.1.50:554/Streaming/Channels/101</tt:Uri>
+            </trt:MediaUri></trt:GetStreamUriResponse></s:Body></s:Envelope>"#;
+
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            // Read headers + Content-Length-delimited body.
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                    let cl = headers
+                        .split("content-length:")
+                        .nth(1)
+                        .and_then(|s| s.split("\r\n").next())
+                        .and_then(|s| s.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + cl {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let body = if req.contains("GetCapabilities") {
+                media_resp.clone()
+            } else if req.contains("GetProfiles") {
+                profiles_resp.to_string()
+            } else {
+                stream_resp.to_string()
+            };
+            cap.lock().unwrap().push(req);
+            let resp = std::format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let device_url = std::format!("http://127.0.0.1:{port}/onvif/device_service");
+    let uri = resolve_stream_uri(&device_url, "admin", "secret")
+        .await
+        .expect("resolve against mock");
+    assert_eq!(uri, "rtsp://192.168.1.50:554/Streaming/Channels/101");
+
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 3, "expected GetCapabilities, GetProfiles, GetStreamUri");
+    assert!(reqs.iter().any(|r| r.contains("GetCapabilities")));
+    assert!(reqs.iter().any(|r| r.contains("GetProfiles")));
+    assert!(reqs.iter().any(|r| r.contains("GetStreamUri")));
+    // Every call carried a WS-Security UsernameToken digest (auth was sent).
+    assert!(
+        reqs.iter().all(|r| r.contains("PasswordDigest") && r.contains("<Username>admin</Username>")),
+        "each SOAP call must carry the WS-Security digest"
+    );
 }
 
 #[tokio::test]
