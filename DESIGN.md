@@ -1217,6 +1217,32 @@ input negotiates (`Accepts(RGBA8)` per pad, `Produces` the fixed canvas). A pad
 may also scale its input as it composites (`CompositorPad::with_size`, integer
 bilinear), so a downscaled camera inset needs no upstream `VideoScale`.
 
+**Runtime request pads.** Both fan directions can grow their pad count *while the
+pipeline runs*, the GStreamer request-pad analog, without an executor `spawn`: the
+no-spawn `DynamicJoin` primitive (`runtime/join.rs`) is a `join_all` that also
+polls a control channel and folds newly-arrived arms into the running poll set,
+completing once the channel closes and every arm resolves. On the **fan-out**
+side, `run_source_router_dynamic` (M310) returns a `DynamicFanoutHandle` whose
+`add_branch` attaches an output branch mid-run; the branch configures from the
+fan-out's *sticky caps* (the source's fixated output caps, replayed into each
+branch the moment it attaches) and then receives its share of frames.
+`run_source_tee_dynamic` (M319) is the *broadcast* variant: each `DataFrame` is
+shared to every branch via the M250 zero-copy path (`make_shareable` once, then a
+refcount handle per branch), so an inference branch and a display branch both see
+the whole stream with no byte copies; round-robin (`Router` model) and broadcast
+(`tee` model) share one driver, differing only in `DataFrame` distribution.
+`run_aggregator_dynamic` (M320) is the **fan-in** dual: a `DynamicFaninHandle`
+whose `add_input` attaches a source to a running terminal aggregator. The
+aggregator declares a fixed pad capacity (`input_count`); the handle reserves the
+next pad index atomically (rejecting past capacity, the M205 dark-slot bound), the
+single aggregator arm owns `&mut` and fixates + configures each new pad inline
+(no aliasing), and per-pad-tagged frames merge as in `run_fanin_session`. The run
+ends once the handle is dropped *and* every attached input has reached EOS (the
+`DynamicJoin` completion rule). In all three the pending-pad set is drained before
+each blocking select, so a pad requested before a frame is never missed. A merged
+downstream output for the dynamic fan-in (the `run_muxer_sink` shape, with a
+trailing sink and output-caps coupling) is a follow-up.
+
 #### 4.13.6a Bins and ghost pads (flattening)
 
 GStreamer's `GstBin` is a runtime container: a node in the pipeline that holds

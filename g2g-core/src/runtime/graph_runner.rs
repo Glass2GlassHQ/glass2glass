@@ -1425,7 +1425,10 @@ async fn demux_arm<'a>(
 /// (a zero-copy refcount handle, M250), so the per-branch clones below are
 /// refcount bumps, not deep copies; the original is then moved into the last
 /// branch. A fan-out of `n` makes zero byte copies of a `System` / GPU frame.
-async fn broadcast(senders: &mut [SenderSink], mut packet: PipelinePacket) -> Result<(), G2gError> {
+pub(crate) async fn broadcast(
+    senders: &mut [SenderSink],
+    mut packet: PipelinePacket,
+) -> Result<(), G2gError> {
     if let PipelinePacket::DataFrame(frame) = &mut packet {
         frame.domain.make_shareable();
     }
@@ -1642,7 +1645,7 @@ async fn muxer_arm_pts<'a>(
 /// GPU-decoded or CPU frame fans out to several consumers (eg inference +
 /// display) with no copy, where `System` previously deep-copied per branch and a
 /// GPU frame failed loud.
-fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError> {
+pub(crate) fn try_clone_packet(packet: &PipelinePacket) -> Result<PipelinePacket, G2gError> {
     Ok(match packet {
         PipelinePacket::CapsChanged(caps) => PipelinePacket::CapsChanged(caps.clone()),
         PipelinePacket::Eos => PipelinePacket::Eos,

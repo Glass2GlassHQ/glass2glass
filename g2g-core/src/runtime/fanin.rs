@@ -15,6 +15,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::future::Future;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::bus::BusHandle;
@@ -37,7 +38,7 @@ use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, Receiver, Sender, SenderSink};
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
-use crate::runtime::join::join_all;
+use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 
 /// Dyn-safe mirror of [`SourceLoop`] for heterogeneous fan-in branches, the
@@ -949,4 +950,238 @@ where
     g.link(mux_node.output(), snk).map_err(|_| G2gError::CapsMismatch)?;
 
     run_graph_inner(g, clock, link_capacity, bus, None, None).await
+}
+
+/// Which arm of a dynamic fan-in ([`run_aggregator_dynamic`]) produced this
+/// result. The arm set grows at runtime, so indices are not stable; identity is
+/// carried in the variant instead (the [`DynamicJoin`](crate::runtime) contract).
+#[derive(Debug, Clone, Copy)]
+enum FaninArmOut {
+    /// The aggregator arm consumed this many `DataFrame`s.
+    Aggregator(u64),
+    /// A runtime-attached input source emitted this many `DataFrame`s.
+    Source(u64),
+}
+
+/// A handle to add inputs to a *running* dynamic aggregator (M320): the fan-in
+/// dual of [`DynamicFanoutHandle`](crate::runtime::DynamicFanoutHandle), the
+/// runtime equivalent of GStreamer's aggregator/muxer request **sink** pads. Each
+/// [`add_input`](Self::add_input) attaches a new source feeding the next free
+/// input pad of the aggregator; the source is fixated and its pad configured on
+/// attach, then its frames are tagged with the pad index and aggregated. Cheap to
+/// clone (a channel sender plus an atomic), so several controllers can request
+/// pads.
+///
+/// `'a` is the run's lifetime: the handle is used concurrently with the run
+/// future and must be dropped no later than it. The aggregator declares a fixed
+/// pad capacity ([`MultiInputElement::input_count`]); [`add_input`](Self::add_input)
+/// past that capacity, or after the run has finished, is rejected with
+/// [`G2gError::Shutdown`].
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct DynamicFaninHandle<'a> {
+    new_input_tx: Sender<(usize, Box<dyn DynSourceLoop + 'a>)>,
+    /// Next free input pad index, reserved atomically so concurrent callers get
+    /// distinct pads. The aggregator's `process(pad, ..)` indexes a fixed pad set,
+    /// so a pad is only handed out while `< max_inputs`.
+    next_pad: Arc<AtomicUsize>,
+    max_inputs: usize,
+}
+
+#[cfg(feature = "std")]
+impl<'a> DynamicFaninHandle<'a> {
+    /// Request a new sink pad: attach `source` as a new input of the running
+    /// aggregator. Reserves the next pad index atomically and hands the source to
+    /// the aggregator arm, which fixates it and configures the pad before its
+    /// first frame. Returns [`G2gError::Shutdown`] if every declared pad is
+    /// already in use, or if the aggregator has already finished.
+    pub fn add_input(
+        &self,
+        source: Box<dyn DynSourceLoop + 'a>,
+    ) -> Result<(), G2gError> {
+        // Reserve a pad. fetch_add can overshoot past capacity under contention,
+        // but that only makes later calls also see `>= max_inputs` and fail, which
+        // is the intended "no free pad" outcome.
+        let pad = self.next_pad.fetch_add(1, Ordering::SeqCst);
+        if pad >= self.max_inputs {
+            return Err(G2gError::Shutdown);
+        }
+        self.new_input_tx.try_send((pad, source)).map_err(|_| G2gError::Shutdown)
+    }
+}
+
+/// Drives `N sources -> dynamic aggregator` (M320 fan-in request pads), where
+/// inputs can be added at runtime through the returned [`DynamicFaninHandle`].
+/// The fan-in dual of
+/// [`run_source_tee_dynamic`](crate::runtime::run_source_tee_dynamic): there
+/// branches attach to a running source, here sources attach to a running
+/// aggregator.
+///
+/// The aggregator is **terminal** (it consumes its inputs and produces no merged
+/// downstream output, like [`run_fanin_session`]): a multi-stream batching sink,
+/// a compositor-to-display, a WebRTC publisher. A source attaches via
+/// [`DynamicFaninHandle::add_input`]; on attach the source self-fixates (no peer
+/// narrowing) and its fixated caps configure the matching aggregator input pad,
+/// so a late input is negotiated without a global re-solve. Each input's packets
+/// are tagged with its pad index and drained by a single aggregator arm that owns
+/// `&mut aggregator`, so the aggregator keeps its state without aliasing. A
+/// per-input `Eos` is delivered to the aggregator (so it can flush that pad's
+/// state); the run completes once the handle is dropped **and** every attached
+/// input has ended.
+///
+/// Returns the handle plus the run future; drive them concurrently. A merged
+/// downstream output (the [`run_muxer_sink`] shape, with a trailing sink and
+/// output-caps coupling) is a follow-up.
+#[cfg(feature = "std")]
+pub fn run_aggregator_dynamic<'a, Agg>(
+    aggregator: &'a mut Agg,
+    link_capacity: impl Into<LinkCapacity>,
+) -> (DynamicFaninHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+where
+    Agg: MultiInputElement + 'a,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let max_inputs = aggregator.input_count();
+
+    // Control channel: handle -> aggregator arm (new (pad, source) inputs).
+    let (new_input_tx, new_input_rx) =
+        bounded::<(usize, Box<dyn DynSourceLoop + 'a>)>(link_capacity);
+    // Arm channel: aggregator arm -> join (the attached source-run futures).
+    let (new_arm_tx, new_arm_rx) =
+        bounded::<BoxFuture<'a, Result<FaninArmOut, G2gError>>>(link_capacity);
+
+    let handle = DynamicFaninHandle {
+        new_input_tx,
+        next_pad: Arc::new(AtomicUsize::new(0)),
+        max_inputs,
+    };
+
+    let run = async move {
+        // One shared tagged channel: every attached source pushes `(pad, packet)`.
+        let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+
+        let aggregator_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
+            // Coerce once so configure / process go through the boxed-future Dyn
+            // surface; `Agg: MultiInputElement` implies `DynMultiInputElement`.
+            let aggregator: &mut dyn DynMultiInputElement = aggregator;
+            let mut null = NullSink;
+            let mut consumed = 0u64;
+            let mut accepting = true;
+            // Hold one tagged sender open while we still accept inputs, so the
+            // tagged channel does not close (and end the run) before any source
+            // attaches. Dropped the moment the handle goes away.
+            let mut keepalive: Option<Sender<(usize, PipelinePacket)>> = Some(tagged_tx);
+            loop {
+                // Attach every input queued so far BEFORE draining the next packet,
+                // so an input requested before a frame is never missed (select2
+                // below is left-biased toward the data channel; mirrors the M310
+                // fan-out drain-first gotcha).
+                while let Some((pad, source)) = new_input_rx.try_recv() {
+                    let tx = keepalive.as_ref().expect("keepalive held while accepting");
+                    attach_input(pad, source, aggregator, tx, &new_arm_tx).await?;
+                }
+
+                if accepting {
+                    match select2(tagged_rx.recv(), new_input_rx.recv()).await {
+                        Either::Left(Some((pad, PipelinePacket::Eos))) => {
+                            // Per-input end: let the aggregator flush that pad. It
+                            // must not forward Eos; the run owns the end.
+                            aggregator.process(pad, PipelinePacket::Eos, &mut null).await?;
+                        }
+                        Either::Left(Some((pad, packet))) => {
+                            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                                consumed += 1;
+                            }
+                            aggregator.process(pad, packet, &mut null).await?;
+                        }
+                        // Unreachable while `keepalive` is held (a live sender keeps
+                        // the channel open), but folded into the end path for safety.
+                        Either::Left(None) => return Ok(FaninArmOut::Aggregator(consumed)),
+                        Either::Right(Some((pad, source))) => {
+                            let tx = keepalive.as_ref().expect("keepalive held while accepting");
+                            attach_input(pad, source, aggregator, tx, &new_arm_tx).await?;
+                        }
+                        // Handle dropped: stop accepting and release the keepalive
+                        // so the tagged channel can close once every attached input
+                        // has ended.
+                        Either::Right(None) => {
+                            accepting = false;
+                            keepalive = None;
+                        }
+                    }
+                } else {
+                    match tagged_rx.recv().await {
+                        Some((pad, PipelinePacket::Eos)) => {
+                            aggregator.process(pad, PipelinePacket::Eos, &mut null).await?;
+                        }
+                        Some((pad, packet)) => {
+                            if matches!(packet, PipelinePacket::DataFrame(_)) {
+                                consumed += 1;
+                            }
+                            aggregator.process(pad, packet, &mut null).await?;
+                        }
+                        None => return Ok(FaninArmOut::Aggregator(consumed)),
+                    }
+                }
+            }
+        });
+
+        // The aggregator arm owns `new_arm_tx`; when it returns (run end) the arm
+        // channel closes and the dynamic join can finish.
+        let arms: Vec<BoxFuture<'a, Result<FaninArmOut, G2gError>>> = alloc::vec![aggregator_arm];
+        let results = dynamic_join(arms, new_arm_rx).await;
+
+        let mut emitted = 0u64;
+        let mut consumed = 0u64;
+        for r in results {
+            match r? {
+                FaninArmOut::Source(n) => emitted += n,
+                FaninArmOut::Aggregator(n) => consumed = n,
+            }
+        }
+        Ok(RunStats {
+            frames_emitted: emitted,
+            frames_consumed: consumed,
+            frames_dropped: 0,
+            latency: LatencyReport::ZERO,
+            allocation: None,
+            clock_priority: ClockPriority::SystemFallback,
+            base_time_ns: 0,
+            coordinator_events: 0,
+        })
+    };
+
+    (handle, run)
+}
+
+/// Attach a runtime-requested input: fixate the new `source`, configure the
+/// aggregator's `pad` against its fixated caps, then hand the source's run loop
+/// (feeding a [`TaggingSink`] tagged with `pad`) to the dynamic join. Mirrors
+/// [`run_source_router_dynamic`](crate::runtime::run_source_router_dynamic)'s
+/// `attach_branch`, transposed to the input side.
+#[cfg(feature = "std")]
+async fn attach_input<'a>(
+    pad: usize,
+    mut source: Box<dyn DynSourceLoop + 'a>,
+    aggregator: &mut dyn DynMultiInputElement,
+    tagged_tx: &Sender<(usize, PipelinePacket)>,
+    new_arm_tx: &Sender<BoxFuture<'a, Result<FaninArmOut, G2gError>>>,
+) -> Result<(), G2gError> {
+    // Each source self-fixates (no peer narrowing, like run_fanin_session); the
+    // fixated caps configure both the source and its aggregator input pad.
+    let proposal = source.intercept_caps().await?;
+    let fixated = proposal.fixate()?;
+    if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&fixated)? {
+        return Err(G2gError::FixationFailed);
+    }
+    if let ConfigureOutcome::ReFixate(_) = aggregator.configure_pipeline(pad, &fixated)? {
+        return Err(G2gError::FixationFailed);
+    }
+    let tx = tagged_tx.clone();
+    let arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
+        let mut sink = TaggingSink { idx: pad, tx };
+        let mut source = source;
+        source.run(&mut sink).await.map(FaninArmOut::Source)
+    });
+    new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)
 }

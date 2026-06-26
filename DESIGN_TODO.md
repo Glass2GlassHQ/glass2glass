@@ -35,16 +35,11 @@ leverage first:
 
 - **Closure-free `FieldTransform` refactor.** Make forward derivation
   declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
-- **Dynamic pads / request pads.** Fan-out branch addition at runtime is DONE
-  (M310): `run_source_router_dynamic` returns a `DynamicFanoutHandle` whose
-  `add_branch` attaches an output branch while the pipeline runs (the no-spawn
-  `DynamicJoin` folds the branch arm into the running join; sticky caps are
-  replayed so a late branch configures). Remaining: a *broadcast* tee (every
-  frame to every branch) needs frame sharing since `Frame` is not `Clone` (today
-  it routes round-robin, the `Router` model); and `mux` runtime *input* addition
-  (fan-in request pads) is still static.
 - **Graceful per-branch drop on fan-out** (`FanOutPolicy::AllowBranchDrop`); a
   rejecting branch fails the run loud today.
+- **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
+  (M320) drives a *terminal* aggregator; the `run_muxer_sink` shape (a trailing
+  sink with output-caps coupling) for runtime-added inputs is still owed.
 - **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad
   re-cascade channel, so the DAG β walk terminates at a muxer.
 - **Allocation join policy across diamonds.** Two branches downstream of a tee

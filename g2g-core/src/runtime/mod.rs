@@ -51,13 +51,15 @@ pub use solver::NegotiationFailure;
 #[cfg(feature = "std")]
 pub use runner::{
     run_fanout_session, run_linear_chain, run_linear_chain_with_bus, run_source_fanout,
-    run_source_fanout_with_bus, run_source_router_dynamic, DynamicFanoutHandle,
+    run_source_fanout_with_bus, run_source_router_dynamic, run_source_tee_dynamic,
+    DynamicFanoutHandle,
 };
 
 #[cfg(feature = "std")]
 pub use fanin::{
-    run_duplex_session, run_fanin_session, run_fanin_sink, run_muxer_sink,
-    run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
+    run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink,
+    run_muxer_sink, run_muxer_sink_with_bus, DynMultiInputElement, DynamicFaninHandle,
+    DynSourceLoop,
 };
 
 #[cfg(feature = "std")]

@@ -55,7 +55,7 @@ use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiOutputSource, Mult
 #[cfg(feature = "std")]
 use crate::graph::Graph;
 #[cfg(feature = "std")]
-use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
+use crate::runtime::graph_runner::{broadcast, run_graph_inner, GraphNodeRef};
 #[cfg(feature = "std")]
 use crate::runtime::channel::{bounded, Sender};
 #[cfg(feature = "std")]
@@ -976,14 +976,27 @@ impl<'a> DynamicFanoutHandle<'a> {
     }
 }
 
+/// How a dynamic fan-out distributes each `DataFrame` across its branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "std")]
+enum FanOutMode {
+    /// Each `DataFrame` goes to exactly one branch, round-robin (the `Router`
+    /// model). Used when a frame must not be duplicated (load spreading).
+    Route,
+    /// Each `DataFrame` is shared to *every* branch (the `tee` model). The
+    /// frame's memory is made shareable once (M250), so the per-branch copies
+    /// are zero-copy refcount bumps, not byte copies.
+    Broadcast,
+}
+
 /// Drives `source -> dynamic router -> N branches`, where branches can be added
 /// at runtime through the returned [`DynamicFanoutHandle`] (M310 request pads).
 ///
 /// The router distributes `DataFrame`s round-robin across the currently-attached
 /// branches (frames are not `Clone`, so this routes rather than broadcasts, the
-/// `Router` model; a broadcast tee needs frame sharing, a follow-up) and
-/// broadcasts `CapsChanged` / `Eos` to every branch. The fan-out's caps are
-/// "sticky": the source's fixated output caps are replayed to each branch the
+/// `Router` model) and broadcasts `CapsChanged` / `Eos` to every branch. See
+/// [`run_source_tee_dynamic`] for the broadcast (tee) variant. The fan-out's caps
+/// are "sticky": the source's fixated output caps are replayed to each branch the
 /// moment it attaches, so a late branch configures correctly without having seen
 /// the original negotiation.
 ///
@@ -994,6 +1007,45 @@ impl<'a> DynamicFanoutHandle<'a> {
 pub fn run_source_router_dynamic<'a, Src>(
     source: &'a mut Src,
     link_capacity: impl Into<LinkCapacity>,
+) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+where
+    Src: SourceLoop + 'a,
+{
+    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Route)
+}
+
+/// Drives `source -> dynamic tee -> N branches` (M319): the broadcast counterpart
+/// of [`run_source_router_dynamic`]. Each `DataFrame` is shared to *every*
+/// currently-attached branch via the M250 zero-copy frame-sharing path
+/// ([`MemoryDomain::make_shareable`](crate::MemoryDomain::make_shareable) once,
+/// then a refcount handle per branch), so a CPU or GPU frame fans out to N
+/// consumers with no byte copies. This is the runtime equivalent of GStreamer's
+/// `tee` request pads: an inference branch and a display branch both see every
+/// frame, and either can be attached while the pipeline runs.
+///
+/// Branch attach, sticky caps, and shutdown are identical to
+/// [`run_source_router_dynamic`]; only `DataFrame` distribution differs (broadcast
+/// vs round-robin). `CapsChanged` / `Segment` / `Flush` / `Eos` are broadcast in
+/// both modes.
+#[cfg(feature = "std")]
+pub fn run_source_tee_dynamic<'a, Src>(
+    source: &'a mut Src,
+    link_capacity: impl Into<LinkCapacity>,
+) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+where
+    Src: SourceLoop + 'a,
+{
+    run_source_fanout_dynamic(source, link_capacity, FanOutMode::Broadcast)
+}
+
+/// Shared driver behind [`run_source_router_dynamic`] (route) and
+/// [`run_source_tee_dynamic`] (broadcast); `mode` selects how each `DataFrame` is
+/// distributed across the attached branches.
+#[cfg(feature = "std")]
+fn run_source_fanout_dynamic<'a, Src>(
+    source: &'a mut Src,
+    link_capacity: impl Into<LinkCapacity>,
+    mode: FanOutMode,
 ) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
 where
     Src: SourceLoop + 'a,
@@ -1039,7 +1091,7 @@ where
                 if accepting {
                     match select2(src_rx.recv(), new_branch_rx.recv()).await {
                         Either::Left(pkt) => {
-                            if route_packet(pkt, &mut ports, &mut rr).await? {
+                            if route_packet(pkt, &mut ports, &mut rr, mode).await? {
                                 return Ok(DynArmOut::Router); // source ended
                             }
                         }
@@ -1050,7 +1102,7 @@ where
                         // Handle dropped: stop watching for new branches.
                         Either::Right(None) => accepting = false,
                     }
-                } else if route_packet(src_rx.recv().await, &mut ports, &mut rr).await? {
+                } else if route_packet(src_rx.recv().await, &mut ports, &mut rr, mode).await? {
                     return Ok(DynArmOut::Router);
                 }
             }
@@ -1108,24 +1160,34 @@ async fn attach_branch<'a>(
     new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)
 }
 
-/// Route one received source packet to the branch ports: a `DataFrame` to the
-/// next branch round-robin (frames are not `Clone`, so a true broadcast tee is a
-/// follow-up needing frame sharing), and `CapsChanged` / `Segment` / `Flush`
-/// broadcast to every branch (those are cloneable). `Eos` (or a closed source
-/// channel) is broadcast to all branches and returns `Ok(true)` to tell the
-/// router the source has ended.
+/// Route one received source packet to the branch ports. A `DataFrame` goes
+/// either to the next branch round-robin ([`FanOutMode::Route`]) or, shared
+/// zero-copy, to every branch ([`FanOutMode::Broadcast`], the tee). `CapsChanged`
+/// / `Segment` / `Flush` broadcast to every branch in both modes (those are
+/// cloneable). `Eos` (or a closed source channel) is broadcast to all branches
+/// and returns `Ok(true)` to tell the router the source has ended.
 #[cfg(feature = "std")]
 async fn route_packet(
     pkt: Option<PipelinePacket>,
     ports: &mut [SenderSink],
     rr: &mut usize,
+    mode: FanOutMode,
 ) -> Result<bool, G2gError> {
     match pkt {
         Some(PipelinePacket::DataFrame(frame)) => {
             if !ports.is_empty() {
-                let idx = *rr % ports.len();
-                *rr = rr.wrapping_add(1);
-                ports[idx].push(PipelinePacket::DataFrame(frame)).await?;
+                match mode {
+                    FanOutMode::Route => {
+                        let idx = *rr % ports.len();
+                        *rr = rr.wrapping_add(1);
+                        ports[idx].push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                    // Tee: share the frame's memory once, then each branch gets a
+                    // refcount handle (M250 zero-copy fan-out), no byte copy.
+                    FanOutMode::Broadcast => {
+                        broadcast(ports, PipelinePacket::DataFrame(frame)).await?;
+                    }
+                }
             }
             // No branches attached: drop the frame (a tee with no src pads).
             Ok(false)
