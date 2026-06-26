@@ -174,6 +174,10 @@ pub enum GraphError {
     /// ghost pad peers 1:1 with one internal pad (as in GStreamer), so a pad can
     /// back at most one ghost.
     DuplicateGhostPad { node: NodeId, index: u8, direction: PadDir },
+    /// A `Tee`/`Demux` with zero outputs or a `Muxer` with zero inputs. The
+    /// runner's broadcast computes `senders.len() - 1`, so a zero-fan node
+    /// underflows and panics; reject it at validation instead.
+    DegenerateFanNode(NodeId),
 }
 
 struct Node<E> {
@@ -353,6 +357,9 @@ impl<E> Graph<E> {
             let id = NodeId(i as u32);
             if in_edges[i].is_empty() && out_edges[i].is_empty() {
                 return Err(GraphError::OrphanNode(id));
+            }
+            if matches!(node.kind, NodeKind::Tee(0) | NodeKind::Muxer(0)) {
+                return Err(GraphError::DegenerateFanNode(id));
             }
             check_pads(
                 node.kind.in_pads(),
@@ -794,6 +801,16 @@ mod tests {
         let _orphan = g.add_transform("orphan");
         g.link(src, sink).unwrap();
         assert_eq!(g.finish().err(), Some(GraphError::OrphanNode(NodeId(2))));
+    }
+
+    #[test]
+    fn zero_output_tee_is_rejected() {
+        // a tee with no outputs would underflow senders.len()-1 in the runner.
+        let mut g = G::new();
+        let src = g.add_source("src");
+        let tee = g.add_tee(0);
+        g.link(src, tee.input()).unwrap();
+        assert_eq!(g.finish().err(), Some(GraphError::DegenerateFanNode(tee.node())));
     }
 
     #[test]
