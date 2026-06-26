@@ -27,6 +27,7 @@
 use core::ffi::{c_char, c_int, c_void};
 use core::future::Future;
 use core::pin::Pin;
+use core::time::Duration;
 
 use ndk::media::image_reader::{AcquireResult, Image, ImageFormat, ImageReader};
 use ndk::native_window::NativeWindow;
@@ -45,14 +46,25 @@ use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+// `ndk-sys` declares the Camera2 externs but links no library for them, so pull
+// in libcamera2ndk explicitly (the camera control surface). ImageReader's
+// libmediandk is already linked by the ndk crate's `media` feature.
+#[link(name = "camera2ndk")]
+extern "C" {}
+
 /// Images the `ImageReader` may hold; a small queue so capture never stalls
 /// waiting for us to acquire, without hoarding camera buffers.
 const MAX_IMAGES: i32 = 4;
 
-/// Bounded busy-poll attempts per frame while the camera has not delivered one
-/// yet (v1 has no image-available callback; see the module note). Generous so a
-/// ~30 fps cadence is never mistaken for a stall.
-const MAX_ACQUIRE_SPINS: u32 = 2_000_000;
+/// Bounded poll attempts per frame while the camera has not delivered one yet
+/// (v1 has no image-available callback; see the module note). At `POLL_SLEEP`
+/// apart this waits ~2 s, far longer than a frame interval, before giving up.
+const MAX_ACQUIRE_ATTEMPTS: u32 = 400;
+
+/// Sleep between acquire attempts. Critical: the camera HAL delivers buffers via
+/// binder callbacks into this process, so the run loop must YIELD the CPU (a
+/// tight spin starves those threads and no frame ever lands).
+const POLL_SLEEP: Duration = Duration::from_millis(5);
 
 /// `ACameraDevice_request_template::TEMPLATE_PREVIEW`.
 const TEMPLATE_PREVIEW: ndk_sys::ACameraDevice_request_template =
@@ -347,11 +359,12 @@ impl SourceLoop for Camera2Src {
             }
             let mut seq = 0u64;
             while seq < self.target_buffers {
-                // Busy-poll the reader until the camera delivers a frame (v1 has
-                // no image-available callback). `acquire_latest_image` drops any
-                // backlog so we always emit the freshest frame.
+                // Poll the reader until the camera delivers a frame (v1 has no
+                // image-available callback). `acquire_latest_image` drops any
+                // backlog so we always emit the freshest frame. Sleep between
+                // attempts so the binder threads delivering buffers get the CPU.
                 let mut nv12: Option<(Vec<u8>, u64)> = None;
-                for _ in 0..MAX_ACQUIRE_SPINS {
+                for _ in 0..MAX_ACQUIRE_ATTEMPTS {
                     let cam = self.cam.as_ref().ok_or(G2gError::NotConfigured)?;
                     match cam
                         .reader
@@ -365,8 +378,8 @@ impl SourceLoop for Camera2Src {
                                 break;
                             }
                         }
-                        // No frame yet / our queue is momentarily full: retry.
-                        _ => continue,
+                        // No frame yet / our queue is momentarily full: wait a beat.
+                        _ => std::thread::sleep(POLL_SLEEP),
                     }
                 }
                 let Some((bytes, pts_ns)) = nv12 else {

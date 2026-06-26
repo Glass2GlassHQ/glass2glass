@@ -87,25 +87,20 @@ leverage first:
   RGBA-GPU path (decoder derives Rgba8 in gpu mode, WgpuPreprocess accepts it) so
   a runner can auto-plug it. Validated on the Pixel 10a end to end (9 frames ->
   NCHW tensor, no CPU frame copy). Pillar complete.
-- Android `Surface` present sink (M305): DONE for the GPU path. The decoded RGBA
-  `WgpuTexture` (M304) is presented through a `wgpu::Surface` over an Android
-  `ANativeWindow` by the existing `WgpuSink`, on the shared interop device, so
-  decode -> GPU -> display is copy-free. `mediacodec_wgpu::create_android_surface`
-  builds the surface, `InteropDevice::gpu_context()` + `MediaCodecDec::with_gpu_device`
-  share the device, and `gpu::texture_of` recognises the decoder's keep-alive.
-  Validated headless on the `android_surface_present_probe` (an `ImageReader`-backed
-  surface, `presented_count() > 0`). Remaining: a real on-screen `SurfaceView` /
-  `NativeActivity` run (needs an APK harness, no headless equivalent).
-- Encode (M306): `MediaCodecEnc` (NV12 -> Annex-B H.264/H.265, `mediacodec`
-  feature), the encode mirror of `MediaCodecDec`. Registered `mediacodecenc` /
-  `mediacodecench265`. Probe `android_mediacodec_enc_probe`.
-- AAudio (M307): `AAudioSink` (PCM render) + `AAudioSrc` (PCM capture), `aaudio`
-  feature. Registered `aaudiosink` / `aaudiosrc`. Probe `android_aaudio_probe`.
-- Camera2 capture (M308): `Camera2Src` (YUV_420_888 -> NV12 via the NDK Camera2
-  API through ndk-sys, `camera2` feature). Registered `camera2src`. Probe
-  `android_camera2_probe`. Remaining for all three: on-device runs from an APK
-  harness for the permission-gated paths (mic capture = `RECORD_AUDIO`, camera =
-  `CAMERA`); render + encode are validated by the bare-binary probes.
+- Android `Surface` present sink (M305): DONE, validated on a Pixel. Decoded RGBA
+  `WgpuTexture` (M304) presented through a `wgpu::Surface` over an `ANativeWindow`
+  by the existing `WgpuSink` on the shared interop device (copy-free).
+  `mediacodec_wgpu::create_android_surface` + `InteropDevice::gpu_context()` +
+  `MediaCodecDec::with_gpu_device`. Remaining: a real on-screen `SurfaceView` /
+  `NativeActivity` (production target; the `ImageReader`-backed surface is the
+  validated headless equivalent).
+- Encode (M306): `MediaCodecEnc` (NV12 -> Annex-B H.264/H.265). DONE, validated on
+  a Pixel. Registered `mediacodecenc` / `mediacodecench265`.
+- AAudio (M307): `AAudioSink` render + `AAudioSrc` capture. DONE, validated on a
+  Pixel (render + mic capture). Registered `aaudiosink` / `aaudiosrc`.
+- Camera2 capture (M308): `Camera2Src` (YUV_420_888 -> NV12 via NDK Camera2 over
+  ndk-sys). DONE, validated on a Pixel (real rear-camera NV12). Registered
+  `camera2src`.
 
 ## Receive / decode
 

@@ -18,6 +18,38 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, RawVideoFormat, Rate};
 use g2g_plugins::mediacodecenc::MediaCodecEnc;
 
+/// Start a binder threadpool so Codec2 can allocate the encoder's buffers (it
+/// calls back over binder into this process). A bare native binary has no
+/// threadpool, so the allocation transaction stalls; the `ABinderProcess_*`
+/// symbols live in the device's libbinder_ndk.so but not the NDK link stub, so
+/// dlsym them. Same shim as the decode probes.
+fn start_binder_threadpool() {
+    use core::ffi::{c_char, c_int, c_void};
+    extern "C" {
+        fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+    const RTLD_NOW: c_int = 2;
+    // SAFETY: libbinder_ndk.so is loadable; the dlsym'd symbols have the C
+    // signatures from <android/binder_process.h>.
+    unsafe {
+        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
+        if lib.is_null() {
+            return;
+        }
+        let set = dlsym(lib, b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char);
+        if !set.is_null() {
+            let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
+            set(1);
+        }
+        let start = dlsym(lib, b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char);
+        if !start.is_null() {
+            let start: extern "C" fn() = core::mem::transmute(start);
+            start();
+        }
+    }
+}
+
 /// Records every packet the encoder pushes, to inspect the encoded frames.
 #[derive(Default)]
 struct Collect {
@@ -74,6 +106,7 @@ fn nal_types(s: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn encode_nv12_to_annexb_h264() {
+    start_binder_threadpool();
     let (w, h) = (640u32, 480u32);
     let frames_in = 30usize;
 

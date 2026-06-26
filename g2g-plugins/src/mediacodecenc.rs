@@ -309,8 +309,16 @@ impl MediaCodecEnc {
                             self.csd = au.to_vec();
                         } else if size > 0 {
                             let keyframe = flags & BUFFER_FLAG_KEY_FRAME != 0;
+                            // Prepend the captured parameter sets to a key frame,
+                            // but only if the encoder did not already inline them
+                            // (some repeat SPS/PPS on each IDR, some emit them only
+                            // once via the codec-config buffer; on-device the Pixel
+                            // encoder inlines them, so avoid the duplicate).
+                            let prepend = keyframe
+                                && !self.csd.is_empty()
+                                && !starts_with_parameter_set(self.codec, au);
                             let mut data = Vec::with_capacity(self.csd.len() + size);
-                            if keyframe {
+                            if prepend {
                                 data.extend_from_slice(&self.csd);
                             }
                             data.extend_from_slice(au);
@@ -484,6 +492,26 @@ fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: &Rate) -> Caps 
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: framerate.clone(),
+    }
+}
+
+/// Whether `au` (an Annex-B access unit) already begins with a parameter-set NAL,
+/// so the encoder inlined the codec config on this key frame and the captured
+/// `csd` must not be prepended again (avoids duplicate SPS/PPS).
+fn starts_with_parameter_set(codec: VideoCodec, au: &[u8]) -> bool {
+    let nal = if au.starts_with(&[0, 0, 0, 1]) {
+        &au[4..]
+    } else if au.starts_with(&[0, 0, 1]) {
+        &au[3..]
+    } else {
+        au
+    };
+    let Some(&b) = nal.first() else { return false };
+    match codec {
+        // H.265 NAL type is bits 6..1; VPS=32, SPS=33, PPS=34.
+        VideoCodec::H265 => matches!((b >> 1) & 0x3f, 32..=34),
+        // H.264 NAL type is the low 5 bits; SPS=7, PPS=8.
+        _ => matches!(b & 0x1f, 7 | 8),
     }
 }
 

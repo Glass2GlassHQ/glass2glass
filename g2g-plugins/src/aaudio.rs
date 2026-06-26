@@ -20,8 +20,8 @@ use core::future::Future;
 use core::pin::Pin;
 
 use ndk::audio::{
-    AudioDirection, AudioFormat as NdkAudioFormat, AudioPerformanceMode, AudioSharingMode,
-    AudioStream, AudioStreamBuilder,
+    AudioDirection, AudioError, AudioFormat as NdkAudioFormat, AudioPerformanceMode,
+    AudioSharingMode, AudioStream, AudioStreamBuilder,
 };
 
 use g2g_core::frame::Frame;
@@ -47,6 +47,19 @@ const CAPTURE_MS: u64 = 10;
 /// Map any AAudio failure to a structured hardware error.
 fn audio_err<E>(_e: E) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
+}
+
+/// Interpret an AAudio `read` / `write` result into a frame count. ndk 0.9's
+/// `read` / `write` wrappers pipe the (positive) frame count through
+/// `AudioError::from_result`, which treats only `AAUDIO_OK` (0) as success, so a
+/// completed transfer surfaces as `Err(AudioError::__Unknown(frames))`. Recover
+/// that count; a real (negative) AAudio error stays an error.
+fn frames_transferred(r: Result<u32, AudioError>) -> Result<u32, G2gError> {
+    match r {
+        Ok(n) => Ok(n),
+        Err(AudioError::__Unknown(n)) if n >= 0 => Ok(n as u32),
+        Err(e) => Err(audio_err(e)),
+    }
 }
 
 /// Bytes per sample for a g2g PCM format.
@@ -152,7 +165,12 @@ impl AAudioSink {
             .format(fmt)
             .channel_count(self.channels as i32)
             .sample_rate(self.sample_rate as i32)
-            .performance_mode(AudioPerformanceMode::LowLatency)
+            // PerformanceMode::None (not LowLatency): low-latency opens an MMAP
+            // stream that is callback-driven, on which a blocking `write` with a
+            // timeout fails. This element drives the stream synchronously with
+            // blocking writes, so it needs the legacy buffered path. (A
+            // callback-based low-latency mode is a follow-up.)
+            .performance_mode(AudioPerformanceMode::None)
             .sharing_mode(AudioSharingMode::Shared)
             .open_stream()
             .map_err(audio_err)?;
@@ -177,10 +195,9 @@ impl AAudioSink {
             let remaining = (total_frames - done) as i32;
             // SAFETY: `off` is frame-aligned and `remaining` frames fit within
             // `pcm[off..]`; the stream is an open output stream owned here.
-            let wrote = unsafe {
+            let wrote = frames_transferred(unsafe {
                 stream.write(pcm[off..].as_ptr() as *const c_void, remaining, IO_TIMEOUT_NS)
-            }
-            .map_err(audio_err)?;
+            })?;
             if wrote == 0 {
                 // Timed out with no progress: surface rather than spin.
                 return Err(G2gError::Hardware(HardwareError::Other));
@@ -318,7 +335,9 @@ impl AAudioSrc {
             .format(NdkAudioFormat::PCM_I16)
             .channel_count(self.req_channels as i32)
             .sample_rate(self.req_sample_rate as i32)
-            .performance_mode(AudioPerformanceMode::LowLatency)
+            // PerformanceMode::None for the same reason as the sink: blocking
+            // `read` needs the legacy buffered path, not the MMAP low-latency one.
+            .performance_mode(AudioPerformanceMode::None)
             .sharing_mode(AudioSharingMode::Shared)
             .open_stream()
             .map_err(audio_err)?;
@@ -383,14 +402,13 @@ impl SourceLoop for AAudioSrc {
                     let stream = self.stream.as_ref().ok_or(G2gError::NotConfigured)?;
                     // SAFETY: `buf` holds `frames_per_buf` frames; the stream is an
                     // open input stream owned here.
-                    unsafe {
+                    frames_transferred(unsafe {
                         stream.read(
                             buf.as_mut_ptr() as *mut c_void,
                             frames_per_buf as i32,
                             IO_TIMEOUT_NS,
                         )
-                    }
-                    .map_err(audio_err)?
+                    })?
                 };
                 if got == 0 {
                     continue;
