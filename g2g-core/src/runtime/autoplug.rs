@@ -855,6 +855,19 @@ mod factory {
             max_depth: usize,
         ) -> Result<Vec<NodeId>, DecodebinError> {
             let elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            Self::splice_chain(graph, from, to, elements)
+        }
+
+        /// Insert `elements` as a run of transforms between output pad `from` and
+        /// input pad `to`, returning the inserted node ids in chain order. The
+        /// shared splice for [`decodebin`](Self::decodebin) and
+        /// [`decodebin_preferring`](Self::decodebin_preferring).
+        fn splice_chain(
+            graph: &mut Graph<GraphNode>,
+            from: impl Into<PadId>,
+            to: impl Into<PadId>,
+            elements: Vec<Box<dyn DynAsyncElement>>,
+        ) -> Result<Vec<NodeId>, DecodebinError> {
             let mut prev: PadId = from.into();
             let to: PadId = to.into();
             let mut inserted = Vec::with_capacity(elements.len());
@@ -916,17 +929,7 @@ mod factory {
             let elements = self
                 .autoplug_preferring(input, target, max_depth, preferred)
                 .ok_or(DecodebinError::NoChain)?;
-            let mut prev: PadId = from.into();
-            let to: PadId = to.into();
-            let mut inserted = Vec::with_capacity(elements.len());
-            for boxed in elements {
-                let node = graph.add_transform(GraphNodeRef::Element(boxed));
-                graph.link(prev, node)?;
-                inserted.push(node);
-                prev = node.into();
-            }
-            graph.link(prev, to)?;
-            Ok(inserted)
+            Self::splice_chain(graph, from, to, elements)
         }
 
         /// `playbin`-equivalent: assemble a complete runnable graph from a
