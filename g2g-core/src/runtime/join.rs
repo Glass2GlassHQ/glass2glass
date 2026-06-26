@@ -6,6 +6,7 @@ use core::task::{Context, Poll};
 use alloc::vec::Vec;
 
 use crate::element::BoxFuture;
+use crate::runtime::channel::Receiver;
 
 /// Polls a homogeneous set of boxed futures concurrently to completion,
 /// returning their outputs in input order. The fan-out runner joins N+2
@@ -56,6 +57,94 @@ impl<'a, T: Unpin> Future for JoinAll<'a, T> {
                     .map(|o| o.take().expect("JoinAll: arm completed without output"))
                     .collect(),
             )
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// Like [`JoinAll`], but the arm set can grow *while the join is running*: new
+/// boxed futures arriving on a control channel are folded into the poll set on
+/// the fly. This is the no-spawn primitive behind runtime request pads (M310):
+/// a dynamic fan-out adds a branch arm mid-stream by sending its future here.
+///
+/// Completion = the control channel is closed (every sender dropped) **and**
+/// every arm has resolved. So a runner keeps one control sender alive for as
+/// long as branches may still be added (typically until the source ends), then
+/// drops it; the join then drains the remaining arms and returns. Outputs are
+/// returned in completion order (arm identity is carried in `T`, e.g. a tagged
+/// enum, since indices are not stable once the set grows).
+#[cfg(feature = "std")]
+#[allow(missing_debug_implementations)]
+pub(crate) struct DynamicJoin<'a, T> {
+    arms: Vec<Option<BoxFuture<'a, T>>>,
+    /// `None` once the control channel has closed; no more arms can arrive.
+    new_arms: Option<Receiver<BoxFuture<'a, T>>>,
+    outputs: Vec<T>,
+}
+
+/// Build a [`DynamicJoin`] from an initial arm set plus a control channel that
+/// delivers later arms. See [`DynamicJoin`].
+#[cfg(feature = "std")]
+pub(crate) fn dynamic_join<'a, T: Unpin>(
+    initial: Vec<BoxFuture<'a, T>>,
+    new_arms: Receiver<BoxFuture<'a, T>>,
+) -> DynamicJoin<'a, T> {
+    DynamicJoin {
+        arms: initial.into_iter().map(Some).collect(),
+        new_arms: Some(new_arms),
+        outputs: Vec::new(),
+    }
+}
+
+#[cfg(feature = "std")]
+impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
+    type Output = Vec<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `DynamicJoin` is `Unpin` (Vecs of `Pin<Box<..>>` / `Option<T>` and a
+        // `Receiver`), so a plain `&mut` is sound.
+        let this = self.get_mut();
+
+        // 1. Fold in any newly-arrived arms (and notice channel closure). A
+        // fresh `recv()` future is created and polled each turn; on `Pending`
+        // it leaves the recv waker registered, so a later send / sender-drop
+        // re-wakes this join.
+        if this.new_arms.is_some() {
+            loop {
+                let polled = {
+                    let rx = this.new_arms.as_ref().expect("checked is_some");
+                    let mut rf = rx.recv();
+                    Pin::new(&mut rf).poll(cx)
+                };
+                match polled {
+                    Poll::Ready(Some(fut)) => this.arms.push(Some(fut)),
+                    Poll::Ready(None) => {
+                        this.new_arms = None;
+                        break;
+                    }
+                    Poll::Pending => break,
+                }
+            }
+        }
+
+        // 2. Poll every live arm; buffer outputs in completion order.
+        let mut all_done = true;
+        for arm in this.arms.iter_mut() {
+            if let Some(fut) = arm {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(v) => {
+                        this.outputs.push(v);
+                        *arm = None;
+                    }
+                    Poll::Pending => all_done = false,
+                }
+            }
+        }
+
+        // 3. Done only once no more arms can arrive and all have resolved.
+        if this.new_arms.is_none() && all_done {
+            Poll::Ready(mem::take(&mut this.outputs))
         } else {
             Poll::Pending
         }
@@ -195,6 +284,7 @@ impl<A: Future, B: Future> Future for Select2<A, B> {
 mod tests {
     use super::*;
     use crate::runtime::channel::bounded;
+    use alloc::boxed::Box;
     use core::future::ready;
     use core::task::{RawWaker, RawWakerVTable, Waker};
 
@@ -273,5 +363,52 @@ mod tests {
             Poll::Ready(Some(5)) => {}
             other => panic!("left message lost across select drop: {other:?}"),
         }
+    }
+
+    /// Spin a future to completion with a noop waker. Sound here because every
+    /// `DynamicJoin` under test makes progress on each poll (ready arms, queued
+    /// control messages, channel closure) rather than waiting on an external
+    /// wake.
+    #[cfg(feature = "std")]
+    fn spin<F: Future>(mut fut: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            // SAFETY: `fut` stays on this frame and is not moved after pinning.
+            let p = unsafe { Pin::new_unchecked(&mut fut) };
+            if let Poll::Ready(v) = p.poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn dynamic_join_folds_in_a_late_arm_then_completes_on_close() {
+        let (tx, rx) = bounded::<BoxFuture<'static, i32>>(4);
+        // One arm up front; a second delivered over the control channel.
+        let initial: Vec<BoxFuture<'static, i32>> = alloc::vec![Box::pin(ready(1))];
+        // (BoxFuture isn't Debug, so assert on is_ok rather than unwrap.)
+        assert!(tx.try_send(Box::pin(ready(2))).is_ok());
+        // Closing the control channel is what lets the join finish.
+        drop(tx);
+
+        let mut out = spin(dynamic_join(initial, rx));
+        out.sort_unstable();
+        assert_eq!(out, alloc::vec![1, 2], "both the initial and the late arm resolve");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn dynamic_join_stays_pending_while_control_channel_is_open() {
+        // An open control channel means more arms may still arrive, so even
+        // with every current arm resolved the join must not complete.
+        let (tx, rx) = bounded::<BoxFuture<'static, i32>>(1);
+        let initial: Vec<BoxFuture<'static, i32>> = alloc::vec![Box::pin(ready(1))];
+        assert!(
+            poll_once(dynamic_join(initial, rx)).is_pending(),
+            "open control channel keeps the join alive"
+        );
+        drop(tx);
     }
 }

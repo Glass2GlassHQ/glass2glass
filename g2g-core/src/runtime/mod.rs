@@ -51,7 +51,7 @@ pub use solver::NegotiationFailure;
 #[cfg(feature = "std")]
 pub use runner::{
     run_fanout_session, run_linear_chain, run_linear_chain_with_bus, run_source_fanout,
-    run_source_fanout_with_bus,
+    run_source_fanout_with_bus, run_source_router_dynamic, DynamicFanoutHandle,
 };
 
 #[cfg(feature = "std")]

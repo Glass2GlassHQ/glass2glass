@@ -14,14 +14,14 @@ use crate::frame::PipelinePacket;
 use crate::memory::MemoryDomainKind;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{link, SenderSink};
+use crate::runtime::channel::{bounded, link, Sender, SenderSink};
 use crate::runtime::coordinator::{
     coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
     report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
-use crate::runtime::join::{select2, Either, Join2};
+use crate::runtime::join::{dynamic_join, select2, Either, Join2};
 use crate::runtime::solver::{
     resolve_forward_output, solve_linear, ForwardResolve, NegotiationFailure,
 };
@@ -926,6 +926,273 @@ where
         base_time_ns: 0,
         coordinator_events: 0,
     })
+}
+
+// ===========================================================================
+// M310: runtime request pads (dynamic fan-out branches).
+// ===========================================================================
+
+/// Self-identifying outcome of a dynamic-fan-out arm. Arm indices are not stable
+/// once branches are added at runtime, so each arm reports what it was.
+#[cfg(feature = "std")]
+enum DynArmOut {
+    /// The source produced this many `DataFrame`s.
+    Source(u64),
+    /// The router (no count of its own).
+    Router,
+    /// A branch consumed this many `DataFrame`s.
+    Branch(u64),
+}
+
+/// A handle to add output branches to a *running* dynamic fan-out (M310): the
+/// runtime equivalent of GStreamer's tee request pads. Each
+/// [`add_branch`](Self::add_branch) attaches a new sink the router routes frames
+/// to; the new branch configures from the fan-out's sticky caps on attach, then
+/// receives its share of subsequent frames. Cheap to clone (channel senders), so
+/// several controllers can request pads.
+///
+/// `'a` is the run's lifetime: the handle is used concurrently with the run
+/// future and must be dropped no later than it. Branches added after the source
+/// has ended are rejected ([`G2gError::Shutdown`]).
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+#[cfg(feature = "std")]
+pub struct DynamicFanoutHandle<'a> {
+    new_branch_tx: Sender<alloc::boxed::Box<dyn DynAsyncElement + 'a>>,
+}
+
+#[cfg(feature = "std")]
+impl<'a> DynamicFanoutHandle<'a> {
+    /// Request a new output pad: attach `sink` as a branch of the running
+    /// fan-out. Returns [`G2gError::Shutdown`] if the fan-out has already
+    /// finished (the source ended), so no branch can be added.
+    pub fn add_branch(
+        &self,
+        sink: alloc::boxed::Box<dyn DynAsyncElement + 'a>,
+    ) -> Result<(), G2gError> {
+        self.new_branch_tx.try_send(sink).map_err(|_| G2gError::Shutdown)
+    }
+}
+
+/// Drives `source -> dynamic router -> N branches`, where branches can be added
+/// at runtime through the returned [`DynamicFanoutHandle`] (M310 request pads).
+///
+/// The router distributes `DataFrame`s round-robin across the currently-attached
+/// branches (frames are not `Clone`, so this routes rather than broadcasts, the
+/// `Router` model; a broadcast tee needs frame sharing, a follow-up) and
+/// broadcasts `CapsChanged` / `Eos` to every branch. The fan-out's caps are
+/// "sticky": the source's fixated output caps are replayed to each branch the
+/// moment it attaches, so a late branch configures correctly without having seen
+/// the original negotiation.
+///
+/// Returns the handle plus the run future; drive them concurrently (await the
+/// future while using the handle from another task). The run completes once the
+/// source ends and every attached branch has drained.
+#[cfg(feature = "std")]
+pub fn run_source_router_dynamic<'a, Src>(
+    source: &'a mut Src,
+    link_capacity: impl Into<LinkCapacity>,
+) -> (DynamicFanoutHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+where
+    Src: SourceLoop + 'a,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    // Control channel: handle -> router (new branch elements).
+    let (new_branch_tx, new_branch_rx) =
+        bounded::<alloc::boxed::Box<dyn DynAsyncElement + 'a>>(link_capacity);
+    // Arm channel: router -> join (the spawned branch futures).
+    let (new_arm_tx, new_arm_rx) =
+        bounded::<BoxFuture<'a, Result<DynArmOut, G2gError>>>(link_capacity);
+
+    let handle = DynamicFanoutHandle { new_branch_tx };
+
+    let run = async move {
+        // The source self-fixates its output caps; that becomes the sticky caps
+        // replayed to every branch on attach.
+        let sticky = source.intercept_caps().await?;
+        if let ConfigureOutcome::ReFixate(_) = source.configure_pipeline(&sticky)? {
+            return Err(G2gError::FixationFailed);
+        }
+
+        let (src_tx, src_rx) = link(link_capacity);
+        let source_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
+            let mut adapter = SenderSink::new(src_tx);
+            source.run(&mut adapter).await.map(DynArmOut::Source)
+        });
+
+        let router_fut: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
+            let mut ports: Vec<SenderSink> = Vec::new();
+            let mut rr = 0usize; // round-robin cursor
+            let mut accepting = true; // poll the control channel until the handle drops
+            loop {
+                // Attach every branch queued so far BEFORE routing the next
+                // packet, so a branch that arrived before a frame never misses
+                // it (select2 below is left-biased toward the source, so without
+                // this drain a backlog of frames would be routed to an empty
+                // port set and dropped).
+                while let Some(sink) = new_branch_rx.try_recv() {
+                    attach_branch(sink, link_capacity, &sticky, &mut ports, &new_arm_tx).await?;
+                }
+
+                if accepting {
+                    match select2(src_rx.recv(), new_branch_rx.recv()).await {
+                        Either::Left(pkt) => {
+                            if route_packet(pkt, &mut ports, &mut rr).await? {
+                                return Ok(DynArmOut::Router); // source ended
+                            }
+                        }
+                        Either::Right(Some(sink)) => {
+                            attach_branch(sink, link_capacity, &sticky, &mut ports, &new_arm_tx)
+                                .await?;
+                        }
+                        // Handle dropped: stop watching for new branches.
+                        Either::Right(None) => accepting = false,
+                    }
+                } else if route_packet(src_rx.recv().await, &mut ports, &mut rr).await? {
+                    return Ok(DynArmOut::Router);
+                }
+            }
+        });
+
+        // Drop our keep-alive arm sender into the router so that when the router
+        // returns (source EOS), the arm channel closes and the join can finish.
+        // (new_arm_tx is moved into router_fut above.)
+        let arms: Vec<BoxFuture<'a, Result<DynArmOut, G2gError>>> = alloc::vec![source_fut, router_fut];
+        let results = dynamic_join(arms, new_arm_rx).await;
+
+        let mut emitted = 0u64;
+        let mut consumed = 0u64;
+        for r in results {
+            match r? {
+                DynArmOut::Source(n) => emitted = n,
+                DynArmOut::Branch(n) => consumed += n,
+                DynArmOut::Router => {}
+            }
+        }
+        Ok(RunStats {
+            frames_emitted: emitted,
+            frames_consumed: consumed,
+            frames_dropped: 0,
+            latency: LatencyReport::ZERO,
+            allocation: None,
+            clock_priority: ClockPriority::SystemFallback,
+            base_time_ns: 0,
+            coordinator_events: 0,
+        })
+    };
+
+    (handle, run)
+}
+
+/// Attach a runtime-requested branch: give it its own link, replay the sticky
+/// caps into it so it configures before any frame, add its sender to the port
+/// set, and hand its loop future to the dynamic join.
+#[cfg(feature = "std")]
+async fn attach_branch<'a>(
+    sink: alloc::boxed::Box<dyn DynAsyncElement + 'a>,
+    link_capacity: usize,
+    sticky: &Caps,
+    ports: &mut Vec<SenderSink>,
+    new_arm_tx: &Sender<BoxFuture<'a, Result<DynArmOut, G2gError>>>,
+) -> Result<(), G2gError> {
+    let (btx, brx) = link(link_capacity);
+    let mut port = SenderSink::new(btx);
+    port.push(PipelinePacket::CapsChanged(sticky.clone())).await?;
+    ports.push(port);
+    let arm: BoxFuture<'a, Result<DynArmOut, G2gError>> = Box::pin(async move {
+        let mut sink = sink;
+        dyn_branch_loop(sink.as_mut(), brx).await.map(DynArmOut::Branch)
+    });
+    new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)
+}
+
+/// Route one received source packet to the branch ports: a `DataFrame` to the
+/// next branch round-robin (frames are not `Clone`, so a true broadcast tee is a
+/// follow-up needing frame sharing), and `CapsChanged` / `Segment` / `Flush`
+/// broadcast to every branch (those are cloneable). `Eos` (or a closed source
+/// channel) is broadcast to all branches and returns `Ok(true)` to tell the
+/// router the source has ended.
+#[cfg(feature = "std")]
+async fn route_packet(
+    pkt: Option<PipelinePacket>,
+    ports: &mut [SenderSink],
+    rr: &mut usize,
+) -> Result<bool, G2gError> {
+    match pkt {
+        Some(PipelinePacket::DataFrame(frame)) => {
+            if !ports.is_empty() {
+                let idx = *rr % ports.len();
+                *rr = rr.wrapping_add(1);
+                ports[idx].push(PipelinePacket::DataFrame(frame)).await?;
+            }
+            // No branches attached: drop the frame (a tee with no src pads).
+            Ok(false)
+        }
+        Some(PipelinePacket::CapsChanged(caps)) => {
+            for p in ports.iter_mut() {
+                p.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+            }
+            Ok(false)
+        }
+        Some(PipelinePacket::Segment(seg)) => {
+            for p in ports.iter_mut() {
+                p.push(PipelinePacket::Segment(seg)).await?;
+            }
+            Ok(false)
+        }
+        Some(PipelinePacket::Flush) => {
+            for p in ports.iter_mut() {
+                p.push(PipelinePacket::Flush).await?;
+            }
+            Ok(false)
+        }
+        Some(PipelinePacket::Eos) | None => {
+            for p in ports.iter_mut() {
+                p.push(PipelinePacket::Eos).await?;
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// A dynamic branch's loop: configure from the first (sticky) `CapsChanged`, then
+/// process frames until `Eos` / channel close. The configure path mirrors the
+/// static fan-out branch arm so a runtime branch negotiates exactly like a built
+/// one.
+#[cfg(feature = "std")]
+async fn dyn_branch_loop(
+    sink: &mut dyn DynAsyncElement,
+    rx: crate::runtime::channel::LinkReceiver,
+) -> Result<u64, G2gError> {
+    let mut null = NullSink;
+    let mut consumed = 0u64;
+    loop {
+        match rx.recv().await {
+            Some(PipelinePacket::Eos) => {
+                sink.process(PipelinePacket::Eos, &mut null).await?;
+                return Ok(consumed);
+            }
+            Some(PipelinePacket::CapsChanged(caps)) => {
+                let branch_caps =
+                    re_solve_downstream_dyn_sink(&caps, &*sink).map_err(|_| G2gError::CapsMismatch)?;
+                match sink.configure_pipeline(&branch_caps)? {
+                    ConfigureOutcome::Accepted => {
+                        sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null).await?;
+                    }
+                    ConfigureOutcome::ReFixate(counter) => {
+                        rx.request_reconfigure(Reconfigure::Propose(counter));
+                    }
+                }
+            }
+            Some(packet) => {
+                if matches!(packet, PipelinePacket::DataFrame(_)) {
+                    consumed += 1;
+                }
+                sink.process(packet, &mut null).await?;
+            }
+            None => return Ok(consumed),
+        }
+    }
 }
 
 /// Drives a terminal multi-output *source* ([`MultiOutputSource`]: 0 inputs to N
