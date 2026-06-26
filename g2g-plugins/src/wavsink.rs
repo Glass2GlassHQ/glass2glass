@@ -19,17 +19,22 @@ use g2g_core::{
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
+use crate::audio::WAVE_FORMAT_IEEE_FLOAT;
 use crate::filesink::io_err;
 
-/// Byte offsets of the two running sizes in the 44-byte canonical header.
+/// Byte offset of the RIFF running size (constant across header layouts).
 const RIFF_SIZE_OFFSET: u64 = 4;
-const DATA_SIZE_OFFSET: u64 = 40;
 
 #[derive(Debug)]
 pub struct WavSink {
     path: PathBuf,
     writer: Option<BufWriter<File>>,
     data_bytes: u64,
+    /// Length of the written header, so the running sizes (always its last
+    /// chunk) are patched at the right offsets for either layout.
+    header_len: u64,
+    /// Frame size in bytes, for the non-PCM `fact` chunk's sample count.
+    block_align: u32,
     eos_seen: bool,
 }
 
@@ -41,6 +46,8 @@ impl WavSink {
             path: path.into(),
             writer: None,
             data_bytes: 0,
+            header_len: 0,
+            block_align: 0,
             eos_seen: false,
         }
     }
@@ -56,22 +63,31 @@ impl WavSink {
 
 use crate::audio::pcm_params;
 
-/// The canonical 44-byte header with zeroed running sizes.
+/// The header with zeroed running sizes. PCM gets the canonical 44-byte form;
+/// IEEE float gets the spec-required 18-byte fmt chunk (with `cbSize`) plus a
+/// `fact` chunk, so non-PCM output is conformant, not just widely accepted.
 fn wav_header(tag: u16, bits: u16, channels: u16, rate: u32) -> Vec<u8> {
     let block_align = channels * bits / 8;
     let byte_rate = rate * block_align as u32;
-    let mut h = Vec::with_capacity(44);
+    let is_float = tag == WAVE_FORMAT_IEEE_FLOAT;
+    let mut h = Vec::with_capacity(if is_float { 58 } else { 44 });
     h.extend_from_slice(b"RIFF");
     h.extend_from_slice(&0u32.to_le_bytes()); // riff size, patched at Eos
     h.extend_from_slice(b"WAVE");
     h.extend_from_slice(b"fmt ");
-    h.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    h.extend_from_slice(&if is_float { 18u32 } else { 16 }.to_le_bytes());
     h.extend_from_slice(&tag.to_le_bytes());
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&rate.to_le_bytes());
     h.extend_from_slice(&byte_rate.to_le_bytes());
     h.extend_from_slice(&block_align.to_le_bytes());
     h.extend_from_slice(&bits.to_le_bytes());
+    if is_float {
+        h.extend_from_slice(&0u16.to_le_bytes()); // cbSize = 0
+        h.extend_from_slice(b"fact");
+        h.extend_from_slice(&4u32.to_le_bytes());
+        h.extend_from_slice(&0u32.to_le_bytes()); // sample count, patched at Eos
+    }
     h.extend_from_slice(b"data");
     h.extend_from_slice(&0u32.to_le_bytes()); // data size, patched at Eos
     h
@@ -98,11 +114,12 @@ impl AsyncElement for WavSink {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let (tag, bits, channels, rate) = pcm_params(absolute_caps)?;
+        let header = wav_header(tag, bits, channels, rate);
+        self.header_len = header.len() as u64;
+        self.block_align = (channels * bits / 8) as u32;
         let file = File::create(&self.path).map_err(io_err)?;
         let mut writer = BufWriter::new(file);
-        writer
-            .write_all(&wav_header(tag, bits, channels, rate))
-            .map_err(io_err)?;
+        writer.write_all(&header).map_err(io_err)?;
         self.writer = Some(writer);
         self.data_bytes = 0;
         Ok(ConfigureOutcome::Accepted)
@@ -128,10 +145,19 @@ impl AsyncElement for WavSink {
                     // (non-standard) post-Eos write stays appendable.
                     writer.flush().map_err(io_err)?;
                     let file = writer.get_mut();
-                    let riff_size = (36 + self.data_bytes) as u32;
+                    // The data chunk's size word is always the last 4 bytes of
+                    // the header; riff size is everything after the RIFF+size.
+                    let riff_size = (self.header_len - 8 + self.data_bytes) as u32;
                     file.seek(SeekFrom::Start(RIFF_SIZE_OFFSET)).map_err(io_err)?;
                     file.write_all(&riff_size.to_le_bytes()).map_err(io_err)?;
-                    file.seek(SeekFrom::Start(DATA_SIZE_OFFSET)).map_err(io_err)?;
+                    // The non-PCM `fact` chunk (when present) carries the per-
+                    // channel sample count, 12 bytes before the data size word.
+                    if self.header_len > 44 && self.block_align > 0 {
+                        let samples = (self.data_bytes / self.block_align as u64) as u32;
+                        file.seek(SeekFrom::Start(self.header_len - 12)).map_err(io_err)?;
+                        file.write_all(&samples.to_le_bytes()).map_err(io_err)?;
+                    }
+                    file.seek(SeekFrom::Start(self.header_len - 4)).map_err(io_err)?;
                     file.write_all(&(self.data_bytes as u32).to_le_bytes())
                         .map_err(io_err)?;
                     file.seek(SeekFrom::End(0)).map_err(io_err)?;
@@ -183,6 +209,54 @@ mod tests {
         // block align 4 (stereo s16), byte rate 192000
         assert_eq!(u16::from_le_bytes(h[32..34].try_into().unwrap()), 4);
         assert_eq!(u32::from_le_bytes(h[28..32].try_into().unwrap()), 192_000);
+    }
+
+    #[test]
+    fn float_header_has_18_byte_fmt_and_fact_chunk() {
+        let h = wav_header(WAVE_FORMAT_IEEE_FLOAT, 32, 2, 48_000);
+        assert_eq!(h.len(), 58);
+        assert_eq!(&h[12..16], b"fmt ");
+        assert_eq!(u32::from_le_bytes(h[16..20].try_into().unwrap()), 18, "18-byte fmt for float");
+        assert_eq!(u16::from_le_bytes(h[36..38].try_into().unwrap()), 0, "cbSize = 0");
+        assert_eq!(&h[38..42], b"fact");
+        assert_eq!(&h[50..54], b"data");
+    }
+
+    #[tokio::test]
+    async fn float_wav_patches_fact_and_data_sizes() {
+        use g2g_core::{Frame, FrameTiming, PushOutcome, SystemSlice};
+        struct NullSink;
+        impl OutputSink for NullSink {
+            fn push<'a>(
+                &'a mut self,
+                _p: PipelinePacket,
+            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+                Box::pin(async { Ok(PushOutcome::Accepted) })
+            }
+        }
+        let path = std::env::temp_dir().join("g2g_wavsink_float.wav");
+        let _ = std::fs::remove_file(&path);
+        let mut sink = WavSink::new(&path);
+        let caps = Caps::Audio { format: AudioFormat::PcmF32Le, channels: 2, sample_rate: 48_000 };
+        sink.configure_pipeline(&caps).unwrap();
+        let mut out = NullSink;
+        // 8 f32 = 32 bytes = 4 stereo frames (block_align 8).
+        let data: Vec<u8> = [0.5f32; 8].into_iter().flat_map(|v| v.to_le_bytes()).collect();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        sink.process(PipelinePacket::DataFrame(frame), &mut out).await.unwrap();
+        sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 58 + 32);
+        assert_eq!(&bytes[38..42], b"fact");
+        assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 4, "4 samples/channel");
+        assert_eq!(u32::from_le_bytes(bytes[54..58].try_into().unwrap()), 32, "data size");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 82, "riff size");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
