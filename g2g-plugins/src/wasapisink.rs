@@ -277,11 +277,15 @@ fn worker_main(
 
     let result = run_render_loop(&render, rx, &rendered);
 
-    // SAFETY: stop the client and tear COM down on the owning thread.
+    // SAFETY: stop the client on the owning thread.
     unsafe {
         let _ = render.client.Stop();
-        CoUninitialize();
     }
+    // Release every COM interface before uninitialising COM: CoUninitialize must
+    // come after the last Release, not before the RenderState drops at scope end.
+    drop(render);
+    // SAFETY: balances the CoInitializeEx in open_endpoint; all interfaces freed.
+    unsafe { CoUninitialize() };
     result
 }
 
