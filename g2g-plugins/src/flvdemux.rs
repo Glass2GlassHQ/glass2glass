@@ -317,7 +317,7 @@ fn parse_on_metadata(body: &[u8]) -> TagList {
     let mut list = TagList::new();
     let mut pos = 0usize;
     // The first value is the event name; bail unless it is "onMetaData".
-    if read_amf0_value(body, &mut pos) != Some(Some(String::from("onMetaData"))) {
+    if read_amf0_value(body, &mut pos, 0) != Some(Some(String::from("onMetaData"))) {
         return list;
     }
     // The second value holds the properties: an ECMA array or an anonymous object.
@@ -326,18 +326,26 @@ fn parse_on_metadata(body: &[u8]) -> TagList {
     let _ = match marker {
         amf0::ECMA_ARRAY => {
             let _count = read_u32_be(body, &mut pos);
-            read_amf0_object(body, &mut pos, Some(&mut list))
+            read_amf0_object(body, &mut pos, Some(&mut list), 0)
         }
-        amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut list)),
+        amf0::OBJECT => read_amf0_object(body, &mut pos, Some(&mut list), 0),
         _ => Some(()),
     };
     list
 }
 
+/// Cap AMF0 nesting so a crafted onMetaData (each level costs ~4 bytes, the body
+/// is up to 16 MB) cannot recurse deep enough to overflow the stack. Real
+/// metadata is only a level or two deep.
+const MAX_AMF0_DEPTH: u32 = 32;
+
 /// Read an AMF0 value at `*pos`, advancing past it. Returns `Some(Some(s))` for a
 /// string value, `Some(None)` for any other (correctly skipped) value, or `None`
-/// on a parse error / unknown marker.
-fn read_amf0_value(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
+/// on a parse error / unknown marker / excessive nesting.
+fn read_amf0_value(b: &[u8], pos: &mut usize, depth: u32) -> Option<Option<String>> {
+    if depth >= MAX_AMF0_DEPTH {
+        return None;
+    }
     let marker = *b.get(*pos)?;
     *pos += 1;
     match marker {
@@ -347,16 +355,16 @@ fn read_amf0_value(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
             let len = read_u16_be(b, pos)? as usize;
             Some(Some(read_amf0_str(b, pos, len)?))
         }
-        amf0::OBJECT => read_amf0_object(b, pos, None).map(|_| None),
+        amf0::OBJECT => read_amf0_object(b, pos, None, depth + 1).map(|_| None),
         amf0::ECMA_ARRAY => {
             let _count = read_u32_be(b, pos)?;
-            read_amf0_object(b, pos, None).map(|_| None)
+            read_amf0_object(b, pos, None, depth + 1).map(|_| None)
         }
         amf0::NULL | amf0::UNDEFINED => Some(None),
         amf0::STRICT_ARRAY => {
             let count = read_u32_be(b, pos)?;
             for _ in 0..count {
-                read_amf0_value(b, pos)?;
+                read_amf0_value(b, pos, depth + 1)?;
             }
             Some(None)
         }
@@ -371,7 +379,15 @@ fn read_amf0_value(b: &[u8], pos: &mut usize) -> Option<Option<String>> {
 
 /// Read AMF0 `(key, value)` property pairs until the object-end marker. When
 /// `collect` is set, each string-valued property is added as a [`Tag`].
-fn read_amf0_object(b: &[u8], pos: &mut usize, mut collect: Option<&mut TagList>) -> Option<()> {
+fn read_amf0_object(
+    b: &[u8],
+    pos: &mut usize,
+    mut collect: Option<&mut TagList>,
+    depth: u32,
+) -> Option<()> {
+    if depth >= MAX_AMF0_DEPTH {
+        return None;
+    }
     loop {
         let key_len = read_u16_be(b, pos)? as usize;
         if key_len == 0 {
@@ -384,7 +400,7 @@ fn read_amf0_object(b: &[u8], pos: &mut usize, mut collect: Option<&mut TagList>
             };
         }
         let key = read_amf0_str(b, pos, key_len)?;
-        let value = read_amf0_value(b, pos)?;
+        let value = read_amf0_value(b, pos, depth + 1)?;
         if let (Some(list), Some(s)) = (collect.as_deref_mut(), value) {
             list.push(Tag::from_key_value(&key, &s));
         }
@@ -589,6 +605,21 @@ mod tests {
         );
         // A body that is not onMetaData yields nothing.
         assert!(parse_on_metadata(&amf0_string("onCuePoint")).is_empty());
+    }
+
+    #[test]
+    fn parse_on_metadata_bounds_nesting_depth() {
+        // A pathologically nested object must not overflow the stack: parsing
+        // bails at the depth cap and returns gracefully.
+        let mut body = amf0_string("onMetaData");
+        body.push(0x03); // OBJECT
+        // Many levels of `{"a": {` opened and never closed.
+        for _ in 0..10_000 {
+            body.extend_from_slice(&(1u16).to_be_bytes());
+            body.push(b'a');
+            body.push(0x03); // nested OBJECT value
+        }
+        assert!(parse_on_metadata(&body).is_empty());
     }
 
     #[tokio::test]
