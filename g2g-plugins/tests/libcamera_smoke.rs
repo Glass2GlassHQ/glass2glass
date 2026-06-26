@@ -31,6 +31,53 @@ impl PipelineClock for ZeroClock {
     }
 }
 
+/// Sink that averages the luma (Y) of each captured frame. The camera emits
+/// YUYV (Y at even byte offsets), so this tracks overall image brightness,
+/// used to prove the `brightness` control actually changes the pixels.
+#[derive(Default)]
+struct LumaSink {
+    sum_of_means: f64,
+    frames: u64,
+}
+
+impl LumaSink {
+    fn mean_luma(&self) -> f64 {
+        if self.frames == 0 {
+            0.0
+        } else {
+            self.sum_of_means / self.frames as f64
+        }
+    }
+}
+
+impl g2g_core::element::OutputSink for LumaSink {
+    fn push<'a>(
+        &'a mut self,
+        packet: g2g_core::frame::PipelinePacket,
+    ) -> g2g_core::element::BoxFuture<'a, Result<g2g_core::element::PushOutcome, g2g_core::G2gError>>
+    {
+        Box::pin(async move {
+            if let g2g_core::frame::PipelinePacket::DataFrame(f) = &packet {
+                if let g2g_core::memory::MemoryDomain::System(s) = &f.domain {
+                    let bytes = s.as_slice();
+                    let (mut sum, mut n) = (0u64, 0u64);
+                    let mut i = 0;
+                    while i < bytes.len() {
+                        sum += bytes[i] as u64; // Y in YUYV
+                        n += 1;
+                        i += 2;
+                    }
+                    if n > 0 {
+                        self.sum_of_means += sum as f64 / n as f64;
+                        self.frames += 1;
+                    }
+                }
+            }
+            Ok(g2g_core::element::PushOutcome::Accepted)
+        })
+    }
+}
+
 fn camera_index() -> usize {
     std::env::var("G2G_LIBCAMERA_INDEX")
         .ok()
@@ -144,6 +191,75 @@ async fn libcamera_fps_limit_is_enforced() {
             "rate collapsed to {actual_fps:.1} fps under a {fps} fps cap"
         );
     }
+}
+
+/// Prove the `brightness` control changes the pixels: at a fixed exposure (so
+/// the camera cannot auto-compensate), a high brightness yields a clearly
+/// brighter average luma than a low one. This is the low-light lever that
+/// brightens *without* lowering the frame rate.
+#[tokio::test]
+#[ignore = "needs a real camera that supports the Brightness control"]
+async fn libcamera_brightness_changes_luma() {
+    async fn mean_luma(brightness: f32) -> f64 {
+        use g2g_core::runtime::SourceLoop as _;
+        let mut src = LibCameraSrc::new()
+            .with_camera(camera_index())
+            .with_size(640, 480)
+            .with_fps(15)
+            .with_exposure(8_000) // fixed exposure: isolate the brightness effect
+            .with_brightness(brightness)
+            .with_frame_limit(10);
+        // Drive the source directly (LumaSink is an OutputSink, not a full
+        // AsyncElement), the minimal source -> sink path.
+        let caps = src.intercept_caps().await.expect("negotiate");
+        src.configure_pipeline(&caps).expect("configure");
+        let mut sink = LumaSink::default();
+        tokio::time::timeout(std::time::Duration::from_secs(20), src.run(&mut sink))
+            .await
+            .expect("finishes")
+            .expect("capture succeeds");
+        sink.mean_luma()
+    }
+
+    let dark = mean_luma(-0.8).await;
+    let bright = mean_luma(0.9).await;
+    eprintln!("mean luma: brightness -0.8 -> {dark:.1}, brightness +0.9 -> {bright:.1}");
+    assert!(
+        bright > dark + 5.0,
+        "brightness control had no visible effect: dark={dark:.1} bright={bright:.1}"
+    );
+}
+
+/// Select the camera by an id substring instead of index: a matching substring
+/// captures, a non-matching one fails negotiation (no camera selected).
+#[tokio::test]
+#[ignore = "needs a real camera; set G2G_LIBCAMERA_ID to a substring of its id"]
+async fn libcamera_camera_id_selects() {
+    // Default is this developer's webcam USB VID:PID; override per device.
+    let id = std::env::var("G2G_LIBCAMERA_ID").unwrap_or_else(|_| "30c9:0057".to_string());
+
+    let mut src = LibCameraSrc::new()
+        .with_camera_id(&id)
+        .with_size(640, 480)
+        .with_fps(15)
+        .with_frame_limit(5);
+    let mut sink = FakeSink::new();
+    let stats = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        run_simple_pipeline(&mut src, &mut sink, &ZeroClock, LatencyProfile::Live.link_capacity()),
+    )
+    .await
+    .expect("finishes")
+    .expect("by-id selection should capture");
+    assert_eq!(stats.frames_emitted, 5, "selected camera by id and captured");
+
+    // A bogus id matches no camera, so negotiation must fail (not pick #0).
+    let mut bad = LibCameraSrc::new()
+        .with_camera_id("no-such-camera-zzz")
+        .with_frame_limit(1);
+    let mut sink2 = FakeSink::new();
+    let r = run_simple_pipeline(&mut bad, &mut sink2, &ZeroClock, LatencyProfile::Live.link_capacity()).await;
+    assert!(r.is_err(), "a non-matching camera id must fail, not fall back to index 0");
 }
 
 /// Prove manual exposure lifts the frame rate that auto-exposure caps in low

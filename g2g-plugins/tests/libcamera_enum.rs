@@ -28,8 +28,11 @@ fn enumerate_formats() {
             println!("    {}x{}", s.width, s.height);
         }
     }
-    println!("supported controls:");
+    println!("camera id: {}", cam.id());
+    // ControlId names are private in the crate; the ControlInfoMap Debug impl
+    // does resolve them, so print the whole map plus per-entry ids.
+    println!("supported controls: {:#?}", cam.controls());
     for (key, info) in cam.controls().into_iter() {
-        println!("    {key}: {info:?}");
+        println!("    id {key}: {info:?}");
     }
 }

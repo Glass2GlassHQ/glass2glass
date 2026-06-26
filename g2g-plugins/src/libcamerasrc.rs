@@ -27,6 +27,7 @@ use core::pin::Pin;
 use core::time::Duration;
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -41,7 +42,9 @@ use g2g_core::{
 use libcamera::camera::CameraConfigurationStatus;
 use libcamera::camera_manager::CameraManager;
 use libcamera::control::{Control, ControlInfoMap, ControlList};
-use libcamera::controls::{AeEnable, AnalogueGain, ExposureTime, FrameDurationLimits};
+use libcamera::controls::{
+    AeEnable, AnalogueGain, Brightness, Contrast, ExposureTime, FrameDurationLimits, Saturation,
+};
 use libcamera::framebuffer::AsFrameBuffer;
 use libcamera::framebuffer_allocator::{FrameBuffer, FrameBufferAllocator};
 use libcamera::framebuffer_map::MemoryMappedFrameBuffer;
@@ -124,6 +127,22 @@ fn lc_other() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
+/// Resolve the camera to open: when `id` is set, the index of the first camera
+/// whose `id()` contains that substring; otherwise `index` unchanged. Reads
+/// each camera's id through a short-lived handle, so it adds no borrow to the
+/// returned value.
+fn resolve_camera_index(
+    cameras: &libcamera::camera_manager::CameraList<'_>,
+    index: usize,
+    id: Option<&str>,
+) -> Option<usize> {
+    match id {
+        Some(want) => (0..cameras.len())
+            .find(|&i| cameras.get(i).is_some_and(|c| c.id().contains(want))),
+        None => Some(index),
+    }
+}
+
 /// Set a control only if the camera advertises it. libcamera throws a C++
 /// `std::out_of_range` (aborting the process across the FFI boundary) when a
 /// control list passed to `start` carries an id the pipeline handler does not
@@ -141,8 +160,13 @@ fn set_if_supported<C: Control>(ctrls: &mut ControlList, infos: &ControlInfoMap,
 
 #[derive(Debug)]
 pub struct LibCameraSrc {
-    /// Index into libcamera's enumerated camera list (default 0).
+    /// Index into libcamera's enumerated camera list (default 0). Ignored when
+    /// `camera_id` is set.
     camera_index: usize,
+    /// Select the camera by an id substring instead of by index (libcamera ids
+    /// are stable across reboots, unlike enumeration order). The first camera
+    /// whose `id()` contains this string is used.
+    camera_id: Option<String>,
     /// Requested geometry; `0` means "let libcamera pick its default".
     req_width: u32,
     req_height: u32,
@@ -169,6 +193,14 @@ pub struct LibCameraSrc {
     /// Manual analogue gain (sensor ISO multiplier; implies AE off). Brightens a
     /// short exposure at the cost of noise.
     gain: Option<f32>,
+    /// Brightness in [-1.0, 1.0] (0 = default). Unlike exposure / gain this is a
+    /// post-capture image adjustment, so it brightens a short-exposure frame
+    /// *without* lowering the frame rate, the low-light lever that keeps fps.
+    brightness: Option<f32>,
+    /// Contrast (1.0 = default).
+    contrast: Option<f32>,
+    /// Colour saturation (1.0 = default; 0 = greyscale).
+    saturation: Option<f32>,
     /// Cached negotiation result: (output kind, width, height, fps). Set by
     /// [`negotiate`](Self::negotiate), consumed by `run`.
     negotiated: Option<(OutKind, u32, u32, u32)>,
@@ -180,6 +212,7 @@ impl LibCameraSrc {
     pub fn new() -> Self {
         Self {
             camera_index: 0,
+            camera_id: None,
             req_width: 0,
             req_height: 0,
             req_fps: DEFAULT_FPS,
@@ -188,14 +221,25 @@ impl LibCameraSrc {
             ae_enable: None,
             exposure_us: None,
             gain: None,
+            brightness: None,
+            contrast: None,
+            saturation: None,
             negotiated: None,
             configured: false,
         }
     }
 
-    /// Select which enumerated camera to open (default 0).
+    /// Select which enumerated camera to open by index (default 0).
     pub fn with_camera(mut self, index: usize) -> Self {
         self.camera_index = index;
+        self
+    }
+
+    /// Select the camera by an id substring (e.g. a USB path fragment or a
+    /// model string). Stable across reboots, unlike enumeration order; takes
+    /// precedence over [`with_camera`](Self::with_camera).
+    pub fn with_camera_id<S: Into<String>>(mut self, id: S) -> Self {
+        self.camera_id = Some(id.into());
         self
     }
 
@@ -254,6 +298,28 @@ impl LibCameraSrc {
         self
     }
 
+    /// Set image brightness in `[-1.0, 1.0]` (0 = default). A post-capture
+    /// adjustment that does not change the exposure time, so it brightens a
+    /// short-exposure low-light frame without lowering the frame rate. Applied
+    /// only if the camera supports it.
+    pub fn with_brightness(mut self, brightness: f32) -> Self {
+        self.brightness = Some(brightness);
+        self
+    }
+
+    /// Set contrast (1.0 = default). Applied only if the camera supports it.
+    pub fn with_contrast(mut self, contrast: f32) -> Self {
+        self.contrast = Some(contrast);
+        self
+    }
+
+    /// Set colour saturation (1.0 = default, 0 = greyscale). Applied only if the
+    /// camera supports it.
+    pub fn with_saturation(mut self, saturation: f32) -> Self {
+        self.saturation = Some(saturation);
+        self
+    }
+
     /// Probe the camera: acquire it, generate a ViewFinder configuration, try
     /// NV12 then YUYV, validate, and read back the format libcamera settled on.
     /// The camera is released before `run`. Caches the result for `run` and for
@@ -265,7 +331,9 @@ impl LibCameraSrc {
 
         let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
         let cameras = mgr.cameras();
-        let cam = cameras.get(self.camera_index).ok_or_else(lc_other)?;
+        let idx = resolve_camera_index(&cameras, self.camera_index, self.camera_id.as_deref())
+            .ok_or_else(lc_other)?;
+        let cam = cameras.get(idx).ok_or_else(lc_other)?;
         let cam = cam.acquire().map_err(|e| lc_err(&e))?;
 
         // MJPEG mode asks for MJPEG only; raw mode prefers NV12 then YUYV.
@@ -403,6 +471,10 @@ impl SourceLoop for LibCameraSrc {
                 self.camera_index = value.as_uint().ok_or(PropError::Type)? as usize;
                 Ok(())
             }
+            "camera-id" => {
+                self.camera_id = Some(value.as_str().ok_or(PropError::Type)?.to_string());
+                Ok(())
+            }
             "width" => {
                 self.req_width = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
@@ -439,6 +511,18 @@ impl SourceLoop for LibCameraSrc {
                 self.ae_enable = Some(false);
                 Ok(())
             }
+            "brightness" => {
+                self.brightness = Some(value.as_double().ok_or(PropError::Type)? as f32);
+                Ok(())
+            }
+            "contrast" => {
+                self.contrast = Some(value.as_double().ok_or(PropError::Type)? as f32);
+                Ok(())
+            }
+            "saturation" => {
+                self.saturation = Some(value.as_double().ok_or(PropError::Type)? as f32);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -446,6 +530,7 @@ impl SourceLoop for LibCameraSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "camera" => Some(PropValue::Uint(self.camera_index as u64)),
+            "camera-id" => self.camera_id.clone().map(PropValue::Str),
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
@@ -453,6 +538,9 @@ impl SourceLoop for LibCameraSrc {
             "auto-exposure" => self.ae_enable.map(PropValue::Bool),
             "exposure" => self.exposure_us.map(|e| PropValue::Int(e as i64)),
             "gain" => self.gain.map(|g| PropValue::Double(g as f64)),
+            "brightness" => self.brightness.map(|b| PropValue::Double(b as f64)),
+            "contrast" => self.contrast.map(|c| PropValue::Double(c as f64)),
+            "saturation" => self.saturation.map(|s| PropValue::Double(s as f64)),
             _ => None,
         }
     }
@@ -463,14 +551,22 @@ impl SourceLoop for LibCameraSrc {
                 return Err(G2gError::NotConfigured);
             }
             let (kind, w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
-            let limit = self.frame_limit;
-            let index = self.camera_index;
-            let pf = kind.pixel_format();
+            let setup = CaptureSetup {
+                index: self.camera_index,
+                camera_id: self.camera_id.clone(),
+                pf: kind.pixel_format(),
+                w,
+                h,
+                limit: self.frame_limit,
+            };
             let controls = CamControls {
                 fps,
                 ae_enable: self.ae_enable,
                 exposure_us: self.exposure_us,
                 gain: self.gain,
+                brightness: self.brightness,
+                contrast: self.contrast,
+                saturation: self.saturation,
             };
 
             // Bounded channel: the capture thread blocks once the pipeline is
@@ -480,7 +576,7 @@ impl SourceLoop for LibCameraSrc {
             // All libcamera interaction lives on this thread: the objects are
             // thread-affine and completions arrive on a libcamera callback.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
-                capture_loop(index, pf, w, h, controls, limit, tx)
+                capture_loop(setup, controls, tx)
             });
 
             let pts_step_ns = if fps > 0 { 1_000_000_000 / fps as u64 } else { 0 };
@@ -522,6 +618,19 @@ impl SourceLoop for LibCameraSrc {
 /// camera, configures it for `pf` at `w`x`h`, allocates and queues a request
 /// ring, and forwards each completed frame's packed bytes over `tx` until the
 /// frame limit is hit or the receiver is dropped.
+/// Everything the capture thread needs to open and configure the stream
+/// (camera selection, pixel format, geometry, frame limit). Bundled so the
+/// thread entry point stays within a sane argument count.
+#[derive(Debug)]
+struct CaptureSetup {
+    index: usize,
+    camera_id: Option<String>,
+    pf: PixelFormat,
+    w: u32,
+    h: u32,
+    limit: u64,
+}
+
 /// Camera-side controls applied at `start`: the frame-rate cap plus the
 /// exposure / gain overrides. All `Copy`, so they cross to the capture thread.
 #[derive(Debug, Clone, Copy)]
@@ -530,20 +639,21 @@ struct CamControls {
     ae_enable: Option<bool>,
     exposure_us: Option<i32>,
     gain: Option<f32>,
+    brightness: Option<f32>,
+    contrast: Option<f32>,
+    saturation: Option<f32>,
 }
 
 fn capture_loop(
-    index: usize,
-    pf: PixelFormat,
-    w: u32,
-    h: u32,
+    setup: CaptureSetup,
     controls: CamControls,
-    limit: u64,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> Result<(), G2gError> {
+    let CaptureSetup { index, camera_id, pf, w, h, limit } = setup;
     let mgr = CameraManager::new().map_err(|e| lc_err(&e))?;
     let cameras = mgr.cameras();
-    let cam = cameras.get(index).ok_or_else(lc_other)?;
+    let idx = resolve_camera_index(&cameras, index, camera_id.as_deref()).ok_or_else(lc_other)?;
+    let cam = cameras.get(idx).ok_or_else(lc_other)?;
     let mut cam = cam.acquire().map_err(|e| lc_err(&e))?;
 
     let mut cfgs = cam
@@ -619,6 +729,17 @@ fn capture_loop(
     if let Some(g) = controls.gain {
         any |= set_if_supported(&mut ctrls, infos, AnalogueGain(g));
     }
+    // Image adjustments: independent of exposure, so they brighten / tune a
+    // short-exposure frame without touching the frame rate.
+    if let Some(b) = controls.brightness {
+        any |= set_if_supported(&mut ctrls, infos, Brightness(b));
+    }
+    if let Some(c) = controls.contrast {
+        any |= set_if_supported(&mut ctrls, infos, Contrast(c));
+    }
+    if let Some(s) = controls.saturation {
+        any |= set_if_supported(&mut ctrls, infos, Saturation(s));
+    }
     let start_controls = any.then_some(ctrls);
     cam.start(start_controls.as_deref()).map_err(|e| lc_err(&e))?;
     for req in reqs.drain(..) {
@@ -673,6 +794,7 @@ fn capture_loop(
 
 static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("camera", PropKind::Uint, "camera index (libcamera enumeration order)"),
+    PropertySpec::new("camera-id", PropKind::Str, "select camera by id substring (stable across reboots)"),
     PropertySpec::new("width", PropKind::Uint, "requested capture width in pixels"),
     PropertySpec::new("height", PropKind::Uint, "requested capture height in pixels"),
     PropertySpec::new("framerate", PropKind::Uint, "capture frame rate (enforced via FrameDurationLimits)"),
@@ -680,6 +802,9 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
     PropertySpec::new("auto-exposure", PropKind::Bool, "auto-exposure on/off (off lifts the low-light fps cap)"),
     PropertySpec::new("exposure", PropKind::Int, "manual exposure time in microseconds (disables AE)"),
     PropertySpec::new("gain", PropKind::Double, "manual analogue gain (disables AE)"),
+    PropertySpec::new("brightness", PropKind::Double, "image brightness [-1,1]; brightens without lowering fps"),
+    PropertySpec::new("contrast", PropKind::Double, "image contrast (1.0 = default)"),
+    PropertySpec::new("saturation", PropKind::Double, "colour saturation (1.0 = default, 0 = grey)"),
 ];
 
 #[cfg(test)]
@@ -777,5 +902,31 @@ mod tests {
             src.set_property("gain", PropValue::Str("x".into())),
             Err(PropError::Type)
         );
+    }
+
+    #[test]
+    fn image_adjustments_round_trip_without_touching_ae() {
+        // Brightness / contrast / saturation are image adjustments, NOT
+        // exposure, so they must not flip auto-exposure off.
+        // Values exactly representable in both f32 and f64 (the setters narrow
+        // to f32) so the round-trip compares cleanly.
+        let src = LibCameraSrc::new()
+            .with_brightness(0.5)
+            .with_contrast(1.25)
+            .with_saturation(0.0);
+        assert_eq!(src.get_property("brightness"), Some(PropValue::Double(0.5)));
+        assert_eq!(src.get_property("contrast"), Some(PropValue::Double(1.25)));
+        assert_eq!(src.get_property("saturation"), Some(PropValue::Double(0.0)));
+        assert_eq!(src.get_property("auto-exposure"), None, "brightness must not disable AE");
+    }
+
+    #[test]
+    fn camera_id_selects_by_name() {
+        let src = LibCameraSrc::new();
+        assert_eq!(src.get_property("camera-id"), None);
+        let mut src = LibCameraSrc::new().with_camera_id("usb-1.2");
+        assert_eq!(src.get_property("camera-id"), Some(PropValue::Str("usb-1.2".into())));
+        src.set_property("camera-id", PropValue::Str("front".into())).unwrap();
+        assert_eq!(src.get_property("camera-id"), Some(PropValue::Str("front".into())));
     }
 }

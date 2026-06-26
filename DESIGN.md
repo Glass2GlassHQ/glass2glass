@@ -764,7 +764,12 @@ auto-exposure off) ride the same start-control path and are the real frame-rate
 lever in low light: with auto-exposure on the camera lengthens exposure until the
 rate collapses (~9 fps on a dim webcam, the same rate in every format and
 resolution), while a fixed short exposure restores a high rate (measured 8.8 ->
-24.9 fps on the developer's webcam). Start controls are applied through a support
+24.9 fps on the developer's webcam). `Brightness` (and `Contrast` / `Saturation`)
+are post-capture image adjustments that do not touch the exposure time, so they
+brighten a dim short-exposure frame without giving back the frame rate (measured
+mean luma 16 -> 117 at a fixed exposure). The camera can also be selected by an
+id substring (`with_camera_id`) rather than enumeration index, stable across
+reboots. Start controls are applied through a support
 check against the camera's `ControlInfoMap`, because libcamera aborts the process
 (a C++ exception across the FFI boundary) if a control list carries an id the
 pipeline handler does not advertise (a UVC webcam may expose `ExposureTime` but
