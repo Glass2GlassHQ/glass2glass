@@ -778,9 +778,16 @@ not `AnalogueGain`). The `libcamera` crate requires libcamera
 the NVIDIA stack) rather than built in CI. The camera also feeds the GPU/ML path:
 the g2g-ml `libcamera-wgpu` feature chains `LibCameraSrc -> VideoConvert(NV12) ->
 WgpuPreprocess` to turn live frames into a normalized f32 NCHW tensor on the GPU
-(validated camera-to-tensor on an RTX 3060); a zero-copy dma-buf import of
-libcamera buffers into wgpu, the Linux analog of the CUDA / AHardwareBuffer
-interop, is a follow-up.
+(validated camera-to-tensor on an RTX 3060). A zero-copy dma-buf import of
+libcamera buffers into wgpu (the Linux analog of the CUDA / AHardwareBuffer
+interop) was investigated under the `libcamera-dmabuf` feature: libcamera does
+export a real dma-buf fd, but on a USB camera + discrete NVIDIA GPU the driver
+advertises the buffer as importable (`vkGetMemoryFdPropertiesKHR`) yet the actual
+`vkAllocateMemory` import fails to bind, because the buffer is CPU/vmalloc-backed
+and the dGPU cannot map it. So the CPU-upload path is correct for that
+configuration; zero-copy is expected to work on an integrated GPU (shared memory)
+or a CSI/ISP camera (GPU-visible buffers), and the full import-to-texture element
+is gated behind the on-hardware probe rather than shipped blind.
 
 Two more capture sources follow the same blocking-work-off-the-async-path shape:
 `PipeWireSrc` (`pipewire` feature, Linux) captures interleaved PCM off the

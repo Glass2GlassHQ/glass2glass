@@ -421,6 +421,10 @@ pub mod v4l2src;
 #[cfg(all(target_os = "linux", feature = "libcamera"))]
 pub mod libcamerasrc;
 
+// Zero-copy libcamera -> GPU dma-buf import feasibility probe (Linux + GPU).
+#[cfg(all(target_os = "linux", feature = "libcamera-dmabuf"))]
+pub mod libcamera_dmabuf;
+
 // Wayland display sink (NV12 -> XRGB8888 via wl_shm). Linux-only;
 // desktop-dev convenience sink — see module docs.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]

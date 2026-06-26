@@ -221,6 +221,13 @@ cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:dr
 # with VK_KHR_external_memory_fd and wrap a self-allocated VkImage) + ash. Linux
 # + NVIDIA only, implies std.
 cuda-wgpu = ["cuda", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Zero-copy libcamera -> GPU feasibility (the Linux analog of cuda-wgpu /
+# mediacodec-wgpu): query whether a discrete GPU can import a libcamera
+# FrameBuffer dma-buf via VK_EXT_external_memory_dma_buf. Needs raw Vulkan
+# (wgpu-hal + ash). Linux only, implies the libcamera source. The full
+# import-to-wgpu-texture element is gated on this probe succeeding on real
+# hardware (a USB camera's CPU-backed dma-buf cannot be mapped by a dGPU).
+libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);
