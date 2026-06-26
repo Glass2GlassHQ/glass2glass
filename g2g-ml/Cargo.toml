@@ -34,6 +34,11 @@ cuda-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/cuda-wgpu"]
 # cuda-wgpu; pulls g2g-plugins/mediacodec-wgpu for the WgpuRgbaTexture keep-alive.
 # Android only. Implies wgpu.
 mediacodec-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/mediacodec-wgpu"]
+# libcamera capture -> GPU preprocess (M315): chain LibCameraSrc (Linux libcamera
+# capture) through VideoConvert into WgpuPreprocess, a camera-to-NCHW-tensor path
+# on the GPU. Pulls g2g-plugins/libcamera (needs libcamera-devel + libclang).
+# Linux only. Implies wgpu.
+libcamera-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/libcamera"]
 # ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).

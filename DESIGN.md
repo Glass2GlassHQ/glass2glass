@@ -760,7 +760,12 @@ requested frame rate is enforced on the camera with a fixed `FrameDurationLimits
 (min == max, microseconds) passed as a start control, which the `uvcvideo`
 handler maps to the UVC frame interval. The `libcamera` crate requires libcamera
 `>= 0.4`, newer than some distro packages, so the feature is host-validated (like
-the NVIDIA stack) rather than built in CI.
+the NVIDIA stack) rather than built in CI. The camera also feeds the GPU/ML path:
+the g2g-ml `libcamera-wgpu` feature chains `LibCameraSrc -> VideoConvert(NV12) ->
+WgpuPreprocess` to turn live frames into a normalized f32 NCHW tensor on the GPU
+(validated camera-to-tensor on an RTX 3060); a zero-copy dma-buf import of
+libcamera buffers into wgpu, the Linux analog of the CUDA / AHardwareBuffer
+interop, is a follow-up.
 
 Two more capture sources follow the same blocking-work-off-the-async-path shape:
 `PipeWireSrc` (`pipewire` feature, Linux) captures interleaved PCM off the
