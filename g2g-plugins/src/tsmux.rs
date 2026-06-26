@@ -31,6 +31,17 @@ use g2g_core::{
 
 use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
 
+/// The PMT `stream_type` for an input caps, or `None` if unsupported. Shared by
+/// the single-input [`TsMux`] and the multi-input `tsmuxn::TsMux`.
+pub(crate) fn stream_type_for(caps: &Caps) -> Option<u8> {
+    match caps {
+        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(STREAM_TYPE_H264),
+        Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(STREAM_TYPE_H265),
+        Caps::Audio { format: AudioFormat::Aac, .. } => Some(STREAM_TYPE_AAC),
+        _ => None,
+    }
+}
+
 /// Muxes one elementary stream into an MPEG-TS byte stream.
 #[derive(Debug)]
 pub struct TsMux {
@@ -62,16 +73,6 @@ impl TsMux {
         Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
     }
 
-    /// The PMT `stream_type` for an input caps, or `None` if unsupported.
-    fn stream_type_for(caps: &Caps) -> Option<u8> {
-        match caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(STREAM_TYPE_H264),
-            Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(STREAM_TYPE_H265),
-            Caps::Audio { format: AudioFormat::Aac, .. } => Some(STREAM_TYPE_AAC),
-            _ => None,
-        }
-    }
-
     /// The elementary streams this muxer accepts on its sink pad.
     fn input_alternatives() -> Vec<Caps> {
         let video = |codec| Caps::CompressedVideo {
@@ -95,7 +96,7 @@ impl AsyncElement for TsMux {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::stream_type_for(upstream_caps).is_some() {
+        if stream_type_for(upstream_caps).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -105,7 +106,7 @@ impl AsyncElement for TsMux {
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // Any supported elementary stream maps to one MPEG-TS byte stream.
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::stream_type_for(input).is_some() {
+            if stream_type_for(input).is_some() {
                 CapsSet::one(Self::output_caps())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -114,7 +115,7 @@ impl AsyncElement for TsMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let stream_type = Self::stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let stream_type = stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.mux = Some(TsMuxer::new(stream_type));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)

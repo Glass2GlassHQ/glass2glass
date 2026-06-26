@@ -29,12 +29,12 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
-    VideoCodec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
 };
 
-use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
+use crate::mpegts::TsMuxer;
+use crate::tsmux::stream_type_for;
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
 #[derive(Debug)]
@@ -73,17 +73,6 @@ impl TsMux {
     fn output_caps_value() -> Caps {
         Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
     }
-
-    /// The PMT `stream_type` for an input caps, or `None` if unsupported.
-    fn stream_type_for(caps: &Caps) -> Option<u8> {
-        match caps {
-            Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(STREAM_TYPE_H264),
-            Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(STREAM_TYPE_H265),
-            Caps::Audio { format: AudioFormat::Aac, .. } => Some(STREAM_TYPE_AAC),
-            _ => None,
-        }
-    }
-
 }
 
 impl MultiInputElement for TsMux {
@@ -97,7 +86,7 @@ impl MultiInputElement for TsMux {
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::stream_type_for(upstream_caps).is_some() {
+        if stream_type_for(upstream_caps).is_some() {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -121,7 +110,7 @@ impl MultiInputElement for TsMux {
         input: usize,
         absolute_caps: &Caps,
     ) -> Result<ConfigureOutcome, G2gError> {
-        let stream_type = Self::stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let stream_type = stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
         self.stream_types[input] = Some(stream_type);
         Ok(ConfigureOutcome::Accepted)
     }
