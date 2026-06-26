@@ -240,8 +240,12 @@ pub fn parse_timestamp(s: &str) -> Option<u64> {
         return None;
     }
     let millis = frac_millis(frac);
-    let total_ms = ((hours * 60 + mins) * 60 + secs) * 1000 + millis;
-    Some(total_ms * 1_000_000)
+    // hours is untrusted and unbounded; fold with checked arithmetic so a huge
+    // value fails the parse (None) instead of overflowing. mins/secs are < 60
+    // and millis < 1000, so their sub-products cannot overflow.
+    let total_secs = hours.checked_mul(3600)?.checked_add(mins * 60 + secs)?;
+    let total_ms = total_secs.checked_mul(1000)?.checked_add(millis)?;
+    Some(total_ms.checked_mul(1_000_000)?)
 }
 
 /// Interpret a fractional-second digit string as milliseconds: take up to three
@@ -293,6 +297,8 @@ mod tests {
         assert_eq!(parse_timestamp("00:00:00.5"), Some(500_000_000));
         // Out-of-range fields rejected.
         assert_eq!(parse_timestamp("00:99:00,000"), None);
+        // An untrusted, unbounded hours field overflows to None, not a panic.
+        assert_eq!(parse_timestamp("9999999999999999:00:00,000"), None);
     }
 
     #[test]
