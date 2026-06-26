@@ -81,14 +81,14 @@ impl RtspRequest {
         }
 
         let body_start = header_end + 4; // past the "\r\n\r\n"
-        if buf.len() < body_start + content_length {
+        // saturating so a crafted Content-Length can't overflow the offset math
+        // into an out-of-bounds slice (a reachable panic / DoS).
+        let body_end = body_start.saturating_add(content_length);
+        if buf.len() < body_end {
             return None; // body not fully arrived
         }
-        let body = buf[body_start..body_start + content_length].to_vec();
-        Some((
-            RtspRequest { method, uri, cseq, transport, content_length, body },
-            body_start + content_length,
-        ))
+        let body = buf[body_start..body_end].to_vec();
+        Some((RtspRequest { method, uri, cseq, transport, content_length, body }, body_end))
     }
 }
 
@@ -312,6 +312,14 @@ mod tests {
         let (r, consumed) = RtspRequest::parse(full.as_bytes()).expect("complete");
         assert_eq!(r.body, b"0123456789");
         assert_eq!(consumed, full.len());
+    }
+
+    #[test]
+    fn overflowing_content_length_does_not_panic() {
+        // A Content-Length near usize::MAX must not overflow the body-offset math
+        // into an out-of-bounds slice; it reads as a not-yet-complete body.
+        let req = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 18446744073709551615\r\n\r\nx";
+        assert!(RtspRequest::parse(req.as_bytes()).is_none());
     }
 
     #[test]
