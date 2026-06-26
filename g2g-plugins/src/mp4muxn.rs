@@ -219,9 +219,8 @@ impl Mp4MuxN {
 
         let mut bytes = Vec::new();
         if !self.header_written {
-            let tracks: Vec<TrackInit> = self.inits.iter().flatten().cloned().collect();
             bytes.extend_from_slice(&ftyp());
-            bytes.extend_from_slice(&av_moov(&tracks));
+            bytes.extend_from_slice(&av_moov(&self.inits));
             self.header_written = true;
         }
 
@@ -366,8 +365,9 @@ fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
 }
 
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
-/// `trex` per track). `track_ID` is the 1-based track index.
-fn av_moov(tracks: &[TrackInit]) -> Vec<u8> {
+/// `trex` per track). `track_ID` is the 1-based pad slot, so it matches the
+/// `track_ID` each fragment carries even when a pad slot is empty (no AU yet).
+fn av_moov(tracks: &[Option<TrackInit>]) -> Vec<u8> {
     let next_track_id = (tracks.len() + 1) as u32;
     let mvhd = {
         let mut p = Vec::new();
@@ -387,11 +387,15 @@ fn av_moov(tracks: &[TrackInit]) -> Vec<u8> {
 
     let mut body = mvhd;
     for (i, track) in tracks.iter().enumerate() {
+        let Some(track) = track else { continue };
         body.extend_from_slice(&trak(i as u32 + 1, track));
     }
     let mvex = {
         let mut p = Vec::new();
-        for i in 0..tracks.len() {
+        for (i, track) in tracks.iter().enumerate() {
+            if track.is_none() {
+                continue;
+            }
             let mut t = Vec::new();
             t.extend_from_slice(&(i as u32 + 1).to_be_bytes()); // track id
             t.extend_from_slice(&1u32.to_be_bytes()); // default sample description
@@ -640,18 +644,18 @@ mod tests {
     #[test]
     fn moov_has_two_traks_and_two_trex() {
         let tracks = [
-            TrackInit::Video {
+            Some(TrackInit::Video {
                 codec: VideoCodec::H264,
                 width: 320,
                 height: 240,
                 param_sets: alloc::vec![alloc::vec![0x67, 0x42, 0x00, 0x1e], alloc::vec![0x68, 0xce]],
-            },
-            TrackInit::Audio {
+            }),
+            Some(TrackInit::Audio {
                 format: AudioFormat::Aac,
                 channels: 2,
                 rate: 48000,
                 asc: alloc::vec![0x11, 0x90],
-            },
+            }),
         ];
         let moov = av_moov(&tracks);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
@@ -664,13 +668,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_leading_pad_keeps_track_id_aligned() {
+        // Pad slot 0 produced no AU; the audio pad sits in slot 1, so its trak
+        // and trex must carry track_ID 2 to match the fragments emit_au writes.
+        let tracks = [
+            None,
+            Some(TrackInit::Audio {
+                format: AudioFormat::Aac,
+                channels: 2,
+                rate: 48000,
+                asc: alloc::vec![0x11, 0x90],
+            }),
+        ];
+        let moov = av_moov(&tracks);
+        let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
+        assert_eq!(count(b"trak"), 1, "only the non-empty pad gets a trak");
+        assert_eq!(count(b"trex"), 1);
+        let trex = moov.windows(4).position(|w| w == b"trex").unwrap();
+        let track_id = u32::from_be_bytes(moov[trex + 8..trex + 12].try_into().unwrap());
+        assert_eq!(track_id, 2, "slot-1 pad keeps track_ID 2 despite the empty slot 0");
+    }
+
+    #[test]
     fn opus_track_writes_an_opus_sample_entry_with_dops() {
-        let tracks = [TrackInit::Audio {
+        let tracks = [Some(TrackInit::Audio {
             format: AudioFormat::Opus,
             channels: 2,
             rate: 48000,
             asc: Vec::new(),
-        }];
+        })];
         let moov = av_moov(&tracks);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
@@ -681,12 +707,12 @@ mod tests {
 
     #[test]
     fn vp9_track_writes_a_vp09_sample_entry_with_vpcc() {
-        let tracks = [TrackInit::Video {
+        let tracks = [Some(TrackInit::Video {
             codec: VideoCodec::Vp9,
             width: 320,
             height: 240,
             param_sets: Vec::new(),
-        }];
+        })];
         let moov = av_moov(&tracks);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
