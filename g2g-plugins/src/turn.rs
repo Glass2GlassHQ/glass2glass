@@ -191,7 +191,7 @@ impl TurnClient {
         socket: &UdpSocket,
         peer: SocketAddr,
     ) -> Result<(), G2gError> {
-        if !self.permitted.insert(peer.ip()) {
+        if self.permitted.contains(&peer.ip()) {
             return Ok(());
         }
         self.txn_counter = self.txn_counter.wrapping_add(1);
@@ -202,7 +202,10 @@ impl TurnClient {
         msg.push_str_attr(ATTR_REALM, &self.realm);
         msg.push_str_attr(ATTR_NONCE, &self.nonce);
         let bytes = msg.finish_with_integrity(&self.key);
+        // Mark the peer permitted only after the request is actually sent, so a
+        // transient send failure leaves it unset and ICE's retransmit retries.
         socket.send_to(&bytes, self.server).await.map_err(|_| hw())?;
+        self.permitted.insert(peer.ip());
         Ok(())
     }
 
