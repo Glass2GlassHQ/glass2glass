@@ -28,7 +28,7 @@ use std::thread::JoinHandle;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
+use g2g_core::runtime::{block_on, parse_launch, run_graph_with_bus, RunStats};
 use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
 use g2g_plugins::appsink::{register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -554,35 +554,6 @@ pub unsafe extern "C" fn g2g_sample_free(s: *mut Sample) {
     }
     // SAFETY: caller contract: `s` came from `Box::into_raw`, freed once.
     drop(unsafe { Box::from_raw(s) });
-}
-
-/// Minimal park-based executor: drive a future to completion on the calling
-/// thread. The runtime channel's recv future registers this waker, and the
-/// pipeline's run thread wakes it cross-thread, so a blocking pull works without
-/// pulling in a full async runtime.
-fn block_on<F: core::future::Future>(fut: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct ThreadWaker(std::thread::Thread);
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-        fn wake_by_ref(self: &Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    let mut fut = core::pin::pin!(fut);
-    loop {
-        match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(v) => return v,
-            Poll::Pending => std::thread::park(),
-        }
-    }
 }
 
 /// Borrow a C string as `&str`, or `None` if null / not UTF-8.

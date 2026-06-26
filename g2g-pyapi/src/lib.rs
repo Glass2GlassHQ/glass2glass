@@ -28,7 +28,7 @@ mod pymod {
 
     use std::thread::JoinHandle;
 
-    use g2g_core::runtime::{parse_launch, run_graph_with_bus, RunStats};
+    use g2g_core::runtime::{block_on, parse_launch, run_graph_with_bus, RunStats};
     use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain};
     use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
     use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -38,33 +38,6 @@ mod pymod {
     const LINK_CAPACITY: usize = 4;
     const BUS_CAPACITY: usize = 64;
 
-    /// Drive a future to completion on the calling thread (the runtime channel's
-    /// recv future is woken cross-thread by the run thread). The GIL is released
-    /// around the call by the caller, so other Python threads keep running.
-    fn block_on<F: core::future::Future>(fut: F) -> F::Output {
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Wake, Waker};
-
-        struct ThreadWaker(std::thread::Thread);
-        impl Wake for ThreadWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.unpark();
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.0.unpark();
-            }
-        }
-
-        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-        let mut cx = Context::from_waker(&waker);
-        let mut fut = core::pin::pin!(fut);
-        loop {
-            match fut.as_mut().poll(&mut cx) {
-                Poll::Ready(v) => return v,
-                Poll::Pending => std::thread::park(),
-            }
-        }
-    }
 
     /// A running pipeline parsed from a `gst-launch`-style string. Runs on a
     /// background thread; poll the bus and `wait()` for the end of stream.

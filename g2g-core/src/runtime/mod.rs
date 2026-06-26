@@ -21,6 +21,9 @@ pub mod solver;
 mod state;
 
 #[cfg(feature = "std")]
+mod blocking;
+
+#[cfg(feature = "std")]
 mod fanin;
 
 #[cfg(feature = "std")]
@@ -47,6 +50,9 @@ pub use progress::PipelineProgress;
 pub use seek::SeekController;
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;
+
+#[cfg(feature = "std")]
+pub use blocking::block_on;
 
 #[cfg(feature = "std")]
 pub use runner::{
