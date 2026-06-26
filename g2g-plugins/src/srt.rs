@@ -456,16 +456,19 @@ impl SrtHandshake {
         }
     }
 
-    pub fn new_listener(socket_id: u32, latency_ms: u16) -> Self {
+    /// `cookie` is the SYN cookie the listener offers in its induction reply and
+    /// later validates is echoed in the conclusion. It must be an unpredictable
+    /// nonzero value (the I/O layer seeds it from a clock / random source); a
+    /// value derivable from the public socket id gives an off-path attacker the
+    /// cookie for free and defeats the handshake's anti-spoof check.
+    pub fn new_listener(socket_id: u32, latency_ms: u16, cookie: u32) -> Self {
         Self {
             role: Role::Listener,
             socket_id,
             init_seq: 0,
             latency_ms,
             stream_id: None,
-            // A self-consistent cookie the listener later validates is echoed; the
-            // caller treats it as opaque, so this interoperates with a real caller.
-            cookie: socket_id ^ 0x5A5A_5A5A,
+            cookie,
             peer_socket_id: 0,
             peer_init_seq: 0,
             established: false,
@@ -888,7 +891,7 @@ mod tests {
     #[test]
     fn caller_and_listener_complete_the_handshake() {
         let mut caller = SrtHandshake::new_caller(0x0A0A_0A0A, 1000, 120, Some("live".into()), None);
-        let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80);
+        let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80, 0x1357_9BDF);
 
         // Caller induction -> listener induction response -> caller conclusion ->
         // listener conclusion response -> both established.
@@ -915,8 +918,24 @@ mod tests {
     }
 
     #[test]
+    fn listener_offers_the_injected_cookie() {
+        // The cookie must be the value the I/O layer injected, not one derived
+        // from the public socket id, so an off-path attacker can't predict it.
+        let cookie = 0x1357_9BDF;
+        let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80, cookie);
+        let induction =
+            build_control(&Control::Handshake(Handshake::induction(0x0A0A_0A0A, 1)), 0, 0);
+        let step = listener.on_packet(&induction);
+        let reply = step.reply.expect("listener answers induction");
+        let Control::Handshake(hs) = parse_control(&reply).expect("handshake reply") else {
+            panic!("induction reply is a handshake");
+        };
+        assert_eq!(hs.syn_cookie, cookie, "offered cookie is the injected one");
+    }
+
+    #[test]
     fn listener_rejects_a_conclusion_with_a_bad_cookie() {
-        let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80);
+        let mut listener = SrtHandshake::new_listener(0x0B0B_0B0B, 80, 0x1357_9BDF);
         let induction = build_control(
             &Control::Handshake(Handshake::induction(0x0A0A_0A0A, 1)),
             0,

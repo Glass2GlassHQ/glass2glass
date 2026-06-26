@@ -149,8 +149,14 @@ impl SourceLoop for SrtSrc {
             std.set_nonblocking(true).map_err(io_err)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
-            // Listener handshake: answer the caller until established.
-            let mut hs = SrtHandshake::new_listener(LISTENER_SOCKET_ID, self.latency_ms);
+            // Listener handshake: answer the caller until established. Seed the
+            // SYN cookie from the monotonic clock so an off-path attacker can't
+            // predict it from the public listener socket id (anti-spoof).
+            let cookie = {
+                let t = g2g_core::metrics::monotonic_ns();
+                ((t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as u32 | 1
+            };
+            let mut hs = SrtHandshake::new_listener(LISTENER_SOCKET_ID, self.latency_ms, cookie);
             let mut buf = [0u8; RECV_BUF];
             let mut peer: Option<SocketAddr> = None;
             while !hs.is_established() {
