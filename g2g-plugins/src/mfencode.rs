@@ -4,12 +4,11 @@
 //!
 //! H.264 uses the MS H.264 Encoder MFT at a fixed CLSID
 //! (`CLSID_MSH264EncoderMFT`). H.265/HEVC has no fixed CLSID, so M30
-//! enumerates an encoder via `MFTEnumEx` for the HEVC output subtype. Only a
-//! synchronous MFT is driven by the `ProcessInput`/`ProcessOutput` loop below;
-//! hardware HEVC encoders are commonly asynchronous MFTs (event-driven), which
-//! this element rejects loud rather than mis-driving. A sync HEVC encoder is
-//! used when present, otherwise `configure_pipeline` fails with a `Hardware`
-//! error. Async-MFT support is deferred.
+//! enumerates an encoder via `MFTEnumEx` for the HEVC output subtype. Both a
+//! synchronous MFT (the `ProcessInput`/`ProcessOutput` loop below) and an
+//! asynchronous, event-driven MFT (the common shape of a hardware HEVC encoder,
+//! driven by its `IMFMediaEventGenerator`) are supported; the path is chosen
+//! from the MFT's `MF_TRANSFORM_ASYNC` attribute at `configure_pipeline`.
 //!
 //! M19: consumes raw NV12 `DataFrame`s (`MemoryDomain::System`, tightly
 //! packed) and produces Annex-B H.264 access units, also
