@@ -44,7 +44,7 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 
 use g2g_core::runtime::{bounded, Receiver};
-use g2g_core::{Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, RawVideoFormat};
+use g2g_core::{Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat};
 
 use crate::format::format_to_py;
 
@@ -212,16 +212,18 @@ impl PyWorker {
         module: &str,
         class: &str,
         draw_label: bool,
+        params: &[(String, PropValue)],
     ) -> Result<Self, G2gError> {
         init_host();
         let (job_tx, jobs) = mpsc::channel::<Job>();
         let (results, result_rx) = bounded::<Reply>(1);
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), G2gError>>();
         let (m, c) = (module.to_owned(), class.to_owned());
+        let params = params.to_vec();
 
         let handle = thread::Builder::new()
             .name("g2g-pyworker".into())
-            .spawn(move || worker_main(m, c, draw_label, ack_tx, jobs, results))
+            .spawn(move || worker_main(m, c, draw_label, params, ack_tx, jobs, results))
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
         match ack_rx.recv() {
@@ -305,11 +307,12 @@ fn worker_main(
     module: String,
     class: String,
     draw_label: bool,
+    params: Vec<(String, PropValue)>,
     ack: mpsc::Sender<Result<(), G2gError>>,
     jobs: mpsc::Receiver<Job>,
     results: g2g_core::runtime::Sender<Reply>,
 ) {
-    let instance = match Python::attach(|py| instantiate(py, &module, &class, draw_label)) {
+    let instance = match Python::attach(|py| instantiate(py, &module, &class, draw_label, &params)) {
         Ok(obj) => {
             let _ = ack.send(Ok(()));
             obj
@@ -334,20 +337,44 @@ fn worker_main(
     Python::attach(|_py| drop(instance));
 }
 
-/// Import `module`, instantiate `class`, and set the `draw_label` attribute.
+/// Import `module`, instantiate `class`, set `draw_label`, and forward the
+/// element's properties onto the instance. Each property name is mapped from
+/// gst style (`model-name`) to the Python attribute (`model_name`); the value
+/// becomes the matching Python scalar. A property the class declares via the g2g
+/// backend's `GObject` shim routes through its setter; one it does not declare is
+/// set as a plain attribute (harmless if unused).
 fn instantiate(
     py: Python<'_>,
     module: &str,
     class: &str,
     draw_label: bool,
+    params: &[(String, PropValue)],
 ) -> Result<Py<PyAny>, G2gError> {
     (|| -> PyResult<Py<PyAny>> {
         let m = PyModule::import(py, module)?;
         let obj = m.getattr(class)?.call0()?;
         obj.setattr("draw_label", draw_label)?;
+        for (name, value) in params {
+            let attr = name.replace('-', "_");
+            obj.setattr(attr.as_str(), propvalue_to_py(py, value)?)?;
+        }
         Ok(obj.unbind())
     })()
     .map_err(|e| py_fail(py, e))
+}
+
+/// Convert a g2g [`PropValue`] to the Python scalar an element property expects.
+fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    match value {
+        PropValue::Bool(b) => b.into_py_any(py),
+        PropValue::Int(i) => i.into_py_any(py),
+        PropValue::Uint(u) => u.into_py_any(py),
+        PropValue::Double(d) => d.into_py_any(py),
+        // A fraction arrives as a (num, den) tuple, matching gst's fraction props.
+        PropValue::Fraction(n, d) => (*n, *d).into_py_any(py),
+        PropValue::Str(s) => s.into_py_any(py),
+    }
 }
 
 /// Run a job (one frame for a transform, a batch for an aggregator) through the

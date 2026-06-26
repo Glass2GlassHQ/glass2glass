@@ -43,3 +43,20 @@ class CounterSource:
         memoryview(buf)[0] = self.n
         self.n += 1
         return True
+
+
+class PropEcho:
+    """Echoes forwarded element properties back as metadata, proving the host
+    set them on the instance: a gst-style `model-name` reaches `self.model_name`,
+    and an int property keeps its int type (used directly as a detection label,
+    which the native sink requires to be an integer)."""
+
+    def g2g_process(self, buf, width, height, fmt, meta):
+        model = getattr(self, "model_name", "<unset>")
+        device = getattr(self, "device", "<unset>")
+        # Forwarded as a Python int; add_object's label requires an integer, so
+        # passing it straight through fails loudly if it arrived as a string.
+        batch = getattr(self, "batch_size", 0)
+        meta.add_blob("model_name", model.encode("utf-8"))
+        meta.add_blob("device", device.encode("utf-8"))
+        meta.add_object(batch, 0.0, 0.0, 1.0, 1.0, 1.0)

@@ -37,6 +37,12 @@ pub struct PyTransform {
     /// Overlay flag bridged to the Python task (an example backend-declared
     /// property; `ActionTask` reads `self.draw_label`).
     draw_label: bool,
+    /// Element properties forwarded verbatim to the hosted Python instance at
+    /// construction (e.g. `model-name`, `engine-name`, `device`): the gst-python
+    /// GObject-property analog. The Python class declares these (via the g2g
+    /// backend's `GObject` shim); the host `setattr`s them on the instance with
+    /// `-` mapped to `_`. Kept in insertion order for deterministic application.
+    params: Vec<(String, PropValue)>,
     configured: bool,
     /// The negotiated, fully fixed input caps captured at configure time, so
     /// `process` knows the concrete geometry / format to hand Python.
@@ -63,6 +69,7 @@ impl PyTransform {
                 framerate: Rate::Any,
             },
             draw_label: false,
+            params: Vec::new(),
             configured: false,
             fixed: None,
             emitted: 0,
@@ -126,8 +133,12 @@ impl AsyncElement for PyTransform {
             if self.module.is_empty() || self.class.is_empty() {
                 return Err(G2gError::NotConfigured);
             }
-            self.worker =
-                Some(crate::host::PyWorker::spawn(&self.module, &self.class, self.draw_label)?);
+            self.worker = Some(crate::host::PyWorker::spawn(
+                &self.module,
+                &self.class,
+                self.draw_label,
+                &self.params,
+            )?);
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -195,6 +206,18 @@ impl AsyncElement for PyTransform {
                 self.draw_label = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            // Any other *declared* property is forwarded to the hosted Python
+            // instance (a gst-python-ml element's own GObject property, e.g.
+            // model-name / engine-name). Stored in order; re-setting replaces.
+            // An undeclared name is a typo, rejected like any other element.
+            other if PYTRANSFORM_PROPS.iter().any(|s| s.name == other) => {
+                if let Some(slot) = self.params.iter_mut().find(|(k, _)| k == other) {
+                    slot.1 = value;
+                } else {
+                    self.params.push((other.to_string(), value));
+                }
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -204,7 +227,7 @@ impl AsyncElement for PyTransform {
             "module" => Some(PropValue::Str(self.module.clone())),
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
-            _ => None,
+            other => self.params.iter().find(|(k, _)| k == other).map(|(_, v)| v.clone()),
         }
     }
 }
@@ -231,5 +254,25 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = &[
     PropertySpec::new("module", PropKind::Str, "Python module to import (the element shell)"),
     PropertySpec::new("class", PropKind::Str, "class within the module to instantiate"),
     PropertySpec::new("draw-label", PropKind::Bool, "overlay the inferred label on the frame")
+        .with_default("false"),
+    // Common ML tunables declared by the gst-python-ml backend BaseTransform.
+    // These are forwarded to the hosted Python instance (a property absent from
+    // the Python class is simply set as an attribute it ignores). Declaring them
+    // here lets `gst-launch` type and accept `model-name=...` etc.
+    PropertySpec::new("model-name", PropKind::Str, "pre-trained model name or local path"),
+    PropertySpec::new(
+        "engine-name",
+        PropKind::Str,
+        "ML engine: pytorch, onnx, tensorflow, tflite, openvino, ...",
+    ),
+    PropertySpec::new("device", PropKind::Str, "inference device: cpu, cuda, cuda:0, ..."),
+    PropertySpec::new("batch-size", PropKind::Int, "number of items to process in a batch"),
+    PropertySpec::new("frame-stride", PropKind::Int, "how often to process a frame"),
+    PropertySpec::new("input-format", PropKind::Str, "input tensor layout: auto, nhwc, or nchw"),
+    PropertySpec::new("post-process", PropKind::Str, "post-processing format for raw output"),
+    PropertySpec::new("device-queue-id", PropKind::Int, "DeviceQueue id from the pool to use"),
+    PropertySpec::new("compile", PropKind::Bool, "enable torch.compile for the model")
+        .with_default("false"),
+    PropertySpec::new("track", PropKind::Bool, "enable object tracking (detectors)")
         .with_default("false"),
 ];

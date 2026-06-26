@@ -146,8 +146,10 @@ impl SourceLoop for PySource {
                 return Err(G2gError::NotConfigured);
             }
             if self.worker.is_none() {
+                // Property forwarding to the hosted source instance is a
+                // follow-up; transforms (PyTransform) forward theirs today.
                 self.worker =
-                    Some(crate::host::PyWorker::spawn(&self.module, &self.class, false)?);
+                    Some(crate::host::PyWorker::spawn(&self.module, &self.class, false, &[])?);
             }
         }
         self.configured = true;

@@ -138,8 +138,14 @@ impl MultiInputElement for PyAggregator {
             }
             // Spawn the worker once (configure is called per input).
             if self.worker.is_none() {
-                self.worker =
-                    Some(crate::host::PyWorker::spawn(&self.module, &self.class, self.draw_label)?);
+                // Property forwarding to the hosted aggregator instance is a
+                // follow-up; transforms (PyTransform) forward theirs today.
+                self.worker = Some(crate::host::PyWorker::spawn(
+                    &self.module,
+                    &self.class,
+                    self.draw_label,
+                    &[],
+                )?);
             }
         }
         Ok(ConfigureOutcome::Accepted)
