@@ -60,6 +60,11 @@ struct Inner {
     /// simple runner. Each [`StateController::notify_prerolled`] decrements it;
     /// the `1 -> 0` edge completes preroll.
     pending_preroll: AtomicUsize,
+    /// The sink count last given to [`StateController::expect_prerolls`], kept so
+    /// a transition down to `Ready`/`Null` can re-arm `pending_preroll` for a
+    /// replay. Without this, the down-transition clears `prerolled` but leaves
+    /// `pending_preroll` at `0`, so the next `Paused` never re-completes preroll.
+    preroll_target: AtomicUsize,
     /// Flow-gate futures parked while data must not cross. Drained and woken on
     /// every state change so they re-evaluate.
     wakers: Mutex<Vec<Waker>>,
@@ -120,6 +125,7 @@ impl StateController {
                 live: AtomicBool::new(false),
                 prerolled: AtomicBool::new(false),
                 pending_preroll: AtomicUsize::new(1),
+                preroll_target: AtomicUsize::new(1),
                 wakers: Mutex::new(Vec::new()),
                 preroll_wakers: Mutex::new(Vec::new()),
                 bus,
@@ -224,6 +230,12 @@ impl StateController {
                 if let Some((_, anchor)) = &*self.inner.play_anchor.lock() {
                     anchor.clear();
                 }
+                // Re-arm the preroll count alongside clearing the latch so a
+                // later `Paused` can re-complete preroll; the previous cycle
+                // drained `pending_preroll` to 0.
+                self.inner
+                    .pending_preroll
+                    .store(self.inner.preroll_target.load(Ordering::Acquire), Ordering::Release);
                 self.inner.prerolled.store(false, Ordering::Release);
             }
             PipelineState::Paused => {}
@@ -241,6 +253,7 @@ impl StateController {
     /// node); the single-sink simple runner relies on the default of `1`.
     /// `expect_prerolls(0)` (a graph with no sinks) completes preroll at once.
     pub fn expect_prerolls(&self, sinks: usize) {
+        self.inner.preroll_target.store(sinks, Ordering::Release);
         self.inner.pending_preroll.store(sinks, Ordering::Release);
         if sinks == 0 {
             self.complete_preroll();
@@ -568,6 +581,34 @@ mod tests {
         // Surplus notify (or a re-report) does not post a second AsyncDone.
         sc.notify_prerolled();
         assert_eq!(bus.try_recv(), None);
+    }
+
+    #[test]
+    fn replay_re_arms_preroll_after_down_transition() {
+        // A stop/replay (Playing -> Ready -> Paused) must preroll again: the
+        // down-transition clears the latch AND re-arms the sink count, so a
+        // later Paused can re-complete without re-calling expect_prerolls.
+        let (bus, handle) = Bus::new(16);
+        let sc = StateController::with_bus(PipelineState::Paused, handle);
+        sc.expect_prerolls(2);
+        sc.notify_prerolled();
+        sc.notify_prerolled();
+        assert!(sc.is_prerolled(), "initial preroll completes");
+
+        sc.set_state(PipelineState::Playing);
+        sc.set_state(PipelineState::Ready); // stop
+        assert!(!sc.is_prerolled(), "down-transition clears preroll");
+        sc.set_state(PipelineState::Paused); // replay
+
+        sc.notify_prerolled();
+        assert!(!sc.is_prerolled(), "first sink alone does not re-complete");
+        sc.notify_prerolled();
+        assert!(sc.is_prerolled(), "re-armed preroll completes on replay");
+
+        let dones = core::iter::from_fn(|| bus.try_recv())
+            .filter(|m| matches!(m, BusMessage::AsyncDone))
+            .count();
+        assert_eq!(dones, 2, "one AsyncDone per preroll cycle");
     }
 
     #[test]
