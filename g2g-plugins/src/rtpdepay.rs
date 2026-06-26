@@ -26,6 +26,13 @@ pub struct AccessUnit {
     pub rtp_timestamp: u32,
 }
 
+/// Cap the in-flight FU-A and access-unit reassembly buffers. A never-ending
+/// fragment run (start without end) or an access unit whose marker never arrives
+/// would otherwise grow without bound on untrusted RTP; past this we drop the
+/// in-flight data and resync at the next start-of-AU. 8 MiB covers a large
+/// keyframe.
+const MAX_ASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Default)]
 pub struct RtpH264Depayloader {
     /// Annex-B NALs accumulated for the access unit currently being assembled.
@@ -118,6 +125,14 @@ impl RtpH264Depayloader {
                 }
                 if self.fu_active {
                     self.fu.extend_from_slice(&payload[2..]);
+                    if self.fu.len() > MAX_ASSEMBLY_BYTES {
+                        // A fragment run that never ends; drop the in-flight data
+                        // and resync at the next start-of-AU.
+                        self.fu.clear();
+                        self.fu_active = false;
+                        self.au.clear();
+                        return None;
+                    }
                     if end {
                         let nal = core::mem::take(&mut self.fu);
                         self.push_nal(&nal);
@@ -147,6 +162,11 @@ impl RtpH264Depayloader {
         }
         self.au.extend_from_slice(&[0, 0, 0, 1]);
         self.au.extend_from_slice(nal);
+        if self.au.len() > MAX_ASSEMBLY_BYTES {
+            // An access unit whose marker never arrives; drop it rather than
+            // buffer without bound.
+            self.au.clear();
+        }
     }
 }
 
@@ -238,5 +258,41 @@ mod tests {
             wrap(&[&[0x65, 0xBB]]),
             "only the post-gap NAL survives; the dropped one is gone"
         );
+    }
+
+    fn fu_a_packet(seq: u16, ts: u32, marker: bool, start: bool, end: bool, frag: &[u8]) -> Vec<u8> {
+        let mut p = alloc::vec![0x80u8, if marker { 0x80 | 96 } else { 96 }];
+        p.extend_from_slice(&seq.to_be_bytes());
+        p.extend_from_slice(&ts.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0]); // ssrc
+        p.push(0x60 | FU_A_TYPE); // FU indicator (F=0, NRI=3, type 28)
+        let mut fu_header = 0x05u8; // type 5 (IDR slice)
+        if start {
+            fu_header |= 0x80;
+        }
+        if end {
+            fu_header |= 0x40;
+        }
+        p.push(fu_header);
+        p.extend_from_slice(frag);
+        p
+    }
+
+    #[test]
+    fn unterminated_fu_a_run_is_bounded_and_resyncs() {
+        let mut depay = RtpH264Depayloader::new();
+        let frag = alloc::vec![0xABu8; 1024 * 1024]; // 1 MiB per packet
+        // Start a fragment run, then never send the end bit: the buffer must cap
+        // and emit nothing instead of growing without bound.
+        assert!(depay.depacketize(&fu_a_packet(0, 1, false, true, false, &frag)).is_none());
+        for seq in 1..16u16 {
+            assert!(depay.depacketize(&fu_a_packet(seq, 1, false, false, false, &frag)).is_none());
+        }
+        // A fresh complete FU-A NAL still reassembles after the run is dropped.
+        assert!(depay.depacketize(&fu_a_packet(100, 2, false, true, false, &[1, 2, 3])).is_none());
+        let unit = depay
+            .depacketize(&fu_a_packet(101, 2, true, false, true, &[4, 5, 6]))
+            .expect("resyncs and completes a new AU");
+        assert_eq!(unit.data, wrap(&[&[0x65, 1, 2, 3, 4, 5, 6]]));
     }
 }
