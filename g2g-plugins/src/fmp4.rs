@@ -267,6 +267,11 @@ pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
 /// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
 /// `mdat`, converting AVCC framing back to Annex-B. `codec` selects the IDR NAL
 /// type used to flag keyframes (the seek snap points).
+///
+/// Assumes each `trun`'s samples are stored contiguously from the start of the
+/// following `mdat` payload; the `trun` `data_offset` is not honored. This holds
+/// for ffmpeg / CMAF output. A non-conforming fragment that positions its sample
+/// data elsewhere in the `mdat` is mis-split, not rejected.
 pub(crate) fn parse_fragments(
     data: &[u8],
     timescale: u32,
