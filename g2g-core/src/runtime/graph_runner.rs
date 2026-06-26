@@ -1279,8 +1279,14 @@ async fn sink_arm<'a>(
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
-                if let Some(sc) = &state {
-                    sc.notify_prerolled();
+                // Count this sink toward preroll only if it never took a real
+                // preroll buffer (an empty stream). Without the guard a sink
+                // that already prerolled double-decrements the shared counter
+                // and completes the pipeline preroll prematurely.
+                if !prerolled_self {
+                    if let Some(sc) = &state {
+                        sc.notify_prerolled();
+                    }
                 }
                 return Ok(consumed);
             }
