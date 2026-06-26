@@ -455,6 +455,13 @@ impl MultiInputElement for Compositor {
                         ..
                     } = caps
                     {
+                        // A geometry change invalidates this input's cached frame:
+                        // compose() would otherwise read the old (smaller) bytes
+                        // at the new dims and panic out of bounds. The fresh frame
+                        // at the new size repopulates the cache.
+                        if self.inputs[input] != Some((w, h)) {
+                            self.latest[input] = None;
+                        }
                         self.inputs[input] = Some((w, h));
                     }
                 }
