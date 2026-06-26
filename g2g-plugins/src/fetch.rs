@@ -55,8 +55,11 @@ pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
         out.push_str(stripped);
         out
     } else {
-        // relative to the playlist's directory (everything up to the last '/')
-        let dir_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
+        // relative to the playlist's directory (everything up to the last '/').
+        // Scan only the path, not the query/fragment, so a '/' inside a signed
+        // CDN query string is not mistaken for a path separator.
+        let path_end = base.find(['?', '#']).unwrap_or(base.len());
+        let dir_end = base[..path_end].rfind('/').map(|i| i + 1).unwrap_or(path_end);
         let mut out = String::from(&base[..dir_end]);
         out.push_str(rel);
         out
@@ -73,5 +76,13 @@ mod tests {
         assert_eq!(resolve_url(base, "seg0.ts"), "http://h/v/seg0.ts");
         assert_eq!(resolve_url(base, "/x/seg0.ts"), "http://h/x/seg0.ts");
         assert_eq!(resolve_url(base, "http://o/s.ts"), "http://o/s.ts");
+    }
+
+    #[test]
+    fn signed_query_slash_is_not_a_path_separator() {
+        // A '/' inside the base's signed query must not become the directory
+        // boundary when resolving a relative segment name.
+        let base = "http://h/v/media.m3u8?token=ab/cd";
+        assert_eq!(resolve_url(base, "seg0.ts"), "http://h/v/seg0.ts");
     }
 }
