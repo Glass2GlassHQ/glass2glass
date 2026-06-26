@@ -378,9 +378,7 @@ impl TsMuxer {
             0x00, 0x01, // program_number 1
             0xE0 | (MUX_PMT_PID >> 8) as u8 & 0x1F, MUX_PMT_PID as u8,
         ];
-        let cc = self.pat_cc;
-        self.pat_cc = (self.pat_cc + 1) & 0x0F;
-        psi_packet(PID_PAT, 0x00, &body, cc, out);
+        self.pat_cc = psi_packet(PID_PAT, 0x00, &body, self.pat_cc, out);
     }
 
     fn pmt_packet(&mut self, out: &mut Vec<u8>) {
@@ -403,9 +401,7 @@ impl TsMuxer {
                 0x00, // ES_info_length = 0
             ]);
         }
-        let cc = self.pmt_cc;
-        self.pmt_cc = (self.pmt_cc + 1) & 0x0F;
-        psi_packet(MUX_PMT_PID, 0x02, &body, cc, out);
+        self.pmt_cc = psi_packet(MUX_PMT_PID, 0x02, &body, self.pmt_cc, out);
     }
 }
 
@@ -467,8 +463,12 @@ fn ts_packet(pid: u16, pusi: bool, cc: u8, payload: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-/// Write a single-packet PSI section (pointer field + table + MPEG-2 CRC-32).
-fn psi_packet(pid: u16, table_id: u8, body: &[u8], cc: u8, out: &mut Vec<u8>) {
+/// Write a PSI section (pointer field + table + MPEG-2 CRC-32), spanning more
+/// than one TS packet when the section exceeds a single 184-byte payload (e.g. a
+/// PMT with more than ~33 streams). The first packet carries PUSI + the pointer
+/// field; continuations carry PUSI=0 with no new pointer. Returns the continuity
+/// counter for the next packet on this PID.
+fn psi_packet(pid: u16, table_id: u8, body: &[u8], mut cc: u8, out: &mut Vec<u8>) -> u8 {
     let section_length = body.len() + 4; // body + 4-byte CRC
     let mut section = Vec::with_capacity(3 + section_length);
     section.push(table_id);
@@ -477,9 +477,23 @@ fn psi_packet(pid: u16, table_id: u8, body: &[u8], cc: u8, out: &mut Vec<u8>) {
     section.extend_from_slice(body);
     let crc = mpeg_crc32(&section); // over table_id .. end of body
     section.extend_from_slice(&crc.to_be_bytes());
-    let mut payload = alloc::vec![0u8]; // pointer_field = 0
+    let mut payload = alloc::vec![0u8]; // pointer_field = 0 (first packet only)
     payload.extend_from_slice(&section);
-    ts_packet(pid, true, cc, &payload, out);
+
+    const ROOM: usize = TS_PACKET_LEN - 4;
+    let mut rest = &payload[..];
+    let mut pusi = true;
+    loop {
+        let n = rest.len().min(ROOM);
+        ts_packet(pid, pusi, cc, &rest[..n], out);
+        cc = (cc + 1) & 0x0F;
+        rest = &rest[n..];
+        pusi = false;
+        if rest.is_empty() {
+            break;
+        }
+    }
+    cc
 }
 
 /// MPEG-2 systems CRC-32 (poly 0x04C11DB7, init all-ones, no final xor, MSB
@@ -680,5 +694,21 @@ mod tests {
     fn mpeg_crc32_matches_known_vector() {
         // The documented CRC-32/MPEG-2 check value for ASCII "123456789".
         assert_eq!(mpeg_crc32(b"123456789"), 0x0376_E6E7);
+    }
+
+    #[test]
+    fn large_psi_section_spans_multiple_packets() {
+        // A section too big for one TS payload (e.g. a PMT with many streams)
+        // must span whole packets, PUSI only on the first, rather than
+        // underflowing the adaptation-field length.
+        let body = alloc::vec![0xABu8; 400];
+        let mut out = Vec::new();
+        let next_cc = super::psi_packet(MUX_PMT_PID, 0x02, &body, 5, &mut out);
+        assert_eq!(out.len() % TS_PACKET_LEN, 0, "emits whole packets");
+        let packets = out.len() / TS_PACKET_LEN;
+        assert!(packets >= 3, "400-byte body spans 3+ packets, got {packets}");
+        assert_eq!(out[1] & 0x40, 0x40, "first packet carries PUSI");
+        assert_eq!(out[TS_PACKET_LEN + 1] & 0x40, 0x00, "continuation clears PUSI");
+        assert_eq!(next_cc, (5 + packets as u8) & 0x0F, "cc advances per packet");
     }
 }
