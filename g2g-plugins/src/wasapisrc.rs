@@ -351,8 +351,11 @@ unsafe fn run_capture(
 
     let _ = ready_tx.try_send(Ok(()));
 
-    // Bound the capture so a silent or stalled endpoint can't run forever.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Watchdog against a silent or stalled endpoint: break only after this long
+    // with no audio. Reset on every packet, so a healthy long capture is never
+    // truncated (the previous absolute cap stopped all captures at ~5s).
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+    let mut deadline = Instant::now() + IDLE_TIMEOUT;
     let mut emitted = 0u64;
     while emitted < target {
         if Instant::now() >= deadline {
@@ -392,6 +395,8 @@ unsafe fn run_capture(
             break; // consumer dropped
         }
         emitted += 1;
+        // Progress: the endpoint is live, so push the watchdog forward.
+        deadline = Instant::now() + IDLE_TIMEOUT;
     }
 
     // SAFETY: stop on the owning thread.
