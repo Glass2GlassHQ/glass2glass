@@ -320,11 +320,16 @@ struct Parser<'a> {
     pos: usize,
 }
 
+/// Header nesting cap. A real header reaches depth ~3 (root object, tensor
+/// object, shape array); this only fences off a crafted header from
+/// overflowing the stack via unbounded recursion.
+const MAX_JSON_DEPTH: u32 = 64;
+
 impl Json {
     fn parse(s: &str) -> Result<Json, &'static str> {
         let mut p = Parser { bytes: s.as_bytes(), pos: 0 };
         p.ws();
-        let v = p.value()?;
+        let v = p.value(0)?;
         p.ws();
         if p.pos != p.bytes.len() {
             return Err("trailing data after the JSON value");
@@ -348,17 +353,20 @@ impl Parser<'_> {
         self.bytes.get(self.pos).copied()
     }
 
-    fn value(&mut self) -> Result<Json, &'static str> {
+    fn value(&mut self, depth: u32) -> Result<Json, &'static str> {
+        if depth > MAX_JSON_DEPTH {
+            return Err("json nesting too deep");
+        }
         match self.peek() {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
+            Some(b'{') => self.object(depth),
+            Some(b'[') => self.array(depth),
             Some(b'"') => Ok(Json::String(self.string()?)),
             Some(b) if b == b'-' || b.is_ascii_digit() => self.number(),
             _ => Err("unexpected token"),
         }
     }
 
-    fn object(&mut self) -> Result<Json, &'static str> {
+    fn object(&mut self, depth: u32) -> Result<Json, &'static str> {
         self.pos += 1; // '{'
         let mut fields = Vec::new();
         self.ws();
@@ -378,7 +386,7 @@ impl Parser<'_> {
             }
             self.pos += 1;
             self.ws();
-            let val = self.value()?;
+            let val = self.value(depth + 1)?;
             fields.push((key, val));
             self.ws();
             match self.peek() {
@@ -394,7 +402,7 @@ impl Parser<'_> {
         }
     }
 
-    fn array(&mut self) -> Result<Json, &'static str> {
+    fn array(&mut self, depth: u32) -> Result<Json, &'static str> {
         self.pos += 1; // '['
         let mut items = Vec::new();
         self.ws();
@@ -404,7 +412,7 @@ impl Parser<'_> {
         }
         loop {
             self.ws();
-            items.push(self.value()?);
+            items.push(self.value(depth + 1)?);
             self.ws();
             match self.peek() {
                 Some(b',') => {
@@ -547,6 +555,15 @@ mod tests {
         blob.extend_from_slice(header.as_bytes());
         blob.extend_from_slice(&[0u8; 8]); // only 8 data bytes, offsets want 16
         assert_eq!(SafeTensors::parse(&blob).unwrap_err(), SafeTensorsError::BadOffsets);
+    }
+
+    #[test]
+    fn deeply_nested_header_is_rejected_not_overflowed() {
+        // A crafted header nested past the depth cap must fail loud rather than
+        // recurse into a stack overflow.
+        let depth = MAX_JSON_DEPTH as usize + 50;
+        let bomb = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        assert_eq!(Json::parse(&bomb).err(), Some("json nesting too deep"));
     }
 
     #[test]
