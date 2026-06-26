@@ -74,6 +74,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
+use crate::worker_ready::Handshake;
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -605,36 +606,6 @@ fn present_frame(
 fn win_err(e: windows::core::Error) -> G2gError {
     // D3D / DXGI / Win32 errors are COM HRESULTs, same carrier as the MF path.
     G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
-}
-
-// =================================================================
-// Worker-readiness handshake (same primitive as WaylandSink)
-// =================================================================
-
-struct Handshake {
-    flag: std::sync::Mutex<bool>,
-    cv: std::sync::Condvar,
-}
-
-impl Handshake {
-    fn new() -> Self {
-        Self {
-            flag: std::sync::Mutex::new(false),
-            cv: std::sync::Condvar::new(),
-        }
-    }
-    fn notify(&self) {
-        *self.flag.lock().unwrap() = true;
-        self.cv.notify_all();
-    }
-    fn wait(&self, timeout: Duration) -> bool {
-        let guard = self.flag.lock().unwrap();
-        let (guard, _) = self
-            .cv
-            .wait_timeout_while(guard, timeout, |notified| !*notified)
-            .unwrap();
-        *guard
-    }
 }
 
 #[cfg(test)]

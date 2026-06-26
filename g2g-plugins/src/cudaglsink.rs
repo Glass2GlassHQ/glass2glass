@@ -91,6 +91,7 @@ use smithay_client_toolkit::{
 };
 use wayland_egl::WlEglSurface;
 
+use crate::worker_ready::Handshake;
 use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -642,36 +643,6 @@ delegate_output!(WorkerState);
 delegate_xdg_shell!(WorkerState);
 delegate_xdg_window!(WorkerState);
 delegate_registry!(WorkerState);
-
-// =================================================================
-// Worker-readiness handshake (identical primitive to WaylandSink)
-// =================================================================
-
-struct Handshake {
-    flag: std::sync::Mutex<bool>,
-    cv: std::sync::Condvar,
-}
-
-impl Handshake {
-    fn new() -> Self {
-        Self {
-            flag: std::sync::Mutex::new(false),
-            cv: std::sync::Condvar::new(),
-        }
-    }
-    fn notify(&self) {
-        *self.flag.lock().unwrap() = true;
-        self.cv.notify_all();
-    }
-    fn wait(&self, timeout: Duration) -> bool {
-        let guard = self.flag.lock().unwrap();
-        let (guard, _) = self
-            .cv
-            .wait_timeout_while(guard, timeout, |notified| !*notified)
-            .unwrap();
-        *guard
-    }
-}
 
 #[cfg(test)]
 mod tests {

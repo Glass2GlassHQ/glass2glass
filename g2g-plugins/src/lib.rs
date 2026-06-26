@@ -359,6 +359,14 @@ mod fmp4;
 #[cfg(feature = "std")]
 pub mod fmp4demux;
 
+// Worker-readiness latch shared by the platform display sinks below.
+#[cfg(any(
+    all(target_os = "windows", feature = "d3d11-sink"),
+    all(target_os = "linux", feature = "wayland-sink"),
+    all(target_os = "linux", feature = "cuda-gl"),
+))]
+mod worker_ready;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]

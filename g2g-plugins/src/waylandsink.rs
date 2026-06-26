@@ -96,6 +96,7 @@ use smithay_client_toolkit::{
     },
 };
 
+use crate::worker_ready::Handshake;
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -463,7 +464,7 @@ impl AsyncElement for WaylandSink {
         // Synchronous handshake: the worker signals readiness once the
         // compositor's first `configure` lands. Until then `process()`
         // would be racing against an unmapped surface.
-        let ready = Arc::new(parking_handshake::Handshake::new());
+        let ready = Arc::new(Handshake::new());
         let ready_for_worker = Arc::clone(&ready);
 
         let join = thread::Builder::new()
@@ -627,7 +628,7 @@ struct WorkerState {
     height: u32,
     configured: bool,
     exit: bool,
-    ready: Option<Arc<parking_handshake::Handshake>>,
+    ready: Option<Arc<Handshake>>,
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
@@ -654,7 +655,7 @@ fn worker_main(
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
-    ready: Arc<parking_handshake::Handshake>,
+    ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -960,51 +961,6 @@ fn nv12_to_xrgb8888(src: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gE
     Ok(out)
 }
 
-// =================================================================
-// Sink-side handshake primitive (worker readiness)
-// =================================================================
-//
-// `parking_handshake::Handshake` is a tiny one-shot: the worker calls
-// `notify()` once after its first compositor `configure`, and the sink
-// blocks on `wait(timeout)` until that lands (or the timeout fires).
-// Implemented inline rather than pulling in `parking_lot` or `tokio::sync`
-// since we already have `std::sync` available under the `wayland-sink`
-// feature.
-
-mod parking_handshake {
-    use std::sync::{Condvar, Mutex};
-    use std::time::Duration;
-
-    pub(super) struct Handshake {
-        flag: Mutex<bool>,
-        cv: Condvar,
-    }
-
-    impl Handshake {
-        pub(super) fn new() -> Self {
-            Self {
-                flag: Mutex::new(false),
-                cv: Condvar::new(),
-            }
-        }
-
-        pub(super) fn notify(&self) {
-            *self.flag.lock().unwrap() = true;
-            self.cv.notify_all();
-        }
-
-        /// Returns true if notified within `timeout`, false on timeout.
-        pub(super) fn wait(&self, timeout: Duration) -> bool {
-            let guard = self.flag.lock().unwrap();
-            let (guard, _wait_result) = self
-                .cv
-                .wait_timeout_while(guard, timeout, |notified| !*notified)
-                .unwrap();
-            *guard
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,23 +1247,5 @@ mod tests {
             Err(G2gError::CapsMismatch) => {}
             other => panic!("expected CapsMismatch on odd dims, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn handshake_round_trips() {
-        let hs = Arc::new(parking_handshake::Handshake::new());
-        let hs2 = Arc::clone(&hs);
-        let join = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            hs2.notify();
-        });
-        assert!(hs.wait(Duration::from_secs(2)), "notify should land");
-        join.join().unwrap();
-    }
-
-    #[test]
-    fn handshake_times_out_without_notify() {
-        let hs = parking_handshake::Handshake::new();
-        assert!(!hs.wait(Duration::from_millis(20)));
     }
 }
