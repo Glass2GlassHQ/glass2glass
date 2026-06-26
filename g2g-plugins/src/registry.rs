@@ -114,6 +114,8 @@ use crate::alsasink::AlsaSink;
 use crate::pulsesink::PulseSink;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 use crate::v4l2src::V4l2Src;
+#[cfg(all(target_os = "linux", feature = "libcamera"))]
+use crate::libcamerasrc::LibCameraSrc;
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]
 use crate::kmssink::KmsSink;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
@@ -639,6 +641,19 @@ fn register_feature_gated(reg: &mut Registry) {
             framerate: Rate::Any,
         },
         || Box::new(V4l2Src::new("/dev/video0")),
+    ));
+    // libcamera capture: NV12 (else YUYV). Geometry/format are negotiated with
+    // the camera at startup, so the declared caps are fully open.
+    #[cfg(all(target_os = "linux", feature = "libcamera"))]
+    reg.register_source(SourceFactory::new(
+        "libcamerasrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(LibCameraSrc::new()),
     ));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {

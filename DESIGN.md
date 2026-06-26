@@ -709,7 +709,7 @@ and a thin sink does the UDP I/O.
   (`with_retransmit(enabled, capacity)`); see the receive-side feedback loop in
   §4.12b.
 
-### 4.12a Live Capture (V4L2)
+### 4.12a Live Capture (V4L2, libcamera)
 
 `V4l2Src` (`v4l2src.rs`, `v4l2` feature, Linux-only) is the first real capture
 source: it streams packed **YUYV** (4:2:2, the near-universal UVC output) off a
@@ -737,6 +737,26 @@ Two design points carry the element:
 
 MJPEG-mode UVC and format-flexible negotiation (the source fixes YUYV today)
 are follow-ups (DESIGN_TODO).
+
+`LibCameraSrc` (`libcamerasrc.rs`, `libcamera` feature, Linux-only) is the
+second capture source and the modern Linux camera path: it captures through the
+**libcamera** stack (linking the system libcamera via the `libcamera` crate),
+which drives UVC webcams through its `uvcvideo` pipeline handler (the same
+devices as `V4l2Src`) plus CSI/ISP cameras that need an ISP pipeline V4L2 alone
+cannot. It follows the same two design points as `V4l2Src` (blocking work off
+the async path; up-front negotiation, re-configure for capture), but differs in
+two ways: it asks libcamera for **NV12** and falls back to **YUYV** only when
+the camera does not offer NV12 (mapping whatever survives `validate()` to
+`Caps::RawVideo`), so a camera that produces planar frames needs no
+`VideoConvert`; and because libcamera is callback-driven and thread-affine, the
+capture thread owns the whole libcamera object graph (manager, camera, a
+request-buffer ring, and the completion callback) rather than a single device
+handle. Each completed request's planes are packed contiguously (Y then
+interleaved UV for NV12) before being forwarded over the bounded channel.
+libcamera frame-duration enforcement (`FrameDurationLimits`) is a follow-up; the
+advertised frame rate is advisory (PTS / latency) today. The `libcamera` crate
+requires libcamera `>= 0.4`, newer than some distro packages, so the feature is
+host-validated (like the NVIDIA stack) rather than built in CI.
 
 Two more capture sources follow the same blocking-work-off-the-async-path shape:
 `PipeWireSrc` (`pipewire` feature, Linux) captures interleaved PCM off the

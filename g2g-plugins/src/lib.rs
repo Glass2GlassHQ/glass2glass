@@ -416,6 +416,11 @@ pub mod kmssink;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
 
+// libcamera capture source (NV12 / YUYV) via the system libcamera stack. The
+// modern Linux camera path: covers UVC webcams plus CSI/ISP cameras. Linux-only.
+#[cfg(all(target_os = "linux", feature = "libcamera"))]
+pub mod libcamerasrc;
+
 // Wayland display sink (NV12 -> XRGB8888 via wl_shm). Linux-only;
 // desktop-dev convenience sink — see module docs.
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]

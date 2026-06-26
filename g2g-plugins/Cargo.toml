@@ -166,6 +166,13 @@ ffmpeg = ["std", "dep:ffmpeg-next"]
 # dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture
 # thread feeding the async run loop over a channel.
 v4l2 = ["std", "dep:v4l"]
+# libcamera capture source (LibCameraSrc): captures NV12 (else YUYV) frames from
+# a camera via the libcamera stack, the modern Linux camera path (handles UVC
+# webcams through libcamera's uvcvideo pipeline handler, plus CSI/ISP cameras
+# V4L2 alone can't). Links system libcamera via the `libcamera` crate (needs
+# libcamera-devel + libclang at build); Linux-only, implies std. Blocking
+# libcamera I/O runs on a dedicated capture thread feeding the async run loop.
+libcamera = ["std", "dep:libcamera"]
 # Embassy RTOS clock backend (M43): EmbassyClock over embassy-time, the no_std
 # analog of WallClock. The tick rate is selected here; a HAL provides the time
 # driver at link. The embassy-futures block_on executor primitive (dev-dep)
@@ -528,6 +535,10 @@ gbm = { version = "0.15", optional = true, default-features = false }
 # Pure-Rust V4L2 bindings (v4l2-sys-mit, no libv4l). Drives the `v4l2` capture
 # source. Linux-only target-gate; the V4L2 ioctl ABI is Linux-specific.
 v4l = { version = "0.14", optional = true }
+# Safe bindings to the system libcamera (links libcamera via pkg-config, bindgen
+# needs libclang). Drives the `libcamera` capture source. Linux-only; libcamera
+# is a Linux camera stack. Known to build against libcamera >= 0.4.
+libcamera = { version = "0.7", optional = true }
 # ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
 # Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
 # it (the underlying pkg-config probe doesn't fit those targets).
