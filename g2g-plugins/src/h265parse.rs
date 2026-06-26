@@ -216,8 +216,10 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsInfo> {
         2 => (2, 1),       // 4:2:2
         _ => (1, 1),       // 4:4:4 / monochrome
     };
-    let width = pic_width.saturating_sub((left + right).saturating_mul(sub_width_c));
-    let height = pic_height.saturating_sub((top + bottom).saturating_mul(sub_height_c));
+    // Conformance offsets come from untrusted exp-Golomb; saturate the sums so
+    // adversarial values cannot overflow before the subtract.
+    let width = pic_width.saturating_sub(left.saturating_add(right).saturating_mul(sub_width_c));
+    let height = pic_height.saturating_sub(top.saturating_add(bottom).saturating_mul(sub_height_c));
     Some(SpsInfo { width, height })
 }
 
@@ -374,6 +376,15 @@ mod tests {
         let stream = build_annexb_sps(1920, 1088, 1, Some((0, 0, 0, 4)));
         let info = extract_sps_info(&stream).expect("SPS with conf window must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
+    }
+
+    #[test]
+    fn saturates_adversarial_conformance_offsets() {
+        // Huge conformance offsets must saturate, not overflow-panic on the sum.
+        let huge = 3_000_000_000u32;
+        let stream = build_annexb_sps(1920, 1080, 1, Some((huge, huge, huge, huge)));
+        let info = extract_sps_info(&stream).expect("parses without overflow");
+        assert_eq!((info.width, info.height), (0, 0), "offsets clamp dims to zero");
     }
 
     #[test]
