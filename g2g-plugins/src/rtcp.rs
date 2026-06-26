@@ -344,8 +344,10 @@ impl ReceptionStats {
         let transit = arrival_units - rtp_ts as i64;
         if self.have_transit {
             let d = (transit - self.transit).unsigned_abs() as u32;
-            // jitter_x16 += d - jitter_x16/16, i.e. a 1/16-gain low-pass.
-            self.jitter_x16 = self.jitter_x16 + d - ((self.jitter_x16 + 8) >> 4);
+            // jitter_x16 += d - jitter_x16/16, a 1/16-gain low-pass. Saturating so
+            // a crafted transit delta inflates the estimate rather than wrapping.
+            let decay = self.jitter_x16.saturating_add(8) >> 4;
+            self.jitter_x16 = self.jitter_x16.saturating_add(d).saturating_sub(decay);
         }
         self.transit = transit;
         self.have_transit = true;
@@ -433,6 +435,20 @@ mod tests {
                 reports: alloc::vec![block],
             }]
         );
+    }
+
+    #[test]
+    fn jitter_saturates_on_crafted_timestamps() {
+        // Adversarial rtp timestamps drive a maximal transit delta each packet;
+        // the jitter accumulator must saturate, not overflow-panic or wrap.
+        let ssrc = 0x1111_2222;
+        let mut s = ReceptionStats::new(ssrc, 90_000);
+        s.on_rtp(ssrc, 0, 0, 0);
+        s.on_rtp(ssrc, 1, u32::MAX, 1_000_000_000);
+        s.on_rtp(ssrc, 2, 0, 2_000_000_000);
+        s.on_rtp(ssrc, 3, u32::MAX, 3_000_000_000);
+        let block = s.report_block(4_000_000_000);
+        assert!(block.jitter > 100_000_000, "jitter saturated high, not wrapped: {}", block.jitter);
     }
 
     #[test]
