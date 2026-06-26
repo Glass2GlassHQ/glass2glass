@@ -220,8 +220,15 @@ impl AsyncElement for DetectionPostprocess {
                     }
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
-                other => {
-                    out.push(other).await?;
+                // Drop EOS: the runner's transform arm forwards it; re-pushing it
+                // here double-pushes onto a full link (the project EOS contract).
+                // Forward the remaining control packets unchanged.
+                PipelinePacket::Eos => {}
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
                 }
             }
             Ok(())
