@@ -147,7 +147,9 @@ async fn hevc_round_trips_through_the_fmp4_container() {
             codec: VideoCodec::H265,
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
-            framerate: Rate::Any,
+            // advisory range, not `Any`: per-frame PTS carries the real timing
+            // and `Any` would abort fixate when nothing downstream pins the rate.
+            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
         },
         "probe recovers HEVC codec and geometry"
     );

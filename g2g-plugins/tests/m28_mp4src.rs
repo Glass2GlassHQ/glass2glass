@@ -153,7 +153,9 @@ async fn round_trip_recovers_access_units_and_timing() {
             codec: VideoCodec::H264,
             width: Dim::Fixed(64),
             height: Dim::Fixed(48),
-            framerate: Rate::Any,
+            // advisory range, not `Any`: per-frame PTS carries the real timing
+            // and `Any` would abort fixate when nothing downstream pins the rate.
+            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
         }
     );
 
