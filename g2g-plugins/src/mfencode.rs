@@ -613,8 +613,10 @@ impl AsyncElement for MfEncode {
                             self.bitrate,
                             self.prefer_hardware,
                         )?);
-                        self.framerate = framerate;
                     }
+                    // Track the rate even on a framerate-only change (no rebuild),
+                    // so the reported output caps are not stale.
+                    self.framerate = framerate;
                     self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
