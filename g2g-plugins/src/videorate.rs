@@ -397,10 +397,24 @@ impl AsyncElement for VideoRate {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "framerate" => Some(PropValue::Fraction((self.rate_q16 >> 16) as i32, 1)),
+            // Report the stored Q16 rate as a reduced fraction, not the floored
+            // integer, so a fractional target (e.g. 30000/1001) round-trips.
+            "framerate" => {
+                let g = gcd(self.rate_q16, 1 << 16).max(1);
+                Some(PropValue::Fraction((self.rate_q16 / g) as i32, ((1u32 << 16) / g) as i32))
+            }
             _ => None,
         }
     }
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
 }
 
 /// `VideoRate`'s settable properties (M104).
@@ -418,6 +432,18 @@ mod tests {
     const STEP_30: u64 = 1_000_000_000 / 30;
     const DT_10: u64 = 1_000_000_000 / 10;
     const DT_60: u64 = 1_000_000_000 / 60;
+
+    #[test]
+    fn framerate_property_round_trips_a_fraction() {
+        let mut vr = VideoRate::new(30.0);
+        vr.set_property("framerate", PropValue::Fraction(30000, 1001)).unwrap();
+        let Some(PropValue::Fraction(num, den)) = vr.get_property("framerate") else {
+            panic!("framerate reads back as a fraction");
+        };
+        // Reads back at ~29.97 within Q16 precision, not floored to 29/1.
+        let fps = num as f64 / den as f64;
+        assert!((fps - 30000.0 / 1001.0).abs() < 0.01, "got {num}/{den} = {fps}");
+    }
 
     #[test]
     fn downsample_keeps_one_in_three() {
