@@ -190,9 +190,9 @@ impl RtspResponder {
                 let transport = format!(
                     "RTP/AVP;unicast;client_port={}-{};server_port={}-{};ssrc={:08X}",
                     self.client_rtp_port.unwrap_or(0),
-                    self.client_rtp_port.map(|p| p + 1).unwrap_or(0),
+                    self.client_rtp_port.map(|p| p.saturating_add(1)).unwrap_or(0),
                     self.server_rtp_port,
-                    self.server_rtp_port + 1,
+                    self.server_rtp_port.saturating_add(1),
                     self.ssrc,
                 );
                 let session = self.session_id.clone();
@@ -320,6 +320,19 @@ mod tests {
         // into an out-of-bounds slice; it reads as a not-yet-complete body.
         let req = "ANNOUNCE rtsp://h/s RTSP/1.0\r\nCSeq: 1\r\nContent-Length: 18446744073709551615\r\n\r\nx";
         assert!(RtspRequest::parse(req.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn setup_with_max_client_port_does_not_overflow() {
+        let mut s = responder();
+        let req = request(
+            "SETUP rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=65535-65535\r\n\r\n",
+        );
+        let (resp, _ev) = s.handle_request(&req);
+        let text = core::str::from_utf8(&resp).unwrap();
+        assert!(text.starts_with("RTSP/1.0 200 OK\r\n"));
+        // The client RTCP port saturates instead of wrapping past u16.
+        assert!(text.contains("client_port=65535-65535"), "{text}");
     }
 
     #[test]
