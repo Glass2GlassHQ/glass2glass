@@ -227,9 +227,20 @@ impl Av1Enc {
         if feedback.force_keyframe {
             self.force_keyframe = true;
         }
-        // A downstream bitrate estimate (WebRTC BWE) retargets the encoder.
+        // A downstream bitrate estimate (WebRTC BWE) retargets the encoder. The
+        // rebuild flushes the old context's lookahead; emit those frames too.
         if let Some(bps) = feedback.bitrate_bps {
-            self.set_target_bitrate(bps);
+            let drained = self.set_target_bitrate(bps);
+            if !drained.is_empty() {
+                crate::encoder_base::emit_packets(
+                    &mut self.caps_sent,
+                    &mut self.emitted,
+                    drained,
+                    &caps,
+                    out,
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -241,7 +252,9 @@ impl Av1Enc {
     /// jittery estimate near the frame rate does not thrash the encoder (each
     /// rebuild costs a keyframe). A bitrate drop is exactly when a fresh keyframe
     /// is wanted anyway. Rebuild failure leaves the current context running.
-    fn set_target_bitrate(&mut self, bps: u32) {
+    /// Returns the packets flushed from the old context so the caller can emit
+    /// them; empty when no rebuild happened.
+    fn set_target_bitrate(&mut self, bps: u32) -> Vec<(Vec<u8>, u64)> {
         let bps = bps.max(1);
         let changed = match self.bitrate_bps {
             None => true,
@@ -250,14 +263,20 @@ impl Av1Enc {
                 (hi - lo) as u64 * 100 >= cur as u64 * BITRATE_HYSTERESIS_PCT
             }
         };
-        if changed {
-            self.bitrate_bps = Some(bps);
-            // Rebuild at the new rate if the encoder is already running; otherwise
-            // the next `build_context` (at configure) picks up the target.
-            if self.ctx.is_some() {
-                let _ = self.build_context();
-            }
+        if !changed {
+            return Vec::new();
         }
+        self.bitrate_bps = Some(bps);
+        // Not running yet: the next `build_context` (at configure) picks up the
+        // target, nothing to flush.
+        if self.ctx.is_none() {
+            return Vec::new();
+        }
+        // Flush the running context's in-flight lookahead before the new-rate
+        // context replaces it, so those frames are emitted instead of dropped.
+        let drained = self.flush().unwrap_or_default();
+        let _ = self.build_context();
+        drained
     }
 }
 
@@ -564,5 +583,23 @@ mod tests {
         enc.process(PipelinePacket::Eos, &mut sink).await.unwrap();
         assert!(!sink.frames.is_empty(), "still produces frames after a bitrate change");
         assert!(sink.frames.iter().all(|f| !f.is_empty()), "no empty packets after rebuild");
+    }
+
+    #[test]
+    fn no_frame_dropped_across_a_bitrate_change() {
+        let mut enc = Av1Enc::new().with_speed(10);
+        enc.configure_pipeline(&i420_caps(64, 64)).unwrap();
+        let mut emitted = 0usize;
+        for i in 0..6u64 {
+            emitted += enc.encode(&i420_grey(64, 64), i * 33_000_000).unwrap().len();
+        }
+        // The rebuild flushes the running context's lookahead (returned here),
+        // so those buffered frames are not lost.
+        emitted += enc.set_target_bitrate(2_000_000).len();
+        for i in 6..12u64 {
+            emitted += enc.encode(&i420_grey(64, 64), i * 33_000_000).unwrap().len();
+        }
+        emitted += enc.flush().unwrap().len();
+        assert_eq!(emitted, 12, "every source frame is emitted across the rebuild");
     }
 }
