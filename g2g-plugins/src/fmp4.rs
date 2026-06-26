@@ -297,7 +297,9 @@ pub(crate) fn parse_fragments(
                 for (size, dur) in sizes.iter().zip(&durs) {
                     tagged.push((*size, timescale_to_ns(t, timescale)));
                     durations.push(timescale_to_ns(*dur as u64, timescale));
-                    t += *dur as u64;
+                    // base_time and durations are untrusted; saturate the running
+                    // decode time rather than overflow.
+                    t = t.saturating_add(*dur as u64);
                 }
                 pending = Some(tagged);
                 pending_subs = match cenc {
