@@ -138,9 +138,10 @@ fn vspan(buf: &mut [u8], w: i32, h: i32, y0: i32, y1: i32, x: i32, color: [u8; 4
     }
 }
 
-/// A fixed, opaque per-class colour palette so adjacent classes are visually
-/// distinct. Cycles for labels beyond the palette length.
-fn class_color(label: u32) -> [u8; 4] {
+/// A fixed, opaque per-class RGB palette so adjacent classes are visually
+/// distinct. Cycles for labels beyond the palette length. Shared with the Vello
+/// overlay backend (`vello-overlay`) so both draw a class the same colour.
+pub(crate) fn class_rgb(label: u32) -> [u8; 3] {
     const PALETTE: [[u8; 3]; 8] = [
         [0xFF, 0x3B, 0x30], // red
         [0x34, 0xC7, 0x59], // green
@@ -151,7 +152,12 @@ fn class_color(label: u32) -> [u8; 4] {
         [0x5A, 0xC8, 0xFA], // cyan
         [0xFF, 0x2D, 0x95], // magenta
     ];
-    let c = PALETTE[(label as usize) % PALETTE.len()];
+    PALETTE[(label as usize) % PALETTE.len()]
+}
+
+/// The opaque RGBA box colour for a class label.
+fn class_color(label: u32) -> [u8; 4] {
+    let c = class_rgb(label);
     [c[0], c[1], c[2], 0xFF]
 }
 

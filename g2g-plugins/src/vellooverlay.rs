@@ -160,18 +160,19 @@ impl VelloAnalyticsOverlay {
         Ok(())
     }
 
-    /// Render `rgba` (full-frame image) with `detections` stroked over it into a
-    /// fresh `wgpu::Texture`, returned for the output frame to own.
-    fn render(&mut self, rgba: &[u8], detections: &[ObjectDetection]) -> Result<wgpu::Texture, G2gError> {
+    /// Render `rgba` (full-frame image, consumed) with `detections` stroked over
+    /// it into a fresh `wgpu::Texture`, returned for the output frame to own.
+    fn render(&mut self, rgba: Vec<u8>, detections: &[ObjectDetection]) -> Result<wgpu::Texture, G2gError> {
         let (w, h) = (self.width, self.height);
         let thickness = self.thickness;
         let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
 
         let mut scene = Scene::new();
         // The input picture as a full-frame image fill, so the boxes composite
-        // over the actual frame on the GPU (Vello clears the target first).
+        // over the actual frame on the GPU (Vello clears the target first). The
+        // caller already owns this buffer, so move it into the blob.
         let image = ImageData {
-            data: Blob::from(rgba.to_vec()),
+            data: Blob::from(rgba),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
             width: w,
@@ -229,20 +230,10 @@ impl VelloAnalyticsOverlay {
     }
 }
 
-/// A fixed, opaque per-class colour palette, matching the CPU overlay's so the
-/// two backends draw the same classes the same colour.
+/// The opaque stroke colour for a class label, from the shared CPU-overlay
+/// palette so the two backends draw the same classes the same colour.
 fn class_color(label: u32) -> Color {
-    const PALETTE: [[u8; 3]; 8] = [
-        [0xFF, 0x3B, 0x30],
-        [0x34, 0xC7, 0x59],
-        [0x00, 0x7A, 0xFF],
-        [0xFF, 0xCC, 0x00],
-        [0xAF, 0x52, 0xDE],
-        [0xFF, 0x95, 0x00],
-        [0x5A, 0xC8, 0xFA],
-        [0xFF, 0x2D, 0x95],
-    ];
-    let c = PALETTE[(label as usize) % PALETTE.len()];
+    let c = crate::analyticsoverlay::class_rgb(label);
     Color::from_rgba8(c[0], c[1], c[2], 0xFF)
 }
 
@@ -306,7 +297,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     let rgba = slice.as_slice()[..need].to_vec();
 
                     self.ensure_gpu().await?;
-                    let texture = self.render(&rgba, &detections)?;
+                    let texture = self.render(rgba, &detections)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
