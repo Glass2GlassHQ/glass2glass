@@ -132,10 +132,13 @@ impl WebCodecsDecode {
         } else {
             EncodedVideoChunkType::Delta
         };
-        // WebCodecs timestamps are microseconds (i32); clamp so a long stream
-        // can't wrap into a negative timestamp the decoder would reject.
-        let timestamp_us = (pts_ns / 1000).min(i32::MAX as u64) as i32;
-        let init = EncodedVideoChunkInit::new_with_u8_array(&data, timestamp_us, chunk_type);
+        // WebCodecs timestamps are microseconds (i64 in the spec). web-sys's
+        // constructor takes only i32 (~35 min of microseconds), so set the field
+        // as f64, which is exact across the full microsecond range (2^53 us is
+        // ~285 years), instead of saturating long streams to a constant.
+        let timestamp_us = (pts_ns / 1000) as f64;
+        let init = EncodedVideoChunkInit::new_with_u8_array(&data, 0, chunk_type);
+        init.set_timestamp_f64(timestamp_us);
         let chunk =
             EncodedVideoChunk::new(&init).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         decoder
