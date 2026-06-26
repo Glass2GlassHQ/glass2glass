@@ -292,15 +292,15 @@ impl RtspServerSink {
         }
     }
 
-    /// Advance every still-handshaking client (non-blocking), reaping any that
-    /// disconnected.
+    /// Service every client's control channel (non-blocking), reaping any that
+    /// disconnected or tore down. PLAYing clients are advanced too, so a
+    /// mid-stream TEARDOWN or control-channel close is detected and keepalive
+    /// requests are answered.
     async fn advance_handshakes(&mut self) {
         let (pt, ssrc, mp) = (self.payload_type, self.ssrc, self.max_payload);
         let mut i = 0;
         while i < self.clients.len() {
-            // A PLAYing client needs no handshake advance; keep it. Otherwise
-            // advance it, reaping the connection if it died.
-            let keep = self.clients[i].playing() || self.clients[i].advance(pt, ssrc, mp).await;
+            let keep = self.clients[i].advance(pt, ssrc, mp).await;
             if keep {
                 i += 1;
             } else {
@@ -456,5 +456,23 @@ mod tests {
         }
         assert!(reaped, "a client overflowing the control buffer is reaped");
         let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn playing_client_is_reaped_when_control_channel_closes() {
+        let (mut client, peer) = client_pair().await;
+        client.dest = Some(SocketAddr::new(client.peer_ip, 5000));
+        client.packetizer = Some(RtpH264Packetizer::new(96, 0x1234_5678));
+        assert!(client.playing());
+        drop(peer); // peer closes the control channel mid-stream
+        let mut reaped = false;
+        for _ in 0..10_000 {
+            if !client.advance(96, 0x1234_5678, 1400).await {
+                reaped = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(reaped, "a playing client whose control channel closed is reaped");
     }
 }
