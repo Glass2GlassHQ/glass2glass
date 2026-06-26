@@ -725,7 +725,14 @@ mod factory {
                 .iter()
                 .map(|s| s.name)
                 .chain(self.launch.iter().map(|f| f.name))
-                .chain(self.muxers.iter().map(|m| m.name))
+                // A muxer dual-registered as a launch element (e.g. `mp4mux`) is
+                // already listed above; only emit muxer-only names here.
+                .chain(
+                    self.muxers
+                        .iter()
+                        .map(|m| m.name)
+                        .filter(|name| !self.launch.iter().any(|f| f.name == *name)),
+                )
                 .collect()
         }
 
@@ -755,7 +762,10 @@ mod factory {
                 lines.push(line(f.name, (f.build)().metadata().long_name));
             }
             for m in &self.muxers {
-                lines.push(m.name.to_string());
+                // Skip a muxer already listed as a launch element above.
+                if !self.launch.iter().any(|f| f.name == m.name) {
+                    lines.push(m.name.to_string());
+                }
             }
             lines
         }

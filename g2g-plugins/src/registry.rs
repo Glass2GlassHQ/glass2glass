@@ -804,4 +804,16 @@ mod muxer_alias_tests {
         assert!(reg.make_muxer("qtmux", 2).is_some(), "qtmux resolves to the mp4mux fan-in");
         assert!(reg.make_muxer("mp4mux", 2).is_some(), "the alias target still builds directly");
     }
+
+    #[test]
+    fn dual_registered_muxers_are_listed_once() {
+        let reg = default_registry();
+        let names = reg.element_names();
+        let mut seen = alloc::collections::BTreeSet::new();
+        for n in &names {
+            assert!(seen.insert(*n), "element `{n}` listed more than once");
+        }
+        // mp4mux is registered as both a launch element and a fan-in muxer.
+        assert_eq!(names.iter().filter(|n| **n == "mp4mux").count(), 1);
+    }
 }
