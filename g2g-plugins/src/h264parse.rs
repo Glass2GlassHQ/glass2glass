@@ -285,12 +285,21 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsInfo> {
         2 => (2, 1),       // 4:2:2
         _ => (1, 1),       // 4:4:4 / monochrome
     };
-    let crop_x = (crop_left + crop_right).saturating_mul(sub_width_c);
-    let crop_y = (crop_top + crop_bottom)
+    // Crop and dimension fields come from untrusted exp-Golomb, so fold with
+    // saturating arithmetic (the additions and the *16 would otherwise overflow,
+    // panicking in debug and wrapping to bogus caps in release).
+    let crop_x = crop_left.saturating_add(crop_right).saturating_mul(sub_width_c);
+    let crop_y = crop_top
+        .saturating_add(crop_bottom)
         .saturating_mul(sub_height_c.saturating_mul(2u32.saturating_sub(frame_mbs_only_flag)));
 
-    let width = ((pic_width_in_mbs_minus1 + 1) * 16).saturating_sub(crop_x);
-    let height = ((2 - frame_mbs_only_flag) * (pic_height_in_map_units_minus1 + 1) * 16)
+    let width = pic_width_in_mbs_minus1
+        .saturating_add(1)
+        .saturating_mul(16)
+        .saturating_sub(crop_x);
+    let height = (2 - frame_mbs_only_flag)
+        .saturating_mul(pic_height_in_map_units_minus1.saturating_add(1))
+        .saturating_mul(16)
         .saturating_sub(crop_y);
 
     // vui_parameters_present_flag follows frame cropping. Read it without `?`
@@ -406,6 +415,36 @@ mod tests {
         let mut out = vec![0u8, 0, 0, 1, 0x67, 66, 0, 30];
         out.extend_from_slice(&rbsp);
         out
+    }
+
+    #[test]
+    fn parse_sps_saturates_adversarial_dimensions() {
+        // Untrusted exp-Golomb dimension/crop fields must saturate, not
+        // overflow-panic (debug) or wrap to bogus caps (release).
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(300_000_000); // pic_width_in_mbs_minus1 (overflows *16)
+        w.write_ue(300_000_000); // pic_height_in_map_units_minus1
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(0); // direct_8x8_inference_flag
+        w.write_bit(1); // frame_cropping_flag
+        w.write_ue(3_000_000_000); // crop_left (sum overflows u32)
+        w.write_ue(3_000_000_000); // crop_right
+        w.write_ue(3_000_000_000); // crop_top
+        w.write_ue(3_000_000_000); // crop_bottom
+        w.write_bit(0); // vui_parameters_present_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let mut au = vec![0u8, 0, 0, 1, 0x67, 66, 0, 30];
+        au.extend_from_slice(&w.into_bytes());
+        // Must not panic; saturated dimensions are clamped.
+        let info = extract_sps_info(&au).expect("parses without overflow");
+        assert!(info.width <= u32::MAX && info.height <= u32::MAX);
     }
 
     /// Build an Annex-B SPS for `width` x `height` carrying a VUI `timing_info`
