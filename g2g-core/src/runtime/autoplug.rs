@@ -643,6 +643,8 @@ mod factory {
                 for &t in *targets {
                     if self.sources.iter().any(|s| s.name == t)
                         || self.launch.iter().any(|f| f.name == t)
+                        || self.muxers.iter().any(|m| m.name == t)
+                        || self.demuxes.iter().any(|d| d.name == t)
                     {
                         return t;
                     }
@@ -692,6 +694,7 @@ mod factory {
         /// muxer node's input-pad count). `None` if `name` is not registered via
         /// [`register_muxer`](Self::register_muxer).
         pub fn make_muxer(&self, name: &str, inputs: usize) -> Option<Box<dyn DynMultiInputElement>> {
+            let name = self.resolve_alias(name);
             self.muxers.iter().find(|m| m.name == name).map(|m| (m.build)(inputs))
         }
 
@@ -704,6 +707,7 @@ mod factory {
             name: &str,
             outputs: usize,
         ) -> Option<Box<dyn DynMultiOutputElement>> {
+            let name = self.resolve_alias(name);
             self.demuxes.iter().find(|d| d.name == name).map(|d| (d.build)(outputs))
         }
 

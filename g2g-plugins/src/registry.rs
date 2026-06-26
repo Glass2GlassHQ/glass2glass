@@ -791,3 +791,17 @@ mod ffmpeg_enc_registry_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod muxer_alias_tests {
+    use super::*;
+
+    /// `qtmux` aliases `mp4mux`; resolving it as a fan-in muxer lets an A/V
+    /// pipeline written `... qtmux name=m` build the multi-input MP4 muxer.
+    #[test]
+    fn qtmux_alias_resolves_as_a_fan_in_muxer() {
+        let reg = default_registry();
+        assert!(reg.make_muxer("qtmux", 2).is_some(), "qtmux resolves to the mp4mux fan-in");
+        assert!(reg.make_muxer("mp4mux", 2).is_some(), "the alias target still builds directly");
+    }
+}
