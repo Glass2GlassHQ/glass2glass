@@ -203,12 +203,17 @@ fn parse_key(attrs: &str) -> Option<SegmentKey> {
 /// `IV=0x<32 hex digits>` -> 16 bytes. Anything else is rejected.
 fn parse_iv(value: &str) -> Option<[u8; 16]> {
     let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    // Work on bytes: slicing the &str by index would panic on a non-ASCII byte
+    // that lands mid-char in the untrusted attribute.
+    let hex = hex.as_bytes();
     if hex.len() != 32 {
         return None;
     }
     let mut iv = [0u8; 16];
     for (i, byte) in iv.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        let hi = (hex[i * 2] as char).to_digit(16)?;
+        let lo = (hex[i * 2 + 1] as char).to_digit(16)?;
+        *byte = (hi * 16 + lo) as u8;
     }
     Some(iv)
 }
@@ -253,6 +258,21 @@ fn parse_extinf_ms(rest: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_iv_rejects_non_ascii_without_panicking() {
+        // 29 hex zeros + a 3-byte char: 32 bytes total but not ASCII, so the old
+        // str-index slicing would panic on a char boundary. Must reject cleanly.
+        let mut bad = String::from("0x");
+        bad.push_str(&"0".repeat(29));
+        bad.push('€');
+        assert!(parse_iv(&bad).is_none());
+        // a valid IV still parses
+        assert_eq!(
+            parse_iv("0x000102030405060708090a0b0c0d0e0f"),
+            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+        );
+    }
 
     #[test]
     fn parses_media_playlist_with_fractional_durations() {
