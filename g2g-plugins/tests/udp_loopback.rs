@@ -451,3 +451,65 @@ async fn fec_recovers_dropped_packets_without_retransmission() {
     assert_eq!(marker.markers, expected, "AUs delivered in order after FEC recovery");
     assert_eq!(sink.retransmits_sent(), 0, "recovery was forward error correction, not resends");
 }
+
+#[tokio::test]
+async fn interleaved_fec_recovers_a_consecutive_burst() {
+    // The burst single-level FEC cannot handle: a one-way path (no feedback, no
+    // retransmit) loses 4 *consecutive* packets, which would put >1 loss in a
+    // contiguous group. Interleaved (column) FEC over a 4x4 block spreads the
+    // burst one-per-column, so each column repair recovers its loss.
+    let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind proxy");
+    let proxy_addr = proxy.local_addr().unwrap();
+    let recv_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    let recv_addr = recv_std.local_addr().unwrap();
+
+    const N: u8 = 16; // one full 4x4 interleaving block (1 RTP packet per AU)
+    // Drop the consecutive burst seqs 5..=8: columns 1,2,3,0 respectively, so
+    // exactly one loss per column.
+    let dropped: HashSet<u16> = [5u16, 6, 7, 8].into_iter().collect();
+    let proxy_task = tokio::spawn(lossy_proxy(proxy, recv_addr, dropped));
+
+    let mut src = UdpSrc::from_socket(recv_std)
+        .unwrap()
+        .with_jitter(500, 256)
+        .with_rtcp(0, false) // strictly one-way receiver
+        .with_fec(98) // the decoder handles interleaved masks unchanged
+        .with_frame_limit(N as u64);
+    let mut marker = MarkerSink::default();
+    let clock = ZeroClock;
+
+    let sink_fut = async {
+        // 4 rows x 4 columns; retransmit OFF so only the column repairs can recover.
+        let mut sink = UdpSink::new(proxy_addr)
+            .with_retransmit(false, 1)
+            .with_interleaved_fec(4, 4, 98, 0xFEC0_0002);
+        sink.configure_pipeline(&h264_caps()).expect("configure sink");
+        let mut null = NullOut;
+        for i in 0u32..N as u32 {
+            let au = alloc_au(i as u8);
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+                timing: FrameTiming { pts_ns: i as u64 * 33_000_000, ..FrameTiming::default() },
+                sequence: i as u64,
+                meta: Default::default(),
+            };
+            sink.process(PipelinePacket::DataFrame(frame), &mut null).await.expect("send");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        sink
+    };
+
+    let recv_fut = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(&mut src, &mut marker, &clock, LatencyProfile::Live.link_capacity()),
+    );
+
+    let (recv_res, sink) = tokio::join!(recv_fut, sink_fut);
+    proxy_task.abort();
+
+    let stats = recv_res.expect("receiver finishes within 15s").expect("receive pipeline succeeds");
+    assert_eq!(stats.frames_emitted, N as u64, "the whole consecutive burst recovered");
+    let expected: Vec<u8> = (0..N).collect();
+    assert_eq!(marker.markers, expected, "AUs delivered in order after burst recovery");
+    assert_eq!(sink.retransmits_sent(), 0, "recovery was interleaved FEC, not resends");
+}

@@ -128,8 +128,8 @@ leverage first:
   interop. (TSBPD delivery timing landed: `SrtReceiver::set_tsbpd`.)
 - **RTMP:** the HMAC-digest handshake some CDNs require, multiple streams,
   server-acknowledgement back-pressure.
-- **RTP FEC:** FlexFEC (RFC 8627); multi-level / interleaved ULPFEC for burst
-  loss (single-level recovers one loss per group).
+- **RTP FEC:** FlexFEC (RFC 8627). (Interleaved column ULPFEC for burst loss
+  landed: `InterleavedFecEncoder` / `UdpSink::with_interleaved_fec`.)
 - **RTSP server:** TCP-interleaved transport; RTCP / keepalive during PLAY.
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust

@@ -11,6 +11,16 @@
 //! recent media + repair packets and recovers any group missing exactly one
 //! member. The repair packets ride a distinct payload type (negotiated, like
 //! RTX), so they are told apart from media at the receiver.
+//!
+//! [`InterleavedFecEncoder`] is the burst-loss answer: over a block of
+//! `rows x stride` packets it emits `stride` *column* repairs, where column `c`
+//! protects the strided set `c, c+stride, c+2*stride, ...`. A burst of up to
+//! `stride` consecutive losses then hits at most one packet per column, so each
+//! column repair recovers its one loss and the whole burst is reconstructed,
+//! where single-level FEC (one loss per contiguous group) would fail. The
+//! decoder is unchanged: it reads each repair's mask generically and chains
+//! recoveries, so column repairs just work (this is RFC 5109's interleaving via
+//! a strided protection mask, the lighter cousin of full 2D row+column FEC).
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
@@ -23,9 +33,13 @@ const FEC_HEADER: usize = 10;
 /// FEC level-0 header (protection length + 16-bit mask).
 const FEC_LEVEL_HEADER: usize = 4;
 
-/// Build a ULPFEC repair packet protecting `media` (contiguous-sequence RTP
-/// packets, at most 16). The repair is itself an RTP packet on `fec_pt` /
-/// `fec_ssrc` / `fec_seq`. `None` if `media` is empty or longer than 16.
+/// Build a ULPFEC repair packet protecting `media`, RTP packets sorted by
+/// sequence and spanning at most 16 sequence numbers from the first (`media[0]`
+/// is the SN base). The set may be *non-contiguous*: the level-0 mask is built
+/// from each packet's sequence offset, so a strided / interleaved column (every
+/// `stride`-th packet) is protected exactly like a contiguous run. The repair is
+/// itself an RTP packet on `fec_pt` / `fec_ssrc` / `fec_seq`. `None` if `media`
+/// is empty, longer than 16, or spans more than 16 sequence numbers.
 pub fn build_fec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16) -> Option<Vec<u8>> {
     if media.is_empty() || media.len() > 16 {
         return None;
@@ -34,6 +48,19 @@ pub fn build_fec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16
         return None;
     }
     let sn_base = u16::from_be_bytes([media[0][2], media[0][3]]);
+
+    // FEC level-0 mask: bit (15 - off) protects SN base + off, where off is each
+    // packet's sequence distance from the base (0,1,2,... contiguous; 0,D,2D,...
+    // interleaved). A span past 16 cannot be expressed in the 16-bit mask.
+    let mut mask = 0u16;
+    for p in media {
+        let seq = u16::from_be_bytes([p[2], p[3]]);
+        let off = seq.wrapping_sub(sn_base);
+        if off >= 16 {
+            return None; // out of order, or spans more than 16 sequence numbers
+        }
+        mask |= 1 << (15 - off);
+    }
 
     // XOR-recover the protected header fields and the payloads.
     let mut pxcc = 0u8; // P|X|CC, the low 6 bits of byte 0
@@ -50,12 +77,6 @@ pub fn build_fec_packet(media: &[&[u8]], fec_pt: u8, fec_ssrc: u32, fec_seq: u16
         for (dst, src) in payload.iter_mut().zip(&p[RTP_HEADER..]) {
             *dst ^= *src;
         }
-    }
-
-    // FEC level-0 mask: bit (15 - i) protects SN base + i.
-    let mut mask = 0u16;
-    for i in 0..media.len() {
-        mask |= 1 << (15 - i);
     }
 
     let mut out = Vec::with_capacity(RTP_HEADER + FEC_HEADER + FEC_LEVEL_HEADER + protection_len);
@@ -182,6 +203,58 @@ impl FecEncoder {
             return fec;
         }
         None
+    }
+}
+
+/// Emits interleaved (column) ULPFEC repairs for burst-loss recovery. Over a
+/// block of `rows * stride` media packets it emits `stride` repair packets, one
+/// per column; `rows * stride` must be at most 16 so each column fits the
+/// level-0 mask. A burst of up to `stride` consecutive losses is recovered.
+#[derive(Debug)]
+pub struct InterleavedFecEncoder {
+    rows: usize,
+    stride: usize,
+    fec_pt: u8,
+    fec_ssrc: u32,
+    fec_seq: u16,
+    pending: Vec<Vec<u8>>,
+}
+
+impl InterleavedFecEncoder {
+    /// `rows` x `stride` is the interleaving block; the product is clamped to 16
+    /// (the level-0 mask width). `stride` is the burst length recovered.
+    pub fn new(rows: usize, stride: usize, fec_pt: u8, fec_ssrc: u32) -> Self {
+        let stride = stride.clamp(1, 16);
+        // Keep rows * stride <= 16 so every column spans <= 16 sequence numbers.
+        let rows = rows.clamp(1, 16 / stride);
+        Self { rows, stride, fec_pt: fec_pt & 0x7F, fec_ssrc, fec_seq: 0, pending: Vec::new() }
+    }
+
+    /// The interleaving block size (`rows * stride`), the number of media packets
+    /// per emitted set of column repairs.
+    pub fn block(&self) -> usize {
+        self.rows * self.stride
+    }
+
+    /// Feed a media RTP packet; returns `stride` column repair packets when the
+    /// block fills (empty otherwise). Each column `c` protects positions `c`,
+    /// `c + stride`, ..., a strided set the decoder recovers independently.
+    pub fn push(&mut self, media: &[u8]) -> Vec<Vec<u8>> {
+        self.pending.push(media.to_vec());
+        if self.pending.len() < self.rows * self.stride {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(self.stride);
+        for c in 0..self.stride {
+            let column: Vec<&[u8]> =
+                (0..self.rows).map(|r| self.pending[c + r * self.stride].as_slice()).collect();
+            if let Some(fec) = build_fec_packet(&column, self.fec_pt, self.fec_ssrc, self.fec_seq) {
+                self.fec_seq = self.fec_seq.wrapping_add(1);
+                out.push(fec);
+            }
+        }
+        self.pending.clear();
+        out
     }
 }
 
@@ -338,5 +411,61 @@ mod tests {
         let recovered = dec.take_recovered();
         assert_eq!(recovered.len(), 1, "the one loss was recovered");
         assert_eq!(recovered[0], media[1]);
+    }
+
+    #[test]
+    fn interleaved_fec_recovers_a_burst_single_level_cannot() {
+        // 4 rows x 4 columns = a 16-packet block; column repairs recover a burst
+        // of up to 4 consecutive losses (one per column).
+        let mut enc = InterleavedFecEncoder::new(4, 4, 97, 0xFEC0_0000);
+        assert_eq!(enc.block(), 16);
+        let media = media_run(16);
+
+        let mut columns = Vec::new();
+        for p in &media {
+            columns.extend(enc.push(p));
+        }
+        assert_eq!(columns.len(), 4, "one repair packet per column");
+
+        // Lose a burst of 4 consecutive media packets (indices 5..=8): more than
+        // one loss in any single contiguous group, so single-level FEC is stuck,
+        // but the burst spans 4 distinct columns, one loss each.
+        let burst = [5usize, 6, 7, 8];
+        let mut dec = FecDecoder::new(64);
+        for (i, p) in media.iter().enumerate() {
+            if !burst.contains(&i) {
+                let seq = u16::from_be_bytes([p[2], p[3]]);
+                dec.push_media(seq, p);
+            }
+        }
+        for col in &columns {
+            dec.push_fec(col);
+        }
+
+        let mut recovered = dec.take_recovered();
+        recovered.sort_by_key(|p| u16::from_be_bytes([p[2], p[3]]));
+        assert_eq!(recovered.len(), 4, "every packet of the burst recovered");
+        for &i in &burst {
+            assert!(
+                recovered.iter().any(|r| *r == media[i]),
+                "burst packet {i} reconstructed byte-exact",
+            );
+        }
+    }
+
+    #[test]
+    fn build_fec_packet_rejects_a_span_wider_than_16() {
+        // Two packets 20 sequence numbers apart cannot share one level-0 mask.
+        let mut pkt = RtpH264Packetizer::new(96, 7);
+        let a = pkt.packetize(&[0, 0, 0, 1, 0x61, 1], 0).remove(0);
+        // Force a far sequence by packetizing many throwaway packets.
+        for _ in 0..19 {
+            pkt.packetize(&[0, 0, 0, 1, 0x61, 2], 90);
+        }
+        let far = pkt.packetize(&[0, 0, 0, 1, 0x61, 3], 180).remove(0);
+        assert!(
+            build_fec_packet(&[a.as_slice(), far.as_slice()], 97, 0, 0).is_none(),
+            "a > 16 sequence span does not fit the 16-bit mask",
+        );
     }
 }

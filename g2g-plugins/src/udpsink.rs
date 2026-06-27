@@ -29,7 +29,17 @@ use crate::filesink::io_err;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtx;
-use crate::ulpfec::FecEncoder;
+use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
+
+/// FEC mode for the sink: off, single-level (one repair per contiguous group,
+/// recovers one loss per group), or interleaved (column repairs recovering a
+/// burst of consecutive losses).
+#[derive(Debug)]
+enum FecMode {
+    None,
+    Single(FecEncoder),
+    Interleaved(InterleavedFecEncoder),
+}
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
 const RTP_CLOCK_HZ: u64 = 90_000;
@@ -71,9 +81,10 @@ pub struct UdpSink {
     rtx: Option<(u8, u32)>,
     /// Sequence counter for the RTX stream (its own numbering space).
     rtx_seq: u16,
-    /// RFC 5109 ULPFEC: when set, a repair packet is emitted per media group
-    /// for latency-free single-loss recovery (independent of NACK/RTX).
-    fec: Option<FecEncoder>,
+    /// RFC 5109 ULPFEC: emits repair packets for latency-free loss recovery
+    /// (independent of NACK/RTX). Single-level recovers one loss per group;
+    /// interleaved recovers a burst of consecutive losses.
+    fec: FecMode,
     /// Recently sent packets, `(sequence, bytes)`, oldest first, capped at
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
     retx_buf: VecDeque<(u16, Vec<u8>)>,
@@ -111,7 +122,7 @@ impl UdpSink {
             retransmit: true,
             rtx: None,
             rtx_seq: 0,
-            fec: None,
+            fec: FecMode::None,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
             rtcp_sr_interval_ns: None,
@@ -162,7 +173,27 @@ impl UdpSink {
     /// `fec_payload_type` / `fec_ssrc`, recovering a single per-group loss at the
     /// receiver with no round trip. Complements (does not replace) NACK/RTX.
     pub fn with_fec(mut self, group: usize, fec_payload_type: u8, fec_ssrc: u32) -> Self {
-        self.fec = Some(FecEncoder::new(group, fec_payload_type, fec_ssrc));
+        self.fec = FecMode::Single(FecEncoder::new(group, fec_payload_type, fec_ssrc));
+        self
+    }
+
+    /// Emit interleaved (column) ULPFEC over a `rows * stride` block on
+    /// `fec_payload_type` / `fec_ssrc`: `stride` repair packets per block,
+    /// recovering a burst of up to `stride` consecutive losses (`rows * stride`
+    /// is capped at 16). The burst-loss counterpart of [`with_fec`](Self::with_fec).
+    pub fn with_interleaved_fec(
+        mut self,
+        rows: usize,
+        stride: usize,
+        fec_payload_type: u8,
+        fec_ssrc: u32,
+    ) -> Self {
+        self.fec = FecMode::Interleaved(InterleavedFecEncoder::new(
+            rows,
+            stride,
+            fec_payload_type,
+            fec_ssrc,
+        ));
         self
     }
 
@@ -332,10 +363,19 @@ impl AsyncElement for UdpSink {
                     // Generate any ULPFEC repair packets for the just-built media
                     // (before the borrow of `self.socket` below).
                     let mut fec_packets = Vec::new();
-                    if let Some(fec) = self.fec.as_mut() {
-                        for pkt in &packets {
-                            if let Some(repair) = fec.push(pkt) {
-                                fec_packets.push(repair);
+                    match &mut self.fec {
+                        FecMode::None => {}
+                        FecMode::Single(enc) => {
+                            for pkt in &packets {
+                                if let Some(repair) = enc.push(pkt) {
+                                    fec_packets.push(repair);
+                                }
+                            }
+                        }
+                        // Interleaved emits a batch of column repairs per block.
+                        FecMode::Interleaved(enc) => {
+                            for pkt in &packets {
+                                fec_packets.extend(enc.push(pkt));
                             }
                         }
                     }
