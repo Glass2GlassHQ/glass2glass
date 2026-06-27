@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "g2g"
+description = "Python bindings to drive glass2glass pipelines (parse_launch + run + bus + appsrc/appsink)."
+requires-python = ">=3.8"
+license = { text = "LGPL-2.1-or-later" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# The compiled extension is `import g2g` (the `#[pymodule] fn g2g`), built from
+# the `g2g-pyapi` cdylib. `python` is the binding code gate; `extension-module`
+# tells PyO3 not to link libpython (the wheel is loaded by an existing
+# interpreter, the inverse of the auto-initialize path the in-crate tests use).
+module-name = "g2g"
+features = ["python", "pyo3/extension-module"]
