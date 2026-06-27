@@ -105,6 +105,20 @@ impl PipeWireSink {
             q.clear();
         }
     }
+
+    /// Wait for the worker to play out the queued PCM before teardown, so EOS
+    /// does not drop up to `high_water` bytes of buffered tail. The queue holds
+    /// at most ~1 s of audio and drains in real time; cap the wait at 2 s so a
+    /// stalled endpoint can't hang the pipeline.
+    fn drain_queue(&self) {
+        for _ in 0..200 {
+            let drained = self.queue.lock().map(|q| q.is_empty()).unwrap_or(true);
+            if drained {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 impl Drop for PipeWireSink {
@@ -215,6 +229,7 @@ impl AsyncElement for PipeWireSink {
                 }
                 PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
+                    self.drain_queue();
                     self.shutdown();
                     Ok(())
                 }
