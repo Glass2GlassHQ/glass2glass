@@ -324,6 +324,26 @@ impl Drop for NvDec {
             }
             self.parser = core::ptr::null_mut();
         }
+        // The ctx-lock and context are owned by `CuvidDecoder`, which frees them
+        // (via the `Arc`) once the last frame referencing it drops. But the
+        // decoder is created lazily on the first decoded sequence: if we were
+        // configured but never decoded a picture, `decoder_owner` is `None` and
+        // nothing else owns them. With the parser already destroyed no callback
+        // can still create one, so free them here, mirroring `CuvidDecoder::drop`.
+        if self.state.decoder_owner.is_none() {
+            // SAFETY: created together in `open`; destroyed once, here, only when
+            // no `CuvidDecoder` took ownership. Best-effort; failures unactionable.
+            unsafe {
+                if !self.state.ctx_lock.is_null() {
+                    let _ = ffi::cuvid_ctx_lock_destroy(self.state.ctx_lock);
+                    self.state.ctx_lock = core::ptr::null_mut();
+                }
+                if self.state.context != 0 {
+                    let _ = ffi::cu_ctx_destroy(self.state.context as *mut core::ffi::c_void);
+                    self.state.context = 0;
+                }
+            }
+        }
     }
 }
 
