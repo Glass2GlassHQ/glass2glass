@@ -37,6 +37,13 @@ Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
 - **Caps refinement** flows at runtime via `PipelinePacket::CapsChanged`, not
   just at negotiation. Emit it before the first affected `DataFrame` and on any
   mid-stream change; suppress re-emission when unchanged.
+- **Parsers / demuxers: never trust the stream.** Counts, lengths, offsets,
+  and dimensions read from a bitstream or container are attacker-controlled.
+  Validate before use and fold arithmetic with checked / saturating ops, so
+  malformed input fails the parse (returns `None` / an error) rather than
+  panicking, overflowing, or allocating on a bogus length. Study
+  `h264parse.rs` (saturating SPS geometry) and `fmp4.rs` (bounded box / sample
+  counts) as references.
 - **Comments:** preserve existing comments; update them if the logic changes;
   only delete when the whole block goes. Comment unusual code, not the obvious.
   No em dash (`—`) in comments; use `,` `:` or `()`.
