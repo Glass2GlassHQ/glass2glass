@@ -191,11 +191,16 @@ impl OrtInference {
     /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
     fn infer(&mut self, rgba: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
-        if rgba.len() < w * h * 4 {
+        // Geometry comes from the model's declared input dims; fold with checked
+        // ops so absurd dimensions fail loud instead of overflowing the length
+        // guard or over-allocating.
+        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
+        let needed = plane.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+        if rgba.len() < needed {
             return Err(G2gError::CapsMismatch);
         }
-        let plane = w * h;
-        let mut chw = vec![0f32; 3 * plane];
+        let chw_len = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+        let mut chw = vec![0f32; chw_len];
         for px in 0..plane {
             let src = px * 4;
             chw[px] = rgba[src] as f32 / 255.0;
@@ -209,11 +214,14 @@ impl OrtInference {
     /// the session (tensor-input mode); the bytes are the tensor's
     /// little-endian f32 values, e.g. from a GPU preprocess step.
     fn infer_tensor(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let n = 3 * self.width as usize * self.height as usize;
-        if bytes.len() < n * 4 {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
+        let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+        let nbytes = n.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+        if bytes.len() < nbytes {
             return Err(G2gError::CapsMismatch);
         }
-        let chw: Vec<f32> = bytes[..n * 4]
+        let chw: Vec<f32> = bytes[..nbytes]
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();

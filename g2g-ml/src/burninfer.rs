@@ -76,8 +76,14 @@ impl BurnInference {
         bias: Vec<f32>,
     ) -> Result<Self, G2gError> {
         let num_outputs = bias.len();
-        let k = 3 * width as usize * height as usize;
-        if num_outputs == 0 || k == 0 || weights.len() != k * num_outputs {
+        // Fold the weight-matrix size with checked ops so an overflowing
+        // (width, height, num_outputs) fails the validation gate instead of
+        // wrapping to a value that admits a short weight buffer.
+        let k = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|wh| wh.checked_mul(3));
+        let expected = k.and_then(|k| k.checked_mul(num_outputs));
+        if num_outputs == 0 || k == Some(0) || Some(weights.len()) != expected {
             return Err(G2gError::CapsMismatch);
         }
         Ok(Self {
