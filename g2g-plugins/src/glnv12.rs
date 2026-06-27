@@ -26,6 +26,11 @@ use crate::cuda::{make_context_current, CudaGlInterop, FRAGMENT_SHADER_NV12, VER
 pub(crate) struct GlState {
     gl: glow::Context,
     program: glow::Program,
+    /// Program input locations, queried once at link rather than every frame.
+    y_tex_loc: Option<glow::UniformLocation>,
+    uv_tex_loc: Option<glow::UniformLocation>,
+    pos_loc: u32,
+    uv_loc: u32,
     y_tex: glow::Texture,
     uv_tex: glow::Texture,
     vbo: glow::Buffer,
@@ -52,6 +57,10 @@ impl GlState {
         // SAFETY: the caller guarantees a current GL ES 3 context.
         unsafe {
             let program = link_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER_NV12)?;
+            let y_tex_loc = gl.get_uniform_location(program, "y_tex");
+            let uv_tex_loc = gl.get_uniform_location(program, "uv_tex");
+            let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
+            let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
 
             // Fullscreen quad: two triangles, interleaved (x, y, u, v). Flip V so
             // the top row of the frame maps to the top of the window.
@@ -76,6 +85,10 @@ impl GlState {
             Ok(GlState {
                 gl,
                 program,
+                y_tex_loc,
+                uv_tex_loc,
+                pos_loc,
+                uv_loc,
                 y_tex,
                 uv_tex,
                 vbo,
@@ -121,18 +134,14 @@ impl GlState {
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.y_tex));
-            if let Some(loc) = gl.get_uniform_location(self.program, "y_tex") {
-                gl.uniform_1_i32(Some(&loc), 0);
-            }
+            gl.uniform_1_i32(self.y_tex_loc.as_ref(), 0);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.uv_tex));
-            if let Some(loc) = gl.get_uniform_location(self.program, "uv_tex") {
-                gl.uniform_1_i32(Some(&loc), 1);
-            }
+            gl.uniform_1_i32(self.uv_tex_loc.as_ref(), 1);
 
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            let pos = gl.get_attrib_location(self.program, "a_pos").unwrap_or(0);
-            let uv = gl.get_attrib_location(self.program, "a_uv").unwrap_or(1);
+            let pos = self.pos_loc;
+            let uv = self.uv_loc;
             let stride = 4 * size_of::<f32>() as i32;
             gl.enable_vertex_attrib_array(pos);
             gl.vertex_attrib_pointer_f32(pos, 2, glow::FLOAT, false, stride, 0);
