@@ -139,8 +139,17 @@ impl TensorRef<'_> {
     }
 
     /// Number of elements implied by the shape (product of dims; 1 for a scalar).
+    /// The shape is attacker-controlled, so the product is folded with
+    /// `checked_mul` and saturates to `usize::MAX` on overflow rather than
+    /// panicking (debug) or wrapping (release); a saturated count can never equal
+    /// a real byte length, so `to_f32` then fails loud with `LenMismatch`.
     pub fn numel(&self) -> usize {
-        self.shape.iter().product::<usize>().max(1)
+        self.shape
+            .iter()
+            .copied()
+            .try_fold(1usize, |acc, d| acc.checked_mul(d))
+            .unwrap_or(usize::MAX)
+            .max(1)
     }
 
     /// Decode an F32 tensor to row-major `Vec<f32>`. Fails loud on a non-F32
@@ -564,6 +573,22 @@ mod tests {
         let depth = MAX_JSON_DEPTH as usize + 50;
         let bomb = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
         assert_eq!(Json::parse(&bomb).err(), Some("json nesting too deep"));
+    }
+
+    #[test]
+    fn overflowing_shape_product_fails_loud_not_panic() {
+        // A crafted shape whose dimension product overflows usize must not panic
+        // (debug) or wrap (release): numel saturates and to_f32 reports a length
+        // mismatch. Two dims that each fit usize but whose product overflows.
+        let header = "{\"t\":{\"dtype\":\"F32\",\"shape\":[4294967296,4294967296],\
+            \"data_offsets\":[0,0]}}";
+        let mut blob = (header.len() as u64).to_le_bytes().to_vec();
+        blob.extend_from_slice(header.as_bytes());
+        // No data bytes: the zero-length range is valid, so parse succeeds.
+        let st = SafeTensors::parse(&blob).unwrap();
+        let t = st.get("t").unwrap();
+        assert_eq!(t.numel(), usize::MAX, "product saturates instead of wrapping");
+        assert_eq!(t.to_f32(), Err(SafeTensorsError::LenMismatch));
     }
 
     #[test]
