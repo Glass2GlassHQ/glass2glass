@@ -412,5 +412,53 @@ except ImportError:
                 py.run(script.as_c_str(), Some(&globals), None).expect("lifetime script runs");
             });
         }
+
+        /// The non-blocking `try_pull()` path: spin until a sample is ready
+        /// (the run thread delivers asynchronously), confirm it lends the same
+        /// zero-copy `FrameView`, then `None` once the stream has ended.
+        #[test]
+        fn try_pull_returns_frame_then_none_at_end() {
+            ensure_module();
+            Python::attach(|py| {
+                let script = CString::new(
+                    r#"
+import g2g
+import time
+src  = g2g.AppSrc("tc")
+sink = g2g.AppSink("to")
+p = g2g.Pipeline(
+    "appsrc channel=tc caps=video/x-raw,format=RGBA,width=2,height=2,framerate=30/1"
+    " ! appsink channel=to"
+)
+src.push(b"\xCD" * 16, 7)
+src.end_of_stream()
+
+# try_pull is non-blocking and may race the run thread, so spin briefly.
+frame = None
+for _ in range(1000):
+    frame = sink.try_pull()
+    if frame is not None:
+        break
+    time.sleep(0.001)
+assert frame is not None, "try_pull never delivered the pushed frame"
+assert not isinstance(frame, (bytes, tuple)), type(frame)
+assert bytes(memoryview(frame)) == b"\xCD" * 16 and frame.pts_ns == 7, frame
+
+# Once drained and ended, try_pull settles on None (empty or ended both map
+# to None); wait() confirms the single frame was consumed.
+for _ in range(1000):
+    if sink.try_pull() is None and p.is_done():
+        break
+    time.sleep(0.001)
+assert sink.try_pull() is None
+_, consumed, _ = p.wait()
+assert consumed == 1, consumed
+"#,
+                )
+                .unwrap();
+                let globals = PyDict::new(py);
+                py.run(script.as_c_str(), Some(&globals), None).expect("try_pull script runs");
+            });
+        }
     }
 }
