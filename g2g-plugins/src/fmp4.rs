@@ -483,7 +483,11 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
     let mut dts: u64 = 0;
     for i in 0..sample_count {
         let off = sample_offsets[i] as usize;
-        let raw = data.get(off..off + sizes[i] as usize).ok_or(G2gError::CapsMismatch)?;
+        // `off` comes from an untrusted co64/stco chunk offset, so bound the end
+        // with checked arithmetic (a u64 offset near usize::MAX would otherwise
+        // overflow the `off + size` add and panic in debug).
+        let end = off.checked_add(sizes[i] as usize).ok_or(G2gError::CapsMismatch)?;
+        let raw = data.get(off..end).ok_or(G2gError::CapsMismatch)?;
         let pts = (dts as i64).saturating_add(ctts_offsets[i]).max(0) as u64;
         let keyframe = match &sync {
             Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
