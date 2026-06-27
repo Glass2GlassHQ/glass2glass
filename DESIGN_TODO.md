@@ -124,9 +124,10 @@ leverage first:
 
 ## Egress / transports
 
-- **SRT:** congestion control, libsrt/ffmpeg real-peer interop. (TSBPD timing,
-  AES-256 (`with_aes256`), and mid-stream key rotation (`with_key_rotation`)
-  landed; KM-retransmit-until-KMRSP for lossy rekey is a refinement.)
+- **SRT:** libsrt/ffmpeg real-peer interop. (TSBPD timing, AES-256
+  (`with_aes256`), mid-stream key rotation (`with_key_rotation`), and live-mode
+  congestion control / pacing (`with_max_bandwidth`) landed; KM-retransmit-until-
+  KMRSP for lossy rekey is a refinement.)
 - **RTMP:** the HMAC-digest handshake some CDNs require, multiple streams,
   server-acknowledgement back-pressure.
 - **RTP FEC:** FlexFEC (RFC 8627). (Interleaved column ULPFEC for burst loss

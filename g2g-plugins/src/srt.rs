@@ -940,6 +940,85 @@ impl SrtReceiver {
     }
 }
 
+/// SRT live-mode congestion control: rate-based output pacing. Rather than the
+/// window-based AIMD of file transfer, SRT live mode paces packets so the egress
+/// does not burst-flood the path and leaves headroom for retransmissions. This
+/// either caps at a fixed bandwidth (`maxbw`) or follows the measured input rate
+/// plus an overhead margin, and reports the inter-packet send interval
+/// ([`snd_period_us`](Self::snd_period_us)) the I/O layer waits between packets.
+/// Sans-IO + integer-only: the element feeds packet sizes and a monotonic clock.
+#[derive(Debug)]
+pub struct LiveCc {
+    /// Hard bandwidth cap in bytes/sec; `None` follows the measured input rate.
+    maxbw: Option<u64>,
+    /// Headroom percent over the input rate for retransmits (rate-follow mode).
+    overhead: u64,
+    /// EWMA of the input rate in bytes/sec (the measured stream rate).
+    est_rate: u64,
+    /// Monotonic microsecond timestamp of the last fed packet.
+    last_us: Option<u64>,
+}
+
+/// EWMA smoothing shift for the input-rate estimate (weight 1/8 on each sample).
+const CC_EWMA_SHIFT: u64 = 3;
+/// Default retransmit headroom (percent) in rate-follow mode (SRT's 25%).
+pub const CC_DEFAULT_OVERHEAD: u64 = 25;
+
+impl LiveCc {
+    /// `maxbw` > 0 caps the egress at that many bytes/sec; `maxbw == 0` follows
+    /// the measured input rate plus `overhead_percent` headroom (SRT semantics:
+    /// maxbw 0 means relative-to-input).
+    pub fn new(maxbw: u64, overhead_percent: u64) -> Self {
+        Self {
+            maxbw: (maxbw > 0).then_some(maxbw),
+            overhead: overhead_percent,
+            est_rate: 0,
+            last_us: None,
+        }
+    }
+
+    /// Record a sent packet of `len` bytes at monotonic `now_us`, updating the
+    /// EWMA input-rate estimate (rate-follow mode). The first packet only seeds
+    /// the clock; the estimate starts on the second (it needs an interval).
+    pub fn on_packet(&mut self, len: usize, now_us: u64) {
+        if let Some(prev) = self.last_us {
+            let delta = now_us.saturating_sub(prev);
+            // Instantaneous rate (bytes/sec) over this inter-packet gap; a zero
+            // gap (checked_div -> None) contributes no sample.
+            if let Some(inst) = (len as u64).saturating_mul(1_000_000).checked_div(delta) {
+                self.est_rate = if self.est_rate == 0 {
+                    inst
+                } else {
+                    self.est_rate - (self.est_rate >> CC_EWMA_SHIFT) + (inst >> CC_EWMA_SHIFT)
+                };
+            }
+        }
+        self.last_us = Some(now_us);
+    }
+
+    /// The current estimated input rate in bytes/sec.
+    pub fn estimated_rate_bps(&self) -> u64 {
+        self.est_rate
+    }
+
+    /// The rate the pacer targets: the fixed cap, or the estimate plus overhead.
+    fn target_rate(&self) -> u64 {
+        match self.maxbw {
+            Some(bw) => bw,
+            None => self.est_rate.saturating_add(self.est_rate.saturating_mul(self.overhead) / 100),
+        }
+    }
+
+    /// Microseconds to wait before sending a packet of `next_len` bytes to hold
+    /// the egress at the target rate. `0` when no rate is known yet (rate-follow
+    /// before the estimate warms up), i.e. send without pacing.
+    pub fn snd_period_us(&self, next_len: usize) -> u64 {
+        // A zero target rate (rate-follow before the estimate warms up) yields no
+        // pacing delay (checked_div -> None -> 0).
+        (next_len as u64).saturating_mul(1_000_000).checked_div(self.target_rate()).unwrap_or(0)
+    }
+}
+
 /// 31-bit sequence comparison (wrap-aware): is `a >= b`?
 fn seq_ge(a: u32, b: u32) -> bool {
     a == b || seq_gt(a, b)
@@ -1267,6 +1346,37 @@ mod tests {
             vec![b"aaa".to_vec(), b"bbb".to_vec(), b"ccc".to_vec(), b"ddd".to_vec()],
             "payloads decrypt across the even -> odd rekey",
         );
+    }
+
+    #[test]
+    fn cc_maxbw_paces_at_the_fixed_cap() {
+        // A 1 MB/s cap: a 1000-byte packet takes 1 ms, a 2000-byte one 2 ms.
+        let cc = LiveCc::new(1_000_000, 0);
+        assert_eq!(cc.snd_period_us(1000), 1000);
+        assert_eq!(cc.snd_period_us(2000), 2000);
+    }
+
+    #[test]
+    fn cc_rate_follow_tracks_input_and_adds_overhead() {
+        // Feed 1250-byte packets 1 ms apart -> 1.25 MB/s input rate. Rate-follow
+        // with 25% overhead paces at 1.5625 MB/s, so a 1250-byte packet -> 800 us
+        // (faster than the 1000 us the bare input rate would give: headroom).
+        let mut cc = LiveCc::new(0, CC_DEFAULT_OVERHEAD);
+        let mut t = 0u64;
+        for _ in 0..5 {
+            cc.on_packet(1250, t);
+            t += 1000;
+        }
+        assert_eq!(cc.estimated_rate_bps(), 1_250_000, "EWMA settles on the steady input rate");
+        assert_eq!(cc.snd_period_us(1250), 800, "25% headroom shortens the pacing interval");
+    }
+
+    #[test]
+    fn cc_rate_follow_does_not_pace_before_the_estimate_warms_up() {
+        // No packets fed yet: the estimate is zero, so the pacer imposes no delay
+        // (send freely until it learns the rate).
+        let cc = LiveCc::new(0, CC_DEFAULT_OVERHEAD);
+        assert_eq!(cc.snd_period_us(1000), 0);
     }
 
     #[test]

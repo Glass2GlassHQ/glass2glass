@@ -154,3 +154,60 @@ async fn srt_handshake_and_arq_recover_a_dropped_payload() {
     assert_eq!(sink_collect.tags, expected, "payloads delivered in order after ARQ recovery");
     assert!(retransmits >= 1, "caller retransmitted the dropped packet on NAK");
 }
+
+#[tokio::test]
+async fn congestion_control_paces_egress_to_the_bandwidth_cap() {
+    // The caller sends as fast as the loop allows (no inter-frame sleep) but with
+    // a bandwidth cap, so the only throttle is the congestion-control pacing.
+    // Unpaced this loop is ~instant; the cap stretches it to ~packets*size/bw.
+    const N: u8 = 30;
+    const PAYLOAD: usize = 1316; // one SRT packet per frame
+    const BW: u64 = 200_000; // bytes/sec cap
+
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+
+    let mut src = SrtSrc::from_socket(listener_std).unwrap().with_frame_limit(N as u64);
+    let mut sink_collect = TagSink::default();
+    let clock = ZeroClock;
+
+    let caller = async {
+        let mut sink = SrtSink::new(listener_addr).with_max_bandwidth(BW);
+        sink.configure_pipeline(&Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs })
+            .expect("configure");
+        let mut null = NullOut;
+        let start = std::time::Instant::now();
+        for i in 0u8..N {
+            let payload = vec![i; PAYLOAD];
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                timing: FrameTiming { pts_ns: i as u64 * 10_000_000, ..FrameTiming::default() },
+                sequence: i as u64,
+                meta: Default::default(),
+            };
+            // No inter-frame sleep: the pacing is the only thing slowing this down.
+            if sink.process(PipelinePacket::DataFrame(frame), &mut null).await.is_err() {
+                break;
+            }
+        }
+        start.elapsed()
+    };
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(&mut src, &mut sink_collect, &clock, LatencyProfile::Live.link_capacity()),
+    );
+
+    let (recv_res, elapsed) = tokio::join!(recv, caller);
+
+    let stats = recv_res.expect("listener finishes within 15s").expect("receive pipeline ok");
+    assert_eq!(stats.frames_emitted, N as u64, "all paced packets delivered");
+
+    // Expected ~ N*PAYLOAD/BW seconds. Assert a lower bound (pacing cannot send
+    // faster than the cap); a generous 60% margin absorbs scheduler slack.
+    let expected_ms = (N as u64 * PAYLOAD as u64 * 1000) / BW;
+    assert!(
+        elapsed.as_millis() as u64 >= expected_ms * 6 / 10,
+        "pacing held egress near the {BW} B/s cap (elapsed {elapsed:?}, expected ~{expected_ms}ms)",
+    );
+}

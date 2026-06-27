@@ -25,7 +25,7 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::srt::{self, SrtHandshake, SrtSender};
+use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
 
 /// Max SRT payload bytes per packet: 7 x 188-byte TS packets, the SRT default.
@@ -55,6 +55,11 @@ pub struct SrtSink {
     rekey_interval: Option<u64>,
     packets_since_rekey: u64,
     rekeys: u64,
+    /// Live-mode congestion control (output pacing); `None` sends as fast as the
+    /// pipeline produces.
+    cc: Option<LiveCc>,
+    /// Earliest monotonic microsecond time the next packet may go (pacing cursor).
+    next_send_us: u64,
     socket: Option<tokio::net::UdpSocket>,
     sender: Option<SrtSender>,
     configured: bool,
@@ -76,6 +81,8 @@ impl SrtSink {
             rekey_interval: None,
             packets_since_rekey: 0,
             rekeys: 0,
+            cc: None,
+            next_send_us: 0,
             socket: None,
             sender: None,
             configured: false,
@@ -129,6 +136,16 @@ impl SrtSink {
     /// Number of mid-stream rekeys performed.
     pub fn rekeys(&self) -> u64 {
         self.rekeys
+    }
+
+    /// Enable live-mode congestion control (output pacing). A positive
+    /// `max_bytes_per_sec` caps the egress at that bandwidth; `0` follows the
+    /// measured input rate plus a retransmit headroom, so SRT does not
+    /// burst-flood the path. Off by default (the pipeline's own cadence paces
+    /// the stream).
+    pub fn with_max_bandwidth(mut self, max_bytes_per_sec: u64) -> Self {
+        self.cc = Some(LiveCc::new(max_bytes_per_sec, CC_DEFAULT_OVERHEAD));
+        self
     }
 
     pub fn frames_sent(&self) -> u64 {
@@ -274,8 +291,23 @@ impl AsyncElement for SrtSink {
                         }
                     }
                     let n_packets = sent.len() as u64;
-                    let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                     for pkt in &sent {
+                        // Congestion control: pace each packet to the target rate
+                        // so the egress does not burst-flood the path.
+                        if let Some(cc) = self.cc.as_mut() {
+                            let now = g2g_core::metrics::monotonic_ns() / 1000;
+                            if now < self.next_send_us {
+                                tokio::time::sleep(core::time::Duration::from_micros(
+                                    self.next_send_us - now,
+                                ))
+                                .await;
+                            }
+                            let sent_at = g2g_core::metrics::monotonic_ns() / 1000;
+                            cc.on_packet(pkt.len(), sent_at);
+                            let period = cc.snd_period_us(pkt.len());
+                            self.next_send_us = sent_at.max(self.next_send_us).saturating_add(period);
+                        }
+                        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                         socket.send(pkt).await.map_err(io_err)?;
                         self.packets_sent += 1;
                     }
