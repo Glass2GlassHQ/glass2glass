@@ -44,9 +44,14 @@ async fn s16_source_records_as_float32_through_converter() {
     assert_eq!(read_u16(&data, 20), 3, "format tag is float");
     assert_eq!(read_u16(&data, 22), 2, "stereo");
     assert_eq!(read_u16(&data, 34), 32, "32-bit samples");
-    // 100 ms stereo f32 = 48000 * 0.1 * 2 ch * 4 bytes.
+    // 100 ms stereo f32 = 48000 * 0.1 * 2 ch * 4 bytes. The float header is the
+    // conformant 58-byte form (fmt18 + `fact` chunk), so assert the `data` chunk
+    // payload rather than the total length, which is header-layout dependent.
     let expected = (48_000f64 * 0.1) as usize * 2 * 4;
-    assert_eq!(data.len(), 44 + expected, "float track length");
+    let data_pos = data.windows(4).position(|w| w == b"data").expect("data chunk");
+    let data_size = u32::from_le_bytes(data[data_pos + 4..data_pos + 8].try_into().unwrap());
+    assert_eq!(data_size as usize, expected, "float track length");
+    assert_eq!(data.len(), data_pos + 8 + expected, "no trailing bytes past data");
     let _ = std::fs::remove_file(&path);
 }
 
