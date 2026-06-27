@@ -226,8 +226,9 @@ impl FfmpegAacEnc {
             let mut packet = Packet::empty();
             match enc.receive_packet(&mut packet) {
                 Ok(()) => {
-                    let pts_units = packet.pts().unwrap_or(0).max(0) as u64;
-                    let pts_ns = pts_units * 1_000_000_000 / self.sample_rate.max(1) as u64;
+                    let pts_units = packet.pts().unwrap_or(0).max(0) as u128;
+                    let pts_ns =
+                        (pts_units * 1_000_000_000 / self.sample_rate.max(1) as u128) as u64;
                     if let Some(data) = packet.data() {
                         out.push((adts_wrap(data, sr_index, self.channels), pts_ns));
                     }
