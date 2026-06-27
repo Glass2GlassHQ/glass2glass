@@ -556,7 +556,9 @@ fn parse_block(
     };
     let codec = t.codec;
     let default_duration_ns = t.default_duration_ns;
-    let abs = cluster_ts as i64 + rel as i64;
+    // `cluster_ts` is an untrusted u64; cast-to-i64 can be negative and the add
+    // can overflow, so saturate (the `abs < 0` clamp below still maps it to 0).
+    let abs = (cluster_ts as i64).saturating_add(rel as i64);
     let pts_ns = if abs < 0 { 0 } else { (abs as u64).saturating_mul(scale) };
     let keyframe = flags & 0x80 != 0;
 
@@ -636,7 +638,9 @@ fn split_ebml(data: &[u8], count: usize) -> Option<Vec<&[u8]>> {
             cur = raw as i64;
         } else {
             let bias = (1i64 << (7 * len - 1)) - 1;
-            cur += raw as i64 - bias;
+            // Untrusted deltas accumulated over up to 255 laces can overflow i64;
+            // a malformed lacing fails the parse rather than panicking in debug.
+            cur = cur.checked_add(raw as i64 - bias)?;
         }
         if cur < 0 {
             return None;
@@ -1267,6 +1271,31 @@ mod tests {
         assert_eq!(frames.len(), 2, "fixed lacing splits into two frames");
         assert_eq!(frames[0].data, vec![0xAA]);
         assert_eq!(frames[1].data, vec![0xBB]);
+    }
+
+    #[test]
+    fn huge_cluster_timestamp_does_not_overflow() {
+        // An untrusted Cluster Timestamp >= 2^63 casts to a negative i64; adding a
+        // negative block rel must not overflow the abs-timestamp add (a debug
+        // panic). It saturates and the existing `< 0` clamp maps it to pts 0.
+        let tracks =
+            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP8", Some((16, 16)), None));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[
+                elem(&[0xE7], &uint_body(1u64 << 63)),
+                elem(&[0xA3], &block_body(1, -1, true, &[0xDD])),
+            ]
+            .concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 1, "the block still emits");
+        assert_eq!(frames[0].pts_ns, 0, "the overflowing timestamp clamps to 0");
     }
 
     #[test]
