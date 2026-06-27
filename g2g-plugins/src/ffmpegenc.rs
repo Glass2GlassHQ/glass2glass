@@ -97,10 +97,12 @@ pub struct FfmpegH264Enc {
     encoder: Option<VideoEncoder>,
     /// Source PTS per input frame number, indexed by the frame counter we stamp
     /// as the encoder PTS. With `max_b_frames = 0` output is in order, but the
-    /// map survives any reorder and recovers the original nanosecond PTS.
-    pts_by_frameno: Vec<u64>,
+    /// map survives any reorder and recovers the original nanosecond PTS. Keyed
+    /// by frame number and drained on output, so it stays bounded by the
+    /// encoder's lookahead instead of growing for the stream lifetime.
+    pts_by_frameno: alloc::collections::BTreeMap<u64, u64>,
     /// Monotonic input frame counter, stamped as each frame's encoder PTS (in
-    /// `time_base` units) and used as the index into `pts_by_frameno`.
+    /// `time_base` units) and used as the key into `pts_by_frameno`.
     frame_no: i64,
     emitted: u64,
     caps_sent: bool,
@@ -142,7 +144,7 @@ impl FfmpegH264Enc {
             framerate: Rate::Any,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             encoder: None,
-            pts_by_frameno: Vec::new(),
+            pts_by_frameno: alloc::collections::BTreeMap::new(),
             frame_no: 0,
             emitted: 0,
             caps_sent: false,
@@ -294,9 +296,8 @@ impl FfmpegH264Enc {
                 (*frame.as_mut_ptr()).pict_type = ffmpeg::ffi::AVPictureType::AV_PICTURE_TYPE_I;
             }
         }
-        // pts_by_frameno is indexed by the frame counter we stamped as the PTS.
-        debug_assert_eq!(self.pts_by_frameno.len() as i64, frameno);
-        self.pts_by_frameno.push(pts_ns);
+        // pts_by_frameno is keyed by the frame counter we stamped as the PTS.
+        self.pts_by_frameno.insert(frameno as u64, pts_ns);
         self.frame_no += 1;
 
         let encoder = self.encoder.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -325,7 +326,7 @@ impl FfmpegH264Enc {
                 Ok(()) => {
                     let pts_ns = match packet.pts() {
                         Some(idx) if idx >= 0 => {
-                            self.pts_by_frameno.get(idx as usize).copied().unwrap_or(0)
+                            self.pts_by_frameno.remove(&(idx as u64)).unwrap_or(0)
                         }
                         _ => 0,
                     };
