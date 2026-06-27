@@ -455,14 +455,12 @@ the remaining items extend them. Highest leverage first:
 
 A `/code-audit-pro` pass (2026-06) fixed runtime/leak/dedup findings across the
 runtime, parsers, mux/demux, RTP/network, codecs, platform codecs, the g2g-core
-negotiation core, the untrusted demuxers, and the g2g-ml inference path (model
-shape / tensor-element / GPU-buffer arithmetic folded with checked ops). The
-remaining unaudited area:
-
-1. **g2g-python hosting boundary** (FFI + GIL + lifetime correctness).
-
-Lower-priority hardening, flagged but not yet fixed (no clear untrusted-file
-path, broader policy call):
+negotiation core, the untrusted demuxers, the g2g-ml inference path (model
+shape / tensor-element / GPU-buffer arithmetic folded with checked ops), and the
+g2g-python hosting boundary (zero-copy frame-buffer retention now caught by an
+export counter; PyTransform worker re-spawn guarded). The audit areas are now
+covered; what remains is lower-priority hardening flagged but not yet fixed (no
+clear untrusted-file path, or a broader policy call):
 
 - Bound caps geometry at `configure_pipeline` so a malformed container's huge
   width/height fails fast instead of driving a multi-GiB GPU allocation
@@ -470,6 +468,11 @@ path, broader policy call):
   `u32` shape products are still unchecked).
 - `fetch.rs` uncapped HTTP body read (DASH/HLS DoS, network-layer).
 - `mp4` `parse_progressive` allocation amplification (bounded by file size).
+- Free-threaded (PEP 703) build: `host.rs` `MetaSink` uses a `RefCell` that only
+  the GIL serializes today; it (and the `unsendable` pyclasses) would need a
+  `Mutex` / re-audit before the "no code change" free-threaded claim holds.
+- `g2g-pyapi` `Pipeline::wait` collapses the underlying `G2gError` / worker
+  panic into an opaque "pipeline errored" (safe, but lossy diagnostics).
 
 ## Documentation
 
