@@ -586,140 +586,10 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
     }
 }
 
-/// Copy a decoded NV12 frame's two planes from CUDA device memory into the
-/// shared image's CUDA array, device->device (no PCIe). The Y plane fills rows
-/// `0..height`, the interleaved CbCr plane rows `height..height + height/2`,
-/// matching the packed-NV12 layout `WgpuPreprocess` samples.
-///
-/// Runs in `context` (the decoder's `CUcontext`, where the plane pointers are
-/// valid), imports the shared FD there, maps the array, copies, synchronizes,
-/// and tears down the CUDA import (the Vulkan allocation persists). Consumes
-/// `shared.fd`.
-///
-/// # Safety
-/// `shared` must come from [`export_nv12_image`] (matching `width`/`height`) and
-/// not yet be imported. The plane pointers / pitches must describe valid NV12
-/// device memory in `context`.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn cuda_copy_nv12_planes(
-    shared: &SharedNv12Image,
-    context: u64,
-    luma_ptr: u64,
-    luma_pitch: u32,
-    chroma_ptr: u64,
-    chroma_pitch: u32,
-    width: u32,
-    height: u32,
-) -> Result<(), G2gError> {
-    use cuda_ffi as c;
-    let w = width as usize;
-    let h = height as usize;
-
-    // SAFETY: CUDA Driver API sequence in the decoder's context; the import and
-    // mapping are destroyed before return.
-    unsafe {
-        check(c::cuInit(0))?;
-        check(c::cuCtxPushCurrent(context as c::CuContext))?;
-
-        let import_desc = c::CudaExternalMemoryHandleDesc {
-            type_: c::CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
-            _pad: 0,
-            handle_fd: shared.fd,
-            _handle_rest: [0; 12],
-            size: shared.size,
-            flags: c::CUDA_EXTERNAL_MEMORY_DEDICATED,
-            reserved: [0; 16],
-        };
-        let mut ext_mem: c::CuExternalMemory = core::ptr::null_mut();
-        let mut result = check(c::cuImportExternalMemory(&mut ext_mem, &import_desc));
-
-        let tex_h = nv12_texture_height(height) as usize;
-        let mipmap_desc = c::CudaExternalMemoryMipmappedArrayDesc {
-            offset: 0,
-            array_desc: c::CudaArray3dDescriptor {
-                width: w,
-                height: tex_h,
-                depth: 0,
-                format: c::CU_AD_FORMAT_UNSIGNED_INT8,
-                num_channels: 1,
-                flags: 0,
-            },
-            num_levels: 1,
-            reserved: [0; 16],
-        };
-        let mut mipmap: c::CuMipmappedArray = core::ptr::null_mut();
-        let mut array: c::CuArray = core::ptr::null_mut();
-        if result.is_ok() {
-            result =
-                check(c::cuExternalMemoryGetMappedMipmappedArray(&mut mipmap, ext_mem, &mipmap_desc));
-        }
-        if result.is_ok() {
-            result = check(c::cuMipmappedArrayGetLevel(&mut array, mipmap, 0));
-        }
-        if result.is_ok() {
-            // Y plane -> array rows 0..h.
-            let luma = c::CudaMemcpy2D {
-                src_x_in_bytes: 0,
-                src_y: 0,
-                src_memory_type: c::CU_MEMORYTYPE_DEVICE,
-                src_host: core::ptr::null(),
-                src_device: luma_ptr,
-                src_array: core::ptr::null_mut(),
-                src_pitch: luma_pitch as usize,
-                dst_x_in_bytes: 0,
-                dst_y: 0,
-                dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
-                dst_host: core::ptr::null_mut(),
-                dst_device: 0,
-                dst_array: array,
-                dst_pitch: 0,
-                width_in_bytes: w,
-                height: h,
-            };
-            result = check(c::cu_memcpy_2d(&luma));
-            if result.is_ok() {
-                // Interleaved CbCr plane (w bytes/row, h/2 rows) -> array rows h..
-                let chroma = c::CudaMemcpy2D {
-                    src_x_in_bytes: 0,
-                    src_y: 0,
-                    src_memory_type: c::CU_MEMORYTYPE_DEVICE,
-                    src_host: core::ptr::null(),
-                    src_device: chroma_ptr,
-                    src_array: core::ptr::null_mut(),
-                    src_pitch: chroma_pitch as usize,
-                    dst_x_in_bytes: 0,
-                    dst_y: h,
-                    dst_memory_type: c::CU_MEMORYTYPE_ARRAY,
-                    dst_host: core::ptr::null_mut(),
-                    dst_device: 0,
-                    dst_array: array,
-                    dst_pitch: 0,
-                    width_in_bytes: w,
-                    height: h / 2,
-                };
-                result = check(c::cu_memcpy_2d(&chroma));
-            }
-            if result.is_ok() {
-                result = check(c::cuCtxSynchronize());
-            }
-        }
-
-        if !mipmap.is_null() {
-            c::cuMipmappedArrayDestroy(mipmap);
-        }
-        if !ext_mem.is_null() {
-            c::cuDestroyExternalMemory(ext_mem);
-        }
-        let mut popped: c::CuContext = core::ptr::null_mut();
-        let _ = c::cuCtxPopCurrent(&mut popped);
-        result
-    }
-}
-
 /// A persistent CUDA import of a [`SharedNv12Image`], mapped as a CUDA array
 /// ready for `cuMemcpy2D`. Created once per pooled image and reused across frames
 /// via [`cuda_copy_planes_into`], so the per-frame `cuImportExternalMemory` + map
-/// + teardown the v1 path paid (in [`cuda_copy_nv12_planes`]) is amortized.
+/// + teardown a non-pooled import would pay is amortized.
 ///
 /// Handles are stored as integers (not raw pointers), so the mapping is `Send`,
 /// the same contract as [`g2g_core::memory::OwnedCudaBuffer`]: the CUDA context
@@ -837,8 +707,8 @@ pub unsafe fn import_image_into_cuda(
 }
 
 /// Copy a decoded NV12 frame's two planes device->device into a persistently
-/// imported [`CudaImageMapping`]'s array (the pooled-reuse counterpart of
-/// [`cuda_copy_nv12_planes`], which imports + tears down every call). The Y plane
+/// imported [`CudaImageMapping`]'s array (the pooled-reuse counterpart of a
+/// per-frame import path, which would import + tear down every call). The Y plane
 /// fills array rows `0..height`, the interleaved CbCr rows `height..`.
 ///
 /// # Safety
