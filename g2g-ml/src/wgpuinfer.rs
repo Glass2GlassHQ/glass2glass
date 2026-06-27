@@ -449,13 +449,25 @@ impl WgpuInference {
         if cin == 0 || cout == 0 || kh == 0 || kw == 0 || height == 0 || width == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if bias.len() != cout as usize
-            || weights.len() != (cout * cin * kh * kw) as usize
-        {
+        // The dims may come from an untrusted safetensors shape
+        // (`conv2d_from_safetensors`), so fold every element-count product with
+        // checked u64 arithmetic: an overflow fails the build instead of
+        // panicking (debug) or wrapping to a value that admits a mismatched
+        // weight buffer or undersizes the GPU buffers / dispatch count.
+        let prod = |dims: &[u32]| -> Option<usize> {
+            dims.iter()
+                .try_fold(1u64, |acc, &d| acc.checked_mul(d as u64))
+                .and_then(|n| usize::try_from(n).ok())
+        };
+        let weight_len = prod(&[cout, cin, kh, kw]).ok_or(G2gError::CapsMismatch)?;
+        if bias.len() != cout as usize || weights.len() != weight_len {
             return Err(G2gError::CapsMismatch);
         }
-        let in_elems = (cin * height * width) as usize;
-        let out_elems = (cout * height * width) as usize;
+        let in_elems = prod(&[cin, height, width]).ok_or(G2gError::CapsMismatch)?;
+        let out_elems = prod(&[cout, height, width]).ok_or(G2gError::CapsMismatch)?;
+        let in_bytes = in_elems.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+        let out_bytes = out_elems.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+        let dispatch_n = u32::try_from(out_elems).map_err(|_| G2gError::CapsMismatch)?;
         let dims = [cin, cout, kh, kw, height, width];
         let mut meta = vec![0u8; 32];
         for (i, d) in dims.iter().enumerate() {
@@ -466,9 +478,9 @@ impl WgpuInference {
             out_shape: vec![1, cout, height, width],
             weights,
             bias,
-            in_bytes: in_elems * 4,
-            out_bytes: out_elems * 4,
-            dispatch_n: out_elems as u32,
+            in_bytes,
+            out_bytes,
+            dispatch_n,
             shader: CONV_SHADER,
             meta,
             configured: false,

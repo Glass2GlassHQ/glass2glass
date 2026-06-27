@@ -693,3 +693,25 @@ fn pool_validates_window_and_dims() {
     assert_eq!(WgpuInference::avgpool2d(3, 2, 4, 2, 2, 0, 1).err(), Some(G2gError::CapsMismatch));
     assert_eq!(WgpuInference::relu(0, 2, 4).err(), Some(G2gError::CapsMismatch));
 }
+
+#[test]
+fn conv2d_overflowing_dims_fail_loud_not_panic() {
+    // conv2d dims can come from an untrusted safetensors shape. A kernel whose
+    // element-count product overflows must return CapsMismatch, not panic
+    // (debug) or wrap to a value that admits a short weight buffer / undersized
+    // GPU buffers. 65536^4 overflows u64, so the weight-length fold rejects it.
+    assert_eq!(
+        WgpuInference::conv2d(0x10000, 0x10000, 0x10000, 0x10000, 0x10000, 0x10000, vec![], vec![])
+            .err(),
+        Some(G2gError::CapsMismatch),
+        "overflowing conv2d geometry must fail loud"
+    );
+    // Valid kernel dims but a spatial size whose in/out element count overflows
+    // usize must also fail at the size fold rather than panicking.
+    assert_eq!(
+        WgpuInference::conv2d(3, 3, 3, 3, 0xFFFF_FFFF, 0xFFFF_FFFF, vec![0.0; 81], vec![0.0; 3])
+            .err(),
+        Some(G2gError::CapsMismatch),
+        "overflowing conv2d spatial size must fail loud"
+    );
+}
