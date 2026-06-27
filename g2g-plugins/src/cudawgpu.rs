@@ -383,6 +383,9 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
         check(c::cuDeviceGet(&mut dev, 0))?;
         let mut ctx: c::CuContext = core::ptr::null_mut();
         check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+        // Release the retain on every path: the `?` calls below early-return past
+        // the manual release otherwise, leaking the primary-context reference.
+        let _ctx_release = PrimaryCtxRelease(dev);
         check(c::cuCtxPushCurrent(ctx))?;
 
         let import_desc = c::CudaExternalMemoryHandleDesc {
@@ -485,7 +488,7 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
         c::cuDestroyExternalMemory(ext_mem);
         let mut popped: c::CuContext = core::ptr::null_mut();
         let _ = c::cuCtxPopCurrent(&mut popped);
-        c::cuDevicePrimaryCtxRelease(dev);
+        // `_ctx_release` releases the primary context on scope exit.
 
         result?;
         Ok(ok)
@@ -510,6 +513,9 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
         check(c::cuDeviceGet(&mut dev, 0))?;
         let mut ctx: c::CuContext = core::ptr::null_mut();
         check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+        // Release the retain on every path: the `?` calls below early-return past
+        // the manual release otherwise, leaking the primary-context reference.
+        let _ctx_release = PrimaryCtxRelease(dev);
         check(c::cuCtxPushCurrent(ctx))?;
 
         let import_desc = c::CudaExternalMemoryHandleDesc {
@@ -581,7 +587,7 @@ pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gE
         c::cuDestroyExternalMemory(ext_mem);
         let mut popped: c::CuContext = core::ptr::null_mut();
         let _ = c::cuCtxPopCurrent(&mut popped);
-        c::cuDevicePrimaryCtxRelease(dev);
+        // `_ctx_release` releases the primary context on scope exit.
         result
     }
 }
@@ -641,8 +647,10 @@ pub unsafe fn import_image_into_cuda(
     let w = shared.width as usize;
     let tex_h = nv12_texture_height(shared.height) as usize;
 
-    // SAFETY: CUDA Driver API import sequence in `context`. On error every handle
-    // created so far is destroyed before the context is popped, so nothing leaks.
+    // SAFETY: CUDA Driver API import sequence in `context`. On error every CUDA
+    // handle created so far is destroyed before the context is popped, and the
+    // exported FD is closed (or was already consumed + released by CUDA), so
+    // nothing leaks; the caller still owns `shared`'s Vulkan image / memory.
     unsafe {
         check(c::cuInit(0))?;
         check(c::cuCtxPushCurrent(context as c::CuContext))?;
@@ -688,7 +696,15 @@ pub unsafe fn import_image_into_cuda(
                 c::cuMipmappedArrayDestroy(mipmap);
             }
             if !ext_mem.is_null() {
+                // The import succeeded (it took ownership of the FD) but a later
+                // step failed; destroying the external memory releases the FD.
                 c::cuDestroyExternalMemory(ext_mem);
+            } else {
+                // The import itself failed, so it never took the FD; it is still
+                // ours. Close it here so the caller's `shared` can be discarded
+                // without leaking it (the caller frees only the image / memory).
+                use std::os::fd::FromRawFd;
+                let _ = std::os::fd::OwnedFd::from_raw_fd(shared.fd);
             }
             let mut popped: c::CuContext = core::ptr::null_mut();
             let _ = c::cuCtxPopCurrent(&mut popped);
@@ -860,7 +876,16 @@ impl CudaWgpuPool {
         // FD is consumed by the import, the image/memory by the texture's drop).
         unsafe {
             let shared = export_nv12_image(device, width, height)?;
-            let mapping = import_image_into_cuda(&shared, context)?;
+            let mapping = match import_image_into_cuda(&shared, context) {
+                Ok(m) => m,
+                Err(e) => {
+                    // The import borrowed `shared` and handled its FD on failure;
+                    // free the exported Vulkan image / memory before bailing so
+                    // they do not leak (`shared` has no Drop).
+                    shared.destroy(device);
+                    return Err(e);
+                }
+            };
             let texture = wrap_as_texture(device, shared);
             Ok(PoolEntry { mapping, texture })
         }
