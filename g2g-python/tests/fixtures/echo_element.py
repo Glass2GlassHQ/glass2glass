@@ -31,6 +31,18 @@ class EchoTransform:
         meta.add_object(len(buffers), 0.0, 0.0, 1.0, 1.0, 1.0)
 
 
+class RetainingTransform:
+    """Misbehaves: stashes the frame buffer view on self, so it outlives the
+    g2g_process call. The host must reject this (the retained pointer would
+    dangle once the frame is freed downstream) rather than risk a use-after-free.
+    """
+
+    def g2g_process(self, buf, width, height, fmt, meta):
+        # Retain a writable view past return: this is the contract violation the
+        # host's export-counter guard catches.
+        self.saved = memoryview(buf)
+
+
 class CounterSource:
     """A source: writes its frame index into byte 0, ends after three frames."""
 

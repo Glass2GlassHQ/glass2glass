@@ -86,6 +86,14 @@ type Reply = Result<Vec<Frame>, G2gError>;
 struct FrameBuffer {
     ptr: *mut u8,
     len: usize,
+    /// Outstanding buffer-protocol exports: `__getbuffer__` increments,
+    /// `__releasebuffer__` decrements. The host checks this is back to 0 after
+    /// each `g2g_process` call (see `process_job`): a nonzero count means the
+    /// Python element retained a `memoryview` / numpy view past the call, whose
+    /// raw pointer would dangle once the frame is freed downstream, so the host
+    /// fails the frame loud instead of letting a later access become a
+    /// use-after-free. Only touched on the worker thread, so a `Cell` suffices.
+    exports: core::cell::Cell<isize>,
 }
 
 #[pymethods]
@@ -102,8 +110,8 @@ impl FrameBuffer {
         // `PyBuffer_FillInfo` increfs the exporter (`slf`) into `view->obj`, so
         // the `FrameBuffer` (and thus the validity guarantee on `ptr`) outlives
         // the view; CPython decrefs on release. `ptr`/`len` describe the worker
-        // thread's owned frame slice, alive for the whole call, and the Python
-        // contract forbids retaining the buffer past `g2g_process`'s return.
+        // thread's owned frame slice, alive for the whole call; the export
+        // counter below enforces that no view survives past the call.
         let ret = unsafe {
             ffi::PyBuffer_FillInfo(
                 view,
@@ -117,13 +125,15 @@ impl FrameBuffer {
         if ret == -1 {
             Err(PyErr::take(slf.py()).unwrap_or_else(|| PyBufferError::new_err("fill failed")))
         } else {
+            slf.exports.set(slf.exports.get() + 1);
             Ok(())
         }
     }
 
     unsafe fn __releasebuffer__(&self, _view: *mut ffi::Py_buffer) {
-        // Nothing allocated in `__getbuffer__` beyond the exporter refcount,
-        // which CPython manages; release is a no-op.
+        // Balance the count `__getbuffer__` raised; nothing else was allocated
+        // (the exporter refcount is CPython's to manage).
+        self.exports.set(self.exports.get() - 1);
     }
 }
 
@@ -403,28 +413,40 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     let produced = (|| -> PyResult<bool> {
         let buffers: Vec<Py<FrameBuffer>> = spans
             .iter()
-            .map(|&(ptr, len)| Py::new(py, FrameBuffer { ptr, len }))
+            .map(|&(ptr, len)| Py::new(py, FrameBuffer { ptr, len, exports: core::cell::Cell::new(0) }))
             .collect::<PyResult<_>>()?;
         let bound = instance.bind(py);
         let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
-        match job.kind {
+        // Pass cloned handles into the call and keep `buffers` so the export
+        // counters can be inspected after it returns.
+        let produced = match job.kind {
             JobKind::Batch => {
                 let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
                 bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
-                Ok(true)
+                true
             }
             JobKind::Transform => {
-                let buffer = buffers.into_iter().next().expect("single job has one frame");
+                let buffer = buffers.first().expect("single job has one frame").clone_ref(py);
                 bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-                Ok(true)
+                true
             }
             JobKind::Produce => {
-                let buffer = buffers.into_iter().next().expect("produce job has one frame");
+                let buffer = buffers.first().expect("produce job has one frame").clone_ref(py);
                 let ret =
                     bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-                ret.extract::<bool>()
+                ret.extract::<bool>()?
             }
+        };
+        // The zero-copy views must not outlive the call: a retained
+        // `memoryview` / numpy view holds a pointer that dangles once the frame
+        // is freed downstream. A nonzero export count means the element kept one,
+        // so fail this frame loud rather than risk a use-after-free next frame.
+        if buffers.iter().any(|b| b.borrow(py).exports.get() != 0) {
+            return Err(PyBufferError::new_err(
+                "g2g_process retained a frame buffer view past return (use-after-free risk)",
+            ));
         }
+        Ok(produced)
     })();
 
     // Drain the staged results regardless (so the field is always read);
