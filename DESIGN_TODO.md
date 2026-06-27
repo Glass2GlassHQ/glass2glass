@@ -124,8 +124,8 @@ leverage first:
 
 ## Egress / transports
 
-- **SRT:** congestion control, AES-256 + key rotation, libsrt/ffmpeg real-peer
-  interop. (TSBPD delivery timing landed: `SrtReceiver::set_tsbpd`.)
+- **SRT:** congestion control, key rotation, libsrt/ffmpeg real-peer interop.
+  (TSBPD delivery timing + AES-256 (`SrtSink::with_aes256`) landed.)
 - **RTMP:** the HMAC-digest handshake some CDNs require, multiple streams,
   server-acknowledgement back-pressure.
 - **RTP FEC:** FlexFEC (RFC 8627). (Interleaved column ULPFEC for burst loss

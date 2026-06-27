@@ -158,6 +158,36 @@ async fn encrypted_stream_round_trips_through_lossy_proxy() {
 }
 
 #[tokio::test]
+async fn aes256_encrypted_stream_round_trips() {
+    // AES-256 (opt-in on the caller): the key size rides in the KM KLen field, so
+    // the listener recovers a 256-bit key from the handshake with no extra config
+    // and the payloads decrypt to their original tags. Direct connection (the KM
+    // exchange + AES-256 CTR is the unit under test, not loss recovery).
+    const N: u8 = 10;
+
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+
+    let mut src =
+        SrtSrc::from_socket(listener_std).unwrap().with_frame_limit(N as u64).with_passphrase(PASS);
+    let mut sink_collect = TagSink::default();
+    let clock = ZeroClock;
+
+    let caller = drive_caller(SrtSink::new(listener_addr).with_passphrase(PASS).with_aes256(), N);
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(&mut src, &mut sink_collect, &clock, LatencyProfile::Live.link_capacity()),
+    );
+    let (recv_res, _) = tokio::join!(recv, caller);
+
+    let stats = recv_res.expect("listener finishes within 15s").expect("receive pipeline ok");
+    assert_eq!(stats.frames_emitted, N as u64, "every AES-256 payload delivered");
+    let expected: Vec<u8> = (0..N).collect();
+    assert_eq!(sink_collect.tags, expected, "AES-256 payloads decrypt to the original tags in order");
+}
+
+#[tokio::test]
 async fn wrong_passphrase_fails_to_decrypt() {
     const N: u8 = 6;
 

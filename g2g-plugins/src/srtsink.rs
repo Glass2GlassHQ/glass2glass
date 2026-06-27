@@ -25,7 +25,7 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 use crate::srt::{self, SrtHandshake, SrtSender};
-use crate::srtcrypto::SrtCrypto;
+use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
 
 /// Max SRT payload bytes per packet: 7 x 188-byte TS packets, the SRT default.
 const SRT_PAYLOAD: usize = 1316;
@@ -48,6 +48,7 @@ pub struct SrtSink {
     latency_ms: u16,
     stream_id: Option<String>,
     passphrase: Option<String>,
+    key_size: AesKeySize,
     socket: Option<tokio::net::UdpSocket>,
     sender: Option<SrtSender>,
     configured: bool,
@@ -65,6 +66,7 @@ impl SrtSink {
             latency_ms: DEFAULT_LATENCY_MS,
             stream_id: None,
             passphrase: None,
+            key_size: AesKeySize::Aes128,
             socket: None,
             sender: None,
             configured: false,
@@ -96,6 +98,15 @@ impl SrtSink {
         self
     }
 
+    /// Use AES-256 (instead of the default AES-128) for the stream cipher. The
+    /// key size rides in the KM `KLen` field, so the listener picks it up from
+    /// the handshake with no extra configuration. Only meaningful with a
+    /// passphrase set.
+    pub fn with_aes256(mut self) -> Self {
+        self.key_size = AesKeySize::Aes256;
+        self
+    }
+
     pub fn frames_sent(&self) -> u64 {
         self.frames_sent
     }
@@ -120,11 +131,11 @@ impl SrtSink {
 
         // For an encrypted stream, generate a fresh key + salt, advertise the
         // wrapped key in the handshake KM extension, and arm the sender's cipher.
-        let crypto = self.passphrase.as_ref().map(|_| SrtCrypto::generate());
+        let crypto = self.passphrase.as_ref().map(|_| SrtCrypto::generate(self.key_size));
         let km = crypto
             .as_ref()
             .zip(self.passphrase.as_ref())
-            .map(|(c, pass)| c.build_km(pass));
+            .map(|(c, pass)| c.build_km(pass, KM_KK_EVEN));
 
         let mut hs = SrtHandshake::new_caller(
             CALLER_SOCKET_ID,
