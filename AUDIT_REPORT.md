@@ -27,12 +27,28 @@ CANNOT build here: CUDA / nvdec / cudawgpu / cudaglsink / cudakmssink / glnv12
 camera2src / mediacodec* (no `aarch64-linux-android` target or NDK), ffmpeg
 ffmpeg* (Linux), pipewire (Linux).
 
-## Open findings (8)
+## Resolved after the Windows session (Linux + Android host)
+
+A follow-up pass on a Linux + NVIDIA box (CUDA, ffmpeg, pipewire present) and a
+connected Android device closed the toolchain gap:
+
+- The 8 "compile-unverified" fixes below all build + clippy clean on Linux; the
+  ffmpeg ones pass their tests (199 cases). No regressions.
+- Clippy was not run on the Windows host: two committed fixes left `-Werror`
+  clippy regressions (`subparse` needless `Some(?)` `8ef417b`; `h264parse`
+  `u32::MAX` tautology `397025f`) and the `wavsink` conformant-float-header fix
+  left a stale std-gated test (`m34` `62a77ec`). All three fixed.
+- `mediacodec_wgpu` convert leak: RESOLVED (`dfe7095`), on-device validated.
+- camera2src / mediacodecdec packer dedup: RESOLVED (`d577173`), on-device
+  validated. (The MediaCodec queue/poll skeleton dedup is still open.)
+
+## Open findings
 
 ### Committed, compile-unverified here (low risk)
 
 Single-file logic / arithmetic / dead-code changes that preserve the
-non-error-path behavior; they need a Linux/macOS build to confirm they compile.
+non-error-path behavior. NOTE: all confirmed to compile + clippy clean on a
+Linux + NVIDIA host in the follow-up pass; the macOS `vt*` two still need a Mac.
 
 | Finding | Commit |
 | :--- | :--- |
@@ -77,21 +93,12 @@ wiring. Exact fixes:
   (`eglDestroySurface` / `eglDestroyContext` / `eglTerminate`), or hold them in a
   guard dropped when the worker loop exits.
 
-- **mediacodec_wgpu convert leak** (`mediacodec_wgpu.rs:1041`): in `convert()`,
-  the input Vulkan image, its memory, and the later views leak if
-  `allocate_memory` / `bind_image_memory` / view-create / fence-wait fails before
-  they reach the ring slot that owns them. Fix: a scope guard that destroys
-  whatever has been created, disarmed once ownership transfers to the ring slot.
-
 - **camera2src / mediacodecdec dedup** (`camera2src.rs:433`,
-  `mediacodecdec.rs:695`): the `YUV_420_888 -> NV12` packer is byte-identical,
-  differing only in the return wrapper. Fix: extract
-  `pack_yuv420_to_nv12(img) -> Option<(Vec<u8>, u32, u32)>` into a module gated
-  `#[cfg(any(feature = "camera2", feature = "mediacodec"))]` (same pattern as
-  `worker_ready`), each caller wrapping the result. Also: the MediaCodec
-  queue/poll skeleton + flag constants are duplicated decoder/encoder and fold
-  into the same shared module. Held back because no arm here can compile the
-  wiring.
+  `mediacodecdec.rs:695`): the `YUV_420_888 -> NV12` packer was byte-identical,
+  differing only in the return wrapper. RESOLVED (`d577173`): extracted to
+  `yuv420::pack_yuv420_to_nv12`. The MediaCodec queue/poll skeleton + flag
+  constants are still duplicated decoder/encoder; that larger dedup is left as a
+  follow-up. Validated on device.
 
 - **ffmpegaacenc missing test**: the AAC encode core has no end-to-end test;
   writing one needs a Linux ffmpeg build to run it.
