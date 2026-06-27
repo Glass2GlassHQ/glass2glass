@@ -780,6 +780,44 @@ struct InFlight {
     out_view: vk::ImageView,
 }
 
+/// Scope guard for the transient objects `convert()` creates before they reach
+/// the ring slot / output texture that takes ownership. Armed by default: any
+/// `?` early-return between the first `create_image` and the submit drops it and
+/// frees whatever was created so far. Disarmed once the conversion is submitted
+/// and ownership transfers, so the success path does not double-free. Each field
+/// is set as its object is created; destroying a null handle is a Vulkan no-op,
+/// so the still-null tail is skipped implicitly.
+struct ConvertGuard<'a> {
+    d: &'a ash::Device,
+    in_image: vk::Image,
+    in_mem: vk::DeviceMemory,
+    in_view: vk::ImageView,
+    out_image: vk::Image,
+    out_mem: vk::DeviceMemory,
+    out_view: vk::ImageView,
+    armed: bool,
+}
+
+impl Drop for ConvertGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // SAFETY: each field is either a null handle or a live object created on
+        // `self.d` in `convert`; `self.d` is borrowed from the caller's device
+        // clone (which outlives this guard), and destroying VK_NULL_HANDLE is a
+        // no-op (Vulkan spec), so unset fields are skipped.
+        unsafe {
+            self.d.destroy_image_view(self.in_view, None);
+            self.d.destroy_image_view(self.out_view, None);
+            self.d.destroy_image(self.in_image, None);
+            self.d.destroy_image(self.out_image, None);
+            self.d.free_memory(self.in_mem, None);
+            self.d.free_memory(self.out_mem, None);
+        }
+    }
+}
+
 /// One slot of the conversion ring: its own fence / command buffer / descriptor
 /// set, so a conversion can be in flight here while other slots run.
 #[derive(Debug)]
@@ -1019,6 +1057,18 @@ impl YcbcrToRgba {
     ) -> Result<wgpu::Texture, G2gError> {
         // Cheap handle clone so we can use the device while mutating `self.slots`.
         let d = self.raw.clone();
+        // Frees the import / output objects on any `?` before the submit hands
+        // them to the ring slot and output texture; disarmed once that happens.
+        let mut guard = ConvertGuard {
+            d: &d,
+            in_image: vk::Image::null(),
+            in_mem: vk::DeviceMemory::null(),
+            in_view: vk::ImageView::null(),
+            out_image: vk::Image::null(),
+            out_mem: vk::DeviceMemory::null(),
+            out_view: vk::ImageView::null(),
+            armed: true,
+        };
         let extent = vk::Extent3D { width: self.width, height: self.height, depth: 1 };
         let color_range = vk::ImageSubresourceRange {
             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1056,6 +1106,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.in_image = in_image;
 
             // Import allocation size / memory type were probed once at build time
             // (constant for this stream's format + geometry).
@@ -1074,6 +1125,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.in_mem = in_mem;
             d.bind_image_memory(in_image, in_mem, 0).map_err(gpu_err)?;
 
             let mut conv_for_view =
@@ -1089,6 +1141,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.in_view = in_view;
 
             // ---- output RGBA image (handed to wgpu) ----
             let out_image = d
@@ -1111,6 +1164,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.out_image = out_image;
             let out_reqs = d.get_image_memory_requirements(out_image);
             let out_mt = find_memory_type(
                 &self.mem_props,
@@ -1126,6 +1180,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.out_mem = out_mem;
             d.bind_image_memory(out_image, out_mem, 0).map_err(gpu_err)?;
             let out_view = d
                 .create_image_view(
@@ -1137,6 +1192,7 @@ impl YcbcrToRgba {
                     None,
                 )
                 .map_err(gpu_err)?;
+            guard.out_view = out_view;
 
             // ---- claim a ring slot, reclaiming its previous conversion ----
             let idx = self.next;
@@ -1251,6 +1307,8 @@ impl YcbcrToRgba {
                 fence,
             )
             .map_err(gpu_err)?;
+            // Submitted: the ring slot and the returned texture now own these.
+            guard.armed = false;
             self.slots[idx].in_flight = Some(InFlight { in_image, in_mem, in_view, out_view });
 
             // ---- wrap the output image as a wgpu texture ----
