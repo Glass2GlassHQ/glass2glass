@@ -61,37 +61,41 @@ Linux + NVIDIA host in the follow-up pass; the macOS `vt*` two still need a Mac.
 | glnv12: cache shader locations at link | `b73a32c` |
 | cudawgpu: remove dead `cuda_copy_nv12_planes` | `5a430dd` |
 
-### Documented, not committed (unsafe-FFI cleanup / cross-file move)
+### Documented unsafe-FFI leaks: RESOLVED on the Linux + NVIDIA follow-up
 
-These need the platform toolchain to verify handle cleanup or feature-gated
-wiring. Exact fixes:
+All four built + clippy clean here; nvdec / cuda-gl run their (non-CUDA-driver)
+test suites green. The CUDA-driver round-trip tests (`cudawgpu_spike`) cannot be
+exercised in this session: `cuInit` / `cuDeviceGet` return `CUDA_ERROR_NO_DEVICE`
+on the clean tree too (sandbox device access), so those success paths stay
+compile-verified only.
 
-- **nvdec leak** (`nvdec.rs`): the CUDA context + cuvid ctx-lock are created in
-  `open()` but only owned/freed by `CuvidDecoder` (created lazily on the first
-  decoded picture). If configured but no decoder is ever created, `NvDec::drop`
-  only destroys the parser, leaking both. Fix: in `NvDec::drop`, when
-  `decoder_owner.is_none()`, also `cuvid_ctx_lock_destroy(ctx_lock)` then
-  `cu_ctx_destroy(context)`, mirroring `CuvidDecoder::drop`.
+- **nvdec leak** (`nvdec.rs`): the CUDA context + cuvid ctx-lock, created in
+  `open()` but only owned by the lazily-created `CuvidDecoder`, leaked when
+  configured-but-never-decoded. FIXED: `NvDec::drop` frees them when
+  `decoder_owner.is_none()` (parser destroyed first, so no callback races it).
 
-- **cudawgpu export leak** (`cudawgpu.rs`, `build_entry`): `export_nv12_image`
-  returns a `SharedNv12Image` (Vulkan image/memory/FD) that has no `Drop`. If
-  the following `import_image_into_cuda(&shared, ...)?` fails, `shared` drops
-  without freeing. Fix: match the import result; on `Err`, free the image/memory
-  and close the FD (same ash calls the texture drop callback uses) before
-  returning.
+- **cudawgpu export leak** (`cudawgpu.rs`, `build_entry`): on import failure the
+  exported `SharedNv12Image` (no `Drop`) leaked. FIXED: `build_entry` frees the
+  Vulkan image/memory on `Err`; `import_image_into_cuda` closes the exported FD
+  on its own failure path (or CUDA already released it after a successful import).
 
-- **cudawgpu primary-ctx leak** (`cudawgpu.rs:372` and the sibling at `:512`):
-  `cuDevicePrimaryCtxRetain` is matched by a release later, but the `check(..)?`
-  calls in between early-return past the release, leaking the retain and leaving
-  the context current. Fix: wrap the retain in an RAII guard (e.g.
-  `PrimaryCtxRelease(i32)`) so release runs on every path.
+- **cudawgpu primary-ctx leak** (`cudawgpu.rs`, `cuda_roundtrip_check` +
+  `cuda_fill_xor_pattern`): the `?` calls after `cuDevicePrimaryCtxRetain`
+  early-returned past the manual release. FIXED: the existing `PrimaryCtxRelease`
+  RAII guard now covers both, so the retain is released on every path.
 
-- **cudaglsink EGL leak** (`cudaglsink.rs:292`): a mid-stream resolution change
-  calls `shutdown()` to respawn the worker, but the worker's EGL
-  display/context/surface are not destroyed on exit, so each resize leaks an EGL
-  context + surface. Fix: destroy them in the worker terminate path
-  (`eglDestroySurface` / `eglDestroyContext` / `eglTerminate`), or hold them in a
-  guard dropped when the worker loop exits.
+- **cudaglsink EGL leak** (`cudaglsink.rs`): a mid-stream resize respawns the
+  worker but the EGL display/context/surface were never destroyed. FIXED: a
+  `Drop for WorkerState` releases the current context then destroys the surface /
+  context / display (ordered before `_wl_egl`'s backing window drops).
+
+### Found + fixed in the follow-up (not from the original audit)
+
+- **decoder-feature test gating** (`m193`/`m194`/`m195`/`m196`): the
+  "no route without a decoder" tests were gated `not(any(ffmpeg, vaapi))` but
+  `nvdec` (Linux) and `mediacodecdec` (Android) also register an H.264 -> raw
+  route, so the assertions falsely failed under those features. Widened the gates
+  (and the dependent helper / import gates) to the full decoder-feature set.
 
 - **camera2src / mediacodecdec dedup** (`camera2src.rs:433`,
   `mediacodecdec.rs:695`): the `YUV_420_888 -> NV12` packer was byte-identical,
