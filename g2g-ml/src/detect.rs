@@ -188,8 +188,15 @@ impl AsyncElement for DetectionPostprocess {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let bytes = slice.as_slice();
-                    let expected = self.channels * self.anchors * 4;
-                    if bytes.len() != expected {
+                    // channels/anchors come from the upstream tensor caps (model
+                    // output shape), so fold with checked_mul: an overflowing
+                    // product fails the length check instead of panicking (debug)
+                    // or wrapping to a small value that admits a bogus frame.
+                    let expected = self
+                        .channels
+                        .checked_mul(self.anchors)
+                        .and_then(|n| n.checked_mul(4));
+                    if expected != Some(bytes.len()) {
                         return Err(G2gError::CapsMismatch);
                     }
                     let values: Vec<f32> = bytes
@@ -339,6 +346,24 @@ mod tests {
         det.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
         let meta = sink.last.expect("empty AnalyticsMeta still attached");
         assert_eq!(meta.detections().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn overflowing_shape_rejected_not_panicked() {
+        // A model output shape whose channels*anchors*4 overflows usize must fail
+        // the length check (CapsMismatch), not panic (debug) or wrap to a small
+        // value that admits a bogus frame.
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.configure_pipeline(&tensor_caps(u32::MAX, u32::MAX)).unwrap();
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 16].into_boxed_slice())),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        let mut sink = MetaSink::default();
+        let err = det.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap_err();
+        assert!(matches!(err, G2gError::CapsMismatch));
     }
 
     #[test]
