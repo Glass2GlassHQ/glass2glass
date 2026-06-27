@@ -123,9 +123,14 @@ fn decodebin_uses_the_reflected_container() {
 
 // The contrast that nails it down: without the property, filesrc's MPEG-TS
 // default emits H.264, which the VP9 stub cannot decode, so the same line fails.
-// Only valid without a real H.264 decoder (`ffmpegdec` / `vaapidec` would decode
-// the default and the contrast would not hold).
-#[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
+// Only valid without a real H.264 decoder (`ffmpegdec` / `vaapidec` / `nvdec` /
+// `mediacodecdec` would decode the default and the contrast would not hold).
+#[cfg(not(any(
+    feature = "ffmpeg",
+    feature = "vaapi",
+    feature = "nvdec",
+    feature = "mediacodec"
+)))]
 #[test]
 fn mpegts_default_without_a_matching_decoder_fails() {
     let reg = registry_with_vp9_stub();

@@ -6,7 +6,14 @@
 //! a container all the way to raw, not just an elementary stream.
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{is_raw_video, parse_launch};
+use g2g_core::runtime::is_raw_video;
+// Only the baseline "no decoder" test and the ffmpeg decode test drive a launch
+// line; gate the import to match so it is not unused under another decoder feature.
+#[cfg(any(
+    all(target_os = "linux", feature = "ffmpeg"),
+    not(any(feature = "ffmpeg", feature = "vaapi", feature = "nvdec", feature = "mediacodec"))
+))]
+use g2g_core::runtime::parse_launch;
 use g2g_core::{ByteStreamEncoding, Caps, Dim, Rate};
 use g2g_plugins::registry::default_registry;
 
@@ -39,8 +46,14 @@ fn demuxers_route_containers_to_an_elementary_stream() {
 }
 
 // Only meaningful without an H.264 decoder (the MPEG-TS default stream is H.264);
-// `ffmpegdec` / `vaapidec` would provide the route to raw this asserts is absent.
-#[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
+// any of `ffmpegdec`, `vaapidec`, `nvdec` (Linux) or `mediacodecdec` (Android)
+// would provide the route to raw this asserts is absent.
+#[cfg(not(any(
+    feature = "ffmpeg",
+    feature = "vaapi",
+    feature = "nvdec",
+    feature = "mediacodec"
+)))]
 #[test]
 fn container_without_a_decoder_does_not_reach_raw() {
     // Baseline: the demuxer reaches a compressed stream, but with no decoder

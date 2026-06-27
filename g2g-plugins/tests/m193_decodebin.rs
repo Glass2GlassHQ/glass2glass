@@ -22,6 +22,13 @@ impl PipelineClock for ZeroClock {
     }
 }
 
+// Used by the baseline "no route" test (no decoder feature) and the ffmpeg
+// "routes to raw" test; gate the helper to exactly those builds so it is not
+// dead code under another decoder feature (vaapi / nvdec / mediacodec).
+#[cfg(any(
+    feature = "ffmpeg",
+    not(any(feature = "ffmpeg", feature = "vaapi", feature = "nvdec", feature = "mediacodec"))
+))]
 fn h264_any() -> Caps {
     Caps::CompressedVideo {
         codec: VideoCodec::H264,
@@ -117,9 +124,15 @@ async fn decodebin_without_upstream_fails_loud() {
     assert!(matches!(err, ParseError::DecodebinNoUpstream), "got {err:?}");
 }
 
-// Only meaningful without an H.264 decoder compiled in; `ffmpegdec` / `vaapidec`
-// would (correctly) provide the route this asserts is absent.
-#[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
+// Only meaningful without an H.264 decoder compiled in; any of `ffmpegdec`,
+// `vaapidec`, `nvdec` (Linux) or `mediacodecdec` (Android) would (correctly)
+// provide the route this asserts is absent.
+#[cfg(not(any(
+    feature = "ffmpeg",
+    feature = "vaapi",
+    feature = "nvdec",
+    feature = "mediacodec"
+)))]
 #[test]
 fn baseline_registry_has_no_route_from_h264_to_raw() {
     // The baseline build registers parsers as auto-plug candidates but no decoder

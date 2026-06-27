@@ -100,12 +100,27 @@ fn no_decoder_feature_fails_loud() {
     let line = "uridecodebin uri=file:///clip.mp4 ! fakesink";
     match parse_launch(&reg, line) {
         // Baseline build: no decoder, must fail loud.
-        #[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
+        #[cfg(not(any(
+            feature = "ffmpeg",
+            feature = "vaapi",
+            feature = "nvdec",
+            feature = "mediacodec"
+        )))]
         Ok(_) => panic!("expected NoDecodeChain without a decoder feature"),
-        #[cfg(not(any(feature = "ffmpeg", feature = "vaapi")))]
+        #[cfg(not(any(
+            feature = "ffmpeg",
+            feature = "vaapi",
+            feature = "nvdec",
+            feature = "mediacodec"
+        )))]
         Err(e) => assert!(matches!(e, ParseError::NoDecodeChain(_)), "got {e:?}"),
         // With a real decoder feature on, it resolves instead, also fine.
-        #[cfg(any(feature = "ffmpeg", feature = "vaapi"))]
+        #[cfg(any(
+            feature = "ffmpeg",
+            feature = "vaapi",
+            feature = "nvdec",
+            feature = "mediacodec"
+        ))]
         result => {
             let _ = result;
         }
