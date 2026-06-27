@@ -454,19 +454,22 @@ the remaining items extend them. Highest leverage first:
 ## Code audit follow-up
 
 A `/code-audit-pro` pass (2026-06) fixed runtime/leak/dedup findings across the
-runtime, parsers, mux/demux, RTP/network, codecs, and platform codecs; the
-remaining unaudited areas, highest blast radius first:
+runtime, parsers, mux/demux, RTP/network, codecs, platform codecs, the g2g-core
+negotiation core, the untrusted demuxers, and the g2g-ml inference path (model
+shape / tensor-element / GPU-buffer arithmetic folded with checked ops). The
+remaining unaudited area:
 
-1. **g2g-core caps / solver / autoplug** (`caps.rs`, `solver.rs`, `autoplug.rs`,
-   `graph.rs`, `pool.rs` / `staticpool.rs`, `memory.rs`, `aggregator.rs`,
-   `query.rs`, `segment.rs`, `clock.rs`, `link.rs`, `fanout.rs`): negotiation
-   correctness affects every pipeline.
-2. **g2g-ml inference + pre/post-process** (`burninfer.rs`, `ortinfer.rs`,
-   `wgpuinfer.rs`, `wgpupreprocess.rs`, `postprocess.rs`, `cudatowgpu.rs`):
-   untrusted model I/O, tensor-shape math, GPU buffer sizing.
-3. **Untrusted-input demuxers** not yet deep-read: `mp4box` / `mp4src`,
-   `mkvdemux`, `tsdemux`, deeper `oggdemux`, `dashsrc` / `rtmpsrc`.
-4. **g2g-python hosting boundary** (FFI + GIL + lifetime correctness).
+1. **g2g-python hosting boundary** (FFI + GIL + lifetime correctness).
+
+Lower-priority hardening, flagged but not yet fixed (no clear untrusted-file
+path, broader policy call):
+
+- Bound caps geometry at `configure_pipeline` so a malformed container's huge
+  width/height fails fast instead of driving a multi-GiB GPU allocation
+  (`wgpupreprocess.rs`, and the weightless `wgpuinfer.rs` constructors whose
+  `u32` shape products are still unchecked).
+- `fetch.rs` uncapped HTTP body read (DASH/HLS DoS, network-layer).
+- `mp4` `parse_progressive` allocation amplification (bounded by file size).
 
 ## Documentation
 
