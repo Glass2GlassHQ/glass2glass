@@ -29,16 +29,19 @@ use crate::filesink::io_err;
 use crate::rtcp::{self, RtcpPacket};
 use crate::rtppay::RtpH264Packetizer;
 use crate::rtx;
+use crate::flexfec::FlexFecEncoder;
 use crate::ulpfec::{FecEncoder, InterleavedFecEncoder};
 
-/// FEC mode for the sink: off, single-level (one repair per contiguous group,
-/// recovers one loss per group), or interleaved (column repairs recovering a
-/// burst of consecutive losses).
+/// FEC mode for the sink: off, single-level ULPFEC (one repair per contiguous
+/// group, recovers one loss per group), interleaved ULPFEC (column repairs
+/// recovering a burst), or FlexFEC (RFC 8627, a wide-mask repair on a dedicated
+/// FEC SSRC protecting more than 16 packets).
 #[derive(Debug)]
 enum FecMode {
     None,
     Single(FecEncoder),
     Interleaved(InterleavedFecEncoder),
+    FlexFec(FlexFecEncoder),
 }
 
 /// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
@@ -194,6 +197,15 @@ impl UdpSink {
             fec_payload_type,
             fec_ssrc,
         ));
+        self
+    }
+
+    /// Emit an RFC 8627 FlexFEC repair every `group` media packets on
+    /// `fec_payload_type` / `fec_ssrc` (a dedicated FEC stream). One repair
+    /// protects up to 109 packets via the variable-length mask, beyond ULPFEC's
+    /// 16; recovers a single loss per group at the receiver with no round trip.
+    pub fn with_flexfec(mut self, group: usize, fec_payload_type: u8, fec_ssrc: u32) -> Self {
+        self.fec = FecMode::FlexFec(FlexFecEncoder::new(group, fec_payload_type, fec_ssrc));
         self
     }
 
@@ -376,6 +388,13 @@ impl AsyncElement for UdpSink {
                         FecMode::Interleaved(enc) => {
                             for pkt in &packets {
                                 fec_packets.extend(enc.push(pkt));
+                            }
+                        }
+                        FecMode::FlexFec(enc) => {
+                            for pkt in &packets {
+                                if let Some(repair) = enc.push(pkt) {
+                                    fec_packets.push(repair);
+                                }
                             }
                         }
                     }

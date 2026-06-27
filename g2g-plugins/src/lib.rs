@@ -82,6 +82,10 @@ pub mod rtx;
 // Sans-IO RTP forward error correction (ULPFEC, RFC 5109): XOR repair packets
 // that recover a single per-group loss with no round trip.
 pub mod ulpfec;
+// Sans-IO FlexFEC (RFC 8627): repair packets on a dedicated FEC SSRC with a
+// variable-length mask, protecting more than ULPFEC's 16 packets and enabling
+// 2-D (row + column) recovery of bursts.
+pub mod flexfec;
 // uridecodebin front door: URI-scheme handlers for Registry::build_uridecodebin
 // (file:// -> Mp4Src, udp:// -> UdpSrc, rtsp:// -> RtspSrc, v4l2:// -> V4l2Src),
 // each gated to its source's feature.
