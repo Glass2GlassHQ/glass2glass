@@ -104,6 +104,10 @@ use g2g_core::{
     VideoCodec, RawVideoFormat,
 };
 
+/// Cap on pending input-pts -> arrival entries, so frames the decoder drops
+/// (never echoing their pts back) can't grow the map without bound.
+const MAX_PENDING_ARRIVALS: usize = 1024;
+
 /// Pixel layout emitted on the decoder's output side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -213,7 +217,8 @@ pub struct FfmpegH264Dec {
     input_caps: Option<Caps>,
     /// Map input pts -> input arrival_ns. Survives the B-frame
     /// reordering libavcodec does internally because we key on pts,
-    /// which the codec layer echoes verbatim.
+    /// which the codec layer echoes verbatim. Bounded by
+    /// [`MAX_PENDING_ARRIVALS`] so decoder-dropped frames can't leak.
     pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
     /// `CUcontext` (as `u64`) of the CUDA hwdevice created for the
     /// `NvdecCuda` backend, extracted at `configure_pipeline`. `0` for the
@@ -419,6 +424,12 @@ impl FfmpegH264Dec {
         packet.set_dts(Some(pts_ns as i64));
         if arrival_ns != 0 {
             self.pts_to_arrival.insert(pts_ns, arrival_ns);
+            // A decoder-dropped frame never echoes its pts back, so its entry
+            // would linger; cap the map and evict the oldest, losing only a
+            // latency sample for a frame the decoder discarded.
+            while self.pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
+                self.pts_to_arrival.pop_first();
+            }
         }
 
         let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
@@ -847,6 +858,7 @@ impl AsyncElement for FfmpegH264Dec {
                     if let Some(d) = self.decoder.as_mut() {
                         d.flush();
                     }
+                    self.pts_to_arrival.clear();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                     return Ok(());
