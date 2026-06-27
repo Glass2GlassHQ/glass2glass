@@ -442,9 +442,11 @@ mod tests {
         w.align_to_byte();
         let mut au = vec![0u8, 0, 0, 1, 0x67, 66, 0, 30];
         au.extend_from_slice(&w.into_bytes());
-        // Must not panic; saturated dimensions are clamped.
+        // Must not panic; the dimension *16 saturates to u32::MAX and the even
+        // larger crop then saturating-subtracts it back to 0 (vs an overflow
+        // panic in debug or a wrapped bogus value in release).
         let info = extract_sps_info(&au).expect("parses without overflow");
-        assert!(info.width <= u32::MAX && info.height <= u32::MAX);
+        assert_eq!((info.width, info.height), (0, 0));
     }
 
     /// Build an Annex-B SPS for `width` x `height` carrying a VUI `timing_info`
