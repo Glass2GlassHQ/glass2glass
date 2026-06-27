@@ -21,6 +21,13 @@ pub const TS_PACKET_LEN: usize = 188;
 const SYNC_BYTE: u8 = 0x47;
 const PID_PAT: u16 = 0x0000;
 
+/// Cap on a single reassembled PES payload. A video PES carries no declared
+/// length and is delimited only by the next payload-unit-start, so a stream that
+/// opens a PES and then sends an endless run of continuation packets (never
+/// another start) would grow the buffer without bound. 16 MiB comfortably holds
+/// a large intra access unit while bounding the memory an untrusted stream costs.
+const MAX_PES_BYTES: usize = 16 * 1024 * 1024;
+
 /// PMT `stream_type` for H.264 (AVC) video.
 pub const STREAM_TYPE_H264: u8 = 0x1B;
 /// PMT `stream_type` for H.265 (HEVC) video.
@@ -217,9 +224,15 @@ impl TsDemuxer {
                 pts_90khz: pts,
                 data: es.to_vec(),
             });
-        } else if let Some(p) = self.pending.iter_mut().find(|p| p.pid == pid) {
-            // Continuation of the current PES.
-            p.data.extend_from_slice(payload);
+        } else if let Some(idx) = self.pending.iter().position(|p| p.pid == pid) {
+            // Continuation of the current PES. Drop a PES that overruns the cap
+            // rather than growing the buffer on an endless continuation run; the
+            // next payload-unit-start resyncs a fresh PES on this PID.
+            if self.pending[idx].data.len().saturating_add(payload.len()) > MAX_PES_BYTES {
+                self.pending.swap_remove(idx);
+            } else {
+                self.pending[idx].data.extend_from_slice(payload);
+            }
         }
     }
 
@@ -655,6 +668,20 @@ mod tests {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].data, whole, "ES reassembled across TS packets");
         assert_eq!(units[0].pts_90khz, Some(12_345));
+    }
+
+    #[test]
+    fn oversized_pes_continuation_is_dropped_not_unbounded() {
+        // A video PES has no declared length and is delimited only by the next
+        // payload-unit-start, so an endless continuation run must be bounded: a
+        // continuation that would exceed the cap drops the pending PES rather
+        // than growing its buffer without limit.
+        let mut d = TsDemuxer::new();
+        d.accumulate_pes(0x0100, STREAM_TYPE_H264, &[0u8; 8], true); // open a PES
+        assert_eq!(d.pending.len(), 1, "the PES is open");
+        let huge = alloc::vec![0u8; MAX_PES_BYTES + 1];
+        d.accumulate_pes(0x0100, STREAM_TYPE_H264, &huge, false);
+        assert!(d.pending.is_empty(), "the oversized PES is dropped, not buffered");
     }
 
     #[test]
