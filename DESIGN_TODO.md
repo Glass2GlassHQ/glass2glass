@@ -15,8 +15,8 @@ leverage first:
 1. **Platforms** (largest track). macOS: AVFoundation capture, Core Audio,
    Metal present, plus on-device validation of `VtDecode` / `VtEncode`.
    Android: encode, Camera2, AAudio, Surface present.
-2. **Egress / transports.** SRT TSBPD + congestion control + real-peer interop,
-   AES-256 + key rotation; FlexFEC + multi-level burst FEC.
+2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
+   + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Pure-Rust / wasm codec decode (dav1d/rav1d, vpx) to drop the
    ffmpeg FFI; negotiation backward coupling through `DerivedOutput`; seek depth
    (segment seeks, re-preroll after flushing seek when paused).
@@ -124,8 +124,8 @@ leverage first:
 
 ## Egress / transports
 
-- **SRT:** TSBPD timing, congestion control, AES-256 + key rotation,
-  libsrt/ffmpeg real-peer interop.
+- **SRT:** congestion control, AES-256 + key rotation, libsrt/ffmpeg real-peer
+  interop. (TSBPD delivery timing landed: `SrtReceiver::set_tsbpd`.)
 - **RTMP:** the HMAC-digest handshake some CDNs require, multiple streams,
   server-acknowledgement back-pressure.
 - **RTP FEC:** FlexFEC (RFC 8627); multi-level / interleaved ULPFEC for burst

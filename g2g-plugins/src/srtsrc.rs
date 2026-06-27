@@ -5,8 +5,9 @@
 //! The sans-IO [`srt`](crate::srt) module does the protocol work; this element is
 //! the tokio UDP I/O around it, the receive-side inverse of [`SrtSink`](crate::srtsink).
 //!
-//! Scope: one caller, the listener role, cleartext, NAK-based ARQ. TSBPD timing
-//! and congestion control are follow-ups.
+//! Scope: one caller, the listener role, NAK-based ARQ, and TSBPD delivery
+//! timing (the advertised latency holds packets back into a steady output).
+//! Congestion control is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -36,6 +37,9 @@ const DEFAULT_LATENCY_MS: u16 = 120;
 const RECV_BUF: usize = 2048;
 /// Send a NAK at most this often (ns), so a gap is not re-requested every packet.
 const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
+/// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
+/// datagram arrives; bounds the extra delivery jitter a silent gap can add.
+const TSBPD_WAKE_MS: u64 = 5;
 
 fn ts_bytestream() -> Caps {
     Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
@@ -174,6 +178,9 @@ impl SourceLoop for SrtSrc {
             out.push(PipelinePacket::CapsChanged(ts_bytestream())).await?;
 
             let mut receiver = SrtReceiver::new();
+            // Hold packets back to the advertised latency (TSBPD): the negotiated
+            // delay smooths network jitter into a steady output stream.
+            receiver.set_tsbpd((self.latency_ms as u32) * 1000);
             // Derive the shared stream key from the caller's KM and our passphrase.
             if let Some(pass) = &self.passphrase {
                 let km = hs.peer_km().ok_or(G2gError::Hardware(HardwareError::Other))?;
@@ -185,23 +192,37 @@ impl SourceLoop for SrtSrc {
             let mut emitted = 0u64;
             let mut last_nack_ns = 0u64;
             loop {
-                let (n, from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
-                if from != peer {
-                    continue; // ignore stray datagrams
-                }
+                // A short receive timeout so buffered packets still flush on their
+                // TSBPD schedule when no new datagram arrives (a silent gap).
+                let recv = tokio::time::timeout(
+                    core::time::Duration::from_millis(TSBPD_WAKE_MS),
+                    socket.recv_from(&mut buf),
+                )
+                .await;
                 let now = g2g_core::metrics::monotonic_ns();
+                let now_us = now / 1000;
 
-                if srt::is_control(&buf[..n]) {
-                    match srt::parse_control(&buf[..n]) {
-                        Some(Control::Shutdown) => break,
-                        _ => continue, // keepalive / handshake retries: ignored
+                match recv {
+                    // Timer wake: no datagram, just drain due packets below.
+                    Err(_elapsed) => {}
+                    Ok(r) => {
+                        let (n, from) = r.map_err(io_err)?;
+                        if from == peer {
+                            if srt::is_control(&buf[..n]) {
+                                // Shutdown ends the stream; keepalive / handshake
+                                // retries are ignored.
+                                if let Some(Control::Shutdown) = srt::parse_control(&buf[..n]) {
+                                    break;
+                                }
+                            } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
+                                receiver.on_data(pkt);
+                            }
+                        }
                     }
                 }
-                let Some(pkt) = srt::parse_data_packet(&buf[..n]) else { continue };
-                receiver.on_data(pkt);
 
-                // Deliver everything now in order.
-                for payload in receiver.take_ready() {
+                // Deliver packets whose TSBPD delivery time is due, in order.
+                for payload in receiver.take_ready_at(now_us) {
                     out.push(PipelinePacket::DataFrame(ts_frame(payload, emitted))).await?;
                     emitted += 1;
                     if limit != 0 && emitted >= limit {

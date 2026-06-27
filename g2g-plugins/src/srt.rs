@@ -9,9 +9,8 @@
 //! and the reliability control packets (ACK / NAK loss-report / ACKACK /
 //! KEEPALIVE / SHUTDOWN). The handshake driver and the ARQ reliability layer
 //! that sit on this are [`SrtHandshake`] and [`SrtReceiver`] / [`SrtSender`].
-//! Encryption (AES / KMREQ), full TSBPD timing, and congestion control are
-//! follow-ups; the wire format leaves room for them (the KK / encryption fields
-//! are emitted as cleartext).
+//! Encryption (AES / KMREQ) and TSBPD delivery timing ([`SrtReceiver::set_tsbpd`])
+//! are wired; congestion control is a follow-up.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -702,12 +701,30 @@ impl SrtSender {
 
 /// Sans-IO reliable SRT receiver: reorders by sequence, reports gaps as a NAK
 /// loss list, and delivers payloads in order. Mirrors the RTP jitter design.
+///
+/// TSBPD (Timestamp-Based Packet Delivery) is optional: with [`set_tsbpd`] the
+/// receiver holds each in-order packet until its scheduled delivery time
+/// (anchored so the first packet is released the configured latency after it
+/// becomes deliverable, every later packet inheriting that fixed buffering delay
+/// off the sender timestamps), smoothing network jitter into a steady output.
+/// Without it, [`take_ready`] delivers as soon as a packet is in order.
+///
+/// [`set_tsbpd`]: Self::set_tsbpd
+/// [`take_ready`]: Self::take_ready
 #[derive(Debug)]
 pub struct SrtReceiver {
     next_deliver: u32,
     have_base: bool,
-    pending: alloc::collections::BTreeMap<u32, Vec<u8>>,
+    /// seq -> (payload, sender packet timestamp in microseconds).
+    pending: alloc::collections::BTreeMap<u32, (Vec<u8>, u32)>,
     max_seen: u32,
+    /// TSBPD target latency in microseconds (the held buffering delay); `None`
+    /// delivers in order with no timing gate.
+    tsbpd_latency_us: Option<u32>,
+    /// TSBPD time base: `delivery_time(pkt) = base + pkt.timestamp`. Anchored on
+    /// the first in-order packet to become deliverable. `i64` so the subtraction
+    /// of the anchor timestamp cannot underflow.
+    tsbpd_base_us: Option<i64>,
     /// Stream cipher once the KM is negotiated (encrypted stream); `None` is
     /// cleartext.
     #[cfg(feature = "srt")]
@@ -727,9 +744,20 @@ impl SrtReceiver {
             have_base: false,
             pending: alloc::collections::BTreeMap::new(),
             max_seen: 0,
+            tsbpd_latency_us: None,
+            tsbpd_base_us: None,
             #[cfg(feature = "srt")]
             crypto: None,
         }
+    }
+
+    /// Enable TSBPD with `latency_us` of buffering delay: [`take_ready_at`] then
+    /// gates delivery on each packet's scheduled time instead of releasing it the
+    /// moment it is in order. The advertised handshake latency drives this.
+    ///
+    /// [`take_ready_at`]: Self::take_ready_at
+    pub fn set_tsbpd(&mut self, latency_us: u32) {
+        self.tsbpd_latency_us = Some(latency_us);
     }
 
     /// Decrypt incoming payloads with the negotiated stream key.
@@ -760,14 +788,44 @@ impl SrtReceiver {
                 }
                 p
             };
-            self.pending.entry(pkt.seq).or_insert(payload);
+            self.pending.entry(pkt.seq).or_insert((payload, pkt.timestamp));
         }
     }
 
-    /// Pop every payload now deliverable in order (stops at the first gap).
+    /// Pop every payload now deliverable in order (stops at the first gap). No
+    /// timing gate: use [`take_ready_at`](Self::take_ready_at) for TSBPD.
     pub fn take_ready(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        while let Some(payload) = self.pending.remove(&self.next_deliver) {
+        while let Some((payload, _ts)) = self.pending.remove(&self.next_deliver) {
+            out.push(payload);
+            self.next_deliver = (self.next_deliver + 1) & 0x7FFF_FFFF;
+        }
+        out
+    }
+
+    /// Pop every in-order payload whose TSBPD delivery time is due at `now_us`
+    /// (a monotonic microsecond clock). Without TSBPD configured this is exactly
+    /// [`take_ready`](Self::take_ready) (no timing gate). With it, the time base
+    /// is anchored on the first in-order packet to become deliverable so that
+    /// packet releases `latency_us` after `now_us`, and every later packet
+    /// inherits the same delay relative to the sender timestamps, holding the
+    /// stream back into a steady, jitter-smoothed output.
+    pub fn take_ready_at(&mut self, now_us: u64) -> Vec<Vec<u8>> {
+        let Some(latency) = self.tsbpd_latency_us else {
+            return self.take_ready();
+        };
+        let mut out = Vec::new();
+        while let Some(ts) = self.pending.get(&self.next_deliver).map(|(_, t)| *t) {
+            // Anchor on the first deliverable packet: schedule it `latency` from
+            // now, so delivery_time(pkt) = base + pkt.timestamp holds a fixed
+            // buffering delay for every later packet.
+            let base = *self
+                .tsbpd_base_us
+                .get_or_insert_with(|| now_us as i64 + latency as i64 - ts as i64);
+            if (now_us as i64) < base + ts as i64 {
+                break; // not yet this packet's scheduled delivery time
+            }
+            let (payload, _) = self.pending.remove(&self.next_deliver).unwrap();
             out.push(payload);
             self.next_deliver = (self.next_deliver + 1) & 0x7FFF_FFFF;
         }
@@ -989,6 +1047,80 @@ mod tests {
         );
         assert!(receiver.missing().is_empty(), "no gaps remain");
         assert_eq!(sender.retransmits(), 1);
+    }
+
+    #[test]
+    fn tsbpd_holds_each_packet_until_its_scheduled_delivery() {
+        // Three packets, 20 ms apart in sender timestamps, 100 ms TSBPD latency.
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(100_000); // 100 ms in microseconds
+        let pkt = |seq, ts| DataPacket {
+            seq,
+            retransmit: false,
+            kk: 0,
+            timestamp: ts,
+            dst_socket_id: 0,
+            payload: vec![seq as u8],
+        };
+        rx.on_data(pkt(10, 0));
+        rx.on_data(pkt(11, 20_000));
+        rx.on_data(pkt(12, 40_000));
+
+        // At the anchor instant (now=1_000_000 us) nothing is due: the first
+        // packet schedules to now+latency.
+        assert!(rx.take_ready_at(1_000_000).is_empty(), "held for the latency");
+        // Just before the first packet's delivery time: still nothing.
+        assert!(rx.take_ready_at(1_099_999).is_empty(), "not quite due");
+        // At now+100 ms the first packet releases; the next two are not yet due
+        // (they sit 20/40 ms further along).
+        assert_eq!(rx.take_ready_at(1_100_000), vec![vec![10u8]], "first packet due");
+        assert!(rx.take_ready_at(1_110_000).is_empty(), "second not due for 10 more ms");
+        assert_eq!(rx.take_ready_at(1_120_000), vec![vec![11u8]], "second due at +20 ms");
+        assert_eq!(rx.take_ready_at(1_140_000), vec![vec![12u8]], "third due at +40 ms");
+    }
+
+    #[test]
+    fn tsbpd_delivers_reordered_packets_on_schedule_and_in_order() {
+        // Packets arrive out of order; TSBPD must still release them in sequence
+        // order and on their timestamp schedule, never the arrival order.
+        let mut rx = SrtReceiver::new();
+        rx.set_tsbpd(50_000); // 50 ms
+        let pkt = |seq, ts| DataPacket {
+            seq,
+            retransmit: false,
+            kk: 0,
+            timestamp: ts,
+            dst_socket_id: 0,
+            payload: vec![seq as u8],
+        };
+        // 5 arrives before 4 (reordered on the wire).
+        rx.on_data(pkt(3, 0));
+        rx.on_data(pkt(5, 20_000));
+        rx.on_data(pkt(4, 10_000));
+        // Anchor at now=0; far in the future everything is due, in order.
+        assert!(rx.take_ready_at(0).is_empty(), "held at the anchor");
+        assert_eq!(
+            rx.take_ready_at(1_000_000),
+            vec![vec![3u8], vec![4u8], vec![5u8]],
+            "delivered in sequence order regardless of arrival order",
+        );
+    }
+
+    #[test]
+    fn without_tsbpd_take_ready_at_delivers_immediately() {
+        let mut rx = SrtReceiver::new();
+        let pkt = |seq| DataPacket {
+            seq,
+            retransmit: false,
+            kk: 0,
+            timestamp: 0,
+            dst_socket_id: 0,
+            payload: vec![seq as u8],
+        };
+        rx.on_data(pkt(1));
+        rx.on_data(pkt(2));
+        // No set_tsbpd: take_ready_at is a pass-through to take_ready (no gate).
+        assert_eq!(rx.take_ready_at(0), vec![vec![1u8], vec![2u8]]);
     }
 
     #[test]
