@@ -114,7 +114,12 @@ impl<'a, T> Future for AcquireFuture<'a, T> {
                 pool: inner.clone(),
             });
         }
-        state.waiters.push_back(cx.waker().clone());
+        // Park this waker. Dedupe so a re-poll (a spurious wakeup, or this future
+        // living in a `select!`) does not push a second entry for the same task;
+        // any leftover entries are drained, not consumed one-at-a-time, on return.
+        if !state.waiters.iter().any(|w| w.will_wake(cx.waker())) {
+            state.waiters.push_back(cx.waker().clone());
+        }
         Poll::Pending
     }
 }
@@ -170,9 +175,17 @@ impl<T: AsMut<[u8]>> AsMut<[u8]> for PooledBuffer<T> {
 impl<T> Drop for PooledBuffer<T> {
     fn drop(&mut self) {
         if let Some(v) = self.value.take() {
-            let mut state = self.pool.state.lock();
-            state.free.push(v);
-            if let Some(w) = state.waiters.pop_front() {
+            // Wake every parked acquirer so each re-polls and races for the freed
+            // buffer (the loser re-parks). Draining all, rather than popping one,
+            // means a waker left behind by a cancelled / dropped `AcquireFuture`
+            // is a harmless no-op rather than a consumed wake that would starve a
+            // still-live waiter. Wake outside the lock to avoid re-entry.
+            let waiters = {
+                let mut state = self.pool.state.lock();
+                state.free.push(v);
+                core::mem::take(&mut state.waiters)
+            };
+            for w in waiters {
                 w.wake();
             }
         }
@@ -229,5 +242,85 @@ mod tests {
         let pool = BufferPool::new_byte_pool(1, 32);
         let buf = pool.try_acquire_or_err().unwrap();
         assert_eq!(buf.as_ref().len(), 32);
+    }
+
+    /// A counting `Waker` so the async-acquire tests can observe wakes without
+    /// an executor.
+    struct CountWaker(core::sync::atomic::AtomicUsize);
+    impl alloc::task::Wake for CountWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn dropped_pending_acquirer_does_not_starve_a_live_waiter() {
+        use core::task::{Context, Poll};
+
+        let pool = BufferPool::new_byte_pool(1, 8);
+        let held = pool.try_acquire_or_err().unwrap(); // pool now exhausted
+
+        let live = Arc::new(CountWaker(core::sync::atomic::AtomicUsize::new(0)));
+        let live_waker = live.clone().into();
+        let mut live_cx = Context::from_waker(&live_waker);
+
+        // A live acquirer parks, then a second acquirer parks and is *cancelled*
+        // (dropped) while pending, leaving its waker behind.
+        let mut live_fut = pool.acquire();
+        assert!(matches!(
+            core::pin::Pin::new(&mut live_fut).poll(&mut live_cx),
+            Poll::Pending
+        ));
+        {
+            let cancelled = Arc::new(CountWaker(core::sync::atomic::AtomicUsize::new(0)));
+            let cancelled_waker = cancelled.clone().into();
+            let mut cancelled_cx = Context::from_waker(&cancelled_waker);
+            let mut cancelled_fut = pool.acquire();
+            assert!(matches!(
+                core::pin::Pin::new(&mut cancelled_fut).poll(&mut cancelled_cx),
+                Poll::Pending
+            ));
+            // cancelled_fut dropped here with its waker still parked.
+        }
+
+        // Returning the one buffer must wake the live waiter (a one-at-a-time
+        // pop could have consumed the wake on the cancelled future instead).
+        drop(held);
+        assert!(
+            live.0.load(core::sync::atomic::Ordering::SeqCst) >= 1,
+            "the live acquirer must be woken when the buffer returns"
+        );
+        assert!(matches!(
+            core::pin::Pin::new(&mut live_fut).poll(&mut live_cx),
+            Poll::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn repolling_a_pending_acquirer_does_not_accumulate_wakers() {
+        use core::task::{Context, Poll};
+
+        let pool = BufferPool::new_byte_pool(1, 8);
+        let _held = pool.try_acquire_or_err().unwrap();
+
+        let w = Arc::new(CountWaker(core::sync::atomic::AtomicUsize::new(0)));
+        let waker = w.clone().into();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = pool.acquire();
+        for _ in 0..5 {
+            assert!(matches!(
+                core::pin::Pin::new(&mut fut).poll(&mut cx),
+                Poll::Pending
+            ));
+        }
+        assert_eq!(
+            pool.inner.state.lock().waiters.len(),
+            1,
+            "re-polling the same future must not push duplicate wakers"
+        );
     }
 }
