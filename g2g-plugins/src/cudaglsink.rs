@@ -521,6 +521,21 @@ fn worker_main(
     Ok(())
 }
 
+impl Drop for WorkerState {
+    fn drop(&mut self) {
+        // Tear down the EGL display / context / surface the worker created. A
+        // mid-stream resolution change respawns the worker (via `shutdown`), so
+        // without this each resize leaks an EGL context + surface. Best-effort;
+        // the worker is exiting. Releasing the current context first, then
+        // destroying the surface here (Drop runs before the `_wl_egl` field drops
+        // its backing `wl_egl_window`) keeps the required outlives ordering.
+        let _ = self.egl.make_current(self.egl_display, None, None, None);
+        let _ = self.egl.destroy_surface(self.egl_display, self.egl_surface);
+        let _ = self.egl.destroy_context(self.egl_display, self._egl_context);
+        let _ = self.egl.terminate(self.egl_display);
+    }
+}
+
 impl WorkerState {
     /// Upload the decoded NV12 planes into the GL textures via CUDA, draw the
     /// fullscreen quad through the NV12->RGB shader, and present. Signals
