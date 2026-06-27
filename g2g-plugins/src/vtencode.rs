@@ -307,9 +307,16 @@ impl AsyncElement for VtEncode {
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // A mid-stream geometry / format change would need a session
-                    // rebuild; reject anything but the configured NV12 shape loud.
+                    // rebuild; reject anything but the exact configured NV12 shape
+                    // loud (the bare format check let a new resolution slip past).
+                    let session_dims = self.state.as_ref().map(|s| (s.width, s.height));
                     match &c {
-                        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => {}
+                        Caps::RawVideo {
+                            format: RawVideoFormat::Nv12,
+                            width: Dim::Fixed(w),
+                            height: Dim::Fixed(h),
+                            ..
+                        } if session_dims == Some((*w, *h)) => {}
                         _ => return Err(G2gError::CapsMismatch),
                     }
                 }
