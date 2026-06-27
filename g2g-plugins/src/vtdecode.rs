@@ -126,7 +126,6 @@ pub struct VtDecode {
     configured: bool,
     state: Option<DecoderState>,
     last_caps: Option<Caps>,
-    input_caps: Option<Caps>,
     emitted: u64,
 }
 
@@ -156,7 +155,6 @@ impl VtDecode {
             configured: false,
             state: None,
             last_caps: None,
-            input_caps: None,
             emitted: 0,
         }
     }
@@ -292,7 +290,6 @@ impl AsyncElement for VtDecode {
                         Caps::CompressedVideo { codec, .. } if *codec == self.codec => {}
                         _ => return Err(G2gError::CapsMismatch),
                     }
-                    self.input_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     if let Some(st) = self.state.as_ref() {
