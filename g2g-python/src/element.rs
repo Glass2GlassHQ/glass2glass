@@ -151,12 +151,17 @@ impl AsyncElement for PyTransform {
             if self.module.is_empty() || self.class.is_empty() {
                 return Err(G2gError::NotConfigured);
             }
-            self.worker = Some(crate::host::PyWorker::spawn(
-                &self.module,
-                &self.class,
-                self.draw_label,
-                &self.params,
-            )?);
+            // Spawn the worker once: a re-configure (re-negotiation) must not tear
+            // down and re-init the hosted instance, which would discard a loaded
+            // model. Matches `PySource` / `PyAggregator`.
+            if self.worker.is_none() {
+                self.worker = Some(crate::host::PyWorker::spawn(
+                    &self.module,
+                    &self.class,
+                    self.draw_label,
+                    &self.params,
+                )?);
+            }
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
