@@ -245,7 +245,7 @@ pub fn parse_timestamp(s: &str) -> Option<u64> {
     // and millis < 1000, so their sub-products cannot overflow.
     let total_secs = hours.checked_mul(3600)?.checked_add(mins * 60 + secs)?;
     let total_ms = total_secs.checked_mul(1000)?.checked_add(millis)?;
-    Some(total_ms.checked_mul(1_000_000)?)
+    total_ms.checked_mul(1_000_000)
 }
 
 /// Interpret a fractional-second digit string as milliseconds: take up to three
