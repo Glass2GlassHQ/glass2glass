@@ -165,6 +165,38 @@ jobs:
           cargo check -p g2g-plugins --locked --all-targets
           --target aarch64-linux-android --features camera2
 
+  # Language bindings: the g2g-pyapi maturin wheel and the in-tree C / Python
+  # example programs (M326/M327). Guards that the bindings keep building and the
+  # examples keep running, the language-neutral waist on top of g2g-capi.
+  bindings:
+    name: bindings (pyapi wheel + C/Python examples)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The g2g-pyapi tests drive the bindings through an embedded interpreter
+      # (pyo3 auto-initialize), so they need libpython at build + run time.
+      - name: test g2g-pyapi (embedded interpreter)
+        run: cargo test -p g2g-pyapi --locked --features python
+      # Build the redistributable abi3 wheel (one cp311-abi3 wheel covers every
+      # CPython >= 3.11), install it, and run the Python example end to end. The
+      # wheel build enables pyo3/extension-module, so it does not link libpython.
+      - name: build + run the Python example
+        run: |
+          python -m pip install --upgrade maturin numpy
+          maturin build --release -m g2g-pyapi/Cargo.toml
+          python -m pip install target/wheels/g2g-*.whl
+          python g2g-pyapi/examples/appsink_numpy.py
+      # The C example links the g2g-capi staticlib (the C ABI) and drives an
+      # appsrc!appsink pipeline; `make run` exits non-zero unless all 3 frames
+      # round-trip.
+      - name: build + run the C example
+        run: make -C examples/g2g-c-example run
+
   # The no_std + wasm pillar: the core builds for the browser target. (A bare-
   # metal target like thumbv7em needs the critical-section feature + a CS impl, so
   # it is left to a dedicated embedded job.)

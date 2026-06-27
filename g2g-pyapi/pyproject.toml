@@ -5,7 +5,9 @@ build-backend = "maturin"
 [project]
 name = "g2g"
 description = "Python bindings to drive glass2glass pipelines (parse_launch + run + bus + appsrc/appsink)."
-requires-python = ">=3.8"
+# abi3-py311: the buffer protocol (FrameView.__getbuffer__) entered the stable
+# ABI in 3.11, so one wheel covers every CPython >= 3.11.
+requires-python = ">=3.11"
 license = { text = "LGPL-2.1-or-later" }
 classifiers = [
     "Programming Language :: Rust",
@@ -19,4 +21,4 @@ dynamic = ["version"]
 # tells PyO3 not to link libpython (the wheel is loaded by an existing
 # interpreter, the inverse of the auto-initialize path the in-crate tests use).
 module-name = "g2g"
-features = ["python", "pyo3/extension-module"]
+features = ["python", "pyo3/extension-module", "pyo3/abi3-py311"]
