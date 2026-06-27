@@ -317,11 +317,13 @@ impl Dim {
     }
 
     /// Collapse to a single `Fixed` value: `Range` picks its minimum, `Any`
-    /// has nothing to pick and yields `None`. See [`Caps::fixate`].
+    /// has nothing to pick and yields `None`. An inverted range (`min > max`)
+    /// is the empty set, as [`Dim::intersect`] treats it, so it also yields
+    /// `None` rather than a value outside the set. See [`Caps::fixate`].
     pub fn fixate(&self) -> Option<Dim> {
         match self {
             Dim::Fixed(v) => Some(Dim::Fixed(*v)),
-            Dim::Range { min, .. } => Some(Dim::Fixed(*min)),
+            Dim::Range { min, max } => (min <= max).then_some(Dim::Fixed(*min)),
             Dim::Any => None,
         }
     }
@@ -364,11 +366,15 @@ impl Rate {
     }
 
     /// Collapse to a single `Fixed` value: `Range` picks its minimum, `Any`
-    /// yields `None`. See [`Caps::fixate`].
+    /// yields `None`. An inverted range (`min_q16 > max_q16`) is the empty set,
+    /// as [`Rate::intersect`] treats it, so it also yields `None`. See
+    /// [`Caps::fixate`].
     pub fn fixate(&self) -> Option<Rate> {
         match self {
             Rate::Fixed(v) => Some(Rate::Fixed(*v)),
-            Rate::Range { min_q16, .. } => Some(Rate::Fixed(*min_q16)),
+            Rate::Range { min_q16, max_q16 } => {
+                (min_q16 <= max_q16).then_some(Rate::Fixed(*min_q16))
+            }
             Rate::Any => None,
         }
     }
@@ -1099,6 +1105,19 @@ mod tests {
         assert_eq!(Dim::Range { min: 480, max: 1080 }.fixate(), Some(Dim::Fixed(480)));
         assert_eq!(Dim::Fixed(720).fixate(), Some(Dim::Fixed(720)));
         assert_eq!(Dim::Any.fixate(), None);
+    }
+
+    #[test]
+    fn fixate_agrees_with_intersect_on_inverted_ranges() {
+        // An inverted range is the empty set: `intersect` reports it empty, so
+        // `fixate` must not hand back a value (the min) that is outside it.
+        let bad_dim = Dim::Range { min: 200, max: 100 };
+        assert_eq!(bad_dim.intersect(&Dim::Any), None, "inverted range is empty");
+        assert_eq!(bad_dim.fixate(), None, "and so cannot fixate to its min");
+
+        let bad_rate = Rate::Range { min_q16: 60 << 16, max_q16: 30 << 16 };
+        assert_eq!(bad_rate.intersect(&Rate::Any), None);
+        assert_eq!(bad_rate.fixate(), None);
     }
 
     #[test]
