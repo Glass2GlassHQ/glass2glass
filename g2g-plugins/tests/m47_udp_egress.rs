@@ -189,3 +189,54 @@ fn idr_nal(body: &[u8]) -> Vec<u8> {
     idr.extend_from_slice(body);
     idr
 }
+
+#[tokio::test]
+async fn sink_emits_rtcp_sender_report_when_enabled() {
+    use g2g_plugins::rtcp::{self, RtcpPacket};
+
+    let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind receiver");
+    let dest: SocketAddr = receiver.local_addr().expect("local addr");
+
+    // interval 0: a sender report is due on the first frame, after its media.
+    let mut sink = UdpSink::new(dest)
+        .with_rtp(PAYLOAD_TYPE, SSRC)
+        .with_max_payload(MAX_PAYLOAD)
+        .with_rtcp_sender_reports(0);
+    sink.configure_pipeline(&h264_caps()).expect("configure");
+
+    // One AU of two small NALs -> two single-NAL RTP packets (4-byte payloads).
+    let sps: &[u8] = &[0x67, 0x42, 0xC0, 0x1E];
+    let pps: &[u8] = &[0x68, 0xCE, 0x3C, 0x80];
+    let au1 = annexb(&[sps, pps]);
+
+    let mut out = NullOut;
+    sink.process(PipelinePacket::DataFrame(au_frame(au1, 0, 0)), &mut out)
+        .await
+        .expect("send AU1");
+
+    // Two media datagrams plus one RTCP sender report.
+    let dgrams = recv_n(&receiver, 3).await;
+    let sr = dgrams
+        .iter()
+        .find(|d| matches!(rtcp::parse_compound(d).first(), Some(RtcpPacket::SenderReport { .. })))
+        .expect("an RTCP sender report arrived on the muxed socket");
+
+    let Some(RtcpPacket::SenderReport { ssrc: sr_ssrc, ntp, rtp_ts, .. }) =
+        rtcp::parse_compound(sr).into_iter().next()
+    else {
+        panic!("first compound packet is a sender report");
+    };
+    assert_eq!(sr_ssrc, SSRC, "SR carries the media SSRC");
+    assert_eq!(rtp_ts, 0, "SR reports the last media RTP timestamp (pts 0)");
+    assert_ne!(ntp, 0, "SR carries an NTP wall-clock timestamp");
+
+    // packet_count / octet_count sit at fixed SR offsets (after header+ssrc+ntp+ts).
+    let packet_count = u32::from_be_bytes(sr[20..24].try_into().unwrap());
+    let octet_count = u32::from_be_bytes(sr[24..28].try_into().unwrap());
+    assert_eq!(packet_count, 2, "two media packets counted");
+    assert_eq!(octet_count, 8, "two 4-byte NAL payloads = 8 octets");
+
+    assert_eq!(sink.sender_reports_sent(), 1);
+}

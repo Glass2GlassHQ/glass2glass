@@ -6,9 +6,10 @@
 //!
 //! The RTP timestamp is derived from `FrameTiming::pts_ns` at the 90 kHz H.264
 //! media clock; sequence numbers and the per-AU marker bit come from the
-//! packetizer. RTCP sender reports and the RTSP `ANNOUNCE`/`RECORD` handshake
-//! for Wowza-style ingest are the remaining live-egress follow-ups (they need
-//! the network port the sandbox blocks).
+//! packetizer. Opt-in RFC 3550 sender reports (`with_rtcp_sender_reports`) let a
+//! receiver sync the RTP clock to wall time. The RTSP `ANNOUNCE`/`RECORD`
+//! handshake for Wowza-style ingest is the remaining live-egress follow-up (it
+//! needs the network port the sandbox blocks).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -77,10 +78,23 @@ pub struct UdpSink {
     /// [`retx_cap`](Self::retx_cap). Resent on a matching NACK.
     retx_buf: VecDeque<(u16, Vec<u8>)>,
     retx_cap: usize,
+    /// RFC 3550 sender reports: emit an RTCP SR at most this often (ns) on the
+    /// RTP/RTCP-muxed socket, so a receiver can sync this SSRC's RTP clock to
+    /// wall time. `None` disables them (the default; SR is a session concern a
+    /// caller opts into via [`with_rtcp_sender_reports`](Self::with_rtcp_sender_reports)).
+    rtcp_sr_interval_ns: Option<u64>,
+    last_sr_ns: u64,
+    /// Media packets / payload octets sent on `ssrc` (the SR sender counters;
+    /// FEC and RTX ride other SSRCs and do not count here). Wrap as RFC fields.
+    rtp_packets: u32,
+    rtp_octets: u32,
+    /// The most recent media RTP timestamp, reported in the SR alongside NTP now.
+    last_rtp_ts: u32,
     packets_sent: u64,
     bytes_sent: u64,
     frames_sent: u64,
     retransmits_sent: u64,
+    sender_reports_sent: u64,
     eos_seen: bool,
 }
 
@@ -100,10 +114,16 @@ impl UdpSink {
             fec: None,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
+            rtcp_sr_interval_ns: None,
+            last_sr_ns: 0,
+            rtp_packets: 0,
+            rtp_octets: 0,
+            last_rtp_ts: 0,
             packets_sent: 0,
             bytes_sent: 0,
             frames_sent: 0,
             retransmits_sent: 0,
+            sender_reports_sent: 0,
             eos_seen: false,
         }
     }
@@ -146,6 +166,21 @@ impl UdpSink {
         self
     }
 
+    /// Emit an RFC 3550 RTCP sender report every `interval_ms` on the RTP socket
+    /// (RTP/RTCP-muxed): it carries the NTP wall time, the matching RTP timestamp,
+    /// and this SSRC's packet / octet counts, so a receiver can map the RTP clock
+    /// to wall time (the basis of inter-stream, e.g. A/V, synchronization). Off by
+    /// default. A receiver disambiguates SR from media by RTCP payload type.
+    pub fn with_rtcp_sender_reports(mut self, interval_ms: u64) -> Self {
+        self.rtcp_sr_interval_ns = Some(interval_ms.saturating_mul(1_000_000));
+        self
+    }
+
+    /// RTCP sender reports emitted so far.
+    pub fn sender_reports_sent(&self) -> u64 {
+        self.sender_reports_sent
+    }
+
     /// Retransmitted packets sent in response to NACK feedback.
     pub fn retransmits_sent(&self) -> u64 {
         self.retransmits_sent
@@ -171,6 +206,18 @@ impl UdpSink {
     /// as the protocol expects.
     fn rtp_timestamp(pts_ns: u64) -> u32 {
         ((pts_ns as u128 * RTP_CLOCK_HZ as u128) / 1_000_000_000) as u32
+    }
+
+    /// The current time as a 64-bit NTP timestamp (seconds since 1900 in the high
+    /// 32 bits, fraction in the low 32), for the RTCP sender report.
+    fn ntp_now() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // NTP epoch (1900) precedes the Unix epoch (1970) by this many seconds.
+        const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
+        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let secs = d.as_secs().wrapping_add(NTP_UNIX_OFFSET);
+        let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
+        (secs << 32) | frac
     }
 
     fn ensure_socket(&mut self) -> Result<(), G2gError> {
@@ -276,6 +323,7 @@ impl AsyncElement for UdpSink {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
+                    self.last_rtp_ts = timestamp;
                     let packets = {
                         let packetizer = self.packetizer.as_mut().ok_or(G2gError::NotConfigured)?;
                         packetizer.packetize(slice.as_slice(), timestamp)
@@ -299,6 +347,11 @@ impl AsyncElement for UdpSink {
                             socket.send(pkt).await.map_err(io_err)?;
                             sent += 1;
                             bytes += pkt.len() as u64;
+                            // SR sender counters: this SSRC's media packets and
+                            // their RTP payload octets (past the 12-byte header).
+                            self.rtp_packets = self.rtp_packets.wrapping_add(1);
+                            self.rtp_octets =
+                                self.rtp_octets.wrapping_add(pkt.len().saturating_sub(12) as u32);
                         }
                         // Repair packets follow the media they protect.
                         for repair in &fec_packets {
@@ -327,6 +380,27 @@ impl AsyncElement for UdpSink {
                     if self.retransmit {
                         let resent = self.service_nacks().await?;
                         self.retransmits_sent += resent;
+                    }
+
+                    // Emit an RTCP sender report when due (rate-limited): NTP now
+                    // paired with the last RTP timestamp lets a receiver map this
+                    // SSRC's clock to wall time.
+                    if let Some(interval) = self.rtcp_sr_interval_ns {
+                        let now = g2g_core::metrics::monotonic_ns();
+                        if now.saturating_sub(self.last_sr_ns) >= interval {
+                            let sr = rtcp::build_sender_report(
+                                self.ssrc,
+                                Self::ntp_now(),
+                                self.last_rtp_ts,
+                                self.rtp_packets,
+                                self.rtp_octets,
+                                &[],
+                            );
+                            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                            socket.send(&sr).await.map_err(io_err)?;
+                            self.last_sr_ns = now;
+                            self.sender_reports_sent += 1;
+                        }
                     }
                 }
                 // RTP carries no in-band end marker; an RTCP BYE is the M47

@@ -130,7 +130,6 @@ leverage first:
   server-acknowledgement back-pressure.
 - **RTP FEC:** FlexFEC (RFC 8627); multi-level / interleaved ULPFEC for burst
   loss (single-level recovers one loss per group).
-- **RTCP sender reports** (RFC 3550 SR) on `UdpSink`.
 - **RTSP server:** TCP-interleaved transport; RTCP / keepalive during PLAY.
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
