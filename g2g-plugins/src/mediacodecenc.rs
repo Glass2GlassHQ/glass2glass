@@ -37,7 +37,7 @@ use core::pin::Pin;
 use core::time::Duration;
 
 use ndk::media::media_codec::{
-    DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
 };
 use ndk::media::media_format::MediaFormat;
 
@@ -49,27 +49,17 @@ use g2g_core::{
     RawVideoFormat, VideoCodec,
 };
 
+use crate::mediacodec_common::{
+    queue_input, BUFFER_FLAG_CODEC_CONFIG, BUFFER_FLAG_END_OF_STREAM, BUFFER_FLAG_KEY_FRAME,
+    MAX_OUTPUT_POLLS,
+};
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-
-/// `AMEDIACODEC_BUFFER_FLAG_KEY_FRAME`: the output access unit is an IDR.
-const BUFFER_FLAG_KEY_FRAME: u32 = 1;
-/// `AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG`: the output buffer is the codec-specific
-/// data (Annex-B parameter sets), not a displayable frame.
-const BUFFER_FLAG_CODEC_CONFIG: u32 = 2;
-/// `AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM`: mark the final (empty) input buffer.
-const BUFFER_FLAG_END_OF_STREAM: u32 = 4;
 
 /// `COLOR_FormatYUV420SemiPlanar` (NV12): the encoder input colour format, matching
 /// `MediaCodecDec`'s NV12 output so a transcode is copy-compatible.
 const COLOR_FORMAT_NV12: i32 = 21;
-
-/// Bounded output polls so the EOS drain waits for the codec to flush without
-/// spinning forever if it never raises the end-of-stream flag.
-const MAX_OUTPUT_POLLS: u32 = 256;
-
-/// Bounded retries when the codec has no free input buffer yet.
-const MAX_INPUT_RETRIES: u32 = 100;
 
 /// Default target bitrate (4 Mbps), the `MfEncode` / `VtEncode` default.
 const DEFAULT_BITRATE: u32 = 4_000_000;
@@ -247,32 +237,11 @@ impl MediaCodecEnc {
         self.pump_output(out, false)
     }
 
-    /// Hand `data` to a free input buffer with the given microsecond pts + flags.
+    /// Hand `data` to a free input buffer with the given microsecond pts + flags
+    /// (see `mediacodec_common::queue_input`).
     fn queue_input(&self, data: &[u8], pts_us: u64, flags: u32) -> Result<(), G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        for _ in 0..MAX_INPUT_RETRIES {
-            match st
-                .codec
-                .dequeue_input_buffer(Duration::from_millis(10))
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            {
-                DequeuedInputBufferResult::Buffer(mut input) => {
-                    let dst = input.buffer_mut();
-                    if dst.len() < data.len() {
-                        return Err(G2gError::Hardware(HardwareError::Other));
-                    }
-                    for (d, &s) in dst.iter_mut().zip(data) {
-                        d.write(s);
-                    }
-                    st.codec
-                        .queue_input_buffer(input, 0, data.len(), pts_us, flags)
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-                    return Ok(());
-                }
-                DequeuedInputBufferResult::TryAgainLater => continue,
-            }
-        }
-        Err(G2gError::Hardware(HardwareError::Other))
+        queue_input(&st.codec, data, pts_us, flags)
     }
 
     /// Drain ready output buffers. In steady state (`until_eos == false`) makes

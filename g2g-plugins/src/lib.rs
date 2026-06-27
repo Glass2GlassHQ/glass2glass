@@ -258,6 +258,11 @@ pub mod vtencode;
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 pub mod mediacodecdec;
 
+// Buffer-flag constants + the dequeue-input-with-retries skeleton shared by the
+// MediaCodec decode / encode elements below.
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+mod mediacodec_common;
+
 // M306: Android MediaCodec H.264/H.265 encode (NV12 -> Annex-B), the encode
 // mirror of mediacodecdec and the Android analog of mfencode / vtencode.
 #[cfg(all(target_os = "android", feature = "mediacodec"))]

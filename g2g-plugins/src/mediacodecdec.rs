@@ -44,7 +44,7 @@ use core::time::Duration;
 
 use ndk::media::image_reader::{AcquireResult, Image, ImageFormat, ImageReader};
 use ndk::media::media_codec::{
-    DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
 };
 use ndk::media::media_format::MediaFormat;
 use ndk::native_window::NativeWindow;
@@ -58,24 +58,14 @@ use g2g_core::{
 };
 
 use crate::annexb::{h264_parameter_sets, h265_parameter_sets};
+use crate::mediacodec_common::{queue_input, BUFFER_FLAG_END_OF_STREAM, MAX_OUTPUT_POLLS};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-/// `AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM`: mark the final (empty) input buffer.
-const BUFFER_FLAG_END_OF_STREAM: u32 = 4;
-
 /// Images the `ImageReader` may hold un-acquired. Must exceed the decoder's
 /// output reorder depth so rendering never stalls waiting for us to acquire.
 const MAX_IMAGES: i32 = 8;
-
-/// Bounded output polls so the EOS drain waits for the codec to flush without
-/// spinning forever if it never raises the end-of-stream flag.
-const MAX_OUTPUT_POLLS: u32 = 256;
-
-/// Bounded retries when the codec has no free input buffer yet, so a stuck
-/// codec surfaces as an error rather than spinning forever.
-const MAX_INPUT_RETRIES: u32 = 100;
 
 /// One decoded frame ready to emit: NV12 bytes in the CPU path, or (in the M304
 /// zero-copy GPU path) the decoded `AHardwareBuffer` to convert to a wgpu texture.
@@ -407,36 +397,11 @@ impl MediaCodecDec {
         self.pump_output(out, false)
     }
 
-    /// Hand `data` to a free input buffer with the given microsecond pts + flags.
-    /// Retries a bounded number of times while the codec reports no free buffer
-    /// (it frees them as it drains), then errors rather than spinning forever.
+    /// Hand `data` to a free input buffer with the given microsecond pts + flags
+    /// (see `mediacodec_common::queue_input`).
     fn queue_input(&self, data: &[u8], pts_us: u64, flags: u32) -> Result<(), G2gError> {
         let st = self.state.as_ref().ok_or(G2gError::NotConfigured)?;
-        for _ in 0..MAX_INPUT_RETRIES {
-            match st
-                .codec
-                .dequeue_input_buffer(Duration::from_millis(10))
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-            {
-                DequeuedInputBufferResult::Buffer(mut input) => {
-                    let dst = input.buffer_mut();
-                    if dst.len() < data.len() {
-                        // A single access unit larger than an input buffer needs
-                        // splitting across buffers; not handled in v1.
-                        return Err(G2gError::Hardware(HardwareError::Other));
-                    }
-                    for (d, &s) in dst.iter_mut().zip(data) {
-                        d.write(s);
-                    }
-                    st.codec
-                        .queue_input_buffer(input, 0, data.len(), pts_us, flags)
-                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-                    return Ok(());
-                }
-                DequeuedInputBufferResult::TryAgainLater => continue,
-            }
-        }
-        Err(G2gError::Hardware(HardwareError::Other))
+        queue_input(&st.codec, data, pts_us, flags)
     }
 
     /// Render every ready output buffer into the codec's ImageReader Surface,
