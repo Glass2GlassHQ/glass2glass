@@ -20,9 +20,8 @@ leverage first:
 3. **Depth.** Pure-Rust / wasm codec decode (dav1d/rav1d, vpx) to drop the
    ffmpeg FFI; negotiation backward coupling through `DerivedOutput`; seek depth
    (segment seeks, re-preroll after flushing seek when paused).
-4. **Bindings polish.** Blocking-with-timeout `appsink` pull; Python `appsink`
-   zero-copy via the buffer protocol (memoryview, not a bytes copy); maturin
-   wheel for `g2g-pyapi`; an in-tree C / Python example program.
+4. **Bindings polish.** Maturin wheel for `g2g-pyapi`; an in-tree C / Python
+   example program.
 5. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
