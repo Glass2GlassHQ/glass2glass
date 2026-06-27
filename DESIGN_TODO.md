@@ -253,6 +253,8 @@ leverage first:
   concealment; bitrate / complexity tuning.
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct
   YCbCr -> I420 path (skip the RGBA intermediate); a single-still image sink.
+- **`FfmpegAacEnc`: end-to-end encode test** (needs a Linux ffmpeg build to run);
+  the AAC encode core is otherwise untested.
 
 ## Parsers
 
@@ -448,6 +450,23 @@ the remaining items extend them. Highest leverage first:
   differ (same launch line through real GStreamer vs g2g, diff caps / behaviour);
   a codec golden-fixture / PSNR conformance harness; an MCP server exposing
   `inspect` / `launch` / `validate` for agent-driven dev.
+
+## Code audit follow-up
+
+A `/code-audit-pro` pass (2026-06) fixed runtime/leak/dedup findings across the
+runtime, parsers, mux/demux, RTP/network, codecs, and platform codecs; the
+remaining unaudited areas, highest blast radius first:
+
+1. **g2g-core caps / solver / autoplug** (`caps.rs`, `solver.rs`, `autoplug.rs`,
+   `graph.rs`, `pool.rs` / `staticpool.rs`, `memory.rs`, `aggregator.rs`,
+   `query.rs`, `segment.rs`, `clock.rs`, `link.rs`, `fanout.rs`): negotiation
+   correctness affects every pipeline.
+2. **g2g-ml inference + pre/post-process** (`burninfer.rs`, `ortinfer.rs`,
+   `wgpuinfer.rs`, `wgpupreprocess.rs`, `postprocess.rs`, `cudatowgpu.rs`):
+   untrusted model I/O, tensor-shape math, GPU buffer sizing.
+3. **Untrusted-input demuxers** not yet deep-read: `mp4box` / `mp4src`,
+   `mkvdemux`, `tsdemux`, deeper `oggdemux`, `dashsrc` / `rtmpsrc`.
+4. **g2g-python hosting boundary** (FFI + GIL + lifetime correctness).
 
 ## Documentation
 
