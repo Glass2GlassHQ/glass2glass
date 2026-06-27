@@ -5,8 +5,9 @@
 //! sans-IO [`srt`](crate::srt) module does the protocol work; this element is the
 //! tokio UDP I/O around it.
 //!
-//! Scope: one connection, the caller role, cleartext (no encryption), NAK-based
-//! ARQ. The TSBPD timing model and congestion control are follow-ups.
+//! Scope: one connection, the caller role, NAK-based ARQ, AES-128/256 encryption
+//! with optional mid-stream key rotation (`with_key_rotation`). Congestion
+//! control is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -49,6 +50,11 @@ pub struct SrtSink {
     stream_id: Option<String>,
     passphrase: Option<String>,
     key_size: AesKeySize,
+    /// Rekey the stream cipher every N data packets (encrypted streams only);
+    /// `None` keeps one key for the whole session.
+    rekey_interval: Option<u64>,
+    packets_since_rekey: u64,
+    rekeys: u64,
     socket: Option<tokio::net::UdpSocket>,
     sender: Option<SrtSender>,
     configured: bool,
@@ -67,6 +73,9 @@ impl SrtSink {
             stream_id: None,
             passphrase: None,
             key_size: AesKeySize::Aes128,
+            rekey_interval: None,
+            packets_since_rekey: 0,
+            rekeys: 0,
             socket: None,
             sender: None,
             configured: false,
@@ -105,6 +114,21 @@ impl SrtSink {
     pub fn with_aes256(mut self) -> Self {
         self.key_size = AesKeySize::Aes256;
         self
+    }
+
+    /// Rekey the stream cipher every `every_packets` data packets: a fresh random
+    /// key is generated in the other parity slot, announced to the receiver in a
+    /// KM control packet, and made active, so no single key encrypts the whole
+    /// session (limiting exposure if a key is ever recovered). Encrypted streams
+    /// only (needs a passphrase); off by default.
+    pub fn with_key_rotation(mut self, every_packets: u64) -> Self {
+        self.rekey_interval = Some(every_packets.max(1));
+        self
+    }
+
+    /// Number of mid-stream rekeys performed.
+    pub fn rekeys(&self) -> u64 {
+        self.rekeys
     }
 
     pub fn frames_sent(&self) -> u64 {
@@ -249,6 +273,7 @@ impl AsyncElement for SrtSink {
                             sent.push(sender.send(chunk, timestamp));
                         }
                     }
+                    let n_packets = sent.len() as u64;
                     let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                     for pkt in &sent {
                         socket.send(pkt).await.map_err(io_err)?;
@@ -256,6 +281,29 @@ impl AsyncElement for SrtSink {
                     }
                     self.frames_sent += 1;
                     self.service_control().await?;
+
+                    // Mid-stream rekey when due (encrypted streams only): roll the
+                    // cipher to a fresh key in the other parity slot, announce it,
+                    // and make it active for the next packets. The KM goes out
+                    // before any packet under the new key so the receiver installs
+                    // it first; the previous key stays live for retransmits.
+                    if let Some(interval) = self.rekey_interval {
+                        self.packets_since_rekey += n_packets;
+                        if self.packets_since_rekey >= interval {
+                            self.packets_since_rekey = 0;
+                            if let Some(pass) = self.passphrase.clone() {
+                                let new = SrtCrypto::generate(self.key_size);
+                                let km_pkt = {
+                                    let sender =
+                                        self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
+                                    sender.rekey(new, &pass)
+                                };
+                                let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                                socket.send(&km_pkt).await.map_err(io_err)?;
+                                self.rekeys += 1;
+                            }
+                        }
+                    }
                 }
                 PipelinePacket::Eos => {
                     // Signal the listener to close cleanly (RTP-style flows have no

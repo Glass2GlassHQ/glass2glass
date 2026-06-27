@@ -39,6 +39,9 @@ pub const CTRL_ACK: u16 = 0x0002;
 pub const CTRL_NAK: u16 = 0x0003;
 pub const CTRL_SHUTDOWN: u16 = 0x0005;
 pub const CTRL_ACKACK: u16 = 0x0006;
+/// User-defined / extended control type; SRT carries a mid-stream Keying
+/// Material update (rekey) here, with the subtype in the type-specific field.
+pub const CTRL_USER: u16 = 0x7FFF;
 
 // SRT handshake extension command types (the extension TLV "type").
 pub const EXT_HSREQ: u16 = 1;
@@ -125,6 +128,10 @@ pub enum Control {
     /// Loss report: the sequence numbers (or ranges) the receiver is missing.
     Nak { loss: Vec<u32> },
     Shutdown,
+    /// Mid-stream Keying Material update (rekey): the opaque KM blob (the new
+    /// wrapped key + salt for the even or odd slot, [`crate::srtcrypto`] builds /
+    /// reads it). `rsp` distinguishes a request (KMREQ) from a response (KMRSP).
+    KeyMaterial { rsp: bool, km: Vec<u8> },
 }
 
 /// The HSv5 handshake Control Information Field.
@@ -187,6 +194,10 @@ pub fn build_control(ctrl: &Control, timestamp: u32, dst_socket_id: u32) -> Vec<
         Control::AckAck { ack_no } => (CTRL_ACKACK, *ack_no, Vec::new()),
         Control::Nak { loss } => (CTRL_NAK, 0, build_nak_cif(loss)),
         Control::Shutdown => (CTRL_SHUTDOWN, 0, Vec::new()),
+        // Subtype (type-specific field): KMREQ (3) or KMRSP (4); CIF is the KM blob.
+        Control::KeyMaterial { rsp, km } => {
+            (CTRL_USER, if *rsp { EXT_KMRSP as u32 } else { EXT_KMREQ as u32 }, km.clone())
+        }
     };
     let mut out = Vec::with_capacity(HEADER_LEN + cif.len());
     // word0: F=1 | Control Type (15 bits) | Subtype (16 bits, 0 here).
@@ -222,6 +233,9 @@ pub fn parse_control(buf: &[u8]) -> Option<Control> {
         CTRL_ACKACK => Some(Control::AckAck { ack_no: type_info }),
         CTRL_NAK => Some(Control::Nak { loss: parse_nak_cif(cif) }),
         CTRL_SHUTDOWN => Some(Control::Shutdown),
+        CTRL_USER if type_info == EXT_KMREQ as u32 || type_info == EXT_KMRSP as u32 => {
+            Some(Control::KeyMaterial { rsp: type_info == EXT_KMRSP as u32, km: cif.to_vec() })
+        }
         _ => None,
     }
 }
@@ -597,15 +611,21 @@ pub struct SrtSender {
     dst_socket_id: u32,
     next_seq: u32,
     msg_no: u32,
-    /// Buffered packets keyed by sequence (post-encryption bytes, so a NAK
-    /// resends the same ciphertext under the same sequence/IV).
-    buffer: alloc::collections::VecDeque<(u32, Vec<u8>)>,
+    /// Buffered packets `(seq, kk, post-encryption bytes)`, so a NAK resends the
+    /// same ciphertext under the same sequence/IV *and the same key parity* even
+    /// after a rekey has switched the active key (the receiver keeps both slots).
+    buffer: alloc::collections::VecDeque<(u32, u8, Vec<u8>)>,
     capacity: usize,
     retransmits: u64,
-    /// Stream cipher once the KM is negotiated (encrypted stream); `None` is
-    /// cleartext.
+    /// Which key slot stamps outgoing packets (`KK`): 0 cleartext, 1 even, 2 odd.
+    active_kk: u8,
+    /// The two stream-key slots; rekeying alternates the active one between them
+    /// so in-flight packets under the previous key still decrypt. `None` until
+    /// the KM is negotiated (cleartext).
     #[cfg(feature = "srt")]
-    crypto: Option<crate::srtcrypto::SrtCrypto>,
+    crypto_even: Option<crate::srtcrypto::SrtCrypto>,
+    #[cfg(feature = "srt")]
+    crypto_odd: Option<crate::srtcrypto::SrtCrypto>,
 }
 
 impl SrtSender {
@@ -617,35 +637,73 @@ impl SrtSender {
             buffer: alloc::collections::VecDeque::new(),
             capacity: capacity.max(1),
             retransmits: 0,
+            active_kk: 0,
             #[cfg(feature = "srt")]
-            crypto: None,
+            crypto_even: None,
+            #[cfg(feature = "srt")]
+            crypto_odd: None,
         }
     }
 
-    /// Encrypt outgoing payloads with the negotiated stream key.
+    /// Encrypt outgoing payloads with the negotiated stream key (the even slot;
+    /// the active key at connection time).
     #[cfg(feature = "srt")]
     pub fn set_crypto(&mut self, crypto: crate::srtcrypto::SrtCrypto) {
-        self.crypto = Some(crypto);
+        self.crypto_even = Some(crypto);
+        self.active_kk = crate::srtcrypto::KM_KK_EVEN;
     }
 
-    /// The KK key flag to stamp on packets (0 cleartext, 1 even key).
-    fn kk(&self) -> u8 {
-        #[cfg(feature = "srt")]
-        {
-            if self.crypto.is_some() {
-                return 1;
-            }
+    /// Install a stream key into the slot named by `kk` (`KM_KK_EVEN` /
+    /// `KM_KK_ODD`) without changing which slot is active (the rekey pre-announce).
+    #[cfg(feature = "srt")]
+    pub fn install_key(&mut self, kk: u8, crypto: crate::srtcrypto::SrtCrypto) {
+        match kk {
+            crate::srtcrypto::KM_KK_EVEN => self.crypto_even = Some(crypto),
+            crate::srtcrypto::KM_KK_ODD => self.crypto_odd = Some(crypto),
+            _ => {}
         }
-        0
     }
 
-    /// Wire-encode `payload` for sequence `seq`: encrypt when the stream is
-    /// keyed, else pass through. Returns the bytes to put on the wire (and to
-    /// buffer for retransmit).
+    /// The active key parity stamped on outgoing packets.
+    pub fn active_kk(&self) -> u8 {
+        self.active_kk
+    }
+
+    /// Rekey: install `new` into the *inactive* slot, switch the active key to it,
+    /// and return the KMREQ control packet announcing it (send this before the
+    /// first packet under the new key so the receiver can install it). Subsequent
+    /// [`send`](Self::send) packets carry the new parity; the previous key stays
+    /// live for retransmits until the next rekey overwrites its slot.
+    #[cfg(feature = "srt")]
+    pub fn rekey(&mut self, new: crate::srtcrypto::SrtCrypto, passphrase: &str) -> Vec<u8> {
+        let next_kk = if self.active_kk == crate::srtcrypto::KM_KK_ODD {
+            crate::srtcrypto::KM_KK_EVEN
+        } else {
+            crate::srtcrypto::KM_KK_ODD
+        };
+        let km = new.build_km(passphrase, next_kk);
+        self.install_key(next_kk, new);
+        self.active_kk = next_kk;
+        build_control(&Control::KeyMaterial { rsp: false, km }, 0, self.dst_socket_id)
+    }
+
+    /// The active key slot, if any.
+    #[cfg(feature = "srt")]
+    fn active_crypto(&self) -> Option<&crate::srtcrypto::SrtCrypto> {
+        match self.active_kk {
+            crate::srtcrypto::KM_KK_EVEN => self.crypto_even.as_ref(),
+            crate::srtcrypto::KM_KK_ODD => self.crypto_odd.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Wire-encode `payload` for sequence `seq`: encrypt with the active key when
+    /// the stream is keyed, else pass through. Returns the bytes to put on the
+    /// wire (and to buffer for retransmit).
     #[cfg(feature = "srt")]
     fn encode_payload(&self, seq: u32, payload: &[u8]) -> Vec<u8> {
         let mut data = payload.to_vec();
-        if let Some(c) = &self.crypto {
+        if let Some(c) = self.active_crypto() {
             c.process(seq, &mut data);
         }
         data
@@ -665,12 +723,13 @@ impl SrtSender {
         self.next_seq = (self.next_seq + 1) & 0x7FFF_FFFF;
         let msg_no = self.msg_no;
         self.msg_no = self.msg_no.wrapping_add(1) & 0x03FF_FFFF;
+        let kk = self.active_kk;
         let data = self.encode_payload(seq, payload);
-        let pkt = build_data_packet(seq, msg_no, false, self.kk(), timestamp, self.dst_socket_id, &data);
+        let pkt = build_data_packet(seq, msg_no, false, kk, timestamp, self.dst_socket_id, &data);
         if self.buffer.len() >= self.capacity {
             self.buffer.pop_front();
         }
-        self.buffer.push_back((seq, data));
+        self.buffer.push_back((seq, kk, data));
         pkt
     }
 
@@ -680,10 +739,11 @@ impl SrtSender {
         match ctrl {
             Control::Nak { loss } => {
                 let mut out = Vec::new();
-                let kk = self.kk();
                 for &seq in loss {
-                    if let Some((_, payload)) = self.buffer.iter().find(|(s, _)| *s == seq) {
-                        out.push(build_data_packet(seq, 0, true, kk, timestamp, self.dst_socket_id, payload));
+                    // Resend with the parity the packet was originally encrypted
+                    // under, not the current active key.
+                    if let Some((_, kk, payload)) = self.buffer.iter().find(|(s, _, _)| *s == seq) {
+                        out.push(build_data_packet(seq, 0, true, *kk, timestamp, self.dst_socket_id, payload));
                         self.retransmits += 1;
                     }
                 }
@@ -691,7 +751,7 @@ impl SrtSender {
             }
             Control::Ack { ack_seq, .. } => {
                 // Everything before ack_seq is received; drop it from the buffer.
-                self.buffer.retain(|(s, _)| *s >= *ack_seq);
+                self.buffer.retain(|(s, _, _)| *s >= *ack_seq);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -725,10 +785,13 @@ pub struct SrtReceiver {
     /// the first in-order packet to become deliverable. `i64` so the subtraction
     /// of the anchor timestamp cannot underflow.
     tsbpd_base_us: Option<i64>,
-    /// Stream cipher once the KM is negotiated (encrypted stream); `None` is
-    /// cleartext.
+    /// The two stream-key slots, selected per packet by its `KK` flag (even/odd),
+    /// so a rekey can roll the active key while packets under the previous key
+    /// still decrypt. `None` is cleartext.
     #[cfg(feature = "srt")]
-    crypto: Option<crate::srtcrypto::SrtCrypto>,
+    crypto_even: Option<crate::srtcrypto::SrtCrypto>,
+    #[cfg(feature = "srt")]
+    crypto_odd: Option<crate::srtcrypto::SrtCrypto>,
 }
 
 impl Default for SrtReceiver {
@@ -747,7 +810,9 @@ impl SrtReceiver {
             tsbpd_latency_us: None,
             tsbpd_base_us: None,
             #[cfg(feature = "srt")]
-            crypto: None,
+            crypto_even: None,
+            #[cfg(feature = "srt")]
+            crypto_odd: None,
         }
     }
 
@@ -760,10 +825,23 @@ impl SrtReceiver {
         self.tsbpd_latency_us = Some(latency_us);
     }
 
-    /// Decrypt incoming payloads with the negotiated stream key.
+    /// Decrypt incoming payloads with the negotiated stream key (the even slot;
+    /// the active key at connection time).
     #[cfg(feature = "srt")]
     pub fn set_crypto(&mut self, crypto: crate::srtcrypto::SrtCrypto) {
-        self.crypto = Some(crypto);
+        self.crypto_even = Some(crypto);
+    }
+
+    /// Install a stream key into the slot named by `kk` (`KM_KK_EVEN` /
+    /// `KM_KK_ODD`), the receiver side of a mid-stream rekey: a packet stamped
+    /// with that parity then decrypts under this key.
+    #[cfg(feature = "srt")]
+    pub fn install_key(&mut self, kk: u8, crypto: crate::srtcrypto::SrtCrypto) {
+        match kk {
+            crate::srtcrypto::KM_KK_EVEN => self.crypto_even = Some(crypto),
+            crate::srtcrypto::KM_KK_ODD => self.crypto_odd = Some(crypto),
+            _ => {}
+        }
     }
 
     /// Buffer a received data packet, decrypting its payload in place (keyed by
@@ -779,11 +857,18 @@ impl SrtReceiver {
                 self.max_seen = pkt.seq;
             }
             let payload = pkt.payload;
-            // Decrypt in place when the stream is keyed (a no-op rebind otherwise).
+            // Decrypt in place using the key slot the packet's KK flag selects
+            // (even/odd), so a rekeyed stream stays readable across the switch.
+            // A no-op rebind for a cleartext stream (KK=0 / no installed key).
             #[cfg(feature = "srt")]
             let payload = {
                 let mut p = payload;
-                if let Some(c) = &self.crypto {
+                let slot = match pkt.kk {
+                    crate::srtcrypto::KM_KK_EVEN => self.crypto_even.as_ref(),
+                    crate::srtcrypto::KM_KK_ODD => self.crypto_odd.as_ref(),
+                    _ => None,
+                };
+                if let Some(c) = slot {
                     c.process(pkt.seq, &mut p);
                 }
                 p
@@ -1121,6 +1206,67 @@ mod tests {
         rx.on_data(pkt(2));
         // No set_tsbpd: take_ready_at is a pass-through to take_ready (no gate).
         assert_eq!(rx.take_ready_at(0), vec![vec![1u8], vec![2u8]]);
+    }
+
+    #[test]
+    fn key_material_control_round_trips() {
+        let km = vec![0x12u8, 0x20, 0x29, 0x01, 0xDE, 0xAD, 0xBE, 0xEF];
+        for rsp in [false, true] {
+            let bytes = build_control(&Control::KeyMaterial { rsp, km: km.clone() }, 7, 42);
+            assert!(is_control(&bytes), "KM update is a control packet");
+            let Control::KeyMaterial { rsp: got_rsp, km: got_km } =
+                parse_control(&bytes).expect("parse KM")
+            else {
+                panic!("not a KeyMaterial control");
+            };
+            assert_eq!(got_rsp, rsp, "request/response flag survives");
+            assert_eq!(got_km, km, "KM blob survives the round trip");
+        }
+    }
+
+    #[cfg(feature = "srt")]
+    #[test]
+    fn rekey_switches_keys_and_receiver_decrypts_across_the_switch() {
+        use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN, KM_KK_ODD};
+
+        let mut sender = SrtSender::new(0x1234, 100, 64);
+        let mut receiver = SrtReceiver::new();
+        // Connection-time even key, shared both sides.
+        let even = SrtCrypto::generate(AesKeySize::Aes128);
+        sender.set_crypto(even.clone());
+        receiver.set_crypto(even);
+        assert_eq!(sender.active_kk(), KM_KK_EVEN, "starts on the even key");
+
+        // Two packets under the even key.
+        let p0 = sender.send(b"aaa", 0);
+        let p1 = sender.send(b"bbb", 1);
+
+        // Rekey to a fresh odd key; the receiver installs it from the KM packet.
+        let odd = SrtCrypto::generate(AesKeySize::Aes128);
+        let km_ctrl = sender.rekey(odd, "pass");
+        assert_eq!(sender.active_kk(), KM_KK_ODD, "active key flipped to odd");
+        let Control::KeyMaterial { km, .. } = parse_control(&km_ctrl).expect("KM control") else {
+            panic!("rekey did not emit a KeyMaterial packet");
+        };
+        let kk = SrtCrypto::km_kk(&km).expect("KM parity");
+        receiver.install_key(kk, SrtCrypto::from_km(&km, "pass").expect("unwrap rekey"));
+
+        // Two more under the odd key.
+        let p2 = sender.send(b"ccc", 2);
+        let p3 = sender.send(b"ddd", 3);
+
+        // The wire carries the parity switch, and every payload decrypts with the
+        // slot its KK selects, across the rekey.
+        assert_eq!(parse_data_packet(&p1).unwrap().kk, KM_KK_EVEN, "pre-rekey packets are even");
+        assert_eq!(parse_data_packet(&p2).unwrap().kk, KM_KK_ODD, "post-rekey packets are odd");
+        for pkt in [&p0, &p1, &p2, &p3] {
+            receiver.on_data(parse_data_packet(pkt).unwrap());
+        }
+        assert_eq!(
+            receiver.take_ready(),
+            vec![b"aaa".to_vec(), b"bbb".to_vec(), b"ccc".to_vec(), b"ddd".to_vec()],
+            "payloads decrypt across the even -> odd rekey",
+        );
     }
 
     #[test]

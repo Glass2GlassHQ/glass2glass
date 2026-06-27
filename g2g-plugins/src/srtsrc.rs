@@ -209,10 +209,23 @@ impl SourceLoop for SrtSrc {
                         let (n, from) = r.map_err(io_err)?;
                         if from == peer {
                             if srt::is_control(&buf[..n]) {
-                                // Shutdown ends the stream; keepalive / handshake
-                                // retries are ignored.
-                                if let Some(Control::Shutdown) = srt::parse_control(&buf[..n]) {
-                                    break;
+                                match srt::parse_control(&buf[..n]) {
+                                    Some(Control::Shutdown) => break,
+                                    // Mid-stream rekey: unwrap the new key and file
+                                    // it into the slot its parity names, so packets
+                                    // under the new key decrypt.
+                                    Some(Control::KeyMaterial { km, .. }) => {
+                                        if let Some(pass) = &self.passphrase {
+                                            if let (Some(kk), Some(crypto)) = (
+                                                SrtCrypto::km_kk(&km),
+                                                SrtCrypto::from_km(&km, pass),
+                                            ) {
+                                                receiver.install_key(kk, crypto);
+                                            }
+                                        }
+                                    }
+                                    // Keepalive / handshake retries: ignored.
+                                    _ => {}
                                 }
                             } else if let Some(pkt) = srt::parse_data_packet(&buf[..n]) {
                                 receiver.on_data(pkt);
