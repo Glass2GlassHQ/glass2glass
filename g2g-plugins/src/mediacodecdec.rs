@@ -688,44 +688,14 @@ fn annexb_join(nals: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
-/// Pack a decoded `YUV_420_888` image to tight NV12 (Y plane then interleaved
-/// UV). Each plane's row and pixel strides describe whatever layout the decoder
-/// used (planar I420, semi-planar, or a vendor format), so this single path
-/// handles them all, unlike the old byte-buffer packing.
+/// Pack a decoded `YUV_420_888` image into a `DecodedFrame::Nv12`; the layout
+/// handling lives in `yuv420::pack_yuv420_to_nv12` (shared with camera2src).
 fn image_to_nv12(img: &Image, pts_ns: u64) -> Option<DecodedFrame> {
-    let w = img.width().ok()?.max(0) as usize;
-    let h = img.height().ok()?.max(0) as usize;
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let y = img.plane_data(0).ok()?;
-    let y_rs = img.plane_row_stride(0).ok()? as usize;
-    let u = img.plane_data(1).ok()?;
-    let u_rs = img.plane_row_stride(1).ok()? as usize;
-    let u_ps = img.plane_pixel_stride(1).ok()? as usize;
-    let v = img.plane_data(2).ok()?;
-    let v_rs = img.plane_row_stride(2).ok()? as usize;
-    let v_ps = img.plane_pixel_stride(2).ok()? as usize;
-
-    let (cw, ch) = (w / 2, h / 2);
-    let mut nv12 = Vec::with_capacity(w * h + 2 * cw * ch);
-    // Luma: w bytes per row, row-stride apart.
-    for row in 0..h {
-        let off = row * y_rs;
-        nv12.extend_from_slice(y.get(off..off + w)?);
-    }
-    // Chroma: interleave Cb,Cr honoring each plane's row + pixel stride (a pixel
-    // stride of 2 is an already-interleaved semi-planar source; 1 is planar).
-    for row in 0..ch {
-        for col in 0..cw {
-            nv12.push(*u.get(row * u_rs + col * u_ps)?);
-            nv12.push(*v.get(row * v_rs + col * v_ps)?);
-        }
-    }
+    let (nv12, width, height) = crate::yuv420::pack_yuv420_to_nv12(img)?;
     Some(DecodedFrame::Nv12 {
         nv12: nv12.into_boxed_slice(),
-        width: w as u32,
-        height: h as u32,
+        width,
+        height,
         pts_ns,
     })
 }

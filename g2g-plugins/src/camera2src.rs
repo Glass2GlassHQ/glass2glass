@@ -427,35 +427,8 @@ impl PadTemplates for Camera2Src {
     }
 }
 
-/// Pack a decoded `YUV_420_888` image to tight NV12 (Y plane then interleaved
-/// UV). The per-plane row / pixel strides describe whatever layout the camera
-/// chose, so this one path handles planar I420, semi-planar, and vendor formats.
+/// Pack a decoded `YUV_420_888` image to tight NV12. The capture caps fix the
+/// geometry, so only the packed bytes are kept; see `yuv420::pack_yuv420_to_nv12`.
 fn image_to_nv12(img: &Image) -> Option<Vec<u8>> {
-    let w = img.width().ok()?.max(0) as usize;
-    let h = img.height().ok()?.max(0) as usize;
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let y = img.plane_data(0).ok()?;
-    let y_rs = img.plane_row_stride(0).ok()? as usize;
-    let u = img.plane_data(1).ok()?;
-    let u_rs = img.plane_row_stride(1).ok()? as usize;
-    let u_ps = img.plane_pixel_stride(1).ok()? as usize;
-    let v = img.plane_data(2).ok()?;
-    let v_rs = img.plane_row_stride(2).ok()? as usize;
-    let v_ps = img.plane_pixel_stride(2).ok()? as usize;
-
-    let (cw, ch) = (w / 2, h / 2);
-    let mut nv12 = Vec::with_capacity(w * h + 2 * cw * ch);
-    for row in 0..h {
-        let off = row * y_rs;
-        nv12.extend_from_slice(y.get(off..off + w)?);
-    }
-    for row in 0..ch {
-        for col in 0..cw {
-            nv12.push(*u.get(row * u_rs + col * u_ps)?);
-            nv12.push(*v.get(row * v_rs + col * v_ps)?);
-        }
-    }
-    Some(nv12)
+    crate::yuv420::pack_yuv420_to_nv12(img).map(|(nv12, _w, _h)| nv12)
 }

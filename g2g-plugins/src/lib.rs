@@ -370,6 +370,11 @@ pub mod fmp4demux;
 ))]
 mod worker_ready;
 
+// YUV_420_888 -> NV12 packer shared by the Android ndk-image elements
+// (camera2src, mediacodecdec).
+#[cfg(all(target_os = "android", any(feature = "camera2", feature = "mediacodec")))]
+mod yuv420;
+
 // D3D11 present sink: displays MemoryDomain::D3D11Texture frames via a DXGI
 // swapchain + D3D11 video processor. Windows-only; the analog of CudaGlSink.
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
