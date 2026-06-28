@@ -1297,9 +1297,16 @@ single aggregator arm owns `&mut` and fixates + configures each new pad inline
 (no aliasing), and per-pad-tagged frames merge as in `run_fanin_session`. The run
 ends once the handle is dropped *and* every attached input has reached EOS (the
 `DynamicJoin` completion rule). In all three the pending-pad set is drained before
-each blocking select, so a pad requested before a frame is never missed. A merged
-downstream output for the dynamic fan-in (the `run_muxer_sink` shape, with a
-trailing sink and output-caps coupling) is a follow-up.
+each blocking select, so a pad requested before a frame is never missed.
+`run_muxer_sink_dynamic` adds the trailing **sink**: the muxer's merged output is
+written to a sink arm rather than discarded, with the output caps coupled without
+a global re-solve. Because inputs attach one at a time, the merged output firms up
+as pads configure, so the muxer arm emits a `CapsChanged` to the sink whenever the
+derived `output_caps` changes (the dynamic analog of the static `run_muxer_sink`
+MX-2 coupling) and the sink configures against it before the first merged frame;
+when every input has ended the muxer arm closes the merged link with `Eos`, ending
+the sink arm. This is the `run_muxer_sink` shape extended to runtime-added inputs
+(attach a late audio track to a running `muxer ! filesink`).
 
 #### 4.13.6a Bins and ghost pads (flattening)
 

@@ -34,9 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
-  (M320) drives a *terminal* aggregator; the `run_muxer_sink` shape (a trailing
-  sink with output-caps coupling) for runtime-added inputs is still owed.
 - **Mid-stream element hot-swap.** `ElementSlot::swap` scaffolding exists; live
   swap of a real element under load isn't wired.
 - **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);

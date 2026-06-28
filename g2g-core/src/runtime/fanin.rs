@@ -292,6 +292,8 @@ pub trait DynMultiInputElement: ElementBound {
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
+    /// Dyn-safe mirror of [`MultiInputElement::output_caps`].
+    fn output_caps(&self) -> Result<Caps, G2gError>;
     fn configure_pipeline(
         &mut self,
         input: usize,
@@ -327,6 +329,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         MultiInputElement::propose_allocation_for_input(self, input, caps)
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        MultiInputElement::output_caps(self)
     }
 
     fn configure_pipeline(
@@ -382,6 +388,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         (**self).propose_allocation_for_input(input, caps)
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        (**self).output_caps()
     }
 
     fn configure_pipeline(
@@ -971,6 +981,9 @@ enum FaninArmOut {
     Aggregator(u64),
     /// A runtime-attached input source emitted this many `DataFrame`s.
     Source(u64),
+    /// The trailing sink arm ([`run_muxer_sink_dynamic`]) consumed this many
+    /// merged `DataFrame`s.
+    Sink(u64),
 }
 
 /// A handle to add inputs to a *running* dynamic aggregator (M320): the fan-in
@@ -1164,6 +1177,169 @@ where
             match r? {
                 FaninArmOut::Source(n) => emitted += n,
                 FaninArmOut::Aggregator(n) => consumed = n,
+                // The terminal aggregator has no trailing sink arm.
+                FaninArmOut::Sink(_) => {}
+            }
+        }
+        Ok(RunStats {
+            frames_emitted: emitted,
+            frames_consumed: consumed,
+            frames_dropped: 0,
+            latency: LatencyReport::ZERO,
+            allocation: None,
+            clock_priority: ClockPriority::SystemFallback,
+            base_time_ns: 0,
+            coordinator_events: 0,
+        })
+    };
+
+    (handle, run)
+}
+
+/// Like [`run_aggregator_dynamic`], but with a trailing **sink**: the muxer's
+/// merged output flows to `sink`, the [`run_muxer_sink`] shape extended to
+/// runtime-added inputs (dynamically attach a late audio track to a running
+/// `muxer ! filesink`, say). Inputs are added through the returned
+/// [`DynamicFaninHandle`] exactly as for the terminal aggregator; the difference
+/// is the merged output is not discarded.
+///
+/// The muxer's output caps are coupled to the sink without a global re-solve:
+/// because inputs attach one at a time, the merged output (`output_caps`) only
+/// firms up as pads are configured, so the muxer arm emits a `CapsChanged` to the
+/// sink whenever the derived output changes (the dynamic analog of the static
+/// `run_muxer_sink` MX-2 coupling), and the sink configures against it before the
+/// first merged frame. When every input has ended and the handle is dropped, the
+/// muxer arm closes the merged link with `Eos`, ending the sink arm.
+/// `RunStats::frames_consumed` is the sink's merged-frame count.
+#[cfg(feature = "std")]
+pub fn run_muxer_sink_dynamic<'a, Mux, Snk>(
+    mux: &'a mut Mux,
+    sink: &'a mut Snk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> (DynamicFaninHandle<'a>, impl Future<Output = Result<RunStats, G2gError>> + 'a)
+where
+    Mux: MultiInputElement + 'a,
+    Snk: AsyncElement + 'a,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let max_inputs = mux.input_count();
+
+    let (new_input_tx, new_input_rx) =
+        bounded::<(usize, Box<dyn DynSourceLoop + 'a>)>(link_capacity);
+    let (new_arm_tx, new_arm_rx) =
+        bounded::<BoxFuture<'a, Result<FaninArmOut, G2gError>>>(link_capacity);
+
+    let handle = DynamicFaninHandle {
+        new_input_tx,
+        next_pad: Arc::new(AtomicUsize::new(0)),
+        max_inputs,
+    };
+
+    let run = async move {
+        let (tagged_tx, tagged_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+        // Merged-output link: muxer arm -> sink arm.
+        let (out_tx, out_rx) = link(link_capacity);
+
+        // Sink arm: configure on the muxer's output `CapsChanged`, then process
+        // merged frames until the muxer arm closes the link (Eos / drop).
+        let sink_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
+            let sink: &mut dyn DynAsyncElement = sink;
+            let mut null = NullSink;
+            let mut consumed = 0u64;
+            while let Some(pkt) = out_rx.recv().await {
+                match pkt {
+                    PipelinePacket::CapsChanged(caps) => {
+                        if let ConfigureOutcome::ReFixate(_) = sink.configure_pipeline(&caps)? {
+                            return Err(G2gError::FixationFailed);
+                        }
+                        sink.process(PipelinePacket::CapsChanged(caps), &mut null).await?;
+                    }
+                    PipelinePacket::Eos => break,
+                    other => {
+                        if matches!(other, PipelinePacket::DataFrame(_)) {
+                            consumed += 1;
+                        }
+                        sink.process(other, &mut null).await?;
+                    }
+                }
+            }
+            Ok(FaninArmOut::Sink(consumed))
+        });
+
+        let muxer_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
+            let mux: &mut dyn DynMultiInputElement = mux;
+            let mut out = SenderSink::new(out_tx);
+            let mut current_output: Option<Caps> = None;
+            let mut consumed = 0u64;
+            let mut accepting = true;
+            let mut keepalive: Option<Sender<(usize, PipelinePacket)>> = Some(tagged_tx);
+            loop {
+                while let Some((pad, source)) = new_input_rx.try_recv() {
+                    let tx = keepalive.as_ref().expect("keepalive held while accepting");
+                    attach_input(pad, source, mux, tx, &new_arm_tx).await?;
+                }
+
+                let next = if accepting {
+                    match select2(tagged_rx.recv(), new_input_rx.recv()).await {
+                        Either::Left(packet) => packet,
+                        Either::Right(Some((pad, source))) => {
+                            let tx = keepalive.as_ref().expect("keepalive held while accepting");
+                            attach_input(pad, source, mux, tx, &new_arm_tx).await?;
+                            continue;
+                        }
+                        Either::Right(None) => {
+                            // Handle dropped: stop accepting, release the keepalive
+                            // so the tagged channel closes once inputs end.
+                            accepting = false;
+                            keepalive = None;
+                            continue;
+                        }
+                    }
+                } else {
+                    tagged_rx.recv().await
+                };
+
+                match next {
+                    Some((pad, PipelinePacket::Eos)) => {
+                        // Per-input end: let the muxer flush that pad. It must not
+                        // forward Eos; this runner owns the merged end.
+                        mux.process(pad, PipelinePacket::Eos, &mut out).await?;
+                    }
+                    Some((pad, packet)) => {
+                        if matches!(packet, PipelinePacket::DataFrame(_)) {
+                            // Couple the merged output to the sink: emit one
+                            // `CapsChanged` whenever the derived output firms up or
+                            // shifts (a newly attached pad can change it), before
+                            // the frame it qualifies.
+                            if let Ok(oc) = mux.output_caps() {
+                                if current_output.as_ref() != Some(&oc) {
+                                    out.push(PipelinePacket::CapsChanged(oc.clone())).await?;
+                                    current_output = Some(oc);
+                                }
+                            }
+                            consumed += 1;
+                        }
+                        mux.process(pad, packet, &mut out).await?;
+                    }
+                    None => break,
+                }
+            }
+            // Close the merged link so the sink arm ends.
+            out.push(PipelinePacket::Eos).await?;
+            Ok(FaninArmOut::Aggregator(consumed))
+        });
+
+        let arms: Vec<BoxFuture<'a, Result<FaninArmOut, G2gError>>> =
+            alloc::vec![muxer_arm, sink_arm];
+        let results = dynamic_join(arms, new_arm_rx).await;
+
+        let mut emitted = 0u64;
+        let mut consumed = 0u64;
+        for r in results {
+            match r? {
+                FaninArmOut::Source(n) => emitted += n,
+                FaninArmOut::Sink(n) => consumed = n,
+                FaninArmOut::Aggregator(_) => {}
             }
         }
         Ok(RunStats {

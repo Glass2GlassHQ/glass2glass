@@ -65,8 +65,8 @@ pub use runner::{
 #[cfg(feature = "std")]
 pub use fanin::{
     run_aggregator_dynamic, run_duplex_session, run_fanin_session, run_fanin_sink,
-    run_muxer_sink, run_muxer_sink_with_bus, DynMultiInputElement, DynamicFaninHandle,
-    DynSourceLoop,
+    run_muxer_sink, run_muxer_sink_dynamic, run_muxer_sink_with_bus, DynMultiInputElement,
+    DynamicFaninHandle, DynSourceLoop,
 };
 
 #[cfg(feature = "std")]
