@@ -375,6 +375,17 @@ fn forward_propagate(
                 upstream: i - 1,
                 downstream: i,
             })?;
+            // A `DerivedCoupled`'s passthrough mask and its derive closure are two
+            // sources of truth for the same fact; verify they agree on the
+            // concrete input so a mask claiming a field the closure retargets is
+            // caught here (debug builds), not as a silent mis-narrowing of the
+            // input. `DerivedOutput` carries no mask, so nothing to check.
+            if let CapsConstraint::DerivedCoupled { passthrough, .. } = c {
+                debug_assert!(
+                    crate::caps::verify_passthrough_sound(f.as_ref(), *passthrough, &fixed),
+                    "DerivedCoupled passthrough mask claims a field its derive closure does not pass through"
+                );
+            }
             let r = f(&fixed);
             if r.is_empty() {
                 return Err(NegotiationFailure::EmptyLink { upstream: i, downstream: i + 1 });

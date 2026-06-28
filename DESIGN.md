@@ -969,6 +969,23 @@ output == input, and the backward sweep (`backward_field_narrow`) intersects a
 downstream pin *into* those input fields (`Range ∩ Fixed = Fixed`). The closure
 stays the source of truth for the retargeted fields.
 
+The mask and the closure are two sources of truth for one fact (which fields
+couple backward), so they can drift: a mask claiming a field the closure actually
+retargets is unsound (the solver would narrow the input on a field the transform
+rewrites). A full *closure-free* forward-derivation descriptor would remove the
+duplication, but it is a deliberate non-goal: forward derivation is genuinely
+imperative (a scaler branches on format membership and enforces 4:2:0 even-dims,
+the cross-field validity §4.13.10 keeps out of the declarative constraint), so it
+cannot be a `Copy` descriptor without re-importing exactly what was excluded.
+Instead the drift is caught directly: the solver's forward step runs a
+`debug_assert!` (`verify_passthrough_sound`) that every field the mask declares
+passthrough is in fact repeated unchanged across *all* of the closure's output
+alternatives for the concrete input. Unlike `discover_passthrough` it stays valid
+for the multi-valued closures `DerivedCoupled` exists for (it checks the declared
+fields, not a single output), and it flags only the unsound direction
+(declared-but-not-honoured); a field the closure passes through but the mask omits
+is merely a missed coupling, which is sound.
+
 A plain `DerivedOutput` (a decoder that declares no mask) recovers the same
 backward coupling automatically (M257): `discover_passthrough` probes the closure
 with two distinct concrete inputs per field and marks a field passthrough when

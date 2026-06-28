@@ -34,8 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Closure-free `FieldTransform` refactor.** Make forward derivation
-  declarative too, for a `Debug`/`Copy` single-source-of-truth descriptor.
 - **Graceful per-branch drop on fan-out** (`FanOutPolicy::AllowBranchDrop`); a
   rejecting branch fails the run loud today.
 - **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
