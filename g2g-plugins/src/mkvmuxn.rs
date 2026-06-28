@@ -80,6 +80,8 @@ pub struct MkvMuxN {
     /// Built lazily once every track has its init (the Tracks element needs all).
     mux: Option<MatroskaMuxer>,
     emitted: u64,
+    /// Set once the EOS `Cues` index has been flushed, so it is emitted only once.
+    cues_emitted: bool,
 }
 
 impl MkvMuxN {
@@ -93,6 +95,7 @@ impl MkvMuxN {
             agg: InputAggregator::new(inputs),
             mux: None,
             emitted: 0,
+            cues_emitted: false,
         }
     }
 
@@ -353,6 +356,23 @@ impl MultiInputElement for MkvMuxN {
             while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
                 self.emit_au(track, frame, out).await?;
             }
+            // Once every track has ended and drained, flush the Cues index after
+            // the last Cluster so the stream is seekable on a read-to-end (M375).
+            if self.agg.is_drained() && !self.cues_emitted {
+                if let Some(mux) = self.mux.as_ref() {
+                    let cues = mux.finish();
+                    if !cues.is_empty() {
+                        let out_frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(cues.into_boxed_slice())),
+                            FrameTiming::default(),
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                }
+                self.cues_emitted = true;
+            }
             Ok(())
         })
     }
@@ -452,6 +472,10 @@ mod tests {
         assert_eq!(tracks[1].codec, MkvCodec::Aac);
         assert_eq!(tracks[1].channels, 2);
         assert_eq!(tracks[1].sample_rate, 48_000);
+
+        // A Cues index is written at EOS, indexing the video keyframes (track 1),
+        // so the muxed A/V stream is seekable (M375).
+        assert!(!d.cues().is_empty(), "Cues index written for the video keyframes");
 
         // CodecPrivate is present for both tracks (avcC record, AAC ASC): the
         // bytes carry the avcC config-version byte and the A_AAC CodecID.

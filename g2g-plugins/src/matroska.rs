@@ -67,6 +67,7 @@ const ID_CUES: u32 = 0x1C53_BB6B;
 const ID_CUE_POINT: u32 = 0x00BB;
 const ID_CUE_TIME: u32 = 0x00B3;
 const ID_CUE_TRACK_POSITIONS: u32 = 0x00B7;
+const ID_CUE_TRACK: u32 = 0x00F7;
 const ID_CUE_CLUSTER_POSITION: u32 = 0x00F1;
 const ID_CHAPTERS: u32 = 0x1043_A770;
 const ID_ATTACHMENTS: u32 = 0x1941_A469;
@@ -932,9 +933,17 @@ const DEFAULT_MAX_CLUSTER_SPAN_MS: u64 = 1_000;
 /// into one Cluster until one is more than the span cap past its base timestamp
 /// (or time runs backward), amortizing the per-Cluster overhead.
 ///
+/// While streaming, the muxer records a `Cues` index (one entry per Cluster that
+/// holds a keyframe on the cue track) and emits it from [`finish`](Self::finish)
+/// at EOS, so the written stream is seekable once read past the Clusters (M375).
+/// A front `SeekHead` pointing at this end-of-stream `Cues` cannot be written by a
+/// streaming muxer (the front is already emitted before the `Cues` position is
+/// known); seeking the muxer's own output without reading to the end (the M374
+/// `SeekHead` prefetch) would need a two-pass / seekable-output finalize mode.
+///
 /// Scope: default TimestampScale (1 ms). One or more tracks (see
 /// [`MatroskaMuxer::new_multi`], the A/V case driven by
-/// [`crate::mkvmuxn::MkvMuxN`]); Cues are a follow-up.
+/// [`crate::mkvmuxn::MkvMuxN`]).
 #[derive(Debug)]
 pub struct MatroskaMuxer {
     /// One or more tracks; the Nth (0-based) writes Matroska TrackNumber N+1.
@@ -944,6 +953,22 @@ pub struct MatroskaMuxer {
     header_written: bool,
     /// The open Cluster's base Timestamp (ms), or `None` before the first frame.
     cluster_base_ms: Option<u64>,
+    /// The track (0-based) the `Cues` index references: the first video track, or
+    /// track 0 if none. Cues conventionally index the video keyframes.
+    cue_track: usize,
+    /// Running byte offset into the Segment data (the byte after the Segment
+    /// header, where `CueClusterPosition` is anchored): bytes emitted past it so
+    /// far. Tracks the position of each Cluster as it streams out.
+    segment_pos: u64,
+    /// Byte offset (relative to the Segment data start) of the currently open
+    /// Cluster, the `CueClusterPosition` a keyframe in it records.
+    current_cluster_pos: u64,
+    /// `Cues` entries collected so far: `(CueTime in TimestampScale units,
+    /// CueClusterPosition relative to the Segment data start)`.
+    cues: Vec<(u64, u64)>,
+    /// The Cluster position of the last recorded cue, so at most one cue is kept
+    /// per Cluster (the first keyframe in it), bounding the index size.
+    last_cued_cluster_pos: Option<u64>,
 }
 
 impl MatroskaMuxer {
@@ -957,12 +982,19 @@ impl MatroskaMuxer {
     /// shared timeline, so blocks of every track interleave by timestamp.
     pub fn new_multi(tracks: Vec<MkvTrackConfig>) -> Self {
         assert!(!tracks.is_empty(), "MatroskaMuxer needs at least one track");
+        // Cues index the video keyframes: pick the first video track, else track 0.
+        let cue_track = tracks.iter().position(|t| t.spec.codec.track_type() == 1).unwrap_or(0);
         Self {
             tracks,
             tags: TagList::new(),
             max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
             header_written: false,
             cluster_base_ms: None,
+            cue_track,
+            segment_pos: 0,
+            current_cluster_pos: 0,
+            cues: Vec::new(),
+            last_cued_cluster_pos: None,
         }
     }
 
@@ -999,11 +1031,14 @@ impl MatroskaMuxer {
             // Segment with unknown size: its children run to end of stream.
             id_bytes(ID_SEGMENT, &mut out);
             out.extend_from_slice(&[0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+            // Segment data starts here; track positions are anchored to it.
+            let seg_data_start = out.len();
             out.extend_from_slice(&info_element());
             out.extend_from_slice(&tracks_element(&self.tracks));
             if !self.tags.is_empty() {
                 out.extend_from_slice(&tags_element(&self.tags));
             }
+            self.segment_pos = (out.len() - seg_data_start) as u64;
             self.header_written = true;
         }
         let ts = pts_ns / DEFAULT_TIMESTAMP_SCALE;
@@ -1013,18 +1048,52 @@ impl MatroskaMuxer {
         };
         if need_new_cluster {
             // Open an unknown-size Cluster: its id + a one-byte unknown-size marker,
-            // then the base Timestamp. The next Cluster header (or EOF) ends it.
+            // then the base Timestamp. The next Cluster header (or EOF) ends it. The
+            // Cluster element starts at the current Segment-data position, which a
+            // keyframe in it records as its CueClusterPosition.
+            self.current_cluster_pos = self.segment_pos;
+            let before = out.len();
             id_bytes(ID_CLUSTER, &mut out);
             out.push(0xFF);
             out.extend_from_slice(&elem_vec(ID_TIMESTAMP, &uint_bytes(ts)));
+            self.segment_pos += (out.len() - before) as u64;
             self.cluster_base_ms = Some(ts);
         }
         let base = self.cluster_base_ms.expect("set above");
         let rel = (ts as i64 - base as i64) as i16;
         let track_number = (track + 1) as u64;
         let block = build_simple_block(track_number, rel, keyframe, data);
+        let before = out.len();
         out.extend_from_slice(&elem_vec(ID_SIMPLE_BLOCK, &block));
+        self.segment_pos += (out.len() - before) as u64;
+        // Index this Cluster in the Cues if it holds a keyframe on the cue track,
+        // at most once per Cluster (the first such keyframe), to bound the index.
+        if keyframe && track == self.cue_track && self.last_cued_cluster_pos != Some(self.current_cluster_pos) {
+            self.cues.push((ts, self.current_cluster_pos));
+            self.last_cued_cluster_pos = Some(self.current_cluster_pos);
+        }
         out
+    }
+
+    /// The `Cues` element for the keyframes muxed so far, to write once at EOS
+    /// (after the last Cluster) so the stream is seekable on a read-to-end. Empty
+    /// when no keyframe was indexed (no frames, or none on the cue track). The
+    /// inverse of [`MatroskaDemuxer`]'s `Cues` parse; positions are relative to the
+    /// Segment data start, the anchor `cue_seek_offset` adds back.
+    pub fn finish(&self) -> Vec<u8> {
+        if self.cues.is_empty() {
+            return Vec::new();
+        }
+        let track_number = (self.cue_track + 1) as u64;
+        let mut body = Vec::new();
+        for &(time, cluster_pos) in &self.cues {
+            let mut positions = elem_vec(ID_CUE_TRACK, &uint_bytes(track_number));
+            positions.extend_from_slice(&elem_vec(ID_CUE_CLUSTER_POSITION, &uint_bytes(cluster_pos)));
+            let mut point = elem_vec(ID_CUE_TIME, &uint_bytes(time));
+            point.extend_from_slice(&elem_vec(ID_CUE_TRACK_POSITIONS, &positions));
+            body.extend_from_slice(&elem_vec(ID_CUE_POINT, &point));
+        }
+        elem_vec(ID_CUES, &body)
     }
 }
 
@@ -1657,6 +1726,36 @@ mod tests {
         let frames = d.take_frames();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[1].pts_ns, 600_000_000, "second Cluster carries its own base");
+    }
+
+    #[test]
+    fn mux_writes_cues_that_demux_resolves_to_the_clusters() {
+        // Two keyframes a span apart open two Clusters; the EOS Cues index should
+        // point each CueTime at its Cluster's byte offset (M375, the write side of
+        // M373's read).
+        let spec =
+            MkvTrackSpec { codec: MkvCodec::Vp9, width: 16, height: 16, channels: 0, sample_rate: 0 };
+        let mut mux = MatroskaMuxer::new(spec).with_max_cluster_span_ms(500);
+        let mut out = mux.push_frame(&[1], 0, true);
+        out.extend_from_slice(&mux.push_frame(&[2], 200_000_000, false)); // same Cluster, non-key
+        out.extend_from_slice(&mux.push_frame(&[3], 600_000_000, true)); // 600 ms > 500 ms: Cluster 2
+        let cues = mux.finish();
+        assert!(!cues.is_empty(), "a Cues element is produced at finish");
+        out.extend_from_slice(&cues);
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&out);
+        // One CuePoint per Cluster holding a keyframe (the non-key frame did not add
+        // a second cue to Cluster 1).
+        assert_eq!(d.cues().len(), 2, "one cue per keyframe-bearing Cluster, deduped");
+        assert_eq!(d.cues()[0].time_ns, 0);
+        assert_eq!(d.cues()[1].time_ns, 600_000_000);
+
+        // Each cue's resolved absolute offset lands exactly on a Cluster element id.
+        for target in [0u64, 600_000_000] {
+            let off = d.cue_seek_offset(target).expect("offset for a cued time") as usize;
+            assert_eq!(&out[off..off + 4], &[0x1F, 0x43, 0xB6, 0x75], "cue points at a Cluster");
+        }
     }
 
     #[test]

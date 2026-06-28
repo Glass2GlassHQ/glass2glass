@@ -15,7 +15,7 @@
 //! The muxer is built lazily on the first frame, so a `CapsChanged` that refines
 //! the geometry (e.g. from a parser) is reflected in the written Tracks. Scope
 //! (v1): one track, one frame per Cluster, every frame flagged a keyframe (no
-//! upstream delta-frame signal yet). Multi-track and Cues are follow-ups.
+//! upstream delta-frame signal yet). A `Cues` index is written at EOS (M375).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -180,8 +180,22 @@ impl AsyncElement for MkvMux {
                         self.caps = Some(c);
                     }
                 }
-                // The runner's transform arm forwards EOS; nothing to flush here.
-                PipelinePacket::Eos => {}
+                // At EOS, flush the Cues index after the last Cluster so the stream
+                // is seekable on a read-to-end (M375); the runner then forwards EOS.
+                PipelinePacket::Eos => {
+                    if let Some(mux) = self.mux.as_ref() {
+                        let cues = mux.finish();
+                        if !cues.is_empty() {
+                            let out_frame = Frame::new(
+                                MemoryDomain::System(SystemSlice::from_boxed(cues.into_boxed_slice())),
+                                FrameTiming::default(),
+                                self.emitted,
+                            );
+                            self.emitted += 1;
+                            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                        }
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -361,6 +375,8 @@ mod tests {
         demux.process(PipelinePacket::Eos, &mut frame_sink).await.unwrap();
 
         assert_eq!(frame_sink.frames, alloc::vec![f0, f1], "frames recovered through mux + demux");
-        assert_eq!(mux.emitted(), 2);
+        // Two frames plus the EOS Cues index (both frames share one Cluster, so the
+        // dedup-per-Cluster index holds a single CuePoint, emitted as one frame).
+        assert_eq!(mux.emitted(), 3);
     }
 }
