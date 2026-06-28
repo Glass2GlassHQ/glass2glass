@@ -126,6 +126,19 @@ pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1F)
 }
 
+/// Whether an access unit (either framing) begins a keyframe for `codec`: an
+/// H.264 IDR (NAL type 5) or an H.265 IRAP picture (types 16..=23, covering
+/// BLA / IDR / CRA). Used by the demuxer seek path (M362) to snap to a decodable
+/// resume point in a stream whose units carry no keyframe flag of their own.
+pub(crate) fn au_is_keyframe(codec: g2g_core::VideoCodec, au: &[u8]) -> bool {
+    use g2g_core::VideoCodec;
+    nal_units_any(au).any(|n| match (codec, n.first()) {
+        (VideoCodec::H265, Some(b)) => (16..=23).contains(&((b >> 1) & 0x3F)),
+        (_, Some(b)) => (b & 0x1F) == 5,
+        (_, None) => false,
+    })
+}
+
 /// Collect the H.264 SPS (type 7) and PPS (type 8) NAL units from an access unit
 /// (either framing), returned as owned copies so the caller can cache them across
 /// frames. VideoToolbox builds its `CMVideoFormatDescription` from the parameter

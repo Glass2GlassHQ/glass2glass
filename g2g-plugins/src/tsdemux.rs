@@ -29,12 +29,14 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, VideoCodec,
 };
 
+use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
     EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, TS_PACKET_LEN,
 };
@@ -68,6 +70,9 @@ pub struct TsDemux {
     buf: Vec<u8>,
     configured: bool,
     emitted: u64,
+    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `with_seek` wired the controllers.
+    seek: DemuxSeek,
 }
 
 impl Default for TsDemux {
@@ -84,6 +89,7 @@ impl TsDemux {
             buf: Vec::new(),
             configured: false,
             emitted: 0,
+            seek: DemuxSeek::default(),
         }
     }
 
@@ -91,6 +97,23 @@ impl TsDemux {
     pub fn with_stream(mut self, stream: TsStream) -> Self {
         self.stream = stream;
         self
+    }
+
+    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// On a time seek the demuxer rewinds the source and re-syncs from the
+    /// keyframe at/after the target.
+    pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
+        self.seek.with(app, upstream);
+        self
+    }
+
+    /// Reset the parser for a discontinuity (a `Flush` / seek): drop buffered
+    /// bytes and the demuxer's PAT/PMT/PES state, which the re-read stream
+    /// re-establishes from its start.
+    fn reset_parser(&mut self) {
+        self.buf.clear();
+        self.demux = TsDemuxer::new();
     }
 
     /// The elementary stream this instance forwards.
@@ -185,6 +208,21 @@ impl TsDemux {
                 .pts_90khz
                 .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(0);
+            // M362 seek: an audio frame is always a resync point; a video AU is
+            // one only if it carries an IDR/IRAP. Drop until the target keyframe.
+            let keyframe = match self.stream {
+                TsStream::H264 => crate::annexb::au_is_keyframe(VideoCodec::H264, &u.data),
+                TsStream::H265 => crate::annexb::au_is_keyframe(VideoCodec::H265, &u.data),
+                TsStream::Aac => true,
+            };
+            match self.seek.admit(pts_ns, keyframe) {
+                Admit::Drop => continue,
+                Admit::Resume(start) => {
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                Admit::Emit => {}
+            }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
                 FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
@@ -237,8 +275,14 @@ impl AsyncElement for TsDemux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            // M362: a pending app seek triggers an upstream byte-seek; until its
+            // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -246,6 +290,13 @@ impl AsyncElement for TsDemux {
                     self.drain_packets();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
+                }
+                // The upstream byte-seek's flush: reset the parser, then re-sync
+                // from the re-read stream. Forward it downstream.
+                PipelinePacket::Flush => {
+                    self.seek.on_flush();
+                    self.reset_parser();
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
                     // Flush the final in-flight PES and emit it; the runner's
