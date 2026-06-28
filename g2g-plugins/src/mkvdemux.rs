@@ -41,9 +41,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
-    Stream, StreamCollection, StreamType, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
+    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, TagList,
+    VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -262,9 +263,17 @@ impl MkvDemux {
     /// The concrete caps for the selected track once Tracks has been parsed,
     /// with real geometry / audio parameters. `None` until the track is known.
     fn concrete_caps(&self) -> Option<Caps> {
-        let want = Self::selected_codec(self.stream);
-        let track = self.demux.tracks().iter().find(|t| t.codec == want)?;
-        match Self::output_caps(self.stream) {
+        Self::concrete_caps_of(&self.demux, self.stream)
+    }
+
+    /// The concrete caps for `stream` in `demux` once Tracks has been parsed, with
+    /// real geometry / audio parameters (`None` until that track is known). The
+    /// stream-parameterized form [`concrete_caps`](Self::concrete_caps) and the
+    /// multi-output [`MkvDemuxN`] share, so a per-port announce reuses it.
+    fn concrete_caps_of(demux: &MatroskaDemuxer, stream: MkvStream) -> Option<Caps> {
+        let want = Self::selected_codec(stream);
+        let track = demux.tracks().iter().find(|t| t.codec == want)?;
+        match Self::output_caps(stream) {
             Caps::CompressedVideo { codec, .. } if track.width > 0 && track.height > 0 => {
                 Some(Caps::CompressedVideo {
                     codec,
@@ -607,6 +616,171 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Opus),
         ]));
         Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
+    }
+}
+
+/// Multi-output Matroska / WebM demuxer (M378): one Matroska byte stream in, N
+/// elementary streams out, one per output port (the decodebin3 core). The
+/// multi-output counterpart of [`MkvDemux`] (which forwards a single selected
+/// stream); the read-side analog of [`crate::mkvmuxn::MkvMuxN`].
+///
+/// A [`MultiOutputElement`] driven by
+/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): each port carries
+/// one selected [`MkvStream`] (the "dark slots", §4.9.3), so one demuxer feeds
+/// several decode branches in one pipeline rather than instantiating a
+/// single-output demuxer per stream. The demuxer parses the container once and
+/// routes each track's access units to its port by codec; a parsed track with no
+/// matching port is dropped. Port `i` emits its concrete [`Caps`]
+/// ([`PipelinePacket::CapsChanged`]) before its first frame, so the branch retypes
+/// from the (byte-stream) input caps to the elementary stream, exactly as the
+/// single-output demuxer announces its output. A port whose stream the container
+/// does not carry simply stays dark.
+///
+/// The app picks the per-port streams from the announced
+/// [`StreamCollection`](BusMessage::StreamCollection) (M376); wiring a `demux`
+/// node into the `gst-launch` text DSL and a `playbin3` element are the follow-ups.
+#[derive(Debug)]
+pub struct MkvDemuxN {
+    demux: MatroskaDemuxer,
+    /// Port `i` emits this elementary stream (one selected stream per output pad).
+    ports: Vec<MkvStream>,
+    /// Whether port `i` has emitted its opening `CapsChanged` yet.
+    announced: Vec<bool>,
+    bus: Option<BusHandle>,
+    /// Set once the `StreamCollection` has been announced (M376), so it posts once.
+    collection_posted: bool,
+    emitted: u64,
+}
+
+impl MkvDemuxN {
+    /// A demuxer with one output port per entry of `ports` (the selected streams),
+    /// in port order. Panics if `ports` is empty (a fan-out needs a port).
+    pub fn new(ports: Vec<MkvStream>) -> Self {
+        assert!(!ports.is_empty(), "MkvDemuxN needs at least one output port");
+        let announced = alloc::vec![false; ports.len()];
+        Self {
+            demux: MatroskaDemuxer::new(),
+            ports,
+            announced,
+            bus: None,
+            collection_posted: false,
+            emitted: 0,
+        }
+    }
+
+    /// Attach the pipeline bus so the container's `StreamCollection` (M376) and
+    /// `Tags` post once parsed, the way [`MkvDemux::with_bus`] does.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Number of output ports (the selected-stream count).
+    pub fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+
+    /// Count of frames forwarded across all ports.
+    pub fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// The output port that carries the elementary stream of `codec`, or `None`
+    /// when no selected port matches (the track is dropped).
+    fn port_for_codec(&self, codec: MkvCodec) -> Option<usize> {
+        self.ports.iter().position(|&s| MkvDemux::selected_codec(s) == codec)
+    }
+
+    /// Announce every container track as a [`BusMessage::StreamCollection`] (M376),
+    /// once, when `Tracks` has parsed. Mirrors [`MkvDemux::post_stream_collection`]
+    /// (lists all tracks, not just the ported ones, so the app can re-select).
+    fn post_stream_collection(&mut self) {
+        if self.collection_posted {
+            return;
+        }
+        let streams: Vec<Stream> =
+            self.demux.tracks().iter().filter_map(MkvDemux::track_to_stream).collect();
+        if streams.is_empty() {
+            return;
+        }
+        self.collection_posted = true;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("matroska-0", streams)));
+        }
+    }
+}
+
+impl MultiOutputElement for MkvDemuxN {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&MkvDemux::input_caps())
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // Accept the negotiated byte-stream input; per-port output caps are
+        // announced from `process` as each stream first routes.
+        absolute_caps.intersect(&MkvDemux::input_caps()).map(|_| ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    self.demux.push_data(slice.as_slice());
+                    if self.bus.is_some() {
+                        self.post_stream_collection();
+                    }
+                    for f in self.demux.take_frames() {
+                        let Some(port) = self.port_for_codec(f.codec) else {
+                            continue; // a track no selected port carries
+                        };
+                        if !self.announced[port] {
+                            let caps = MkvDemux::concrete_caps_of(&self.demux, self.ports[port])
+                                .unwrap_or_else(|| MkvDemux::output_caps(self.ports[port]));
+                            out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
+                            self.announced[port] = true;
+                        }
+                        let out_frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
+                            FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..FrameTiming::default() },
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push_to(port, PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                }
+                // Flush / Segment apply to every branch (the parser resets on a
+                // flush, as the single-output demuxer does).
+                PipelinePacket::Flush => {
+                    self.demux.reset_keeping_tracks();
+                    for port in 0..self.ports.len() {
+                        out.push_to(port, PipelinePacket::Flush).await?;
+                    }
+                }
+                PipelinePacket::Segment(seg) => {
+                    for port in 0..self.ports.len() {
+                        out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                    }
+                }
+                // The input's own (byte-stream) CapsChanged is consumed: each port
+                // defines its own caps, announced per port above.
+                PipelinePacket::CapsChanged(_) => {}
+                // The runner broadcasts the single merged Eos to every port.
+                PipelinePacket::Eos => {}
+            }
+            Ok(())
+        })
     }
 }
 
