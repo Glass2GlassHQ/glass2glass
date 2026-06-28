@@ -280,6 +280,14 @@ fn parse_raw_format(s: &str) -> Option<RawVideoFormat> {
         "nv12" => RawVideoFormat::Nv12,
         "i420" => RawVideoFormat::I420,
         "yuyv" | "yuy2" => RawVideoFormat::Yuyv,
+        "i420_10le" => RawVideoFormat::I420p10,
+        "i420_12le" => RawVideoFormat::I420p12,
+        "y42b" => RawVideoFormat::I422,
+        "i422_10le" => RawVideoFormat::I422p10,
+        "i422_12le" => RawVideoFormat::I422p12,
+        "y444" => RawVideoFormat::I444,
+        "y444_10le" => RawVideoFormat::I444p10,
+        "y444_12le" => RawVideoFormat::I444p12,
         _ => return None,
     })
 }
@@ -319,6 +327,24 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+        }
+    }
+
+    #[test]
+    fn parses_high_bit_depth_and_alt_chroma_format_names() {
+        // The GStreamer `format=` strings for the planar high-bit-depth / 4:2:2 /
+        // 4:4:4 family resolve to the right variant (case-insensitively).
+        for (s, want) in [
+            ("I420_10LE", RawVideoFormat::I420p10),
+            ("i420_12le", RawVideoFormat::I420p12),
+            ("Y42B", RawVideoFormat::I422),
+            ("I422_10LE", RawVideoFormat::I422p10),
+            ("I422_12LE", RawVideoFormat::I422p12),
+            ("Y444", RawVideoFormat::I444),
+            ("Y444_10LE", RawVideoFormat::I444p10),
+            ("Y444_12LE", RawVideoFormat::I444p12),
+        ] {
+            assert_eq!(parse_raw_format(s), Some(want), "format string {s}");
         }
     }
 

@@ -376,6 +376,14 @@ pub(crate) fn raw_format_to_str(f: RawVideoFormat) -> &'static str {
         RawVideoFormat::Rgba8 => "RGBA",
         RawVideoFormat::Bgra8 => "BGRA",
         RawVideoFormat::Yuyv => "YUY2",
+        RawVideoFormat::I420p10 => "I420_10LE",
+        RawVideoFormat::I420p12 => "I420_12LE",
+        RawVideoFormat::I422 => "Y42B",
+        RawVideoFormat::I422p10 => "I422_10LE",
+        RawVideoFormat::I422p12 => "I422_12LE",
+        RawVideoFormat::I444 => "Y444",
+        RawVideoFormat::I444p10 => "Y444_10LE",
+        RawVideoFormat::I444p12 => "Y444_12LE",
     }
 }
 

@@ -19,7 +19,9 @@ leverage first:
    + key rotation; FlexFEC + multi-level burst FEC.
 3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
-   `rav1d` feature, via `re_rav1d`). Still wants a `vpx` decoder. Plus negotiation
+   `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
+   (a dedicated libvpx `VpxDec` is deferred: no pure-Rust decoder exists, and a
+   libvpx-FFI element would only duplicate the ffmpeg path). Plus negotiation
    backward coupling through `DerivedOutput`; seek depth (segment seeks, re-preroll
    after flushing seek when paused).
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:

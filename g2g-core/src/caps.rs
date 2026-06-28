@@ -240,6 +240,14 @@ fn raw_format_gst_name(f: RawVideoFormat) -> &'static str {
         RawVideoFormat::Rgba8 => "RGBA",
         RawVideoFormat::Bgra8 => "BGRA",
         RawVideoFormat::Yuyv => "YUY2",
+        RawVideoFormat::I420p10 => "I420_10LE",
+        RawVideoFormat::I420p12 => "I420_12LE",
+        RawVideoFormat::I422 => "Y42B",
+        RawVideoFormat::I422p10 => "I422_10LE",
+        RawVideoFormat::I422p12 => "I422_12LE",
+        RawVideoFormat::I444 => "Y444",
+        RawVideoFormat::I444p10 => "Y444_10LE",
+        RawVideoFormat::I444p12 => "Y444_12LE",
     }
 }
 
@@ -998,6 +1006,71 @@ pub enum RawVideoFormat {
     /// fourcc). Two bytes per pixel; the near-universal UVC webcam output.
     /// Packed (not planar), so it needs unpacking before planar consumers.
     Yuyv,
+    // Fully-planar YUV (three separate Y / U / V planes), the layout the AV1 /
+    // HEVC / VP9 decoders produce. The `p10` / `p12` suffix is 10- / 12-bit
+    // depth, each sample stored little-endian in the low bits of a 2-byte word
+    // (the GStreamer `*_10LE` / `*_12LE` formats); the bare name is 8-bit. The
+    // family covers the three chroma subsamplings: I420 = 4:2:0, I422 = 4:2:2,
+    // I444 = 4:4:4. See [`RawVideoFormat::chroma_shift`] / [`bit_depth`].
+    /// Planar 4:2:0, 10-bit (LE).
+    I420p10,
+    /// Planar 4:2:0, 12-bit (LE).
+    I420p12,
+    /// Planar 4:2:2 (full-height, half-width chroma), 8-bit.
+    I422,
+    /// Planar 4:2:2, 10-bit (LE).
+    I422p10,
+    /// Planar 4:2:2, 12-bit (LE).
+    I422p12,
+    /// Planar 4:4:4 (full-resolution chroma), 8-bit.
+    I444,
+    /// Planar 4:4:4, 10-bit (LE).
+    I444p10,
+    /// Planar 4:4:4, 12-bit (LE).
+    I444p12,
+}
+
+impl RawVideoFormat {
+    /// Bits per sample of a fully-planar YUV format: 8, 10, or 12. The 10- and
+    /// 12-bit formats store each sample little-endian in a 2-byte word. The
+    /// non-planar / RGBA formats report 8.
+    pub const fn bit_depth(self) -> u8 {
+        match self {
+            RawVideoFormat::I420p10 | RawVideoFormat::I422p10 | RawVideoFormat::I444p10 => 10,
+            RawVideoFormat::I420p12 | RawVideoFormat::I422p12 | RawVideoFormat::I444p12 => 12,
+            _ => 8,
+        }
+    }
+
+    /// Bytes per sample: 2 for the 10- / 12-bit planar formats (LE `u16`), else 1.
+    pub const fn bytes_per_sample(self) -> usize {
+        if self.bit_depth() > 8 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Chroma subsampling of a fully-planar YUV format as the (horizontal,
+    /// vertical) right-shift from luma to chroma dimensions: 4:2:0 = `(1, 1)`,
+    /// 4:2:2 = `(1, 0)`, 4:4:4 = `(0, 0)`. `None` for the non-planar formats
+    /// (NV12 is semi-planar; RGBA / YUYV are packed), which carry their own
+    /// layout.
+    pub const fn chroma_shift(self) -> Option<(u32, u32)> {
+        match self {
+            RawVideoFormat::I420 | RawVideoFormat::I420p10 | RawVideoFormat::I420p12 => Some((1, 1)),
+            RawVideoFormat::I422 | RawVideoFormat::I422p10 | RawVideoFormat::I422p12 => Some((1, 0)),
+            RawVideoFormat::I444 | RawVideoFormat::I444p10 | RawVideoFormat::I444p12 => Some((0, 0)),
+            _ => None,
+        }
+    }
+
+    /// True for the fully-planar I420 / I422 / I444 family (three Y, U, V planes
+    /// of [`Self::bytes_per_sample`]-byte samples). Excludes the semi-planar NV12
+    /// and the packed formats.
+    pub const fn is_planar_yuv(self) -> bool {
+        self.chroma_shift().is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1375,5 +1448,47 @@ mod tests {
             framerate: Rate::Fixed(30 << 16),
         };
         assert_eq!(discover_passthrough(&conv, &sample), PassthroughFields::NONE);
+    }
+
+    #[test]
+    fn planar_format_layout_helpers() {
+        use RawVideoFormat::*;
+        // Bit depth and the 2-byte sample size for the high-bit-depth variants.
+        for f in [I420, I422, I444] {
+            assert_eq!(f.bit_depth(), 8);
+            assert_eq!(f.bytes_per_sample(), 1);
+        }
+        for f in [I420p10, I422p10, I444p10] {
+            assert_eq!(f.bit_depth(), 10);
+            assert_eq!(f.bytes_per_sample(), 2);
+        }
+        for f in [I420p12, I422p12, I444p12] {
+            assert_eq!(f.bit_depth(), 12);
+            assert_eq!(f.bytes_per_sample(), 2);
+        }
+        // Chroma subsampling shift: 4:2:0 = (1,1), 4:2:2 = (1,0), 4:4:4 = (0,0).
+        assert_eq!(I420p10.chroma_shift(), Some((1, 1)));
+        assert_eq!(I422.chroma_shift(), Some((1, 0)));
+        assert_eq!(I444p12.chroma_shift(), Some((0, 0)));
+        // The non-planar formats are not in the fully-planar family.
+        for f in [Nv12, Rgba8, Bgra8, Yuyv] {
+            assert!(!f.is_planar_yuv());
+            assert_eq!(f.chroma_shift(), None);
+        }
+        assert!(I444p10.is_planar_yuv());
+    }
+
+    #[test]
+    fn every_raw_format_has_a_distinct_gst_name() {
+        use RawVideoFormat::*;
+        let all = [
+            Nv12, I420, Rgba8, Bgra8, Yuyv, I420p10, I420p12, I422, I422p10, I422p12, I444, I444p10,
+            I444p12,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|f| raw_format_gst_name(*f)).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "gst format names must be unique");
     }
 }

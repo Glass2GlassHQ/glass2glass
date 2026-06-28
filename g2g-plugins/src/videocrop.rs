@@ -406,9 +406,20 @@ fn crop(
             out.extend_from_slice(&v);
             out.into_boxed_slice()
         }
-        // YUYV is absent from SUPPORTED, so negotiation never admits it here;
-        // convert to a planar format upstream before cropping.
-        RawVideoFormat::Yuyv => unreachable!("videocrop: YUYV is not negotiated"),
+        // YUYV and the high-bit-depth / 4:2:2 / 4:4:4 planar formats are absent
+        // from SUPPORTED, so negotiation never admits them here; convert to a
+        // supported format upstream before cropping.
+        RawVideoFormat::Yuyv
+        | RawVideoFormat::I420p10
+        | RawVideoFormat::I420p12
+        | RawVideoFormat::I422
+        | RawVideoFormat::I422p10
+        | RawVideoFormat::I422p12
+        | RawVideoFormat::I444
+        | RawVideoFormat::I444p10
+        | RawVideoFormat::I444p12 => {
+            unreachable!("videocrop: format is not negotiated")
+        }
     }
 }
 
