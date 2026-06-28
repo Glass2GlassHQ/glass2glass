@@ -1206,6 +1206,18 @@ Two fan structures have non-trivial joins:
   either keeps the decoded NV12 surface device-resident (zero-copy) or downloads
   it, chosen by the negotiated proposal alone, validated end-to-end on an RTX
   3060.
+- **Converter auto-plug (M354).** When no shared domain exists (the negotiation
+  would otherwise fail loud), `auto_plug_domain_converters` splices a memory-domain
+  converter instead. A pre-solve graph pass: for each edge it traces the producer
+  domain through structural tee/demux nodes (`output_domains`) and, if disjoint
+  from the consumer's declared `input_domains` (caps-free, default
+  `DomainSet::ALL`), splices a caps-`Identity` converter from a registered factory
+  (`Graph::insert_on_edge`, so the caps solve is undisturbed). `g2g-plugins`
+  provides the CUDA factory (`Cuda->System` = `CudaDownload`, `System->Cuda` =
+  `CudaUpload`), so e.g. a System NV12 source feeding `NvEnc` (CUDA-only) gains a
+  `CudaUpload` with no hand-wiring. Negotiation settles a shared domain when one
+  exists; the auto-plug bridges when one does not; an unconvertible pair still
+  fails loud.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
   so a plain container muxer imposes nothing). At startup the runner stores it on

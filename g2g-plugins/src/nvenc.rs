@@ -51,7 +51,9 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use g2g_core::memory::OwnedCudaBuffer;
+use alloc::sync::Arc;
+
+use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
@@ -106,6 +108,12 @@ struct Session {
     /// encode), so a single buffer suffices and the per-frame create / destroy
     /// the v1 path paid is gone. Destroyed with the session.
     output: *mut core::ffi::c_void,
+    /// Shared-ownership pin on the producer of the first input frame, so the CUDA
+    /// `context` (owned upstream, eg by a `CudaUpload` or `NvDec`) outlives this
+    /// session. Without it a producer that created the context can be torn down
+    /// (destroying the context) before `Drop` here destroys the encoder in it, a
+    /// use-after-free when the producer and encoder run in separate runner arms.
+    _keep_alive: Arc<dyn CudaKeepAlive>,
 }
 
 // SAFETY: `Session` holds raw NVENC/CUDA handles. The runner moves `NvEnc`
@@ -242,7 +250,8 @@ impl NvEnc {
     /// config, tweaks rate control + GOP, and initializes the encoder for the
     /// negotiated geometry. Fails loud (`HardwareError::Other`) if NVENC is
     /// unavailable so the caller can fall back to `FfmpegH264Enc`.
-    fn open_session(&mut self, context: u64) -> Result<(), G2gError> {
+    fn open_session(&mut self, buf: &OwnedCudaBuffer) -> Result<(), G2gError> {
+        let context = buf.context;
         let encode_guid = self.encode_guid();
         // Load the SDK dispatch table.
         let mut funcs: Box<ffi::NvEncodeApiFunctionList> =
@@ -276,7 +285,14 @@ impl NvEnc {
 
         // Build the session now so a failure below still destroys the handle on
         // drop. `output` is filled once the bitstream buffer is created below.
-        self.session = Some(Session { funcs, encoder, context, output: core::ptr::null_mut() });
+        self.session = Some(Session {
+            funcs,
+            encoder,
+            context,
+            output: core::ptr::null_mut(),
+            // Pin the producer's context for the session's life (see field docs).
+            _keep_alive: buf.keep_alive_arc(),
+        });
 
         // Pull the low-latency preset config (the driver fills the codec-specific
         // union for us), then tweak rate control + GOP.
@@ -410,7 +426,7 @@ impl NvEnc {
     /// access units. Opens the session lazily on `buf.context`.
     fn encode(&mut self, buf: &OwnedCudaBuffer, pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         if self.session.is_none() {
-            self.open_session(buf.context)?;
+            self.open_session(buf)?;
         }
         // Apply a pending bitrate retarget to the live session before encoding.
         if self.bitrate_bps != self.applied_bitrate_bps {
@@ -729,6 +745,13 @@ impl AsyncElement for NvEnc {
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
+    }
+
+    /// NVENC ingests device-resident frames only (`MemoryDomain::Cuda`); a System
+    /// frame is rejected at `process`. Declaring it lets the M354 converter
+    /// auto-plug splice a `CudaUpload` ahead of a CPU-side NV12 source.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::Cuda)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

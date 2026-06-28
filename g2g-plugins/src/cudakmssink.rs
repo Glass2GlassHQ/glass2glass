@@ -255,6 +255,12 @@ impl AsyncElement for CudaKmsSink {
         }))
     }
 
+    /// Presents from CUDA device memory only; declared for the M354 converter
+    /// auto-plug (same as `CudaGlSink`).
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::Cuda)
+    }
+
     /// Ask the producer to keep buffers in CUDA device memory so the `NvdecCuda`
     /// -> sink handoff stays on the GPU (same proposal as `CudaGlSink`).
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {

@@ -6,7 +6,9 @@
 
 #![cfg(all(target_os = "linux", feature = "cuda"))]
 
+#[cfg(feature = "nvenc")]
 use core::future::Future;
+#[cfg(feature = "nvenc")]
 use core::pin::Pin;
 use std::boxed::Box;
 

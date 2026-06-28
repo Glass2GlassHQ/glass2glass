@@ -128,6 +128,16 @@ impl DomainSet {
     /// irreconcilable conflict (producer and consumer share no domain).
     pub const EMPTY: Self = Self(0);
 
+    /// Every domain. The default *input* acceptance of an element (it imposes no
+    /// domain requirement on its upstream), so the converter auto-plug only acts
+    /// on elements that declare a narrower `input_domains`.
+    pub const ALL: Self = Self(0x03ff); // 10 variants -> low 10 bits
+
+    /// Iterate the member domains in preference order (GPU-resident first).
+    pub fn iter(self) -> impl Iterator<Item = MemoryDomainKind> {
+        DOMAIN_PREFERENCE.into_iter().filter(move |&k| self.contains(k))
+    }
+
     /// The singleton set holding just `k`. The default capability/acceptance of
     /// every element, derived from its single `output_memory()`.
     pub const fn only(k: MemoryDomainKind) -> Self {
@@ -608,6 +618,15 @@ impl OwnedCudaBuffer {
     /// into another API (eg CUDA external memory) can take shared ownership.
     pub fn keep_alive(&self) -> &dyn CudaKeepAlive {
         self.keep_alive.as_ref()
+    }
+
+    /// A shared-ownership clone of the keep-alive owner. A consumer that outlives
+    /// individual frames but depends on the producer's resources (a CUDA encode
+    /// session holding the producer's context across frames) clones this to pin
+    /// the context / allocation for its own lifetime, so producer teardown cannot
+    /// race ahead of it.
+    pub fn keep_alive_arc(&self) -> Arc<dyn CudaKeepAlive> {
+        Arc::clone(&self.keep_alive)
     }
 }
 

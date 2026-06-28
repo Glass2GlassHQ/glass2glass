@@ -160,6 +160,17 @@ pub trait AsyncElement: ElementBound {
         DomainSet::only(self.output_memory())
     }
 
+    /// The memory domains this element can accept on its *input* pad (M354), for
+    /// the domain-converter auto-plug. Default [`DomainSet::ALL`] (no requirement,
+    /// so no converter is forced); a domain-strict element (a CUDA encoder/sink
+    /// that needs device-resident input) narrows it, and the auto-plug splices a
+    /// converter when the upstream cannot produce a domain in this set. A pure
+    /// pass-through element (a memory-domain converter, an aggregator) leaves it
+    /// `ALL`. Caps-free so the splice runs before the caps solve.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
+
     /// Answer the upstream peer's allocation query (M12): the buffer size,
     /// count, alignment, and memory domain this element needs allocated so a
     /// pool can be handed over without a copy. Default: no preference
@@ -378,6 +389,12 @@ pub trait DynAsyncElement: ElementBound {
         DomainSet::only(self.output_memory())
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::input_domains`]. Default
+    /// [`DomainSet::ALL`].
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
     /// element that paces to hardware joins the runner's clock election.
     /// Defaults to none.
@@ -502,6 +519,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::output_domains(self)
     }
 
+    fn input_domains(&self) -> DomainSet {
+        AsyncElement::input_domains(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
@@ -603,6 +624,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn output_domains(&self) -> DomainSet {
         (**self).output_domains()
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        (**self).input_domains()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

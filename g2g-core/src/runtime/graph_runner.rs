@@ -48,6 +48,7 @@ use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, Mult
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
+use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
@@ -172,6 +173,18 @@ impl<'a> GraphNodeRef<'a> {
             GraphNodeRef::Element(e) => e.output_domains(),
             GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
+            }
+        }
+    }
+
+    /// The memory domains this node accepts on its input pad (M354), for the
+    /// converter auto-plug. A source has no input; fan-in/out nodes are
+    /// domain-transparent here, so both report [`DomainSet::ALL`] (no requirement).
+    pub fn input_domains(&self) -> crate::memory::DomainSet {
+        match self {
+            GraphNodeRef::Element(e) => e.input_domains(),
+            GraphNodeRef::Source(_) | GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
+                crate::memory::DomainSet::ALL
             }
         }
     }
@@ -453,6 +466,66 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
     link_capacity: impl Into<LinkCapacity>,
 ) -> Result<RunStats, G2gError> {
     run_graph_inner(graph, clock, link_capacity, None, None, None).await
+}
+
+/// Splice memory-domain converters where a producer and consumer cannot agree on
+/// a domain (M354), the structural complement to the M351/M352 in-band domain
+/// negotiation: negotiation settles a *shared* domain when one exists, and this
+/// inserts a converter when one does not. For each original edge `P -> C`, the
+/// producer domain is traced through structural tee/demux nodes back to the real
+/// producer ([`output_domains`](GraphNodeRef::output_domains)); if it shares no
+/// domain with `C`'s [`input_domains`](GraphNodeRef::input_domains), `factory` is
+/// asked for a converter from the producer's preferred domain to one `C` accepts,
+/// and it is spliced onto that edge ([`Graph::insert_on_edge`]).
+///
+/// Converters are caps-transparent (`Identity`), so the subsequent caps solve is
+/// unaffected. `factory` returns `None` when it has no converter for a pair, in
+/// which case the edge is left as-is and the conflict surfaces later as an
+/// [`AllocationConflict`](G2gError::AllocationConflict) (the loud failure M351
+/// already gives). The converter elements live in `g2g-plugins`, so the caller
+/// supplies the factory (the crate layering keeps `g2g-core` converter-agnostic);
+/// `g2g-plugins` provides the CUDA wrapper.
+pub fn auto_plug_domain_converters<'a>(
+    mut graph: Graph<GraphNodeRef<'a>>,
+    factory: &dyn Fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNodeRef<'a>>,
+) -> Graph<GraphNodeRef<'a>> {
+    // Snapshot the original edge count: splicing appends nodes and a `K -> C`
+    // edge and only rewires the edge being spliced, so original ids stay valid.
+    let original_edges = graph.edges().len();
+    for e in 0..original_edges {
+        let edge = graph.edges()[e];
+        let producer = traced_output_domains(&graph, edge.src.node);
+        let consumer =
+            graph.element(edge.dst.node).map(|n| n.input_domains()).unwrap_or(DomainSet::ALL);
+        if !producer.intersect(consumer).is_empty() {
+            continue; // already compatible, no converter needed
+        }
+        let (Some(from), Some(to)) = (producer.preferred(), consumer.preferred()) else {
+            continue;
+        };
+        if let Some(conv) = factory(from, to) {
+            graph.insert_on_edge(e, conv);
+        }
+    }
+    graph
+}
+
+/// Domains the node emits, tracing through structural tee/demux nodes (which
+/// forward their single input's domain) to the real producer. Used by the
+/// converter auto-plug so a tee fed by a GPU decoder reports the GPU domain on
+/// every branch rather than the structural `System` default.
+fn traced_output_domains<'a>(graph: &Graph<GraphNodeRef<'a>>, node: NodeId) -> DomainSet {
+    if let Some(NodeKind::Tee(_)) = graph.node_kind(node) {
+        // A tee/demux is domain-transparent: trace its single input's producer.
+        return match graph.edges().iter().find(|e| e.dst.node == node) {
+            Some(in_edge) => traced_output_domains(graph, in_edge.src.node),
+            None => DomainSet::only(MemoryDomainKind::System),
+        };
+    }
+    graph
+        .element(node)
+        .map(|n| n.output_domains())
+        .unwrap_or(DomainSet::only(MemoryDomainKind::System))
 }
 
 /// As [`run_graph`], but posts pipeline [`BusMessage`](crate::BusMessage)s to

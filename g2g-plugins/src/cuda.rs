@@ -35,8 +35,9 @@ use alloc::sync::Arc;
 use alloc::vec;
 
 use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
+use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError, Graph,
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, SystemSlice,
 };
 
@@ -455,6 +456,36 @@ unsafe fn htod_plane(
     };
     // SAFETY: `copy` fully describes a host->device 2D copy; the driver reads it.
     check(unsafe { ffi::cu_memcpy_2d(&copy) })
+}
+
+/// The g2g memory-domain converter for a `(from, to)` pair, or `None` when g2g
+/// has none (the auto-plug then leaves the edge to fail loud). Covers the
+/// CUDA<->System pair: [`CudaDownload`] (`Cuda -> System`) and [`CudaUpload`]
+/// (`System -> Cuda`). The factory the M354 auto-plug calls; see
+/// [`auto_plug_cuda_converters`].
+pub fn cuda_domain_converter(
+    from: MemoryDomainKind,
+    to: MemoryDomainKind,
+) -> Option<GraphNode> {
+    match (from, to) {
+        (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
+            Some(GraphNode::element(CudaDownload::new()))
+        }
+        (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
+            Some(GraphNode::element(CudaUpload::new()))
+        }
+        _ => None,
+    }
+}
+
+/// Auto-plug CUDA<->System domain converters into `graph` (M354): splices a
+/// [`CudaUpload`] / [`CudaDownload`] on any edge whose producer and consumer
+/// cannot agree on a memory domain. E.g. a System NV12 source feeding `NvEnc`
+/// (CUDA-only input) gains a `CudaUpload`; a CUDA decoder fanned out to a System
+/// sink gains a `CudaDownload` on that branch. A no-op where domains already
+/// agree, so it is safe to call on any graph before `run_graph`.
+pub fn auto_plug_cuda_converters(graph: Graph<GraphNode>) -> Graph<GraphNode> {
+    auto_plug_domain_converters(graph, &cuda_domain_converter)
 }
 
 /// Per-plane parameters for the device->host `cuMemcpy2D` of one NV12 plane.

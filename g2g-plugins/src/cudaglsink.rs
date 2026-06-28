@@ -250,6 +250,13 @@ impl AsyncElement for CudaGlSink {
         }))
     }
 
+    /// Presents from CUDA device memory only; declaring it lets the M354 converter
+    /// auto-plug splice a `CudaDownload`-free GPU path (or, behind a tee, a
+    /// `CudaDownload` only on a sibling System branch).
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::Cuda)
+    }
+
     /// M12 / C3 step 3: ask the producer to keep buffers in CUDA device memory
     /// so the `NvdecCuda` -> sink handoff stays on the GPU. The runner conveys
     /// this `MemoryDomainKind::Cuda` proposal to the decoder's

@@ -300,6 +300,26 @@ impl<E> Graph<E> {
         &self.edges
     }
 
+    /// Splice a new transform node carrying `element` onto edge `edge_idx`,
+    /// returning its id. The edge `P -> C` becomes `P -> K -> C` (K the new
+    /// node), preserving the original [`LinkPolicy`] on both halves. Existing node
+    /// and edge ids are unchanged (the new node is appended, the new `K -> C` edge
+    /// is appended, and the original edge is rewired to `P -> K`), so a caller
+    /// iterating a snapshot of the original edge ids can splice several without
+    /// re-indexing. The new node is a single-pad [`Transform`](NodeKind::Transform),
+    /// so the spliced element must be a 1-in/1-out transform (e.g. a memory-domain
+    /// converter). Used by the domain-converter auto-plug (M354).
+    pub fn insert_on_edge(&mut self, edge_idx: usize, element: E) -> NodeId {
+        let new = self.push(NodeKind::Transform, Some(element));
+        let old_dst = self.edges[edge_idx].dst;
+        let policy = self.edges[edge_idx].policy;
+        // P -> K (rewire the original edge's destination to the new node).
+        self.edges[edge_idx].dst = PadId { node: new, index: 0 };
+        // K -> C (the original destination).
+        self.edges.push(Edge { src: PadId { node: new, index: 0 }, dst: old_dst, policy });
+        new
+    }
+
     /// Number of nodes added so far. With [`edges`](Self::edges) and
     /// [`node_kind`](Self::node_kind) this is enough to render the wiring
     /// before validation (the DOT dump).
