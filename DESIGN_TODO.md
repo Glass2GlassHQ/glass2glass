@@ -246,12 +246,11 @@ leverage first:
 ## Codecs
 
 - **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
-- **AV1 encode** (`Av1Enc`): bitrate / quantizer rate control; 10/12-bit (needs a
-  `Context<u16>`; 8-bit 4:2:0 / 4:2:2 / 4:4:4 done).
+- **AV1 encode** (`Av1Enc`): bitrate / quantizer rate control. (8/10/12-bit in
+  4:2:0 / 4:2:2 / 4:4:4 all done.)
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
-  4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit); still VP8 / VP9 decode and a pure-Rust
-  Opus path. (The 10/12-bit AV1 decode path lacks an end-to-end test until `Av1Enc`
-  can produce high-bit-depth input.)
+  4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
+  VP8 / VP9 decode and a pure-Rust Opus path.
 - **Opus:** float (F32) PCM in/out; other frame durations; packet-loss
   concealment; bitrate / complexity tuning.
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct

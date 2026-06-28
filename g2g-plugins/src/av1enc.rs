@@ -8,10 +8,12 @@
 //! came from (`Packet::input_frameno`), since AV1 may reorder. Output is the
 //! low-overhead OBU stream that [`crate::av1parse::Av1Parse`] reads.
 //!
-//! Scope: 8-bit planar YUV (4:2:0 `I420`, 4:2:2 `I422`, 4:4:4 `I444`), geometry
-//! fixed at configure. The speed preset is builder-configurable (`with_speed`,
-//! 0..=10); rate control uses the rav1e quantizer default. (10/12-bit encode, which
-//! needs a `Context<u16>`, is a follow-up; decode already handles all depths.)
+//! Scope: planar YUV at 8 / 10 / 12-bit in 4:2:0 (`I420`), 4:2:2 (`I422`), and
+//! 4:4:4 (`I444`), geometry fixed at configure. rav1e is generic over the sample
+//! type, so the encoder holds either a `Context<u8>` (8-bit) or a `Context<u16>`
+//! (10/12-bit, samples little-endian) selected from the input format; one generic
+//! `encode_frame` drives both. The speed preset is builder-configurable
+//! (`with_speed`, 0..=10); rate control uses the rav1e quantizer default.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -29,8 +31,15 @@ use g2g_core::{
 
 use rav1e::prelude::{
     ChromaSampling, Config, Context, EncoderConfig, EncoderStatus, FrameParameters,
-    FrameTypeOverride, SpeedSettings,
+    FrameTypeOverride, Pixel, SpeedSettings,
 };
+
+/// A live rav1e context, monomorphized to the sample type the input format needs:
+/// `u8` for 8-bit, `u16` for 10/12-bit (samples little-endian).
+enum RavCtx {
+    U8(Context<u8>),
+    U16(Context<u16>),
+}
 
 /// rav1e speed preset (0 slowest/best .. 10 fastest); 9 is a fast default for a
 /// real-time-ish software encode.
@@ -46,11 +55,11 @@ pub struct Av1Enc {
     speed: u8,
     width: u32,
     height: u32,
-    /// The negotiated input format (8-bit `I420` / `I422` / `I444`); fixes the
-    /// rav1e chroma sampling and the per-frame plane geometry.
+    /// The negotiated input format (planar `I420` / `I422` / `I444` at 8/10/12-bit);
+    /// fixes the rav1e chroma sampling, bit depth, and the per-frame plane geometry.
     format: RawVideoFormat,
     framerate: Rate,
-    ctx: Option<Context<u8>>,
+    ctx: Option<RavCtx>,
     /// Source PTS keyed by `Packet::input_frameno`. Entries are removed as their
     /// packet is emitted, so this stays bounded to the encoder's lookahead window
     /// rather than growing one slot per frame for the stream lifetime.
@@ -127,10 +136,11 @@ impl Av1Enc {
     }
 
     fn build_context(&mut self) -> Result<(), G2gError> {
+        let depth = self.format.bit_depth() as usize;
         let enc = EncoderConfig {
             width: self.width as usize,
             height: self.height as usize,
-            bit_depth: 8,
+            bit_depth: depth,
             chroma_sampling: chroma_for(self.format).ok_or(G2gError::CapsMismatch)?,
             speed_settings: SpeedSettings::from_preset(self.speed),
             // 0 = rav1e's default quantizer mode; a downstream BWE target switches
@@ -139,65 +149,53 @@ impl Av1Enc {
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
-        let ctx = cfg.new_context::<u8>().map_err(|_| G2gError::CapsMismatch)?;
-        self.ctx = Some(ctx);
+        // rav1e packs 10/12-bit samples into `u16`; 8-bit uses `u8`.
+        self.ctx = Some(if depth > 8 {
+            RavCtx::U16(cfg.new_context::<u16>().map_err(|_| G2gError::CapsMismatch)?)
+        } else {
+            RavCtx::U8(cfg.new_context::<u8>().map_err(|_| G2gError::CapsMismatch)?)
+        });
         self.pts_by_frameno.clear();
         self.next_frameno = 0;
         Ok(())
     }
 
     /// Encode one planar-YUV access unit, returning the ready packets as `(data, pts)`.
-    /// The chroma plane size follows the configured format's subsampling, so 4:2:0 /
-    /// 4:2:2 / 4:4:4 share this path.
+    /// The chroma plane size and per-sample byte width follow the configured format,
+    /// so 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 / 12-bit share this path.
     fn encode(&mut self, planar: &[u8], pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
+        let bps = self.format.bytes_per_sample();
         // `chroma_shift` is `Some` for every supported (planar) input format.
         let (hs, vs) = self.format.chroma_shift().ok_or(G2gError::CapsMismatch)?;
         let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-        let (y_size, c_size) = (w * h, cw * ch);
-        if planar.len() < y_size + 2 * c_size {
+        let plane_dims = [(w, h), (cw, ch), (cw, ch)];
+        if planar.len() < (w * h + 2 * cw * ch) * bps {
             return Err(G2gError::CapsMismatch);
         }
         self.pts_by_frameno.insert(self.next_frameno, pts_ns);
         self.next_frameno += 1;
         // A pending keyframe request (downstream PLI) overrides this frame's type
-        // to Key; consume the flag now. `FrameParameters` is not `Clone`, so it is
-        // rebuilt per `send_frame` attempt below (the loop retries on EnoughData).
+        // to Key; consume the flag now.
         let force_keyframe = core::mem::take(&mut self.force_keyframe);
-        let frame_params = || {
-            force_keyframe.then(|| FrameParameters {
-                frame_type_override: FrameTypeOverride::Key,
-                ..Default::default()
-            })
-        };
-        let raw = {
-            let ctx = self.ctx.as_mut().ok_or(G2gError::NotConfigured)?;
-            let mut frame = ctx.new_frame();
-            frame.planes[0].copy_from_raw_u8(&planar[..y_size], w, 1);
-            frame.planes[1].copy_from_raw_u8(&planar[y_size..y_size + c_size], cw, 1);
-            frame.planes[2].copy_from_raw_u8(&planar[y_size + c_size..y_size + 2 * c_size], cw, 1);
-            let arc = Arc::new(frame);
-            let mut packets = Vec::new();
-            // send_frame asks us to drain (EnoughData) when its lookahead is full.
-            loop {
-                match ctx.send_frame((arc.clone(), frame_params())) {
-                    Ok(()) => break,
-                    Err(EncoderStatus::EnoughData) => packets.extend(drain_ready(ctx)),
-                    Err(_) => break,
-                }
-            }
-            packets.extend(drain_ready(ctx));
-            packets
+        let raw = match self.ctx.as_mut().ok_or(G2gError::NotConfigured)? {
+            RavCtx::U8(ctx) => encode_frame(ctx, planar, plane_dims, bps, force_keyframe),
+            RavCtx::U16(ctx) => encode_frame(ctx, planar, plane_dims, bps, force_keyframe),
         };
         Ok(self.map_pts(raw))
     }
 
     /// Flush the encoder at EOS and return the remaining packets.
     fn flush(&mut self) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
-        let raw = {
-            let ctx = self.ctx.as_mut().ok_or(G2gError::NotConfigured)?;
-            let _ = ctx.send_frame(None);
-            drain_ready(ctx)
+        let raw = match self.ctx.as_mut().ok_or(G2gError::NotConfigured)? {
+            RavCtx::U8(ctx) => {
+                let _ = ctx.send_frame(None);
+                drain_ready(ctx)
+            }
+            RavCtx::U16(ctx) => {
+                let _ = ctx.send_frame(None);
+                drain_ready(ctx)
+            }
         };
         Ok(self.map_pts(raw))
     }
@@ -281,21 +279,69 @@ impl Av1Enc {
 }
 
 /// The rav1e chroma sampling for a supported input format, or `None` if the format
-/// is not an 8-bit planar YUV the encoder accepts (the v1 scope). 10/12-bit planar
-/// formats are planar too but need a `Context<u16>`, so they are excluded here.
+/// is not a planar YUV the encoder accepts. Covers 8 / 10 / 12-bit (the sample
+/// depth picks the `Context` pixel type separately); the subsampling is read from
+/// the format itself so every depth of one chroma maps the same.
 fn chroma_for(format: RawVideoFormat) -> Option<ChromaSampling> {
-    match format {
-        RawVideoFormat::I420 => Some(ChromaSampling::Cs420),
-        RawVideoFormat::I422 => Some(ChromaSampling::Cs422),
-        RawVideoFormat::I444 => Some(ChromaSampling::Cs444),
-        _ => None,
+    Some(match format.chroma_shift()? {
+        (1, 1) => ChromaSampling::Cs420,
+        (1, 0) => ChromaSampling::Cs422,
+        (0, 0) => ChromaSampling::Cs444,
+        _ => return None,
+    })
+}
+
+/// Fill a fresh frame from the tightly-packed planar `src` (Y, U, V planes of
+/// `plane_dims` samples, `bps` bytes each), send it, and return the ready packets.
+/// Generic over the rav1e sample type so the 8-bit (`u8`) and 10/12-bit (`u16`)
+/// contexts share one body; `copy_from_raw_u8` reinterprets `src` per `bps`.
+fn encode_frame<T: Pixel>(
+    ctx: &mut Context<T>,
+    src: &[u8],
+    plane_dims: [(usize, usize); 3],
+    bps: usize,
+    force_keyframe: bool,
+) -> Vec<(Vec<u8>, u64)> {
+    let mut frame = ctx.new_frame();
+    let mut off = 0;
+    for (i, (pw, ph)) in plane_dims.iter().enumerate() {
+        let len = pw * ph * bps;
+        frame.planes[i].copy_from_raw_u8(&src[off..off + len], pw * bps, bps);
+        off += len;
     }
+    // Replicate each plane's edges into its allocation padding. rav1e pads in place
+    // only when it can uniquely borrow the frame, but the retry-on-EnoughData loop
+    // below holds a clone, so it cannot; it then asserts the padding is present.
+    // Padding up front satisfies that for both the 8- and high-bit-depth paths.
+    let (luma_w, luma_h) = plane_dims[0];
+    for plane in frame.planes.iter_mut() {
+        plane.pad(luma_w, luma_h);
+    }
+    let arc = Arc::new(frame);
+    // `FrameParameters` is not `Clone`, so it is rebuilt per `send_frame` attempt.
+    let frame_params = || {
+        force_keyframe.then(|| FrameParameters {
+            frame_type_override: FrameTypeOverride::Key,
+            ..Default::default()
+        })
+    };
+    let mut packets = Vec::new();
+    // send_frame asks us to drain (EnoughData) when its lookahead is full.
+    loop {
+        match ctx.send_frame((arc.clone(), frame_params())) {
+            Ok(()) => break,
+            Err(EncoderStatus::EnoughData) => packets.extend(drain_ready(ctx)),
+            Err(_) => break,
+        }
+    }
+    packets.extend(drain_ready(ctx));
+    packets
 }
 
 /// Drain the packets rav1e has ready. `Encoded` means a frame was consumed
 /// without emitting a packet (keep going); any other status means nothing more is
 /// ready right now (`NeedMoreData`) or the stream is finished (`LimitReached`).
-fn drain_ready(ctx: &mut Context<u8>) -> Vec<(Vec<u8>, u64)> {
+fn drain_ready<T: Pixel>(ctx: &mut Context<T>) -> Vec<(Vec<u8>, u64)> {
     let mut out = Vec::new();
     loop {
         match ctx.receive_packet() {
