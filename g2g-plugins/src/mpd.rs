@@ -22,7 +22,61 @@ pub struct Representation {
     pub height: Option<u32>,
     pub codecs: Option<String>,
     pub mime_type: Option<String>,
-    pub template: SegmentTemplate,
+    /// How this Representation's segments are addressed.
+    pub source: SegmentSource,
+}
+
+/// A byte sub-range of a resource (`mediaRange` / `range` / `indexRange`):
+/// `length` bytes from `offset`. The DASH analog of HLS `#EXT-X-BYTERANGE`; the
+/// MPD spells it `"start-end"` (inclusive end), parsed by [`parse_dash_range`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// How a Representation addresses its segments. `SegmentBase` (a single resource
+/// with a `sidx`-indexed media range) is a follow-up; it needs `sidx` parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentSource {
+    /// `SegmentTemplate`: `$Number$` / `$Time$` URL synthesis.
+    Template(SegmentTemplate),
+    /// `SegmentList`: an explicit ordered list of segment URLs / byte ranges.
+    List(SegmentList),
+}
+
+/// `SegmentList`: an explicit ordered list of media segments, each a URL and/or
+/// a `mediaRange` byte range of the `BaseURL` resource, plus an `Initialization`.
+/// `@duration` / `@timescale` give per-segment timing (a nested `SegmentTimeline`
+/// is a follow-up).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentList {
+    /// `<Initialization sourceURL>`, empty when the init is a byte range of the
+    /// `BaseURL` itself; `init_present` distinguishes "no init element" from it.
+    pub init_url: String,
+    pub init_range: Option<ByteRange>,
+    pub init_present: bool,
+    pub duration: u64,
+    pub timescale: u64,
+    pub segments: Vec<SegmentUrl>,
+}
+
+/// One `<SegmentURL>` in a `SegmentList`: a `@media` URL (empty = the `BaseURL`
+/// resource itself) and an optional `mediaRange` byte sub-range of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentUrl {
+    pub media: String,
+    pub media_range: Option<ByteRange>,
+}
+
+/// A segment resolved from either addressing mode for the source loop: the URL
+/// (template-expanded or list-explicit; empty means the `BaseURL` resource), an
+/// optional byte range, and the segment start time in `timescale` units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSegment {
+    pub url: String,
+    pub byte_range: Option<ByteRange>,
+    pub time: u64,
 }
 
 /// `SegmentTemplate` with `$Number$` / `$Time$` addressing.
@@ -140,6 +194,66 @@ impl SegmentTemplate {
     }
 }
 
+impl Representation {
+    /// Addressing-mode-agnostic segment timescale (>= 1).
+    pub fn timescale(&self) -> u64 {
+        match &self.source {
+            SegmentSource::Template(t) => t.timescale.max(1),
+            SegmentSource::List(l) => l.timescale.max(1),
+        }
+    }
+
+    /// The init segment, if any: its URL (empty = the `BaseURL` resource) and an
+    /// optional byte range. The source loop resolves the URL against the base.
+    pub fn init(&self) -> Option<(String, Option<ByteRange>)> {
+        match &self.source {
+            SegmentSource::Template(t) => t.init_url(&self.id).map(|u| (u, None)),
+            SegmentSource::List(l) => {
+                l.init_present.then(|| (l.init_url.clone(), l.init_range))
+            }
+        }
+    }
+
+    /// The ordered segments resolved for the source loop. Template synthesizes
+    /// URLs by `$Number$` / `$Time$`; List returns its explicit URLs / ranges
+    /// with cumulative `@duration` start times.
+    pub fn resolved_segments(&self, total_secs: f64) -> Vec<ResolvedSegment> {
+        match &self.source {
+            SegmentSource::Template(t) => t
+                .segments(total_secs)
+                .into_iter()
+                .map(|s| ResolvedSegment {
+                    url: t.media_url(&self.id, s),
+                    byte_range: None,
+                    time: s.time,
+                })
+                .collect(),
+            SegmentSource::List(l) => {
+                let mut out = Vec::new();
+                let mut time = 0u64;
+                for su in &l.segments {
+                    out.push(ResolvedSegment {
+                        url: su.media.clone(),
+                        byte_range: su.media_range,
+                        time,
+                    });
+                    time = time.saturating_add(l.duration);
+                }
+                out
+            }
+        }
+    }
+
+    /// The `SegmentTemplate` when this Representation uses template addressing
+    /// (for inspection / tests); `None` for a `SegmentList`.
+    pub fn template(&self) -> Option<&SegmentTemplate> {
+        match &self.source {
+            SegmentSource::Template(t) => Some(t),
+            SegmentSource::List(_) => None,
+        }
+    }
+}
+
 impl Mpd {
     /// Pick the highest-bandwidth Representation at or below `max_bandwidth`
     /// (or the overall highest when `None` / nothing fits).
@@ -172,7 +286,7 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
     let mut representations = Vec::new();
     for rep in root.descendants().filter(|n| n.has_tag_name("Representation")) {
         let Some(id) = rep.attribute("id") else { continue };
-        let Some(template) = segment_template(rep) else { continue };
+        let Some(source) = segment_source(rep) else { continue };
         representations.push(Representation {
             id: String::from(id),
             bandwidth: inherited(rep, "bandwidth").and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -180,7 +294,7 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
             height: inherited(rep, "height").and_then(|s| s.parse().ok()),
             codecs: inherited(rep, "codecs").map(String::from),
             mime_type: inherited(rep, "mimeType").map(String::from),
-            template,
+            source,
         });
     }
 
@@ -188,6 +302,20 @@ pub fn parse(xml: &str) -> Result<Mpd, MpdError> {
         return Err(MpdError::Invalid);
     }
     Ok(Mpd { base_url, duration_secs, dynamic, minimum_update_period_secs, representations })
+}
+
+/// The addressing for a Representation: its nearest `SegmentList` (preferred when
+/// present) or `SegmentTemplate`, searching its own children then ancestors'
+/// (AdaptationSet / Period inheritance). `None` if neither is usable (e.g. a
+/// `SegmentBase`-only Representation, a follow-up).
+fn segment_source(rep: Node) -> Option<SegmentSource> {
+    if let Some(sl) = rep
+        .ancestors()
+        .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentList")))
+    {
+        return Some(SegmentSource::List(parse_segment_list(sl)));
+    }
+    segment_template(rep).map(SegmentSource::Template)
 }
 
 /// The nearest `SegmentTemplate` for a Representation (its own, else inherited
@@ -210,6 +338,36 @@ fn segment_template(rep: Node) -> Option<SegmentTemplate> {
         timescale: st.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
         timeline,
     })
+}
+
+/// Parse a `SegmentList` element into its init + ordered `<SegmentURL>` entries.
+fn parse_segment_list(sl: Node) -> SegmentList {
+    let init = sl.children().find(|c| c.is_element() && c.has_tag_name("Initialization"));
+    let segments = sl
+        .children()
+        .filter(|c| c.is_element() && c.has_tag_name("SegmentURL"))
+        .map(|s| SegmentUrl {
+            media: s.attribute("media").map(String::from).unwrap_or_default(),
+            media_range: s.attribute("mediaRange").and_then(parse_dash_range),
+        })
+        .collect();
+    SegmentList {
+        init_url: init.and_then(|n| n.attribute("sourceURL")).map(String::from).unwrap_or_default(),
+        init_range: init.and_then(|n| n.attribute("range")).and_then(parse_dash_range),
+        init_present: init.is_some(),
+        duration: sl.attribute("duration").and_then(|s| s.parse().ok()).unwrap_or(0),
+        timescale: sl.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
+        segments,
+    }
+}
+
+/// A DASH byte range `"start-end"` (inclusive end) -> [`ByteRange`]. A reversed
+/// or malformed range yields `None` (the segment then fetches whole).
+fn parse_dash_range(s: &str) -> Option<ByteRange> {
+    let (start, end) = s.trim().split_once('-')?;
+    let offset: u64 = start.trim().parse().ok()?;
+    let end: u64 = end.trim().parse().ok()?;
+    Some(ByteRange { offset, length: end.checked_sub(offset)?.checked_add(1)? })
 }
 
 /// Parse a `SegmentTimeline`'s `<S>` entries. A negative `@r` (live "repeat to
@@ -317,8 +475,8 @@ mod tests {
         assert_eq!(high.width, Some(1280));
         // codecs inherited from the AdaptationSet
         assert_eq!(high.codecs.as_deref(), Some("avc1.4d401f"));
-        assert_eq!(high.template.timescale, 1000);
-        assert_eq!(high.template.duration, 4000);
+        assert_eq!(high.template().unwrap().timescale, 1000);
+        assert_eq!(high.template().unwrap().duration, 4000);
     }
 
     #[test]
@@ -332,13 +490,14 @@ mod tests {
     fn segment_count_and_url_templating() {
         let mpd = parse(MPD).unwrap();
         let rep = mpd.select(None).unwrap();
+        let template = rep.template().unwrap();
         // 12s / 4s = 3 segments.
-        assert_eq!(rep.template.segment_count(mpd.duration_secs), 3);
-        assert_eq!(rep.template.init_url(&rep.id).as_deref(), Some("init-high.mp4"));
-        assert_eq!(rep.template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }), "seg-high-001.m4s");
-        assert_eq!(rep.template.media_url(&rep.id, SegmentRef { number: 12, time: 0 }), "seg-high-012.m4s");
+        assert_eq!(template.segment_count(mpd.duration_secs), 3);
+        assert_eq!(template.init_url(&rep.id).as_deref(), Some("init-high.mp4"));
+        assert_eq!(template.media_url(&rep.id, SegmentRef { number: 1, time: 0 }), "seg-high-001.m4s");
+        assert_eq!(template.media_url(&rep.id, SegmentRef { number: 12, time: 0 }), "seg-high-012.m4s");
         // The @duration profile yields startNumber.. with cumulative $Time$.
-        let segs = rep.template.segments(mpd.duration_secs);
+        let segs = template.segments(mpd.duration_secs);
         assert_eq!(segs.len(), 3);
         assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
         assert_eq!(segs[2], SegmentRef { number: 3, time: 8000 });
@@ -390,14 +549,14 @@ mod tests {
         let mpd = parse(TIMELINE_MPD).unwrap();
         let rep = mpd.select(None).unwrap();
         // <S r="2"> = 3 segments of d=180000, then one of d=90000.
-        let segs = rep.template.segments(mpd.duration_secs);
+        let segs = rep.template().unwrap().segments(mpd.duration_secs);
         assert_eq!(segs.len(), 4);
         assert_eq!(segs[0], SegmentRef { number: 1, time: 0 });
         assert_eq!(segs[1], SegmentRef { number: 2, time: 180_000 });
         assert_eq!(segs[2], SegmentRef { number: 3, time: 360_000 });
         assert_eq!(segs[3], SegmentRef { number: 4, time: 540_000 });
         // $Time$ addressing uses each segment's start time.
-        assert_eq!(rep.template.media_url(&rep.id, segs[2]), "seg-360000.m4s");
+        assert_eq!(rep.template().unwrap().media_url(&rep.id, segs[2]), "seg-360000.m4s");
     }
 
     #[test]
@@ -409,7 +568,7 @@ mod tests {
           <Representation id="r" bandwidth="1"/>
         </AdaptationSet></Period></MPD>"#;
         let mpd = parse(xml).unwrap();
-        let segs = mpd.representations[0].template.segments(0.0);
+        let segs = mpd.representations[0].template().unwrap().segments(0.0);
         // A gap: the second <S t="5000"> jumps the running time past 1000.
         assert_eq!(
             segs,
@@ -419,6 +578,75 @@ mod tests {
                 SegmentRef { number: 3, time: 6000 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_segment_list_with_byte_ranges() {
+        // Single-file CMAF: init + three fragments are byte ranges of one BaseURL
+        // resource (empty @media), each <SegmentURL> a mediaRange.
+        let xml = r#"<MPD type="static"><Period><AdaptationSet mimeType="video/mp4">
+          <BaseURL>all.m4s</BaseURL>
+          <SegmentList duration="1000" timescale="1000">
+            <Initialization range="0-799"/>
+            <SegmentURL mediaRange="800-999"/>
+            <SegmentURL mediaRange="1000-1299"/>
+            <SegmentURL mediaRange="1300-1449"/>
+          </SegmentList>
+          <Representation id="v0" bandwidth="1000000" width="64" height="48"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let rep = mpd.select(None).unwrap();
+        assert_eq!(rep.timescale(), 1000);
+
+        // Init is a byte range of the BaseURL (empty URL, range present).
+        let (init_url, init_range) = rep.init().unwrap();
+        assert_eq!(init_url, "");
+        assert_eq!(init_range, Some(ByteRange { offset: 0, length: 800 }));
+
+        let segs = rep.resolved_segments(mpd.duration_secs);
+        assert_eq!(segs.len(), 3);
+        // Range "800-999" (inclusive) -> offset 800, length 200; times accumulate
+        // by @duration (0, 1000, 2000 in timescale units).
+        assert_eq!(segs[0], ResolvedSegment {
+            url: String::new(),
+            byte_range: Some(ByteRange { offset: 800, length: 200 }),
+            time: 0,
+        });
+        assert_eq!(segs[1].byte_range, Some(ByteRange { offset: 1000, length: 300 }));
+        assert_eq!(segs[1].time, 1000);
+        assert_eq!(segs[2].byte_range, Some(ByteRange { offset: 1300, length: 150 }));
+        assert_eq!(segs[2].time, 2000);
+        // A SegmentList Representation has no template.
+        assert!(rep.template().is_none());
+    }
+
+    #[test]
+    fn parses_segment_list_with_explicit_media_urls() {
+        let xml = r#"<MPD type="static"><Period><AdaptationSet>
+          <SegmentList duration="1000" timescale="1000">
+            <Initialization sourceURL="init.mp4"/>
+            <SegmentURL media="seg0.m4s"/>
+            <SegmentURL media="seg1.m4s"/>
+          </SegmentList>
+          <Representation id="v0" bandwidth="1"/>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let rep = mpd.select(None).unwrap();
+        assert_eq!(rep.init(), Some((String::from("init.mp4"), None)));
+        let segs = rep.resolved_segments(mpd.duration_secs);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].url, "seg0.m4s");
+        assert_eq!(segs[0].byte_range, None);
+        assert_eq!(segs[1].url, "seg1.m4s");
+        assert_eq!(segs[1].time, 1000);
+    }
+
+    #[test]
+    fn dash_range_parse_rejects_reversed_and_malformed() {
+        assert_eq!(parse_dash_range("0-799"), Some(ByteRange { offset: 0, length: 800 }));
+        assert_eq!(parse_dash_range("800-800"), Some(ByteRange { offset: 800, length: 1 }));
+        assert_eq!(parse_dash_range("999-800"), None, "reversed range rejected");
+        assert_eq!(parse_dash_range("notarange"), None);
     }
 
     #[test]

@@ -5,17 +5,26 @@
 //! the fetching (via `reqwest`, shared with [`HlsSrc`](crate::hlssrc)) and the
 //! `SegmentTemplate` `$Number$` / `$Time$` addressing.
 //!
-//! Scope: `SegmentTemplate` with the `@duration` profile or `SegmentTimeline`,
-//! one `DataFrame` per segment, a fixed Representation. Dynamic (live) manifests
-//! are handled by reloading on the MPD's refresh period. The wall-clock
-//! `availabilityStartTime` live profile, `SegmentList`/`SegmentBase`, multi-period,
-//! and mid-stream switching are follow-ups (DESIGN_TODO).
+//! `SegmentList` is also supported (M369): an explicit ordered list of
+//! `<SegmentURL>` entries, each a `@media` URL and/or a `mediaRange` byte range
+//! of the `BaseURL` resource, with an `<Initialization>` (`sourceURL` / `range`).
+//! A range-only entry fetches just its sub-range with an HTTP `Range` request,
+//! the DASH analog of HLS `#EXT-X-BYTERANGE`, so a single-file CMAF DASH stream
+//! plays.
+//!
+//! Scope: `SegmentTemplate` (`@duration` profile or `SegmentTimeline`) and
+//! `SegmentList`, one `DataFrame` per segment, a fixed Representation. Dynamic
+//! (live) manifests are handled by reloading on the MPD's refresh period. The
+//! wall-clock `availabilityStartTime` live profile, `SegmentBase` (`sidx`-indexed
+//! single resource), multi-period, and mid-stream switching are follow-ups
+//! (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
@@ -24,9 +33,34 @@ use g2g_core::{
 };
 
 use crate::fetch::{
-    byte_frame, get_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
+    MAX_SEGMENT_BYTES,
 };
-use crate::mpd::{parse, SegmentRef};
+use crate::mpd::{parse, ByteRange, ResolvedSegment};
+
+/// Resolve a segment / init URL against the base. An empty URL means the piece
+/// is a byte range of the `BaseURL` resource itself (a pure byte-range
+/// `SegmentList` / `Initialization`), so the base is fetched directly.
+fn seg_url(base: &str, url: &str) -> String {
+    if url.is_empty() {
+        String::from(base)
+    } else {
+        resolve_url(base, url)
+    }
+}
+
+/// Fetch a segment, issuing a `Range` request when the segment carries a byte
+/// sub-range (single-file CMAF), else fetching the whole resource.
+async fn fetch_segment(
+    client: &reqwest::Client,
+    url: &str,
+    range: Option<ByteRange>,
+) -> Result<Vec<u8>, G2gError> {
+    match range {
+        Some(r) => get_range_bytes(client, url, r.offset, r.length, MAX_SEGMENT_BYTES).await,
+        None => get_bytes(client, url, MAX_SEGMENT_BYTES).await,
+    }
+}
 
 #[derive(Debug)]
 pub struct DashSrc {
@@ -88,7 +122,7 @@ impl DashSrc {
 /// target) and that segment's start time in ns. Segments are time-ordered, so
 /// the scan stops at the first start past the target. A target before the first
 /// segment clamps to it; empty input returns `(0, 0)`.
-fn segment_for_time(segs: &[SegmentRef], timescale: u64, target_ns: u64) -> (usize, u64) {
+fn segment_for_time(segs: &[ResolvedSegment], timescale: u64, target_ns: u64) -> (usize, u64) {
     let timescale = timescale.max(1) as u128;
     let mut chosen = 0usize;
     let mut chosen_start = 0u64;
@@ -156,10 +190,14 @@ impl SourceLoop for DashSrc {
                     None => self.url.clone(),
                 };
                 let rep = mpd.select(cap).ok_or(G2gError::CapsMismatch)?;
-                // SegmentTimeline (if present) or the @duration profile drives the
-                // ordered segments, with $Number$ / $Time$ resolved per segment.
-                let segs = rep.template.segments(mpd.duration_secs);
-                let timescale = rep.template.timescale;
+                // `SegmentTemplate` ($Number$/$Time$, SegmentTimeline or @duration)
+                // or an explicit `SegmentList` (byte-range single-file CMAF) both
+                // resolve to the same ordered segment list, each with an optional
+                // byte sub-range and a start time. An empty URL is the BaseURL
+                // resource itself (a pure byte-range SegmentList / Initialization).
+                let segs = rep.resolved_segments(mpd.duration_secs);
+                let timescale = rep.timescale();
+                let init = rep.init();
 
                 let mut idx = 0usize;
                 loop {
@@ -187,9 +225,9 @@ impl SourceLoop for DashSrc {
                     }
 
                     if !init_emitted {
-                        if let Some(init) = rep.template.init_url(&rep.id) {
-                            let bytes = get_bytes(&client, &resolve_url(&base, &init), MAX_SEGMENT_BYTES)
-                                .await?;
+                        if let Some((init_url, init_range)) = &init {
+                            let url = seg_url(&base, init_url);
+                            let bytes = fetch_segment(&client, &url, *init_range).await?;
                             if !bytes.is_empty() {
                                 out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
                                     .await?;
@@ -202,11 +240,10 @@ impl SourceLoop for DashSrc {
                     if idx >= segs.len() {
                         break;
                     }
-                    let seg = segs[idx];
+                    let seg = &segs[idx];
                     if !last_time.is_some_and(|lt| seg.time <= lt) {
-                        let media = rep.template.media_url(&rep.id, seg);
-                        let bytes =
-                            get_bytes(&client, &resolve_url(&base, &media), MAX_SEGMENT_BYTES).await?;
+                        let url = seg_url(&base, &seg.url);
+                        let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;

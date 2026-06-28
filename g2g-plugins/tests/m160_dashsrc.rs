@@ -416,6 +416,121 @@ async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
     assert_eq!(dsink.aus[1], aus[2], "the last demuxed AU is byte-exact (no param-set prepend)");
 }
 
+/// Parse a `Range: bytes=a-b` request header, returning the inclusive `(a, b)`.
+fn parse_range_header(req: &str) -> Option<(usize, usize)> {
+    let line = req.lines().find(|l| l.to_ascii_lowercase().starts_with("range:"))?;
+    let spec = line.split_once('=')?.1.trim();
+    let (a, b) = spec.split_once('-')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Serve a single-file CMAF resource `all.m4s` honouring HTTP `Range` with `206`,
+/// plus a `SegmentList` MPD that addresses init + fragments by `mediaRange`.
+fn serve_segment_list(resource: Vec<u8>, mpd: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&req);
+            let path = text.split_whitespace().nth(1).unwrap_or("");
+            if path == "/manifest.mpd" {
+                let body = mpd.clone().into_bytes();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            } else if path == "/all.m4s" {
+                let (body, status) = match parse_range_header(&text) {
+                    Some((a, b)) => {
+                        let end = (b + 1).min(resource.len());
+                        let start = a.min(end);
+                        (resource[start..end].to_vec(), "206 Partial Content")
+                    }
+                    None => (resource.clone(), "200 OK"),
+                };
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            } else {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        }
+    });
+    format!("http://127.0.0.1:{port}/manifest.mpd")
+}
+
+#[tokio::test]
+async fn dash_segment_list_byte_ranges_single_file_cmaf_demuxes() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 3);
+
+    // One resource: init then the three fragments back to back; the SegmentList
+    // addresses each piece by an inclusive `mediaRange`/`range` of `all.m4s`.
+    let mut resource = init.clone();
+    for s in &segs {
+        resource.extend_from_slice(s);
+    }
+    let r = |start: usize, len: usize| format!("{}-{}", start, start + len - 1);
+    let o0 = init.len();
+    let o1 = o0 + segs[0].len();
+    let o2 = o1 + segs[1].len();
+    let mpd = format!(
+        "<?xml version=\"1.0\"?>\n\
+         <MPD type=\"static\"><Period><AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
+           <BaseURL>all.m4s</BaseURL>\n\
+           <SegmentList duration=\"1000\" timescale=\"1000\">\n\
+             <Initialization range=\"{}\"/>\n\
+             <SegmentURL mediaRange=\"{}\"/>\n\
+             <SegmentURL mediaRange=\"{}\"/>\n\
+             <SegmentURL mediaRange=\"{}\"/>\n\
+           </SegmentList>\n\
+           <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\"/>\n\
+         </AdaptationSet></Period></MPD>",
+        r(0, init.len()),
+        r(o0, segs[0].len()),
+        r(o1, segs[1].len()),
+        r(o2, segs[2].len()),
+    );
+    let url = serve_segment_list(resource.clone(), mpd);
+
+    let mut src = DashSrc::new(url);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    // The byte-range fetches reassemble the single-file resource exactly.
+    assert_eq!(sink.body, resource, "SegmentList byte ranges reassemble the single-file resource");
+
+    // End to end: the reassembled fMP4 demuxes back to the original access units.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "SegmentList CMAF -> Fmp4Demux recovers the access units");
+}
+
 #[tokio::test]
 async fn dash_streams_init_then_segments_and_demuxes() {
     let aus = access_units();

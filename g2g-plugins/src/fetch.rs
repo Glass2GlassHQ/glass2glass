@@ -66,8 +66,8 @@ pub(crate) async fn get_bytes(
 /// is handled by slicing the requested window from the full body, so a
 /// non-range-capable origin still yields the right bytes.
 ///
-/// `hls`-only today (`#EXT-X-BYTERANGE`); DASH byte-range addressing will reuse it.
-#[cfg(feature = "hls")]
+/// Used by HLS `#EXT-X-BYTERANGE` and DASH `SegmentList` byte-range addressing.
+#[cfg(any(feature = "hls", feature = "dash"))]
 pub(crate) async fn get_range_bytes(
     client: &reqwest::Client,
     url: &str,

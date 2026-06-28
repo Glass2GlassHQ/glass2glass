@@ -189,8 +189,9 @@ leverage first:
   ABR; live-edge start; mid-stream variant switching. (Encrypted fMP4 cbcs
   *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
   done, M368.)
-- **DASH:** wall-clock `@duration` live profile; `SegmentList` / `SegmentBase`
-  byte-range; multi-period; throughput-driven ABR.
+- **DASH:** wall-clock `@duration` live profile; `SegmentBase` (`sidx`-indexed
+  single-resource) byte-range; multi-period; throughput-driven ABR.
+  (`SegmentList` byte-range single-file CMAF is done, M369.)
 
 ## Capture sources
 
