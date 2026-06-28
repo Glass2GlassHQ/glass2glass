@@ -606,6 +606,109 @@ async fn dash_segment_base_sidx_indexed_single_file_demuxes() {
     assert_eq!(dsink.aus, aus, "SegmentBase CMAF -> Fmp4Demux recovers the access units");
 }
 
+// --- throughput-driven ABR (M372) -----------------------------------------
+
+/// Two time-aligned Representations (50 Mbit/s `high`, 500 kbit/s `low`) sharing
+/// one @duration SegmentTemplate, addressed by `$RepresentationID$` / `$Number$`.
+const ABR_MPD: &str = "<?xml version=\"1.0\"?>\n\
+    <MPD mediaPresentationDuration=\"PT3S\" type=\"static\"><Period>\n\
+      <AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
+        <SegmentTemplate initialization=\"init-$RepresentationID$.mp4\" \
+           media=\"seg-$RepresentationID$-$Number$.m4s\" startNumber=\"0\" \
+           duration=\"1000\" timescale=\"1000\"/>\n\
+        <Representation id=\"high\" bandwidth=\"50000000\" width=\"1920\" height=\"1080\"/>\n\
+        <Representation id=\"low\" bandwidth=\"500000\" width=\"320\" height=\"180\"/>\n\
+      </AdaptationSet>\n\
+    </Period></MPD>";
+
+/// Serve the ABR MPD + per-representation init / segments, throttling each media
+/// response ~1ms per KiB so a large (high) segment measures as slow bandwidth.
+fn serve_abr_dash(
+    init_high: Vec<u8>,
+    init_low: Vec<u8>,
+    high: Vec<Vec<u8>>,
+    low: Vec<Vec<u8>>,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let seg = |v: &[Vec<u8>], p: &str, pre: &str| {
+                p.strip_prefix(pre)
+                    .and_then(|s| s.strip_suffix(".m4s"))
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .and_then(|i| v.get(i).cloned())
+            };
+            let body: Vec<u8> = match path {
+                "/manifest.mpd" => ABR_MPD.as_bytes().to_vec(),
+                "/init-high.mp4" => init_high.clone(),
+                "/init-low.mp4" => init_low.clone(),
+                p if p.starts_with("/seg-high-") => seg(&high, p, "/seg-high-").unwrap_or_default(),
+                p if p.starts_with("/seg-low-") => seg(&low, p, "/seg-low-").unwrap_or_default(),
+                _ => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+            };
+            if path.ends_with(".m4s") {
+                thread::sleep(std::time::Duration::from_millis((body.len() / 1024) as u64));
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/manifest.mpd")
+}
+
+#[tokio::test]
+async fn dash_abr_downswitches_when_measured_bandwidth_is_low() {
+    let init_high: Vec<u8> = (0..100u32).map(|i| i as u8).collect();
+    let init_low: Vec<u8> = (0..100u32).map(|i| (i as u8) ^ 0xAA).collect();
+    let high: Vec<Vec<u8>> =
+        (0..3u8).map(|s| (0..60_000u32).map(|i| (i as u8) ^ (s + 1)).collect()).collect();
+    let low: Vec<Vec<u8>> =
+        (0..3u8).map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect()).collect();
+    let url = serve_abr_dash(init_high.clone(), init_low.clone(), high.clone(), low.clone());
+
+    let mut src = DashSrc::new(url).with_abr();
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    // No estimate yet -> the high Representation is picked: its init + seg0. The
+    // slow download then downswitches to low, re-emitting the low init, for the
+    // remaining time-aligned segments.
+    let mut expected = init_high.clone();
+    expected.extend_from_slice(&high[0]);
+    expected.extend_from_slice(&init_low);
+    expected.extend_from_slice(&low[1]);
+    expected.extend_from_slice(&low[2]);
+    assert_eq!(
+        sink.body, expected,
+        "ABR starts on high, downswitches to low (new init re-emitted) after the slow segment"
+    );
+}
+
 #[tokio::test]
 async fn dash_streams_init_then_segments_and_demuxes() {
     let aus = access_units();

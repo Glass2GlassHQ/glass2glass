@@ -356,8 +356,7 @@ pub mod httpsrc;
 mod fetch;
 
 // Shared throughput-driven ABR estimator for the adaptive-streaming sources.
-// (DASH wiring widens this to `any(hls, dash)` in a follow-up.)
-#[cfg(feature = "hls")]
+#[cfg(any(feature = "hls", feature = "dash"))]
 mod abr;
 
 // HLS playlist parser (pure, no_std baseline) and the HlsSrc segment source.

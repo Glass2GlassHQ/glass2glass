@@ -1944,8 +1944,13 @@ list, so a range-carrying entry fetches just its sub-range with an HTTP `Range`
 request, the DASH analog of HLS `#EXT-X-BYTERANGE`, letting a single-file CMAF
 DASH stream play. A dynamic (live) MPD is reloaded on its `minimumUpdatePeriod`,
 each new segment played once (tracked by start time), ending when the manifest
-turns static, the same shape as the HLS live reload. Throughput-driven ABR, the
-wall-clock `@duration` live profile, and multi-period are follow-ups
+turns static, the same shape as the HLS live reload. `with_abr()` (M372) makes it
+throughput-adaptive on the same shared `abr::BandwidthEstimator` as `HlsSrc`: a
+`load_rep` helper resolves any Representation (Template / List / `sidx`-fetched
+SegmentBase) into the run loop's segment/timescale/init working set, and the
+estimate-derived cap drives both the per-reload pick and a per-segment
+re-selection (so a static VOD adapts within one pass), re-emitting the init on a
+switch. The wall-clock `@duration` live profile and multi-period are follow-ups
 (DESIGN_TODO).
 
 ### 4.18 Subtitle Overlay (`textoverlay`)

@@ -36,7 +36,8 @@ use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::mpd::{parse, parse_sidx, ByteRange, ResolvedSegment};
+use crate::abr::BandwidthEstimator;
+use crate::mpd::{parse, parse_sidx, ByteRange, Representation, ResolvedSegment};
 
 /// Resolve a segment / init URL against the base. An empty URL means the piece
 /// is a byte range of the `BaseURL` resource itself (a pure byte-range
@@ -62,6 +63,26 @@ async fn fetch_segment(
     }
 }
 
+/// Resolve a Representation's addressing into the run loop's working set: the
+/// ordered segments, the timescale, and the init descriptor. A `SegmentBase`
+/// representation fetches + parses its `sidx` here (the only async case); the
+/// `sidx` carries the authoritative timescale. Used for the initial pick and on
+/// every ABR switch.
+async fn load_rep(
+    client: &reqwest::Client,
+    base: &str,
+    rep: &Representation,
+    total_secs: f64,
+) -> Result<(Vec<ResolvedSegment>, u64, Option<(String, Option<ByteRange>)>), G2gError> {
+    let init = rep.init();
+    if let Some(index_range) = rep.segment_base().map(|sb| sb.index_range) {
+        let idx_bytes = fetch_segment(client, &seg_url(base, ""), Some(index_range)).await?;
+        let sidx = parse_sidx(&idx_bytes).ok_or(G2gError::CapsMismatch)?;
+        return Ok((sidx.subsegments(index_range.offset), sidx.timescale.max(1), init));
+    }
+    Ok((rep.resolved_segments(total_secs), rep.timescale(), init))
+}
+
 #[derive(Debug)]
 pub struct DashSrc {
     url: String,
@@ -75,6 +96,11 @@ pub struct DashSrc {
     /// already a stream-time in `timescale` units), flushes, re-emits the init
     /// segment, and resumes there. The CMAF/DASH segment-transition case.
     seek: Option<SeekController>,
+    /// Throughput-driven ABR (M372): when set, the run loop measures each segment
+    /// download and re-selects the Representation whose bandwidth fits the
+    /// estimate (under `max_bandwidth`), switching mid-stream (new init re-emitted,
+    /// aligned index kept). Off by default (a fixed up-front Representation).
+    abr: bool,
     configured: bool,
 }
 
@@ -85,8 +111,19 @@ impl DashSrc {
             max_bandwidth: 0,
             reload_interval_ms: 0,
             seek: None,
+            abr: false,
             configured: false,
         }
+    }
+
+    /// Enable throughput-driven ABR (M372): measure each segment's download and
+    /// re-select the Representation whose declared bandwidth fits the smoothed
+    /// estimate (under any `max_bandwidth` cap), switching mid-stream and
+    /// re-emitting the init segment on a change. Off by default. Shares the
+    /// estimator with [`HlsSrc`](crate::hlssrc).
+    pub fn with_abr(mut self) -> Self {
+        self.abr = true;
+        self
     }
 
     /// Make the source time-seekable (M367): `run` polls `controller` before each
@@ -182,6 +219,17 @@ impl SourceLoop for DashSrc {
             // Largest segment start time already played; on a live reload only
             // segments past it are new (SegmentTimeline times are monotonic).
             let mut last_time: Option<u64> = None;
+            // ABR throughput estimate, persisted across live reloads. The effective
+            // selection cap is the estimate (when ABR is on and a sample exists),
+            // else the user `max_bandwidth` cap.
+            let mut estimator = BandwidthEstimator::new();
+            let sel_cap = |est: &BandwidthEstimator| {
+                if self.abr {
+                    est.effective_cap(self.max_bandwidth).or(cap)
+                } else {
+                    cap
+                }
+            };
             loop {
                 // Segment URIs resolve against the MPD BaseURL (if any) resolved
                 // against the manifest URL, else the manifest URL's directory.
@@ -189,28 +237,14 @@ impl SourceLoop for DashSrc {
                     Some(b) => resolve_url(&self.url, b),
                     None => self.url.clone(),
                 };
-                let rep = mpd.select(cap).ok_or(G2gError::CapsMismatch)?;
                 // `SegmentTemplate` ($Number$/$Time$, SegmentTimeline or @duration),
                 // an explicit `SegmentList`, or a `sidx`-indexed `SegmentBase` all
-                // resolve to one ordered segment list, each with an optional byte
-                // sub-range and a start time. An empty URL is the BaseURL resource
-                // itself (byte-range SegmentList / SegmentBase / Initialization).
-                let mut timescale = rep.timescale();
-                let init = rep.init();
-                let base_index = rep.segment_base().map(|sb| sb.index_range);
-                let segs = if let Some(index_range) = base_index {
-                    // SegmentBase: fetch the sidx index, parse it, and turn its
-                    // subsegments into byte ranges of the BaseURL resource. The
-                    // sidx carries the authoritative timescale for the durations.
-                    let index_url = seg_url(&base, "");
-                    let idx_bytes =
-                        fetch_segment(&client, &index_url, Some(index_range)).await?;
-                    let sidx = parse_sidx(&idx_bytes).ok_or(G2gError::CapsMismatch)?;
-                    timescale = sidx.timescale.max(1);
-                    sidx.subsegments(index_range.offset)
-                } else {
-                    rep.resolved_segments(mpd.duration_secs)
-                };
+                // resolve to one ordered segment list (see `load_rep`). Pick the
+                // Representation fitting the current estimate (or the user cap).
+                let rep = mpd.select(sel_cap(&estimator)).ok_or(G2gError::CapsMismatch)?;
+                let mut cur_rep_id = rep.id.clone();
+                let (mut segs, mut timescale, mut init) =
+                    load_rep(&client, &base, rep, mpd.duration_secs).await?;
 
                 let mut idx = 0usize;
                 loop {
@@ -253,17 +287,49 @@ impl SourceLoop for DashSrc {
                     if idx >= segs.len() {
                         break;
                     }
-                    let seg = &segs[idx];
-                    if !last_time.is_some_and(|lt| seg.time <= lt) {
-                        let url = seg_url(&base, &seg.url);
-                        let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
-                        if !bytes.is_empty() {
-                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
-                            sequence += 1;
+                    // Bytes + elapsed of the segment just fetched, for the ABR
+                    // estimator (None when this index was skipped on a live reload).
+                    let mut measured: Option<(usize, u64)> = None;
+                    {
+                        let seg = &segs[idx];
+                        if !last_time.is_some_and(|lt| seg.time <= lt) {
+                            let url = seg_url(&base, &seg.url);
+                            let t0 = g2g_core::metrics::monotonic_ns();
+                            let bytes = fetch_segment(&client, &url, seg.byte_range).await?;
+                            measured = Some((
+                                bytes.len(),
+                                g2g_core::metrics::monotonic_ns().saturating_sub(t0),
+                            ));
+                            if !bytes.is_empty() {
+                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                                    .await?;
+                                sequence += 1;
+                            }
+                            last_time = Some(seg.time);
                         }
-                        last_time = Some(seg.time);
                     }
                     idx += 1;
+
+                    // ABR: feed the measured throughput and, if the best-fitting
+                    // Representation changed, switch to it (re-resolve its segments
+                    // / init, re-emit the init), keeping the time-aligned index.
+                    // The `seg` borrow above has ended, so reassigning is safe.
+                    if self.abr {
+                        if let Some((len, elapsed)) = measured {
+                            estimator.sample(len, elapsed);
+                            if let Some(best) = mpd.select(sel_cap(&estimator)) {
+                                if best.id != cur_rep_id {
+                                    cur_rep_id = best.id.clone();
+                                    let (s, ts, ini) =
+                                        load_rep(&client, &base, best, mpd.duration_secs).await?;
+                                    segs = s;
+                                    timescale = ts;
+                                    init = ini;
+                                    init_emitted = false;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if !mpd.dynamic {
