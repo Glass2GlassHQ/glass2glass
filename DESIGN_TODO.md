@@ -41,10 +41,6 @@ leverage first:
 - **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
   (M320) drives a *terminal* aggregator; the `run_muxer_sink` shape (a trailing
   sink with output-caps coupling) for runtime-added inputs is still owed.
-- **Mid-stream β re-cascade across a muxer.** Startup negotiation now crosses
-  the boundary (`MultiInputElement::propose_allocation_for_input`, M343), but a
-  muxer's inputs still carry no per-pad re-cascade channel, so a *mid-stream*
-  `CapsChanged`-driven β walk terminates at the muxer.
 - **`Graph` re-run / clone for seek-and-replay.** `run_graph` consumes elements
   via `take()`; a `GraphTemplate::instantiate() -> Graph` two-step is cleaner
   than making `Graph` reusable.

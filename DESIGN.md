@@ -1148,13 +1148,15 @@ Two fan structures have non-trivial joins:
   where the consumer-most proposal legitimately dictates the domain.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
-  so a plain container muxer imposes nothing). The runner stores it on each
-  input edge so the demand crosses the boundary and re-cascades up that branch
-  independently (a device-resident interleave muxer asking each video pad for
-  GPU buffers). The muxer's byte output has no memory-domain tie to its inputs,
-  so its output-edge proposal is not absorbed. The *mid-stream* per-pad
-  re-cascade (a live `CapsChanged` re-deriving across the muxer) still
-  terminates at the boundary, a follow-up.
+  so a plain container muxer imposes nothing). At startup the runner stores it on
+  each input edge so the demand crosses the boundary and re-cascades up that
+  branch independently (a device-resident interleave muxer asking each video pad
+  for GPU buffers). Mid-stream the same crossing holds: a `CapsChanged` on one
+  pad re-derives that pad's proposal and re-cascades it up *that pad's branch
+  alone* via the `Recascade::target` override (the node-keyed walk would hit
+  every input), leaving the other inputs untouched. The muxer's byte output has
+  no memory-domain tie to its inputs, so its output-edge proposal is not
+  absorbed.
 
 #### 4.13.6 Fan-out and fan-in
 

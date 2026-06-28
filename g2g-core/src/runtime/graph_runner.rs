@@ -22,13 +22,13 @@
 //! and a sink re-solves its input against its declared constraint. A node-keyed
 //! [`GraphCoordinator`] walks the sink's re-derived allocation proposal one hop
 //! upstream per reply via [`ValidatedGraph::in_edges`], resolving through
-//! structural tee nodes; a source or muxer terminates the *mid-stream* walk.
-//! Tee branches re-solve independently (each broadcast `CapsChanged` lands in
-//! its own arm); muxer inputs re-configure per pad. At startup negotiation a
-//! muxer's per-pad allocation demand (`propose_allocation_for_input`) does
-//! cross the boundary and re-cascades up each branch; only the *mid-stream*
-//! re-cascade still stops at a muxer (its inputs carry no per-pad re-cascade
-//! channel yet, a follow-up).
+//! structural tee nodes; a source terminates the walk. Tee branches re-solve
+//! independently (each broadcast `CapsChanged` lands in its own arm); muxer
+//! inputs re-configure per pad. A muxer's per-pad allocation demand
+//! (`propose_allocation_for_input`) crosses the boundary both at startup
+//! negotiation and mid-stream: a `CapsChanged` on one pad re-cascades the
+//! re-derived proposal up that pad's branch alone (the `Recascade::target`
+//! override), leaving the other inputs untouched.
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -258,9 +258,16 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 /// interior transform reports the proposal it re-derived after applying an
 /// upstream directive. `node` is the reporting node, so the coordinator walks
 /// the proposal one hop further upstream through the graph topology.
+///
+/// `target` overrides that topology walk: a muxer has many inputs but a
+/// mid-stream `CapsChanged` arrives on one pad, so it names the single upstream
+/// arm feeding that pad's branch rather than re-cascading to all of them (which
+/// the node-keyed `upstream_arms` lookup would do). `None` for the ordinary
+/// single-input transform / sink path.
 #[derive(Debug, Clone)]
 struct Recascade {
     node: NodeId,
+    target: Option<NodeId>,
     proposal: Option<AllocationParams>,
 }
 
@@ -282,10 +289,12 @@ impl GraphCoordHandle {
 /// [`ArmDirective`] sender per interruptible interior arm (transforms), keyed by
 /// node id, plus `upstream_arms`: for each reporting node, the nearest interior
 /// transform arm feeding each of its inputs (resolved through structural tee
-/// nodes; a source or muxer terminates the walk). On each report it forwards an
+/// nodes; a source terminates the walk). On each report it forwards an
 /// `ArmDirective::Recascade` one hop upstream to those arms, which re-derive and
-/// report again, so the cascade walks the DAG without a global lock. The walk is
-/// reactive and non-blocking (`try_send`), so it never wedges the data plane.
+/// report again, so the cascade walks the DAG without a global lock. A report
+/// carrying an explicit [`Recascade::target`] (a muxer's per-pad re-cascade)
+/// forwards to that one arm instead of the node-keyed set. The walk is reactive
+/// and non-blocking (`try_send`), so it never wedges the data plane.
 #[derive(Debug)]
 struct GraphCoordinator {
     rx: Receiver<Recascade>,
@@ -299,9 +308,21 @@ impl GraphCoordinator {
         while let Some(event) = self.rx.recv().await {
             observed += 1;
             if let Some(p) = event.proposal {
-                for &u in &self.upstream_arms[event.node.0 as usize] {
-                    if let Some(ctrl) = &self.arm_ctrl[u.0 as usize] {
-                        let _ = ctrl.try_send(ArmDirective::Recascade(p));
+                match event.target {
+                    // Muxer per-pad path: re-cascade up exactly the one branch
+                    // whose pad changed.
+                    Some(t) => {
+                        if let Some(ctrl) = &self.arm_ctrl[t.0 as usize] {
+                            let _ = ctrl.try_send(ArmDirective::Recascade(p));
+                        }
+                    }
+                    // Single-input path: walk to every arm feeding the reporter.
+                    None => {
+                        for &u in &self.upstream_arms[event.node.0 as usize] {
+                            if let Some(ctrl) = &self.arm_ctrl[u.0 as usize] {
+                                let _ = ctrl.try_send(ArmDirective::Recascade(p));
+                            }
+                        }
                     }
                 }
             }
@@ -764,6 +785,13 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             let mux_out_caps = solution[out_e[0]].clone();
             let pads: Vec<usize> =
                 in_e.iter().map(|&eid| vg.edge(eid).dst.index as usize).collect();
+            // The interior arm feeding each input pad (resolved through structural
+            // tees; `None` when a source feeds the pad directly, which has no
+            // mid-stream re-cascade channel). Aligned with `pads` / `pad_rxs`, so
+            // the muxer arm can re-cascade a per-pad β proposal up just that
+            // branch. `in_e` order matches `in_rxs`, so slot k maps to pad k here.
+            let pad_upstream: Vec<Option<NodeId>> =
+                in_e.iter().map(|&eid| nearest_upstream_arm(&vg, eid)).collect();
             let input_count = in_rxs.len();
             // Each input pad gets its OWN bounded channel feeding the muxer arm,
             // which drains them round-robin. A single shared FIFO would let a
@@ -787,9 +815,27 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             // merges its inputs by DataFrame PTS); the default drains round-robin
             // in arrival order.
             let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
-                Box::pin(muxer_arm_pts(mux, pad_rxs, out_tx, input_count, mux_out_caps))
+                Box::pin(muxer_arm_pts(
+                    mux,
+                    pad_rxs,
+                    out_tx,
+                    input_count,
+                    mux_out_caps,
+                    coord_handle.clone(),
+                    node,
+                    pad_upstream,
+                ))
             } else {
-                Box::pin(muxer_arm(mux, pad_rxs, out_tx, input_count, mux_out_caps))
+                Box::pin(muxer_arm(
+                    mux,
+                    pad_rxs,
+                    out_tx,
+                    input_count,
+                    mux_out_caps,
+                    coord_handle.clone(),
+                    node,
+                    pad_upstream,
+                ))
             };
             arms.push(arm);
             arm_kinds.push(kind);
@@ -1180,7 +1226,7 @@ async fn transform_arm<'a>(
                     // our upstream neighbour.
                     elem.configure_allocation(&params);
                     let proposal = elem.propose_allocation(&out_caps);
-                    coord.report(Recascade { node, proposal }).await;
+                    coord.report(Recascade { node, target: None, proposal }).await;
                     continue;
                 }
                 Either::Left(None) => {
@@ -1334,7 +1380,7 @@ async fn sink_arm<'a>(
                         if let Some(p) = &proposal {
                             elem.configure_allocation(p);
                         }
-                        coord.report(Recascade { node, proposal }).await;
+                        coord.report(Recascade { node, target: None, proposal }).await;
                         elem.process(PipelinePacket::CapsChanged(sink_caps), &mut null)
                             .await?;
                     }
@@ -1523,12 +1569,16 @@ async fn muxer_recv_any(
 /// frozen overlay and a hung EOS aggregation). The per-input `Eos` is delivered
 /// to the element first (so a stateful muxer can flush) but the element must not
 /// forward it; the runner owns the merged one.
+#[allow(clippy::too_many_arguments)]
 async fn muxer_arm<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
     pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
     out_tx: LinkSender,
     input_count: usize,
     mut current_output: Caps,
+    coord: GraphCoordHandle,
+    node: NodeId,
+    pad_upstream: Vec<Option<NodeId>>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -1577,12 +1627,19 @@ async fn muxer_arm<'a>(
             PipelinePacket::CapsChanged(new_caps) => {
                 // MX-1: re-solve this input against its pad constraint and
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
-                // not forwarded as if it were the merged output. A muxer is a β
-                // allocation boundary (its inputs have no per-pad re-cascade
-                // channel).
+                // not forwarded as if it were the merged output.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
                 if let ConfigureOutcome::ReFixate(_) = mux.configure_pipeline(pad, &input_caps)? {
                     return Err(G2gError::FixationFailed);
+                }
+                // MX-1β: the muxer's per-pad allocation demand may shift with the
+                // new input caps; re-cascade it up exactly this pad's branch (the
+                // other inputs are untouched). A source feeding the pad directly
+                // has no interruptible arm, so there is nothing to walk.
+                if let (Some(target), Some(p)) =
+                    (pad_upstream[slot], mux.propose_allocation_for_input(pad, &input_caps))
+                {
+                    coord.report(Recascade { node, target: Some(target), proposal: Some(p) }).await;
                 }
                 // MX-2: the per-input change may shift the merged output. Emit one
                 // downstream `CapsChanged` only when it actually changed.
@@ -1608,12 +1665,16 @@ async fn muxer_arm<'a>(
 /// would otherwise hand-roll. `Eos` (per-input flush + aggregation) and
 /// `CapsChanged` (MX-1 / MX-2) are handled as in [`muxer_arm`]; only `DataFrame`s
 /// are reordered.
+#[allow(clippy::too_many_arguments)]
 async fn muxer_arm_pts<'a>(
     mut mux: Box<dyn DynMultiInputElement + 'a>,
     pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
     out_tx: LinkSender,
     input_count: usize,
     mut current_output: Caps,
+    coord: GraphCoordHandle,
+    node: NodeId,
+    pad_upstream: Vec<Option<NodeId>>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -1647,12 +1708,18 @@ async fn muxer_arm_pts<'a>(
                 agg.mark_ended(slot);
             }
             PipelinePacket::CapsChanged(new_caps) => {
-                // MX-1 / MX-2, identical to `muxer_arm`: re-solve this input's pad
-                // and emit one downstream `CapsChanged` only when the merged output
-                // actually shifts.
+                // MX-1 / MX-1β / MX-2, identical to `muxer_arm`: re-solve this
+                // input's pad, re-cascade the per-pad β proposal up that branch,
+                // and emit one downstream `CapsChanged` only when the merged
+                // output actually shifts.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
                 if let ConfigureOutcome::ReFixate(_) = mux.configure_pipeline(pad, &input_caps)? {
                     return Err(G2gError::FixationFailed);
+                }
+                if let (Some(target), Some(p)) =
+                    (pad_upstream[slot], mux.propose_allocation_for_input(pad, &input_caps))
+                {
+                    coord.report(Recascade { node, target: Some(target), proposal: Some(p) }).await;
                 }
                 let new_output = solve_mux_output_dyn(&*mux)?;
                 if new_output != current_output {
