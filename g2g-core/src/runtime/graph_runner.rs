@@ -1504,13 +1504,26 @@ async fn sink_arm<'a>(
     let mut last_buffer_bucket: Option<u8> = None;
     // M203: the segment in force, so a buffer's PTS maps to stream-time position.
     let mut current_segment: Option<Segment> = None;
+    // M360 re-preroll: generation this arm last prerolled at, and whether it is
+    // draining stale pre-seek frames (paused flushing seek) until the `Flush`.
+    let mut preroll_gen = state.as_ref().map_or(0, |sc| sc.preroll_generation());
+    let mut flushing = false;
     loop {
         // M78 flow gate: below `Playing` the sink parks here, so it stops
         // draining its edge and backpressure stalls the DAG upstream. Non-live
         // `Paused` admits this sink's one preroll buffer; `Null` ends the arm.
         if let Some(sc) = &state {
-            if sc.flow_gate(prerolled_self).await == Flow::Stop {
+            if sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop {
                 return Ok(consumed);
+            }
+            // M360: a `request_repreroll` (paused flushing seek) bumped the
+            // generation; re-arm preroll and drain stale pre-seek frames until
+            // the `Flush`, so the post-flush target is the new visible preroll.
+            let gen = sc.preroll_generation();
+            if gen != preroll_gen {
+                preroll_gen = gen;
+                prerolled_self = false;
+                flushing = true;
             }
         }
         // M87 buffering: sample the input link's fill and post a `Buffering`
@@ -1525,6 +1538,9 @@ async fn sink_arm<'a>(
             }
         }
         match in_rx.recv().await {
+            // M360: discard stale pre-seek buffers while draining toward the
+            // `Flush`; control packets fall through (the `Flush` ends drain).
+            Some(PipelinePacket::DataFrame(_)) if flushing => continue,
             Some(PipelinePacket::Eos) => {
                 elem.process(PipelinePacket::Eos, &mut null).await?;
                 // Count this sink toward preroll only if it never took a real
@@ -1572,6 +1588,12 @@ async fn sink_arm<'a>(
                         in_rx.request_reconfigure(Reconfigure::Propose(counter));
                     }
                 }
+            }
+            // M360: the `Flush` ends the re-preroll drain; the next (post-flush)
+            // DataFrame becomes the new visible preroll.
+            Some(PipelinePacket::Flush) => {
+                flushing = false;
+                elem.process(PipelinePacket::Flush, &mut null).await?;
             }
             Some(packet) => {
                 // M203: follow the segment and publish each buffer's stream-time

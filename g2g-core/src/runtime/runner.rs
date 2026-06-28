@@ -602,6 +602,11 @@ where
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         let mut prerolled_self = false;
+        // M360 re-preroll: the generation this arm last prerolled at, and whether
+        // it is currently draining stale pre-seek frames (after a paused flushing
+        // seek) until the `Flush` arrives.
+        let mut preroll_gen = state_for_sink.as_ref().map_or(0, |sc| sc.preroll_generation());
+        let mut flushing = false;
         loop {
             // Flow gate (M76/M77): below `Playing` the sink parks here, so it
             // stops draining the link; the bounded channel fills and
@@ -609,11 +614,24 @@ where
             // ends the arm. In non-live `Paused` the gate admits exactly one
             // buffer (this sink's preroll frame) before it holds.
             if let Some(sc) = &state_for_sink {
-                if sc.flow_gate(prerolled_self).await == Flow::Stop {
+                if sc.flow_gate(prerolled_self, preroll_gen).await == Flow::Stop {
                     return Ok::<u64, G2gError>(consumed);
+                }
+                // M360: a `request_repreroll` (paused flushing seek) bumped the
+                // generation. Re-arm this arm's preroll and drain the stale
+                // pre-seek frames until the `Flush`, so the post-flush target
+                // becomes the new visible preroll rather than a stale buffer.
+                let gen = sc.preroll_generation();
+                if gen != preroll_gen {
+                    preroll_gen = gen;
+                    prerolled_self = false;
+                    flushing = true;
                 }
             }
             match link_rx.recv().await {
+                // M360: discard stale pre-seek buffers while draining toward the
+                // `Flush`; control packets fall through (the `Flush` ends drain).
+                Some(PipelinePacket::DataFrame(_)) if flushing => continue,
                 Some(PipelinePacket::Eos) => {
                     sink.process(PipelinePacket::Eos, &mut null).await?;
                     // M77: EOS during preroll still completes the async
@@ -669,6 +687,12 @@ where
                             link_rx.request_reconfigure(Reconfigure::Propose(counter));
                         }
                     }
+                }
+                // M360: the `Flush` ends the re-preroll drain; the next
+                // (post-flush) DataFrame becomes the new visible preroll.
+                Some(PipelinePacket::Flush) => {
+                    flushing = false;
+                    sink.process(PipelinePacket::Flush, &mut null).await?;
                 }
                 Some(packet) => {
                     let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));

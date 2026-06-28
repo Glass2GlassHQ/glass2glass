@@ -33,7 +33,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
@@ -65,6 +65,12 @@ struct Inner {
     /// replay. Without this, the down-transition clears `prerolled` but leaves
     /// `pending_preroll` at `0`, so the next `Paused` never re-completes preroll.
     preroll_target: AtomicUsize,
+    /// Preroll generation (M360). Bumped by [`StateController::request_repreroll`]
+    /// (a flushing seek while paused). A sink arm holding a stale generation
+    /// re-prerolls: the `flow_gate` reopens even though the arm already took a
+    /// preroll buffer this generation, so the post-flush target frame becomes the
+    /// new visible preroll. Starts at `0`.
+    preroll_gen: AtomicU64,
     /// Flow-gate futures parked while data must not cross. Drained and woken on
     /// every state change so they re-evaluate.
     wakers: Mutex<Vec<Waker>>,
@@ -126,6 +132,7 @@ impl StateController {
                 prerolled: AtomicBool::new(false),
                 pending_preroll: AtomicUsize::new(1),
                 preroll_target: AtomicUsize::new(1),
+                preroll_gen: AtomicU64::new(0),
                 wakers: Mutex::new(Vec::new()),
                 preroll_wakers: Mutex::new(Vec::new()),
                 bus,
@@ -260,6 +267,38 @@ impl StateController {
         }
     }
 
+    /// Re-arm preroll for a flushing seek issued while paused (M360). The app
+    /// calls this alongside a flushing [`Seek`](crate::segment::Seek) on a paused
+    /// pipeline: the sinks have already prerolled and are holding (so they are not
+    /// draining the links and the source is backpressured, unable to observe the
+    /// seek), and a fresh `Flush` + post-seek segment are about to flow. Bumping
+    /// the generation reopens each sink's `flow_gate` so it drains the stale
+    /// pre-seek frames (discarded until the `Flush`), then prerolls the post-flush
+    /// target frame and re-completes preroll (a fresh `AsyncDone`). A no-op once
+    /// `Playing` (no async preroll there). Reuses the last
+    /// [`expect_prerolls`](StateController::expect_prerolls) target.
+    pub fn request_repreroll(&self) {
+        if self.state() == PipelineState::Playing {
+            return;
+        }
+        self.inner.preroll_gen.fetch_add(1, Ordering::AcqRel);
+        self.inner.prerolled.store(false, Ordering::Release);
+        self.inner
+            .pending_preroll
+            .store(self.inner.preroll_target.load(Ordering::Acquire), Ordering::Release);
+        // Wake parked flow gates so they re-evaluate against the new generation.
+        let mut w = self.inner.wakers.lock();
+        for waker in w.drain(..) {
+            waker.wake();
+        }
+    }
+
+    /// The current preroll generation (M360). A sink arm remembers the value it
+    /// last prerolled at and re-prerolls when it observes a newer one.
+    pub fn preroll_generation(&self) -> u64 {
+        self.inner.preroll_gen.load(Ordering::Acquire)
+    }
+
     /// Record that *one* sink took its preroll buffer. The DAG runner's sink
     /// arms each call this after their first buffer in non-live `Paused`; the
     /// `1 -> 0` edge (the last sink) completes the pipeline preroll, waking
@@ -311,10 +350,17 @@ impl StateController {
     /// - non-live `Paused` → `Go` while `!self_prerolled` (admit this sink's one
     ///   preroll frame), then `Pending` until `Playing`.
     /// - live `Paused` / `Ready` → `Pending` (no flow).
-    pub fn flow_gate(&self, self_prerolled: bool) -> FlowGate {
+    ///
+    /// `self_gen` is the preroll generation the arm last prerolled at (M360):
+    /// when [`request_repreroll`](StateController::request_repreroll) bumps the
+    /// controller's generation past it, the gate reopens (`Go`) even with
+    /// `self_prerolled` set, so the arm re-prerolls the post-flush frame. Pass
+    /// [`preroll_generation`](StateController::preroll_generation) at arm start.
+    pub fn flow_gate(&self, self_prerolled: bool, self_gen: u64) -> FlowGate {
         FlowGate {
             inner: self.inner.clone(),
             self_prerolled,
+            self_gen,
         }
     }
 
@@ -343,6 +389,7 @@ pub enum Flow {
 pub struct FlowGate {
     inner: Arc<Inner>,
     self_prerolled: bool,
+    self_gen: u64,
 }
 
 impl Future for FlowGate {
@@ -373,7 +420,11 @@ impl Future for FlowGate {
             // until `Playing`. Live `Paused` admits nothing.
             PipelineState::Paused => {
                 let live = self.inner.live.load(Ordering::Acquire);
-                go_or_park(&mut wakers, !live && !self.self_prerolled)
+                // Admit this arm's one preroll buffer per generation: while not
+                // yet prerolled, or once a `request_repreroll` has bumped the
+                // generation past the one this arm last prerolled at (M360).
+                let stale_gen = self.self_gen != self.inner.preroll_gen.load(Ordering::Acquire);
+                go_or_park(&mut wakers, !live && (!self.self_prerolled || stale_gen))
             }
         }
     }
@@ -483,7 +534,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // A not-yet-prerolled arm gets `Go` (its one preroll frame).
-        let mut gate = sc.flow_gate(false);
+        let mut gate = sc.flow_gate(false, 0);
         // SAFETY: `gate` pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
         assert_eq!(
@@ -493,7 +544,7 @@ mod tests {
         );
 
         // Once the arm has prerolled, the gate holds until Playing.
-        let mut held = sc.flow_gate(true);
+        let mut held = sc.flow_gate(true, 0);
         // SAFETY: pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut held) };
         assert_eq!(pinned.poll(&mut cx), Poll::Pending, "holds after preroll");
@@ -512,7 +563,7 @@ mod tests {
         let waker = flag_waker(flag.clone());
         let mut cx = Context::from_waker(&waker);
 
-        let mut gate = sc.flow_gate(false);
+        let mut gate = sc.flow_gate(false, 0);
         // Live `Paused` admits nothing: the gate parks immediately.
         // SAFETY: `gate` pinned to the stack for the poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
@@ -553,6 +604,56 @@ mod tests {
         // Idempotent: a second notify posts nothing.
         sc.notify_prerolled();
         assert_eq!(bus.try_recv(), None);
+    }
+
+    #[test]
+    fn request_repreroll_reopens_a_held_gate_for_the_next_generation() {
+        // M360: a prerolled sink (gen 0) holds in non-live Paused. A
+        // `request_repreroll` bumps the generation and reopens the gate so the
+        // arm re-prerolls the post-flush frame, then re-arms the preroll latch.
+        let sc = StateController::new(PipelineState::Paused);
+        let flag = Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let waker = flag_waker(flag.clone());
+        let mut cx = Context::from_waker(&waker);
+
+        // The arm prerolled at generation 0: the gate holds (one buffer already
+        // taken this generation).
+        let mut gate = sc.flow_gate(true, 0);
+        // SAFETY: pinned to the stack for the poll.
+        let pinned = unsafe { Pin::new_unchecked(&mut gate) };
+        assert_eq!(pinned.poll(&mut cx), Poll::Pending, "prerolled gate holds");
+        sc.notify_prerolled();
+        assert!(sc.is_prerolled());
+
+        // A flushing seek while paused re-arms preroll: generation advances, the
+        // latch resets, and the parked gate is woken.
+        assert_eq!(sc.preroll_generation(), 0);
+        sc.request_repreroll();
+        assert_eq!(sc.preroll_generation(), 1, "generation advanced");
+        assert!(!sc.is_prerolled(), "preroll latch re-armed");
+        assert!(flag.load(Ordering::SeqCst), "request_repreroll woke the held gate");
+
+        // The arm still holds gen 0, so on re-poll the gate reopens (a stale
+        // generation re-prerolls), admitting the post-flush target frame.
+        // SAFETY: same pinned gate, re-polled after the wake.
+        let pinned = unsafe { Pin::new_unchecked(&mut gate) };
+        assert_eq!(pinned.poll(&mut cx), Poll::Ready(Flow::Go), "stale generation re-prerolls");
+
+        // Once the arm has caught up to the new generation and re-prerolled, it
+        // holds again (one buffer per generation).
+        let mut held = sc.flow_gate(true, 1);
+        // SAFETY: pinned to the stack for the poll.
+        let pinned = unsafe { Pin::new_unchecked(&mut held) };
+        assert_eq!(pinned.poll(&mut cx), Poll::Pending, "re-prerolled gate holds again");
+    }
+
+    #[test]
+    fn request_repreroll_is_a_noop_while_playing() {
+        // Playing has no async preroll, so a re-preroll request must not corrupt
+        // the latch / generation.
+        let sc = StateController::new(PipelineState::Playing);
+        sc.request_repreroll();
+        assert_eq!(sc.preroll_generation(), 0, "no generation bump while Playing");
     }
 
     #[test]
@@ -665,7 +766,7 @@ mod tests {
         let flag = Arc::new(core::sync::atomic::AtomicBool::new(false));
         let waker = flag_waker(flag);
         let mut cx = Context::from_waker(&waker);
-        let mut gate = sc.flow_gate(false);
+        let mut gate = sc.flow_gate(false, 0);
         // SAFETY: `gate` pinned to the stack for this poll.
         let pinned = unsafe { Pin::new_unchecked(&mut gate) };
         assert_eq!(pinned.poll(&mut cx), Poll::Ready(Flow::Stop));
