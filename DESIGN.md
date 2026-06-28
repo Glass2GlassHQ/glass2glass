@@ -1599,8 +1599,21 @@ is done (M226): `FrameTiming::keyframe` carries a per-frame flag (set by
 container sync-sample / `trun` keyframe flag), a `TRICKMODE` seek sets
 `Segment::key_units_only` in `from_seek`, and `SyncSink` drops non-keyframe frames
 under such a segment before scheduling them (counted by `trick_dropped()`).
-Segment seeks (CMAF / DASH), re-preroll after a flushing seek when paused, and
-making the other in-tree sources seek-aware remain open (DESIGN_TODO).
+**Segment playback / gapless looping** (M358, the `GstSeekFlags::SEGMENT` analog)
+is consumed through the `SeekController`, not a new packet: g2g has no
+`SEGMENT_DONE` `PipelinePacket` (it would force a new control variant through
+every element's exhaustive match), so the controller carries it on the same
+app<->source channel a seek already uses. A `SEGMENT`-flagged seek runs the
+source to `stop`; instead of `Eos` the source calls `notify_segment_done(stop)`
+and parks (polling) for the app's next move. The app observes
+`segment_done_count()` / `take_segment_done()` and re-arms a *non-flushing*
+`SEGMENT` seek to loop (so `accumulate_seek` advances `base` by one span per
+iteration, gapless, no `Flush` downstream) or calls `shutdown()` to end the loop,
+at which point the idle source emits `Eos`. The idle park is a poll (the
+poll-model analog of GStreamer pausing the source task; a wakeful wait is a
+follow-up). Wiring the in-tree repositioning sources (`Mp4Src`) to loop on
+`SEGMENT`, container-level segment seeks (CMAF / DASH transitions), and re-preroll
+after a flushing seek when paused remain open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

@@ -1,4 +1,4 @@
-//! Seek request channel (M82).
+//! Seek request channel (M82) and segment-done back-channel (M358).
 //!
 //! A cloneable handle carrying a pending [`Seek`] from the application to a
 //! seek-aware source. The app calls [`SeekController::seek`]; the source's run
@@ -13,6 +13,26 @@
 //! one. Polling (rather than waking) is deliberate — a producing source checks
 //! between frames; a parked source isn't producing, so there is nothing to
 //! reposition until it resumes.
+//!
+//! ## Segment seeks (M358)
+//!
+//! A [`SeekFlags::SEGMENT`](crate::segment::SeekFlags::SEGMENT) seek asks the
+//! source to play `[start, stop]` and, on reaching `stop`, report
+//! **segment-done** instead of running to `Eos`, so the app can loop seamlessly
+//! with a non-flushing accumulating seek (gapless, see
+//! [`Segment::accumulate_seek`](crate::segment::Segment::accumulate_seek)). g2g
+//! has no `PipelinePacket` for this (the GStreamer `SEGMENT_DONE` event/message);
+//! it would force a new control packet through every element's exhaustive match.
+//! Instead the controller carries it back on the same app<->source channel that
+//! already exists: the source calls [`notify_segment_done`](Self::notify_segment_done)
+//! at `stop`, the app observes [`segment_done_count`](Self::segment_done_count) /
+//! [`take_segment_done`](Self::take_segment_done) and either re-arms a loop seek
+//! or calls [`shutdown`](Self::shutdown) to end the loop. A segment-looping
+//! source that is idle between loops polls [`is_shutdown`](Self::is_shutdown) so
+//! it can emit `Eos` and terminate (the poll-model analog of pausing the source
+//! task; a wakeful wait is a follow-up).
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::sync::Arc;
 
@@ -20,12 +40,31 @@ use spin::Mutex;
 
 use crate::segment::Seek;
 
+/// Source -> app segment-done state. `count` is monotonic so the app can detect
+/// a *new* completion (e.g. spin until it advances); `fresh` is the take-once
+/// flag for [`take_segment_done`](SeekController::take_segment_done).
+#[derive(Debug, Default, Clone, Copy)]
+struct SegmentDone {
+    /// Number of `SEGMENT` segments the source has completed (monotonic).
+    count: u64,
+    /// Stream-time position (ns) where the most recent segment ended.
+    position_ns: u64,
+    /// Set by `notify_segment_done`, cleared by `take_segment_done`.
+    fresh: bool,
+}
+
 #[derive(Debug, Default)]
 struct SeekInner {
     pending: Mutex<Option<Seek>>,
+    /// Segment-done back-channel (source -> app), the `SEGMENT_DONE` analog.
+    segment_done: Mutex<SegmentDone>,
+    /// App -> source stop request: ends a segment-looping source idling between
+    /// loop seeks. Latches once set (a run is torn down, not resumed).
+    shutdown: AtomicBool,
 }
 
-/// Cloneable seek channel. Every clone shares one pending-seek slot.
+/// Cloneable seek channel. Every clone shares one pending-seek slot, one
+/// segment-done back-channel, and one shutdown flag.
 #[derive(Debug, Clone, Default)]
 pub struct SeekController {
     inner: Arc<SeekInner>,
@@ -51,6 +90,47 @@ impl SeekController {
     /// Whether a seek is currently pending (not yet taken).
     pub fn has_pending(&self) -> bool {
         self.inner.pending.lock().is_some()
+    }
+
+    /// Source side: report that a `SEGMENT` segment finished at stream-time
+    /// `position_ns` (the `SEGMENT_DONE` signal). Bumps the completion count and
+    /// arms [`take_segment_done`](Self::take_segment_done).
+    pub fn notify_segment_done(&self, position_ns: u64) {
+        let mut d = self.inner.segment_done.lock();
+        d.count = d.count.saturating_add(1);
+        d.position_ns = position_ns;
+        d.fresh = true;
+    }
+
+    /// Application side: take the stream-time position of the most recent
+    /// segment-done, or `None` if none is unconsumed since the last take. The
+    /// app reacts by re-arming a (typically non-flushing) loop seek.
+    pub fn take_segment_done(&self) -> Option<u64> {
+        let mut d = self.inner.segment_done.lock();
+        if d.fresh {
+            d.fresh = false;
+            Some(d.position_ns)
+        } else {
+            None
+        }
+    }
+
+    /// Application side: total `SEGMENT` segments the source has completed
+    /// (monotonic). Lets the app wait for the next completion without consuming
+    /// the take-once slot.
+    pub fn segment_done_count(&self) -> u64 {
+        self.inner.segment_done.lock().count
+    }
+
+    /// Application side: ask a segment-looping source to stop and emit `Eos`.
+    /// Latching: a torn-down run is not resumed.
+    pub fn shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Source side: whether the app has requested shutdown.
+    pub fn is_shutdown(&self) -> bool {
+        self.inner.shutdown.load(Ordering::SeqCst)
     }
 }
 
@@ -99,5 +179,36 @@ mod tests {
         // The source-side clone observes the app-side request.
         assert_eq!(src.take_pending().map(|s| s.start), Some(42));
         assert!(!app.has_pending());
+    }
+
+    #[test]
+    fn segment_done_counts_and_takes_once() {
+        let app = SeekController::new();
+        let src = app.clone();
+        assert_eq!(app.segment_done_count(), 0);
+        assert_eq!(app.take_segment_done(), None);
+
+        // Source reports a completed segment; the app sees the count advance and
+        // can take the position exactly once.
+        src.notify_segment_done(5_000);
+        assert_eq!(app.segment_done_count(), 1);
+        assert_eq!(app.take_segment_done(), Some(5_000));
+        assert_eq!(app.take_segment_done(), None, "take is once per notify");
+
+        // A second completion bumps the monotonic count and re-arms the take.
+        src.notify_segment_done(10_000);
+        assert_eq!(app.segment_done_count(), 2);
+        assert_eq!(app.take_segment_done(), Some(10_000));
+    }
+
+    #[test]
+    fn shutdown_latches_and_is_visible_to_the_source() {
+        let app = SeekController::new();
+        let src = app.clone();
+        assert!(!src.is_shutdown());
+        app.shutdown();
+        assert!(src.is_shutdown());
+        // Latching: it stays set (a run is torn down, not resumed).
+        assert!(src.is_shutdown());
     }
 }
