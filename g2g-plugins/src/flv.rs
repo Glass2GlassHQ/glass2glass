@@ -63,6 +63,10 @@ pub struct FlvUnit {
     pub track: FlvTrack,
     pub data: Vec<u8>,
     pub pts_ms: u32,
+    /// Whether this is a resync point: a video keyframe (FLV frame type 1) or any
+    /// audio frame. Used by the demuxer seek path (M362) to snap to a decodable
+    /// resume point.
+    pub keyframe: bool,
 }
 
 /// Incremental FLV demuxer: feed bytes with [`push_data`](Self::push_data), drain
@@ -378,8 +382,8 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
     match tag_type {
         TAG_VIDEO => {
             // body[0] = frame type (high nibble) | codec id (low nibble).
-            let codec_id = body.first()? & 0x0F;
-            if codec_id != VIDEO_CODEC_AVC {
+            let first = *body.first()?;
+            if first & 0x0F != VIDEO_CODEC_AVC {
                 return None;
             }
             // AVC: body[1] = packet type (0 config, 1 NALU, 2 end), body[2..5] =
@@ -387,7 +391,14 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
             if *body.get(1)? != 1 {
                 return None;
             }
-            Some(FlvUnit { track: FlvTrack::Video, data: body.get(5..)?.to_vec(), pts_ms: timestamp })
+            // Frame type 1 is a keyframe (2 interframe, 3..5 disposable/generated).
+            let keyframe = first >> 4 == 1;
+            Some(FlvUnit {
+                track: FlvTrack::Video,
+                data: body.get(5..)?.to_vec(),
+                pts_ms: timestamp,
+                keyframe,
+            })
         }
         TAG_AUDIO => {
             // body[0] = sound format (high nibble) | rate/size/type (low nibble).
@@ -400,7 +411,13 @@ fn parse_tag(tag_type: u8, timestamp: u32, body: &[u8]) -> Option<FlvUnit> {
             if *body.get(1)? != 1 {
                 return None;
             }
-            Some(FlvUnit { track: FlvTrack::Audio, data: body.get(2..)?.to_vec(), pts_ms: timestamp })
+            // Every audio frame is a resync point.
+            Some(FlvUnit {
+                track: FlvTrack::Audio,
+                data: body.get(2..)?.to_vec(),
+                pts_ms: timestamp,
+                keyframe: true,
+            })
         }
         _ => None,
     }
@@ -475,9 +492,9 @@ mod tests {
         let units = d.take_units();
 
         assert_eq!(units.len(), 3);
-        assert_eq!(units[0], FlvUnit { track: FlvTrack::Video, data: v0.to_vec(), pts_ms: 0 });
-        assert_eq!(units[1], FlvUnit { track: FlvTrack::Audio, data: a0.to_vec(), pts_ms: 0 });
-        assert_eq!(units[2], FlvUnit { track: FlvTrack::Video, data: v1.to_vec(), pts_ms: 33 });
+        assert_eq!(units[0], FlvUnit { track: FlvTrack::Video, data: v0.to_vec(), pts_ms: 0, keyframe: true });
+        assert_eq!(units[1], FlvUnit { track: FlvTrack::Audio, data: a0.to_vec(), pts_ms: 0, keyframe: true });
+        assert_eq!(units[2], FlvUnit { track: FlvTrack::Video, data: v1.to_vec(), pts_ms: 33, keyframe: true });
     }
 
     #[test]
@@ -577,8 +594,8 @@ mod tests {
         assert_eq!(
             units,
             vec![
-                FlvUnit { track: FlvTrack::Video, data: aus[0].to_vec(), pts_ms: 0 },
-                FlvUnit { track: FlvTrack::Video, data: aus[1].to_vec(), pts_ms: 33 },
+                FlvUnit { track: FlvTrack::Video, data: aus[0].to_vec(), pts_ms: 0, keyframe: true },
+                FlvUnit { track: FlvTrack::Video, data: aus[1].to_vec(), pts_ms: 33, keyframe: true },
             ]
         );
     }
@@ -592,7 +609,10 @@ mod tests {
         let mut demux = FlvDemuxer::new();
         demux.push_data(&bytes);
         let units = demux.take_units();
-        assert_eq!(units, vec![FlvUnit { track: FlvTrack::Audio, data: vec![0x11, 0x22], pts_ms: 10 }]);
+        assert_eq!(
+            units,
+            vec![FlvUnit { track: FlvTrack::Audio, data: vec![0x11, 0x22], pts_ms: 10, keyframe: true }]
+        );
     }
 
     #[test]
