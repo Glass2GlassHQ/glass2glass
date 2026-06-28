@@ -531,6 +531,81 @@ async fn dash_segment_list_byte_ranges_single_file_cmaf_demuxes() {
     assert_eq!(dsink.aus, aus, "SegmentList CMAF -> Fmp4Demux recovers the access units");
 }
 
+/// Build a version-0 `sidx` box from `(referenced_size, subsegment_duration)`.
+fn build_sidx(timescale: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut b = Vec::new();
+    let box_size = 32 + 12 * entries.len() as u32;
+    b.extend_from_slice(&box_size.to_be_bytes());
+    b.extend_from_slice(b"sidx");
+    b.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags
+    b.extend_from_slice(&1u32.to_be_bytes()); // reference_ID
+    b.extend_from_slice(&timescale.to_be_bytes());
+    b.extend_from_slice(&0u32.to_be_bytes()); // earliest_presentation_time
+    b.extend_from_slice(&0u32.to_be_bytes()); // first_offset
+    b.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    b.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+    for &(size, dur) in entries {
+        b.extend_from_slice(&(size & 0x7fff_ffff).to_be_bytes());
+        b.extend_from_slice(&dur.to_be_bytes());
+        b.extend_from_slice(&0x9000_0000u32.to_be_bytes()); // SAP
+    }
+    b
+}
+
+#[tokio::test]
+async fn dash_segment_base_sidx_indexed_single_file_demuxes() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 3);
+
+    // Single-file layout: [init][sidx][frag0][frag1][frag2]. The sidx indexes the
+    // three fragments; the source fetches init + each fragment by range (never the
+    // sidx), so the demuxer sees init + fragments just like the other profiles.
+    let sidx = build_sidx(1000, &segs.iter().map(|s| (s.len() as u32, 1000)).collect::<Vec<_>>());
+    let mut resource = init.clone();
+    resource.extend_from_slice(&sidx);
+    for s in &segs {
+        resource.extend_from_slice(s);
+    }
+
+    let init_end = init.len() - 1;
+    let idx_start = init.len();
+    let idx_end = init.len() + sidx.len() - 1;
+    let mpd = format!(
+        "<?xml version=\"1.0\"?>\n\
+         <MPD type=\"static\"><Period><AdaptationSet mimeType=\"video/mp4\" codecs=\"avc1.4d401f\">\n\
+           <BaseURL>all.m4s</BaseURL>\n\
+           <Representation id=\"v0\" bandwidth=\"1000000\" width=\"64\" height=\"48\">\n\
+             <SegmentBase indexRange=\"{idx_start}-{idx_end}\" timescale=\"1000\">\n\
+               <Initialization range=\"0-{init_end}\"/>\n\
+             </SegmentBase>\n\
+           </Representation>\n\
+         </AdaptationSet></Period></MPD>"
+    );
+    let url = serve_segment_list(resource, mpd);
+
+    let mut src = DashSrc::new(url);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    // Fetched stream is init + the three fragments (the sidx is not fetched).
+    let mut expected = init.clone();
+    for s in &segs {
+        expected.extend_from_slice(s);
+    }
+    assert_eq!(sink.body, expected, "sidx-indexed fetches skip the index, reassemble init+frags");
+
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "SegmentBase CMAF -> Fmp4Demux recovers the access units");
+}
+
 #[tokio::test]
 async fn dash_streams_init_then_segments_and_demuxes() {
     let aus = access_units();

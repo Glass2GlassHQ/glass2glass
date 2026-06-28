@@ -1924,19 +1924,22 @@ track stays a normal demux; an encrypted track with no key fails loud.
 `dashsrc::DashSrc` (`dash`)
 is the MPEG-DASH analog: it parses a static MPD (the `mpd` parser, via
 `roxmltree`), selects a Representation, and streams its fMP4 init + media segments
-into `fmp4demux`. A Representation addresses its segments by a `SegmentSource`: a `SegmentTemplate`
-(the `@duration` profile or a `SegmentTimeline`, the `<S t d r>` entries expanded
-into per-segment times, addressed by `$Number$` or `$Time$`) or a `SegmentList`
-(M369: an explicit ordered list of `<SegmentURL>`, each a `@media` URL and/or a
-`mediaRange` byte range of the `BaseURL` resource, with an `<Initialization>`).
-Both resolve to one `ResolvedSegment { url, byte_range, time }` list, so a
-range-only `SegmentList` entry fetches just its sub-range with an HTTP `Range`
+into `fmp4demux`. A Representation addresses its segments by a `SegmentSource`, one of three: a
+`SegmentTemplate` (the `@duration` profile or a `SegmentTimeline`, the `<S t d r>`
+entries expanded into per-segment times, addressed by `$Number$` or `$Time$`); a
+`SegmentList` (M369: an explicit ordered list of `<SegmentURL>`, each a `@media`
+URL and/or a `mediaRange` byte range of the `BaseURL` resource, with an
+`<Initialization>`); or a `SegmentBase` (M370: one resource whose fragment byte
+ranges live in a `sidx` Segment Index box at `indexRange`, fetched and parsed at
+run time via `parse_sidx` + `Sidx::subsegments`, the index bytes never pushed
+downstream). All three resolve to one `ResolvedSegment { url, byte_range, time }`
+list, so a range-carrying entry fetches just its sub-range with an HTTP `Range`
 request, the DASH analog of HLS `#EXT-X-BYTERANGE`, letting a single-file CMAF
 DASH stream play. A dynamic (live) MPD is reloaded on its `minimumUpdatePeriod`,
 each new segment played once (tracked by start time), ending when the manifest
 turns static, the same shape as the HLS live reload. Throughput-driven ABR, the
-wall-clock `@duration` live profile, and `SegmentBase` (the `sidx`-indexed
-single-resource byte-range form) are follow-ups (DESIGN_TODO).
+wall-clock `@duration` live profile, and multi-period are follow-ups
+(DESIGN_TODO).
 
 ### 4.18 Subtitle Overlay (`textoverlay`)
 

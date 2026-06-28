@@ -36,7 +36,7 @@ use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::mpd::{parse, ByteRange, ResolvedSegment};
+use crate::mpd::{parse, parse_sidx, ByteRange, ResolvedSegment};
 
 /// Resolve a segment / init URL against the base. An empty URL means the piece
 /// is a byte range of the `BaseURL` resource itself (a pure byte-range
@@ -190,14 +190,27 @@ impl SourceLoop for DashSrc {
                     None => self.url.clone(),
                 };
                 let rep = mpd.select(cap).ok_or(G2gError::CapsMismatch)?;
-                // `SegmentTemplate` ($Number$/$Time$, SegmentTimeline or @duration)
-                // or an explicit `SegmentList` (byte-range single-file CMAF) both
-                // resolve to the same ordered segment list, each with an optional
-                // byte sub-range and a start time. An empty URL is the BaseURL
-                // resource itself (a pure byte-range SegmentList / Initialization).
-                let segs = rep.resolved_segments(mpd.duration_secs);
-                let timescale = rep.timescale();
+                // `SegmentTemplate` ($Number$/$Time$, SegmentTimeline or @duration),
+                // an explicit `SegmentList`, or a `sidx`-indexed `SegmentBase` all
+                // resolve to one ordered segment list, each with an optional byte
+                // sub-range and a start time. An empty URL is the BaseURL resource
+                // itself (byte-range SegmentList / SegmentBase / Initialization).
+                let mut timescale = rep.timescale();
                 let init = rep.init();
+                let base_index = rep.segment_base().map(|sb| sb.index_range);
+                let segs = if let Some(index_range) = base_index {
+                    // SegmentBase: fetch the sidx index, parse it, and turn its
+                    // subsegments into byte ranges of the BaseURL resource. The
+                    // sidx carries the authoritative timescale for the durations.
+                    let index_url = seg_url(&base, "");
+                    let idx_bytes =
+                        fetch_segment(&client, &index_url, Some(index_range)).await?;
+                    let sidx = parse_sidx(&idx_bytes).ok_or(G2gError::CapsMismatch)?;
+                    timescale = sidx.timescale.max(1);
+                    sidx.subsegments(index_range.offset)
+                } else {
+                    rep.resolved_segments(mpd.duration_secs)
+                };
 
                 let mut idx = 0usize;
                 loop {

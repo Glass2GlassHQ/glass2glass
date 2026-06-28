@@ -35,14 +35,52 @@ pub struct ByteRange {
     pub length: u64,
 }
 
-/// How a Representation addresses its segments. `SegmentBase` (a single resource
-/// with a `sidx`-indexed media range) is a follow-up; it needs `sidx` parsing.
+/// How a Representation addresses its segments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SegmentSource {
     /// `SegmentTemplate`: `$Number$` / `$Time$` URL synthesis.
     Template(SegmentTemplate),
     /// `SegmentList`: an explicit ordered list of segment URLs / byte ranges.
     List(SegmentList),
+    /// `SegmentBase`: one resource whose subsegment byte ranges come from a
+    /// `sidx` index box (`indexRange`), resolved by fetching + parsing it.
+    Base(SegmentBase),
+}
+
+/// `SegmentBase`: a single-resource (single-file CMAF) Representation. The media
+/// fragments are byte ranges of the `BaseURL` resource, discovered at run time by
+/// fetching the `sidx` box at `index_range` and parsing it ([`parse_sidx`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentBase {
+    /// Byte range of the `sidx` Segment Index box in the resource.
+    pub index_range: ByteRange,
+    /// `@timescale` (advisory; the `sidx` carries the authoritative one).
+    pub timescale: u64,
+    /// `<Initialization range>` byte range of the init segment (the `ftyp`+`moov`
+    /// at the head of the resource); `None` when no `<Initialization>` is given.
+    pub init_range: Option<ByteRange>,
+    pub init_present: bool,
+}
+
+/// One entry parsed from a `sidx` box: a subsegment's byte size, its duration in
+/// the `sidx` timescale, and whether it references a child `sidx` (hierarchical)
+/// rather than media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidxEntry {
+    pub size: u64,
+    pub duration: u64,
+    pub reference_type: bool,
+}
+
+/// A parsed `sidx` (Segment Index) box: the box's own byte size, the
+/// `first_offset` (anchor-relative start of the first subsegment), the segment
+/// timescale, and the per-subsegment entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sidx {
+    pub box_size: u64,
+    pub first_offset: u64,
+    pub timescale: u64,
+    pub entries: Vec<SidxEntry>,
 }
 
 /// `SegmentList`: an explicit ordered list of media segments, each a URL and/or
@@ -194,12 +232,39 @@ impl SegmentTemplate {
     }
 }
 
+impl Sidx {
+    /// Resolve the indexed subsegments to byte ranges + cumulative start times.
+    /// `index_offset` is the byte offset of the `sidx` box in the resource (the
+    /// `indexRange` start); media begins at `index_offset + box_size +
+    /// first_offset`. Hierarchical references (`reference_type == 1`, a child
+    /// `sidx`) are not media, so they advance the cursor but emit no segment.
+    pub fn subsegments(&self, index_offset: u64) -> Vec<ResolvedSegment> {
+        let mut pos = index_offset.saturating_add(self.box_size).saturating_add(self.first_offset);
+        let mut time = 0u64;
+        let mut out = Vec::new();
+        for e in &self.entries {
+            if !e.reference_type {
+                out.push(ResolvedSegment {
+                    url: String::new(),
+                    byte_range: Some(ByteRange { offset: pos, length: e.size }),
+                    time,
+                });
+            }
+            pos = pos.saturating_add(e.size);
+            time = time.saturating_add(e.duration);
+        }
+        out
+    }
+}
+
 impl Representation {
-    /// Addressing-mode-agnostic segment timescale (>= 1).
+    /// Addressing-mode-agnostic segment timescale (>= 1). For `SegmentBase` this
+    /// is the manifest `@timescale`; the authoritative one is in the `sidx`.
     pub fn timescale(&self) -> u64 {
         match &self.source {
             SegmentSource::Template(t) => t.timescale.max(1),
             SegmentSource::List(l) => l.timescale.max(1),
+            SegmentSource::Base(b) => b.timescale.max(1),
         }
     }
 
@@ -208,15 +273,19 @@ impl Representation {
     pub fn init(&self) -> Option<(String, Option<ByteRange>)> {
         match &self.source {
             SegmentSource::Template(t) => t.init_url(&self.id).map(|u| (u, None)),
-            SegmentSource::List(l) => {
-                l.init_present.then(|| (l.init_url.clone(), l.init_range))
-            }
+            SegmentSource::List(l) => l.init_present.then(|| (l.init_url.clone(), l.init_range)),
+            // SegmentBase init is a byte range of the BaseURL resource (empty URL).
+            SegmentSource::Base(b) => b.init_present.then(|| (String::new(), b.init_range)),
         }
     }
 
-    /// The ordered segments resolved for the source loop. Template synthesizes
-    /// URLs by `$Number$` / `$Time$`; List returns its explicit URLs / ranges
-    /// with cumulative `@duration` start times.
+    /// The ordered segments resolved for the source loop without I/O. Template
+    /// synthesizes URLs by `$Number$` / `$Time$`; List returns its explicit URLs
+    /// / ranges with cumulative `@duration` start times. `SegmentBase` returns
+    /// empty here: its subsegments need the fetched `sidx` (see [`segment_base`]
+    /// and [`Sidx::subsegments`]).
+    ///
+    /// [`segment_base`]: Self::segment_base
     pub fn resolved_segments(&self, total_secs: f64) -> Vec<ResolvedSegment> {
         match &self.source {
             SegmentSource::Template(t) => t
@@ -241,17 +310,85 @@ impl Representation {
                 }
                 out
             }
+            SegmentSource::Base(_) => Vec::new(),
+        }
+    }
+
+    /// The `SegmentBase` when this Representation is `sidx`-indexed single-file;
+    /// the source loop fetches `index_range`, parses the `sidx`, and builds the
+    /// subsegment list. `None` for Template / List addressing.
+    pub fn segment_base(&self) -> Option<&SegmentBase> {
+        match &self.source {
+            SegmentSource::Base(b) => Some(b),
+            _ => None,
         }
     }
 
     /// The `SegmentTemplate` when this Representation uses template addressing
-    /// (for inspection / tests); `None` for a `SegmentList`.
+    /// (for inspection / tests); `None` otherwise.
     pub fn template(&self) -> Option<&SegmentTemplate> {
         match &self.source {
             SegmentSource::Template(t) => Some(t),
-            SegmentSource::List(_) => None,
+            _ => None,
         }
     }
+}
+
+/// Parse a `sidx` (Segment Index) box (ISO/IEC 14496-12). Untrusted input: every
+/// field read is bounds-checked, so a malformed box / hostile `reference_count`
+/// fails to `None` rather than over-reading or over-allocating.
+pub fn parse_sidx(data: &[u8]) -> Option<Sidx> {
+    // FullBox header: size(4) type(4) version(1) flags(3).
+    let box_size = u32::from_be_bytes(data.get(0..4)?.try_into().ok()?) as u64;
+    if data.get(4..8)? != b"sidx" {
+        return None;
+    }
+    let version = *data.get(8)?;
+    let mut p = 12usize; // skip the 3 flag bytes
+    let _reference_id = read_u32(data, &mut p)?;
+    let timescale = read_u32(data, &mut p)? as u64;
+    // earliest_presentation_time + first_offset: 32-bit in v0, 64-bit in v1.
+    let first_offset = if version == 0 {
+        let _ept = read_u32(data, &mut p)?;
+        read_u32(data, &mut p)? as u64
+    } else {
+        let _ept = read_u64(data, &mut p)?;
+        read_u64(data, &mut p)?
+    };
+    let _reserved = read_u16(data, &mut p)?;
+    let reference_count = read_u16(data, &mut p)?;
+    let mut entries = Vec::new();
+    for _ in 0..reference_count {
+        // reference_type(1) | referenced_size(31); subsegment_duration(32);
+        // starts_with_SAP(1) | SAP_type(3) | SAP_delta_time(28).
+        let w0 = read_u32(data, &mut p)?;
+        let duration = read_u32(data, &mut p)? as u64;
+        let _sap = read_u32(data, &mut p)?;
+        entries.push(SidxEntry {
+            reference_type: (w0 >> 31) & 1 == 1,
+            size: (w0 & 0x7fff_ffff) as u64,
+            duration,
+        });
+    }
+    Some(Sidx { box_size, first_offset, timescale, entries })
+}
+
+fn read_u16(d: &[u8], p: &mut usize) -> Option<u16> {
+    let v = u16::from_be_bytes(d.get(*p..*p + 2)?.try_into().ok()?);
+    *p += 2;
+    Some(v)
+}
+
+fn read_u32(d: &[u8], p: &mut usize) -> Option<u32> {
+    let v = u32::from_be_bytes(d.get(*p..*p + 4)?.try_into().ok()?);
+    *p += 4;
+    Some(v)
+}
+
+fn read_u64(d: &[u8], p: &mut usize) -> Option<u64> {
+    let v = u64::from_be_bytes(d.get(*p..*p + 8)?.try_into().ok()?);
+    *p += 8;
+    Some(v)
 }
 
 impl Mpd {
@@ -315,7 +452,27 @@ fn segment_source(rep: Node) -> Option<SegmentSource> {
     {
         return Some(SegmentSource::List(parse_segment_list(sl)));
     }
+    if let Some(sb) = rep
+        .ancestors()
+        .find_map(|n| n.children().find(|c| c.is_element() && c.has_tag_name("SegmentBase")))
+        .and_then(parse_segment_base)
+    {
+        return Some(SegmentSource::Base(sb));
+    }
     segment_template(rep).map(SegmentSource::Template)
+}
+
+/// Parse a `SegmentBase` element. Requires an `indexRange` (the `sidx` location);
+/// without it there is no way to discover the subsegments, so it is not usable.
+fn parse_segment_base(sb: Node) -> Option<SegmentBase> {
+    let index_range = sb.attribute("indexRange").and_then(parse_dash_range)?;
+    let init = sb.children().find(|c| c.is_element() && c.has_tag_name("Initialization"));
+    Some(SegmentBase {
+        index_range,
+        timescale: sb.attribute("timescale").and_then(|s| s.parse().ok()).unwrap_or(1),
+        init_range: init.and_then(|n| n.attribute("range")).and_then(parse_dash_range),
+        init_present: init.is_some(),
+    })
 }
 
 /// The nearest `SegmentTemplate` for a Representation (its own, else inherited
@@ -639,6 +796,87 @@ mod tests {
         assert_eq!(segs[0].byte_range, None);
         assert_eq!(segs[1].url, "seg1.m4s");
         assert_eq!(segs[1].time, 1000);
+    }
+
+    /// Build a version-0 `sidx` box from `(referenced_size, subsegment_duration)`
+    /// entries (all media references, SAP set).
+    fn build_sidx(timescale: u32, entries: &[(u32, u32)]) -> Vec<u8> {
+        let mut b = Vec::new();
+        let box_size = 32 + 12 * entries.len() as u32;
+        b.extend_from_slice(&box_size.to_be_bytes());
+        b.extend_from_slice(b"sidx");
+        b.extend_from_slice(&[0, 0, 0, 0]); // version 0 + flags
+        b.extend_from_slice(&1u32.to_be_bytes()); // reference_ID
+        b.extend_from_slice(&timescale.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes()); // earliest_presentation_time
+        b.extend_from_slice(&0u32.to_be_bytes()); // first_offset
+        b.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        b.extend_from_slice(&(entries.len() as u16).to_be_bytes());
+        for &(size, dur) in entries {
+            b.extend_from_slice(&(size & 0x7fff_ffff).to_be_bytes()); // reference_type 0
+            b.extend_from_slice(&dur.to_be_bytes());
+            b.extend_from_slice(&0x9000_0000u32.to_be_bytes()); // starts_with_SAP, type 1
+        }
+        b
+    }
+
+    #[test]
+    fn parses_sidx_and_resolves_subsegment_ranges() {
+        let sidx_bytes = build_sidx(1000, &[(200, 1000), (300, 1000), (150, 1000)]);
+        let sidx = parse_sidx(&sidx_bytes).unwrap();
+        assert_eq!(sidx.timescale, 1000);
+        assert_eq!(sidx.first_offset, 0);
+        assert_eq!(sidx.box_size as usize, sidx_bytes.len());
+        assert_eq!(sidx.entries.len(), 3);
+        assert_eq!(sidx.entries[0], SidxEntry { size: 200, duration: 1000, reference_type: false });
+
+        // The sidx sits at byte `index_offset`; media starts right after it
+        // (box_size + first_offset). Ranges accumulate by size, times by duration.
+        let index_offset = 800u64;
+        let media_start = index_offset + sidx.box_size; // first_offset 0
+        let segs = sidx.subsegments(index_offset);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0].byte_range, Some(ByteRange { offset: media_start, length: 200 }));
+        assert_eq!(segs[0].time, 0);
+        assert_eq!(segs[1].byte_range, Some(ByteRange { offset: media_start + 200, length: 300 }));
+        assert_eq!(segs[1].time, 1000);
+        assert_eq!(segs[2].byte_range, Some(ByteRange { offset: media_start + 500, length: 150 }));
+        assert_eq!(segs[2].time, 2000);
+    }
+
+    #[test]
+    fn parse_sidx_rejects_truncated_and_wrong_box() {
+        // Truncated mid-entry: a hostile reference_count must fail, not over-read.
+        let mut sidx = build_sidx(1000, &[(200, 1000), (300, 1000)]);
+        sidx.truncate(sidx.len() - 4);
+        assert!(parse_sidx(&sidx).is_none(), "truncated sidx rejected");
+        // Not a sidx box.
+        let mut notsidx = build_sidx(1000, &[(1, 1)]);
+        notsidx[4..8].copy_from_slice(b"moof");
+        assert!(parse_sidx(&notsidx).is_none(), "non-sidx box rejected");
+        assert!(parse_sidx(&[0, 0, 0, 4]).is_none(), "too short rejected");
+    }
+
+    #[test]
+    fn parses_segment_base_representation() {
+        let xml = r#"<MPD type="static"><Period><AdaptationSet mimeType="video/mp4">
+          <BaseURL>media.mp4</BaseURL>
+          <Representation id="v0" bandwidth="1000000">
+            <SegmentBase indexRange="900-1199" timescale="1000">
+              <Initialization range="0-899"/>
+            </SegmentBase>
+          </Representation>
+        </AdaptationSet></Period></MPD>"#;
+        let mpd = parse(xml).unwrap();
+        let rep = mpd.select(None).unwrap();
+        let sb = rep.segment_base().expect("SegmentBase addressing");
+        assert_eq!(sb.index_range, ByteRange { offset: 900, length: 300 });
+        assert_eq!(rep.timescale(), 1000);
+        assert_eq!(rep.init(), Some((String::new(), Some(ByteRange { offset: 0, length: 900 }))));
+        // SegmentBase resolves segments only after fetching the sidx, so the
+        // pure (no-I/O) path is empty.
+        assert!(rep.resolved_segments(mpd.duration_secs).is_empty());
+        assert!(rep.template().is_none());
     }
 
     #[test]
