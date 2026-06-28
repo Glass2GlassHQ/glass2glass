@@ -31,6 +31,33 @@ class EchoTransform:
         meta.add_object(len(buffers), 0.0, 0.0, 1.0, 1.0, 1.0)
 
 
+class ThreadedTransform:
+    """Stages a detection from a *worker thread*, not the calling thread.
+
+    The native MetaSink is created on the host's element thread; an `unsendable`
+    sink trips pyo3's thread-affinity check the moment another thread touches it,
+    so this cross-thread `add_object` would raise. A `Sync` (Mutex-backed) sink
+    accepts it. Models an ML element that parallelizes post-processing.
+    """
+
+    def g2g_process(self, buf, width, height, fmt, meta):
+        import threading
+
+        err = []
+
+        def work():
+            try:
+                meta.add_object(11, 0.0, 0.0, 1.0, 1.0, 0.5)
+            except BaseException as e:  # noqa: BLE001 - surface any failure
+                err.append(repr(e))
+
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()  # releases the GIL so the worker thread can run
+        if err:
+            raise RuntimeError("cross-thread add_object failed: " + err[0])
+
+
 class RetainingTransform:
     """Misbehaves: stashes the frame buffer view on self, so it outlives the
     g2g_process call. The host must reject this (the retained pointer would

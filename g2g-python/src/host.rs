@@ -36,7 +36,7 @@
 
 use std::os::raw::c_int;
 use std::sync::mpsc;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::thread::{self, JoinHandle};
 
 use pyo3::exceptions::PyBufferError;
@@ -154,10 +154,26 @@ enum Staged {
 /// metadata after the call. Labels are interned ids (`u32`), as g2g's
 /// `ObjectDetection` stores; the Python side maps string classes to ids (the
 /// `quark` step) before calling.
-#[pyclass(unsendable)]
+///
+/// `staged` is a `Mutex`, not a `RefCell`, so the pyclass is `Sync` and need not
+/// be `unsendable`: a Python element that parallelizes post-processing (e.g. a
+/// torch worker thread calling `add_object`) reaches the sink from a thread
+/// other than the one that created it. On a GIL build an `unsendable` +
+/// `RefCell` sink panics the moment any such thread touches it (the affinity
+/// check fires before the GIL even matters); on a free-threaded (PEP 703) build
+/// it would be an outright data race. The `Mutex` serializes the pushes on
+/// either, so the "free-threaded with no code change" claim above actually holds
+/// for the sink. Contention is nil in the common single-threaded-element case.
+#[pyclass]
 #[derive(Debug, Default)]
 struct MetaSink {
-    staged: core::cell::RefCell<Vec<Staged>>,
+    staged: Mutex<Vec<Staged>>,
+}
+
+impl MetaSink {
+    fn stage(&self, item: Staged) {
+        self.staged.lock().expect("MetaSink staged lock poisoned").push(item);
+    }
 }
 
 #[pymethods]
@@ -165,19 +181,19 @@ impl MetaSink {
     /// Add an object-detection box: class `label` id, pixel `(x, y, w, h)`,
     /// confidence `score` in `[0, 1]`.
     fn add_object(&self, label: u32, x: f32, y: f32, w: f32, h: f32, score: f32) {
-        self.staged.borrow_mut().push(Staged::Object { label, x, y, w, h, score });
+        self.stage(Staged::Object { label, x, y, w, h, score });
     }
 
     /// Add a whole-frame classification: class `label` id and `score`.
     fn add_classification(&self, label: u32, score: f32) {
-        self.staged.borrow_mut().push(Staged::Classification { label, score });
+        self.stage(Staged::Classification { label, score });
     }
 
     /// Append an opaque tagged blob (the `FrameIO.append_blob` mirror): a
     /// `header` tag and serialized `payload` bytes, e.g. an embedding's f32
     /// bytes or a JSON record. Carried on the frame as a `BlobMeta`.
     fn add_blob(&self, header: String, payload: Vec<u8>) {
-        self.staged.borrow_mut().push(Staged::Blob { header, payload });
+        self.stage(Staged::Blob { header, payload });
     }
 }
 
@@ -451,7 +467,9 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
 
     // Drain the staged results regardless (so the field is always read);
     // materialize onto the anchor frame (frame 0) only under `analytics`.
-    let staged = core::mem::take(&mut *sink.borrow(py).staged.borrow_mut());
+    let staged = core::mem::take(
+        &mut *sink.borrow(py).staged.lock().expect("MetaSink staged lock poisoned"),
+    );
 
     match produced {
         Ok(true) => {
