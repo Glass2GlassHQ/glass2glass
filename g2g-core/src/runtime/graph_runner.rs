@@ -207,6 +207,7 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
 /// runner uses are mirrored.
 pub trait DynMultiOutputElement: ElementBound {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_>;
+    fn port_output_caps(&self, port: usize) -> Option<Caps>;
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
     fn process<'a>(
         &'a mut self,
@@ -221,6 +222,10 @@ pub trait DynMultiOutputElement: ElementBound {
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
         MultiOutputElement::caps_constraint_as_input(self)
+    }
+
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        MultiOutputElement::port_output_caps(self, port)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -254,6 +259,10 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
         (**self).caps_constraint_as_input()
+    }
+
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        (**self).port_output_caps(port)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -1150,8 +1159,31 @@ fn build_node_constraints<'g, 'a>(
                 let elem = element_ref(vg, node).ok_or(G2gError::CapsMismatch)?;
                 NodeConstraint::Element(elem.caps_constraint_as_sink())
             }
-            // A tee is structural; the solver ignores its slot.
-            NodeKind::Tee(_) => NodeConstraint::Element(CapsConstraint::IdentityAny),
+            // A plain (broadcast) tee is structural; the solver couples its
+            // branches via `IdentityAny`. A demux that declares per-port caps
+            // (M380) instead negotiates each branch against its port: build a
+            // `Demux` constraint so a downstream decoder configures at startup.
+            NodeKind::Tee(n) => {
+                let ports: Vec<Option<Caps>> = match vg.element(node) {
+                    Some(GraphNodeRef::Demux(elem)) => {
+                        (0..n as usize).map(|p| elem.port_output_caps(p)).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                if !ports.is_empty() && ports.iter().all(Option::is_some) {
+                    let input = match vg.element(node) {
+                        Some(GraphNodeRef::Demux(elem)) => elem.caps_constraint_as_input(),
+                        _ => CapsConstraint::AcceptsAny,
+                    };
+                    let ports = ports
+                        .into_iter()
+                        .map(|c| CapsConstraint::Produces(CapsSet::one(c.expect("all Some"))))
+                        .collect();
+                    NodeConstraint::Demux { input, ports }
+                } else {
+                    NodeConstraint::Element(CapsConstraint::IdentityAny)
+                }
+            }
             NodeKind::Muxer(_) => {
                 let GraphNodeRef::Muxer(elem) = vg.element(node).ok_or(G2gError::CapsMismatch)?
                 else {

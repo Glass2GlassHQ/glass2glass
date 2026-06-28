@@ -224,6 +224,21 @@ pub trait MultiOutputElement: ElementBound {
         }))
     }
 
+    /// The caps output port `port` carries, if this fan-out is a **demux** whose
+    /// ports each carry a distinct elementary stream, rather than a broadcast tee
+    /// (M380). When every port returns `Some`, the graph solver negotiates each
+    /// branch against its port's caps (decoupled from the byte-stream input), so a
+    /// real decoder downstream of the port configures against its codec at startup
+    /// instead of having to retype from the input caps at runtime. Default `None`
+    /// for every port: a broadcast fan-out (e.g. [`Router`]) whose branches all
+    /// carry the input caps and negotiate as a tee. A demux (e.g. `MkvDemuxN`)
+    /// overrides it, returning `Some` for every port it exposes. The caps may be a
+    /// placeholder (geometry as a `Range`), refined at runtime via the port's
+    /// `CapsChanged`, exactly as a single-output demuxer's output caps are.
+    fn port_output_caps(&self, _port: usize) -> Option<Caps> {
+        None
+    }
+
     /// Runtime properties this demux exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
     /// none. A demux overrides this (with `set_property` / `get_property`) to be

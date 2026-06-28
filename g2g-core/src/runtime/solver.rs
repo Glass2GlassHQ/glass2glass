@@ -808,6 +808,15 @@ pub enum NodeConstraint<'a> {
     /// (`MultiInputElement::caps_constraint_as_input` / `_for_output`), so the
     /// DAG runner builds it straight from the element.
     Muxer { inputs: Vec<CapsConstraint<'a>>, output: CapsConstraint<'a> },
+    /// Fan-out demux (M380): `input` is the byte-stream input constraint (the
+    /// container the demux consumes), and `ports[i]` is output port `i`'s
+    /// `Produces` constraint (its distinct elementary stream). Unlike a broadcast
+    /// tee (which couples in == every out), the ports are *decoupled*, so each
+    /// branch negotiates against its own caps and a downstream decoder configures
+    /// against its codec at startup. Built from a demux element that declares
+    /// per-port caps (`MultiOutputElement::port_output_caps`); a broadcast fan-out
+    /// (declaring none) stays a plain tee.
+    Demux { input: CapsConstraint<'a>, ports: Vec<CapsConstraint<'a>> },
 }
 
 /// Solve caps for an arbitrary DAG (DESIGN_TODO "DAG runner" D2). Generalizes
@@ -1027,8 +1036,15 @@ fn node_consistent<E>(
         // Membership is already ensured by arc consistency; nothing cross-edge.
         NodeKind::Source | NodeKind::Sink | NodeKind::Muxer(_) => true,
         NodeKind::Tee(_) => {
-            let inp = get(in_e[0]);
-            out_e.iter().all(|&o| get(o) == inp)
+            // A demux decouples its ports (each its own produce set, ensured by arc
+            // consistency), so there is no cross-edge equality; a broadcast tee
+            // requires every branch to carry its input.
+            if matches!(&constraints[node.0 as usize], NodeConstraint::Demux { .. }) {
+                true
+            } else {
+                let inp = get(in_e[0]);
+                out_e.iter().all(|&o| get(o) == inp)
+            }
         }
         NodeKind::Transform => match &constraints[node.0 as usize] {
             NodeConstraint::Element(c) => transform_pair_consistent(c, get(in_e[0]), get(out_e[0])),
@@ -1103,6 +1119,7 @@ fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
         NodeConstraint::Muxer { inputs, output } => {
             alloc::format!("mux {} inputs -> {}", inputs.len(), fmt_caps_constraint(output))
         }
+        NodeConstraint::Demux { ports, .. } => alloc::format!("demux -> {} ports", ports.len()),
     }
 }
 
@@ -1166,16 +1183,26 @@ pub(crate) fn graph_downstream_feasibility<E>(
                 }
             }
             NodeKind::Tee(_) => {
-                let mut acc: Option<CapsSet> = None;
-                for &oe in graph.out_edges(node) {
-                    if let Some(s) = feas[oe].as_ref() {
-                        acc = Some(match acc {
-                            Some(a) => a.intersect(s),
-                            None => s.clone(),
-                        });
+                // A demux decouples its ports, so its input feasibility is its own
+                // `input` accept (not the branches'); a broadcast tee's input must
+                // satisfy every branch, so it is their intersection.
+                if let NodeConstraint::Demux { input, .. } = &constraints[idx] {
+                    feas[graph.in_edges(node)[0]] = match input {
+                        CapsConstraint::Accepts(s) => Some(s.clone()),
+                        _ => None,
+                    };
+                } else {
+                    let mut acc: Option<CapsSet> = None;
+                    for &oe in graph.out_edges(node) {
+                        if let Some(s) = feas[oe].as_ref() {
+                            acc = Some(match acc {
+                                Some(a) => a.intersect(s),
+                                None => s.clone(),
+                            });
+                        }
                     }
+                    feas[graph.in_edges(node)[0]] = acc;
                 }
-                feas[graph.in_edges(node)[0]] = acc;
             }
             NodeKind::Muxer(_) => {
                 if let NodeConstraint::Muxer { inputs, .. } = &constraints[idx] {
@@ -1241,7 +1268,14 @@ fn apply_node<E>(
             }
             _ => Err(shape_err),
         },
-        NodeKind::Tee(_) => apply_tee_node(graph, in_e[0], out_e, edges),
+        NodeKind::Tee(_) => match nc {
+            // A demux decouples its ports (each its own elementary stream); a
+            // plain (broadcast) tee couples in == every out.
+            NodeConstraint::Demux { input, ports } => {
+                apply_demux_node(graph, in_e[0], out_e, input, ports, edges)
+            }
+            _ => apply_tee_node(graph, in_e[0], out_e, edges),
+        },
         NodeKind::Muxer(_) => match nc {
             NodeConstraint::Muxer { inputs, output } => {
                 apply_muxer_node(graph, node, inputs, output, edges)
@@ -1569,6 +1603,34 @@ fn apply_tee_node<E>(
         edges[in_e] = Some(coupled.clone());
         for &oe in out_e {
             edges[oe] = Some(coupled.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Apply a fan-out **demux** node (M380): its ports are decoupled, so the input
+/// edge narrows by the demux's `input` accept (the container it consumes) and each
+/// output edge narrows by its port's `Produces` caps (its elementary stream),
+/// independent of one another. The port for an output edge is its source pad
+/// index, so the order of `out_e` does not matter.
+fn apply_demux_node<E>(
+    graph: &ValidatedGraph<E>,
+    in_e: usize,
+    out_e: &[usize],
+    input: &CapsConstraint<'_>,
+    ports: &[CapsConstraint<'_>],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    // The byte-stream input: an `Accepts` narrows it; `AcceptsAny` / `LegacySink`
+    // leave it to whatever the source fixates (the common case, the demux's
+    // `intercept` being the terminal accept).
+    if let CapsConstraint::Accepts(s) = input {
+        narrow_edge(graph, edges, in_e, s)?;
+    }
+    for &oe in out_e {
+        let port = graph.edge(oe).src.index as usize;
+        if let Some(CapsConstraint::Produces(s)) = ports.get(port) {
+            narrow_edge(graph, edges, oe, s)?;
         }
     }
     Ok(())

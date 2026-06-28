@@ -720,6 +720,14 @@ impl MultiOutputElement for MkvDemuxN {
         upstream_caps.intersect(&MkvDemux::input_caps())
     }
 
+    /// Declare each port's elementary-stream caps (M380), so the solver negotiates
+    /// each branch against its codec at startup and a real decoder downstream of
+    /// the port configures against it (geometry is a placeholder `Range`, refined
+    /// at runtime by the port's `CapsChanged`). `None` for an out-of-range port.
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.ports.get(port).map(|&stream| MkvDemux::output_caps(stream))
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // Accept the negotiated byte-stream input; per-port output caps are
         // announced from `process` as each stream first routes.
