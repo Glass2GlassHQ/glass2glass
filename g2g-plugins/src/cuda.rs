@@ -31,9 +31,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec;
 
-use g2g_core::memory::OwnedCudaBuffer;
+use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError,
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, SystemSlice,
@@ -162,6 +163,298 @@ impl AsyncElement for CudaDownload {
             Ok(())
         })
     }
+}
+
+/// Owns a CUDA context created by [`CudaUpload`]. Destroyed on drop (the last
+/// `Arc` ref, after every uploaded frame's [`DevAlloc`] is gone, since each holds
+/// one). `Send + Sync`: the context is used single-threaded by the element and
+/// only read-only by downstream GPU consumers, the same contract as the other
+/// CUDA owners (M213).
+#[derive(Debug)]
+struct UploadCtx(u64);
+
+// SAFETY: the contained CUcontext is driven through `&mut CudaUpload` (never
+// concurrently) and downstream frames reference its device memory read-only.
+unsafe impl Send for UploadCtx {}
+// SAFETY: see above.
+unsafe impl Sync for UploadCtx {}
+
+impl Drop for UploadCtx {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a context created by `cu_ctx_create`, destroyed once.
+        unsafe {
+            let _ = ffi::cu_ctx_destroy(self.0 as ffi::CuContext);
+        }
+    }
+}
+
+/// Keep-alive owner for an uploaded device buffer: frees the allocation on drop
+/// and pins the context (`Arc<UploadCtx>`) for the frame's lifetime so the
+/// context outlives any frame still in flight downstream.
+#[derive(Debug)]
+struct DevAlloc {
+    dptr: u64,
+    ctx: Arc<UploadCtx>,
+}
+
+impl Drop for DevAlloc {
+    fn drop(&mut self) {
+        // SAFETY: push the owning context, free the allocation made under it, pop.
+        unsafe {
+            if ffi::cu_ctx_push_current(self.ctx.0 as ffi::CuContext) == ffi::CUDA_SUCCESS {
+                let _ = ffi::cu_mem_free(self.dptr);
+                let mut popped: ffi::CuContext = core::ptr::null_mut();
+                let _ = ffi::cu_ctx_pop_current(&mut popped);
+            }
+        }
+    }
+}
+
+impl CudaKeepAlive for DevAlloc {}
+
+/// Pass-through transform that uploads system-memory NV12 frames to CUDA device
+/// memory (`System -> Cuda`), the mirror of [`CudaDownload`]. It is the
+/// host->device converter the auto-plug registry uses, and on its own unblocks
+/// feeding a CPU-side NV12 stream into [`NvEnc`](crate::nvenc::NvEnc), which
+/// ingests `MemoryDomain::Cuda` only. A frame already in CUDA memory passes
+/// through untouched, so the element is a safe no-op on a GPU-resident path.
+///
+/// Unlike `CudaDownload` (whose Cuda input carries the foreign context), an
+/// upload's System input has no context, so this element creates and owns its
+/// own CUDA context at configure and tears it down once every uploaded frame is
+/// released.
+#[derive(Debug, Default)]
+pub struct CudaUpload {
+    configured: bool,
+    width: u32,
+    height: u32,
+    /// Created at configure; cloned into every uploaded frame's keep-alive.
+    context: Option<Arc<UploadCtx>>,
+    uploaded: u64,
+    forwarded: u64,
+}
+
+impl CudaUpload {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Frames copied host->device into CUDA memory so far.
+    pub fn uploaded(&self) -> u64 {
+        self.uploaded
+    }
+
+    /// Frames already in CUDA memory, passed through untouched.
+    pub fn forwarded(&self) -> u64 {
+        self.forwarded
+    }
+}
+
+impl AsyncElement for CudaUpload {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        for alt in nv12_any().alternatives() {
+            if let Ok(narrowed) = upstream_caps.intersect(alt) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::Identity(nv12_any())
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let Caps::RawVideo { format: RawVideoFormat::Nv12, width, height, .. } = absolute_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if let Dim::Fixed(w) = width {
+            self.width = *w;
+        }
+        if let Dim::Fixed(h) = height {
+            self.height = *h;
+        }
+        // Create our own CUDA context (the System input carries none).
+        // SAFETY: plain driver-API init/create calls; failures map to a hardware
+        // error so a host without an NVIDIA GPU fails the configure gracefully.
+        let ctx = unsafe {
+            check(ffi::cu_init(0))?;
+            let mut dev: ffi::CuDevice = 0;
+            check(ffi::cu_device_get(&mut dev, 0))?;
+            let mut ctx: ffi::CuContext = core::ptr::null_mut();
+            check(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
+            // `cu_ctx_create` leaves the new context current on this thread; pop
+            // it so per-frame uploads push/pop explicitly (the element may run on
+            // a different worker thread).
+            let mut popped: ffi::CuContext = core::ptr::null_mut();
+            let _ = ffi::cu_ctx_pop_current(&mut popped);
+            ctx as u64
+        };
+        self.context = Some(Arc::new(UploadCtx(ctx)));
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// Emits CUDA NV12 (the uploaded frames; a passed-through Cuda frame keeps its
+    /// own domain), so a downstream link is a GPU link (M285).
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::Cuda
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let out_frame = match frame.domain {
+                        MemoryDomain::System(ref slice) => {
+                            let ctx = self.context.clone().ok_or(G2gError::NotConfigured)?;
+                            // SAFETY: `slice` holds at least a packed NV12 frame of
+                            // the configured geometry (checked in `upload_nv12`);
+                            // `ctx` is a live context owned by this element.
+                            let buf = unsafe {
+                                upload_nv12(&ctx, slice.as_slice(), self.width, self.height)?
+                            };
+                            self.uploaded += 1;
+                            Frame {
+                                domain: MemoryDomain::Cuda(buf),
+                                timing: frame.timing,
+                                sequence: frame.sequence,
+                                meta: Default::default(),
+                            }
+                        }
+                        // Already on the GPU: forward untouched.
+                        _ => {
+                            self.forwarded += 1;
+                            frame
+                        }
+                    };
+                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                }
+                PipelinePacket::CapsChanged(c) => {
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
+                }
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Eos => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Allocate a pitched device NV12 buffer in `ctx` and copy `src` (a packed system
+/// NV12 frame) into it host->device. One pitched allocation holds the luma plane
+/// (`height` rows) followed by the interleaved chroma plane (`ceil(height/2)`
+/// rows), both at the hardware pitch `cuMemAllocPitch` returns, so NVENC's input
+/// registration accepts the device pointer (a tight pitch is rejected).
+///
+/// # Safety
+/// `ctx` must own a live CUcontext; `src` must hold at least
+/// [`nv12_byte_size`]`(width, height)` bytes.
+unsafe fn upload_nv12(
+    ctx: &Arc<UploadCtx>,
+    src: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<OwnedCudaBuffer, G2gError> {
+    let total = nv12_byte_size(width, height);
+    if src.len() < total {
+        return Err(G2gError::CapsMismatch);
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let chroma_w = 2 * w.div_ceil(2); // interleaved CbCr row, = width for even w
+    let chroma_h = h.div_ceil(2);
+
+    // SAFETY: push the element's context, allocate a pitched buffer for both
+    // planes stacked, copy each plane host->device honoring the device pitch, then
+    // pop. On any failure free the allocation (context still current) so we never
+    // leak; on success the buffer's `DevAlloc` owns the free.
+    unsafe {
+        check(ffi::cu_ctx_push_current(ctx.0 as ffi::CuContext))?;
+        let mut dptr: u64 = 0;
+        let mut pitch: usize = 0;
+        // Widest row across the two planes (chroma_w == w here) sizes the pitch;
+        // element size 16 matches NVENC's preferred alignment.
+        let mut result =
+            check(ffi::cu_mem_alloc_pitch(&mut dptr, &mut pitch, w.max(chroma_w), h + chroma_h, 16));
+        if result.is_ok() {
+            let chroma_dst = dptr + (pitch * h) as u64;
+            result = htod_plane(src.as_ptr(), 0, w, w, h, dptr, pitch)
+                .and_then(|()| htod_plane(src.as_ptr(), w * h, chroma_w, w, chroma_h, chroma_dst, pitch));
+            if result.is_err() {
+                let _ = ffi::cu_mem_free(dptr);
+            }
+        }
+        let mut popped: ffi::CuContext = core::ptr::null_mut();
+        let _ = ffi::cu_ctx_pop_current(&mut popped);
+        result?;
+        Ok(OwnedCudaBuffer::new(
+            dptr,
+            dptr + (pitch * h) as u64,
+            pitch as u32,
+            pitch as u32,
+            width,
+            height,
+            ctx.0,
+            Arc::new(DevAlloc { dptr, ctx: Arc::clone(ctx) }),
+        ))
+    }
+}
+
+/// One host->device `cuMemcpy2D` of an NV12 plane: `width_bytes` x `height` rows
+/// from `src_base + src_off` (tight `src_pitch`) into `dst_device` at `dst_pitch`.
+///
+/// # Safety
+/// The current CUDA context must own `dst_device`, which must have room for
+/// `dst_pitch * height` bytes; `src_base + src_off` must have `width_bytes` per
+/// row for `height` rows.
+unsafe fn htod_plane(
+    src_base: *const u8,
+    src_off: usize,
+    width_bytes: usize,
+    src_pitch: usize,
+    height: usize,
+    dst_device: u64,
+    dst_pitch: usize,
+) -> Result<(), G2gError> {
+    let copy = ffi::CudaMemcpy2D {
+        src_x_in_bytes: 0,
+        src_y: 0,
+        src_memory_type: ffi::CU_MEMORYTYPE_HOST,
+        // SAFETY: `src_off` is within the caller's packed NV12 buffer.
+        src_host: unsafe { src_base.add(src_off) } as *const core::ffi::c_void,
+        src_device: 0,
+        src_array: core::ptr::null_mut(),
+        src_pitch,
+        dst_x_in_bytes: 0,
+        dst_y: 0,
+        dst_memory_type: ffi::CU_MEMORYTYPE_DEVICE,
+        dst_host: core::ptr::null_mut(),
+        dst_device,
+        dst_array: core::ptr::null_mut(),
+        dst_pitch,
+        width_in_bytes: width_bytes,
+        height,
+    };
+    // SAFETY: `copy` fully describes a host->device 2D copy; the driver reads it.
+    check(unsafe { ffi::cu_memcpy_2d(&copy) })
 }
 
 /// Per-plane parameters for the device->host `cuMemcpy2D` of one NV12 plane.
@@ -362,6 +655,9 @@ mod ffi {
         pub(super) height: usize,
     }
 
+    /// `CUdevice` is an int handle.
+    pub(super) type CuDevice = i32;
+
     #[link(name = "cuda")]
     extern "C" {
         /// Push `ctx` onto the calling thread's current-context stack.
@@ -373,6 +669,37 @@ mod ffi {
         /// 2D memory copy described entirely by `*pcopy`.
         #[link_name = "cuMemcpy2D_v2"]
         pub(super) fn cu_memcpy_2d(pcopy: *const CudaMemcpy2D) -> CuResult;
+
+        // --- Context + device-memory lifecycle for `CudaUpload` (M353). Unlike
+        // `CudaDownload`, whose input frame carries the foreign CUcontext, an
+        // upload's System input has none, so the element creates and owns its own
+        // context and device allocations. ---
+
+        /// Initialise the CUDA driver API (flags must be 0). Idempotent.
+        #[link_name = "cuInit"]
+        pub(super) fn cu_init(flags: u32) -> CuResult;
+        /// Get a device handle by ordinal.
+        #[link_name = "cuDeviceGet"]
+        pub(super) fn cu_device_get(device: *mut CuDevice, ordinal: i32) -> CuResult;
+        /// Create a context on `dev` and leave it current on the calling thread.
+        #[link_name = "cuCtxCreate_v2"]
+        pub(super) fn cu_ctx_create(pctx: *mut CuContext, flags: u32, dev: CuDevice) -> CuResult;
+        /// Destroy a context created by [`cu_ctx_create`].
+        #[link_name = "cuCtxDestroy_v2"]
+        pub(super) fn cu_ctx_destroy(ctx: CuContext) -> CuResult;
+        /// Allocate pitched device memory (`*pitch` rows of >= `width_bytes`),
+        /// hardware-aligned so NVENC's input-resource registration accepts it.
+        #[link_name = "cuMemAllocPitch_v2"]
+        pub(super) fn cu_mem_alloc_pitch(
+            dptr: *mut u64,
+            pitch: *mut usize,
+            width_bytes: usize,
+            height: usize,
+            element_size: u32,
+        ) -> CuResult;
+        /// Free device memory from [`cu_mem_alloc`] / [`cu_mem_alloc_pitch`].
+        #[link_name = "cuMemFree_v2"]
+        pub(super) fn cu_mem_free(dptr: u64) -> CuResult;
     }
 
     // --- CUDA-GL interop (C3 Phase 3, step 2 / `CudaGlSink`) ---
