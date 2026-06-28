@@ -441,11 +441,8 @@ negotiation core, the untrusted demuxers, the g2g-ml inference path (model
 shape / tensor-element / GPU-buffer arithmetic folded with checked ops), and the
 g2g-python hosting boundary (zero-copy frame-buffer retention now caught by an
 export counter; PyTransform worker re-spawn guarded). The audit areas are now
-covered; what remains is lower-priority hardening flagged but not yet fixed (no
-clear untrusted-file path, or a broader policy call):
-
-- `g2g-pyapi` `Pipeline::wait` collapses the underlying `G2gError` / worker
-  panic into an opaque "pipeline errored" (safe, but lossy diagnostics).
+covered; the flagged hardening follow-ups are now fixed (segment-fetch body cap,
+free-threaded analytics sink, descriptive `Pipeline::wait` errors).
 
 ## Documentation
 

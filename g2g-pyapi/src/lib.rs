@@ -53,7 +53,45 @@ mod pymod {
     struct Pipeline {
         bus: Bus,
         join: Option<JoinHandle<Result<RunStats, G2gError>>>,
-        result: Option<Result<RunStats, G2gError>>,
+        // The joined outcome, cached so a second `wait()` is idempotent. The
+        // error arm is a formatted message (not the raw `G2gError`) so it can
+        // also carry a run-thread panic, which is not a `G2gError`.
+        result: Option<Result<RunStats, String>>,
+    }
+
+    /// A human-readable message for each `G2gError` variant, so `Pipeline::wait`
+    /// surfaces *why* a run failed instead of a single opaque "pipeline errored".
+    fn describe_error(e: &G2gError) -> String {
+        match e {
+            G2gError::CapsMismatch => {
+                "caps negotiation failed (no common format between linked elements)".into()
+            }
+            G2gError::NotConfigured => {
+                "an element received data before configuration completed".into()
+            }
+            G2gError::FixationFailed => "caps fixation failed".into(),
+            G2gError::PoolExhausted => "buffer pool exhausted".into(),
+            G2gError::UnsupportedDomain => {
+                "an element was handed a memory domain it cannot consume".into()
+            }
+            G2gError::AllocationConflict => {
+                "fan-out branches share no common memory domain".into()
+            }
+            G2gError::Hardware(h) => format!("hardware/driver failure: {h:?}"),
+            G2gError::Shutdown => "pipeline shut down before completing".into(),
+        }
+    }
+
+    /// Best-effort extraction of a panic payload's message (the common
+    /// `&str` / `String` cases a `panic!` / `expect` produces).
+    fn panic_message(payload: &(dyn core::any::Any + Send)) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).into()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".into()
+        }
     }
 
     #[pymethods]
@@ -91,14 +129,28 @@ mod pymod {
         }
 
         /// Block until the pipeline ends; returns `(emitted, consumed, dropped)`.
-        /// Raises on a pipeline error. Releases the GIL while blocking.
+        /// Raises on a pipeline error, carrying the underlying cause (a described
+        /// `G2gError`, or the run-thread panic message) rather than an opaque
+        /// "pipeline errored". Releases the GIL while blocking.
         fn wait(&mut self, py: Python<'_>) -> PyResult<(u64, u64, u64)> {
             if let Some(j) = self.join.take() {
-                self.result = Some(py.detach(|| j.join().unwrap_or(Err(G2gError::Shutdown))));
+                // Detach the GIL while joining. A clean run returns
+                // Ok/Err(G2gError); a panic in the run thread surfaces as the
+                // join Err, which we describe rather than swallow.
+                self.result = Some(match py.detach(|| j.join()) {
+                    Ok(Ok(s)) => Ok(s),
+                    Ok(Err(e)) => Err(describe_error(&e)),
+                    Err(panic) => {
+                        Err(format!("pipeline run thread panicked: {}", panic_message(&*panic)))
+                    }
+                });
             }
             match &self.result {
                 Some(Ok(s)) => Ok((s.frames_emitted, s.frames_consumed, s.frames_dropped)),
-                _ => Err(PyValueError::new_err("pipeline errored")),
+                Some(Err(msg)) => Err(PyValueError::new_err(format!("pipeline error: {msg}"))),
+                // `wait()` always sets `result` above, so this is unreachable in
+                // practice; kept as a non-panicking fallback.
+                None => Err(PyValueError::new_err("pipeline error: result unavailable")),
             }
         }
     }
@@ -459,6 +511,61 @@ assert consumed == 1, consumed
                 let globals = PyDict::new(py);
                 py.run(script.as_c_str(), Some(&globals), None).expect("try_pull script runs");
             });
+        }
+
+        /// `Pipeline::wait` surfaces *why* a run failed: every `G2gError` variant
+        /// maps to a distinct, non-empty message, and never the old opaque
+        /// "pipeline errored" placeholder. Guards against a regression to a lossy
+        /// error path. No interpreter needed: the formatter is a pure function.
+        #[test]
+        fn describe_error_is_specific_per_variant() {
+            use super::describe_error;
+            use g2g_core::{G2gError, HardwareError};
+
+            let cases = [
+                G2gError::CapsMismatch,
+                G2gError::NotConfigured,
+                G2gError::FixationFailed,
+                G2gError::PoolExhausted,
+                G2gError::UnsupportedDomain,
+                G2gError::AllocationConflict,
+                G2gError::Hardware(HardwareError::Cuda(2)),
+                G2gError::Shutdown,
+            ];
+            let msgs: Vec<String> = cases.iter().map(describe_error).collect();
+
+            // Every message is informative, not the discarded opaque text.
+            for m in &msgs {
+                assert!(!m.is_empty());
+                assert_ne!(m, "pipeline errored");
+            }
+            // Variants map to distinct messages (no information collapse).
+            for i in 0..msgs.len() {
+                for j in (i + 1)..msgs.len() {
+                    assert_ne!(msgs[i], msgs[j], "variants {i} and {j} share a message");
+                }
+            }
+            // The hardware arm carries the backend detail (the CUDA code).
+            assert!(
+                describe_error(&G2gError::Hardware(HardwareError::Cuda(2))).contains('2'),
+                "hardware error should carry its backend code"
+            );
+            assert!(describe_error(&G2gError::CapsMismatch).contains("caps"));
+        }
+
+        /// A run-thread panic is surfaced (not swallowed into `Shutdown`): the
+        /// `&str` / `String` payloads a `panic!` / `expect` produce come through.
+        #[test]
+        fn panic_message_extracts_common_payloads() {
+            use super::panic_message;
+            use core::any::Any;
+
+            let s: Box<dyn Any + Send> = Box::new("boom");
+            assert_eq!(panic_message(&*s), "boom");
+            let owned: Box<dyn Any + Send> = Box::new(String::from("kaboom"));
+            assert_eq!(panic_message(&*owned), "kaboom");
+            let other: Box<dyn Any + Send> = Box::new(42i32);
+            assert_eq!(panic_message(&*other), "unknown panic");
         }
     }
 }
