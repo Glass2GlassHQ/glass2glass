@@ -387,6 +387,42 @@ fn branch_mode<E>(vg: &ValidatedGraph<E>, node: NodeId) -> BranchMode {
     }
 }
 
+/// A reusable recipe for an owned graph: a builder closure that produces a fresh
+/// [`Graph<GraphNode>`](Graph) each time it is [`instantiate`](Self::instantiate)d.
+///
+/// [`run_graph`] consumes the elements it runs (it `take()`s the boxed payloads
+/// out of the graph), so a graph cannot be run twice. Seek-and-replay (re-run
+/// from the start after a flushing seek), retry-on-error, and A/B benchmarking
+/// all need a *fresh* set of elements per run, because real elements carry state
+/// (a decoder's reference frames, a source's file offset) that cannot simply be
+/// rewound. A template rebuilds them via the closure rather than cloning, which
+/// is cleaner than making `Graph` itself reusable: that would force every element
+/// to be `Clone` or re-initialisable in place, a contract the element traits
+/// deliberately do not impose.
+pub struct GraphTemplate {
+    build: Box<dyn Fn() -> Graph<GraphNode> + Send + Sync>,
+}
+
+impl GraphTemplate {
+    /// Wrap a graph-builder closure. The closure must construct the whole graph
+    /// (nodes + links) from scratch on each call, so each instance gets its own
+    /// elements.
+    pub fn new(build: impl Fn() -> Graph<GraphNode> + Send + Sync + 'static) -> Self {
+        Self { build: Box::new(build) }
+    }
+
+    /// Build a fresh runnable graph. Call once per [`run_graph`] invocation.
+    pub fn instantiate(&self) -> Graph<GraphNode> {
+        (self.build)()
+    }
+}
+
+impl core::fmt::Debug for GraphTemplate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphTemplate").finish_non_exhaustive()
+    }
+}
+
 /// Drive an arbitrary DAG to EOS. Negotiates the whole graph at once, then runs
 /// one arm per node over per-edge channels. `link_capacity` accepts a
 /// [`LatencyProfile`](crate::runtime::LatencyProfile) or a `usize` depth.

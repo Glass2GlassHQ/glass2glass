@@ -1083,6 +1083,15 @@ so an optional branch (a preview that can't follow a format switch) does not kil
 the essential ones. A genuine downstream error still surfaces through that branch
 arm's own result, so swallowing the closed channel at the tee is safe.
 
+`run_graph` consumes the elements it runs (it `take()`s the boxed payloads), so a
+graph runs only once. Re-running (seek-and-replay after a flushing seek, retry,
+A/B benchmarking) needs *fresh* elements, because real ones carry state a rewind
+cannot undo (a decoder's reference frames, a source's file offset). A
+[`GraphTemplate`](crate::runtime::GraphTemplate) wraps a builder closure and hands
+back a fresh `Graph<GraphNode>` per `instantiate()`, which is cleaner than making
+`Graph` itself reusable: that would force every element to be `Clone` or
+re-initialisable in place, a contract the element traits deliberately avoid.
+
 #### 4.13.4 Mid-stream re-solve
 
 A mid-stream `PipelinePacket::CapsChanged` triggers a re-fixation that stays
