@@ -16,10 +16,10 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, Dim, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PushOutcome, Rate, VideoCodec,
+    PipelinePacket, PushOutcome, Rate, Seek, VideoCodec,
 };
 use g2g_plugins::fmp4demux::Fmp4Demux;
 use g2g_plugins::hlssrc::HlsSrc;
@@ -30,6 +30,9 @@ struct CaptureSink {
     body: Vec<u8>,
     frames: usize,
     eos: bool,
+    flushes: usize,
+    /// Stream-time start of each post-flush `Segment` emitted (seek observability).
+    segment_starts: Vec<u64>,
 }
 
 impl OutputSink for CaptureSink {
@@ -46,6 +49,8 @@ impl OutputSink for CaptureSink {
                     }
                 }
                 PipelinePacket::Eos => self.eos = true,
+                PipelinePacket::Flush => self.flushes += 1,
+                PipelinePacket::Segment(seg) => self.segment_starts.push(seg.start),
                 _ => {}
             }
             Ok(PushOutcome::Accepted)
@@ -279,6 +284,91 @@ async fn live_reloads_playlist_and_plays_each_new_segment_once() {
     assert_eq!(count, 4, "each of the 4 segments played exactly once across reloads");
     let expected: Vec<u8> = segs.concat();
     assert_eq!(sink.body, expected, "seg0..seg3 delivered once, in order, no duplicates");
+}
+
+// --- time seek: jump to the segment containing the target (M367) ----------
+
+/// A 3-segment VOD playlist, 4s each, so a time seek maps unambiguously to a
+/// segment (seg0 = [0,4)s, seg1 = [4,8)s, seg2 = [8,12)s).
+const MEDIA_SEEK: &str = "#EXTM3U\n\
+    #EXT-X-TARGETDURATION:4\n\
+    #EXT-X-MEDIA-SEQUENCE:0\n\
+    #EXTINF:4.0,\nseg0.ts\n\
+    #EXTINF:4.0,\nseg1.ts\n\
+    #EXTINF:4.0,\nseg2.ts\n\
+    #EXT-X-ENDLIST\n";
+
+fn serve_seek(segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/media.m3u8" {
+                MEDIA_SEEK.as_bytes().to_vec()
+            } else if let Some(idx) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".ts"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(idx).cloned().unwrap_or_default()
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/media.m3u8")
+}
+
+#[tokio::test]
+async fn time_seek_jumps_to_the_segment_containing_the_target() {
+    let segs: Vec<Vec<u8>> =
+        (0..3u8).map(|s| (0..1000u32).map(|i| (i as u8) ^ (s * 53)).collect()).collect();
+    let url = serve_seek(segs.clone());
+
+    let seek = SeekController::new();
+    // Pre-arm a 5s seek before run(): deterministic (no fetch/EOF race). 5s lands
+    // in seg1 ([4,8)s), so playback must start there, skipping seg0.
+    seek.seek(Seek::flush_to(5 * 1_000_000_000));
+
+    let mut src = HlsSrc::new(url).with_seek(seek);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos, "the VOD playlist still ends with Eos");
+    assert_eq!(sink.flushes, 1, "the flushing seek emits exactly one Flush");
+    assert_eq!(
+        sink.segment_starts,
+        vec![4 * 1_000_000_000],
+        "the post-flush Segment starts at seg1's cumulative time (4s)"
+    );
+    // Body is seg1 then seg2: the seek resumes at the target segment and plays on.
+    let mut expected = segs[1].clone();
+    expected.extend_from_slice(&segs[2]);
+    assert_eq!(sink.body, expected, "playback starts at seg1, seg0 skipped");
 }
 
 // --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------

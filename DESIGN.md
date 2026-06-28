@@ -1638,8 +1638,16 @@ index-derived offset a later optimization). All five carry it
 (`fmp4demux` / `tsdemux` / `mkvdemux` / `flvdemux` / `oggdemux`), each using its
 own keyframe signal (the container flag, or `annexb::au_is_keyframe` for TS whose
 units have none; every audio packet is a resync point, and `oggdemux` now
-accumulates an Opus PTS from the TOC byte). Container-level segment seeks
-(CMAF / DASH transitions) remain open (DESIGN_TODO).
+accumulates an Opus PTS from the TOC byte). **Adaptive segment seek (M367).** The
+adaptive sources `HlsSrc` / `DashSrc` are TIME-seekable (`with_seek`): unlike the
+BYTES-format `FileSrc`, an app time seek resolves to the media segment containing
+the target (HLS walks cumulative `#EXTINF` durations; DASH maps the target onto
+the `SegmentRef` `$Time$` line), then the source emits `Flush`, jumps to that
+segment, re-emits the fMP4 init segment (the downstream demuxer reset on the flush
+needs its `moov` again), emits the post-flush `Segment` at the segment start, and
+resumes there. This is the CMAF / DASH segment-transition case (clamped to the
+last segment; a target past the end lands there). Discontinuity / multi-period
+boundary `SEGMENT` emission is a separate later concern.
 
 ### 4.15 Bus and Observability
 

@@ -32,10 +32,10 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
 };
 
 use crate::fetch::{
@@ -63,6 +63,13 @@ pub struct HlsSrc {
     /// fetched key/IV here (for a downstream `SampleAesDecrypt`) and the bytes are
     /// forwarded undecrypted. Without it a SAMPLE-AES playlist is rejected.
     sample_aes_key: Option<SampleAesKeyHandle>,
+    /// Optional time-seek channel (M367). Unlike `FileSrc` (BYTES format), an
+    /// adaptive source resolves a TIME seek to the media segment containing the
+    /// target by walking the playlist's `#EXTINF` durations: it emits `Flush`,
+    /// jumps to that segment, re-emits the `#EXT-X-MAP` init (so a downstream
+    /// `fmp4demux` reset on the flush gets its `moov` again), emits the post-flush
+    /// `Segment`, and resumes from there. The CMAF/DASH segment-transition case.
+    seek: Option<SeekController>,
     configured: bool,
 }
 
@@ -75,8 +82,20 @@ impl HlsSrc {
             container: None,
             probed: None,
             sample_aes_key: None,
+            seek: None,
             configured: false,
         }
+    }
+
+    /// Make the source time-seekable (M367): `run` polls `controller` before each
+    /// segment fetch and, on a flushing seek, selects the media segment containing
+    /// the target time (cumulative `#EXTINF` durations, clamped to the last
+    /// segment), emits `Flush`, re-emits the `#EXT-X-MAP` init segment for a reset
+    /// downstream demuxer, emits the post-flush `Segment`, and resumes there. The
+    /// application keeps a clone of the controller to drive scrubbing.
+    pub fn with_seek(mut self, controller: SeekController) -> Self {
+        self.seek = Some(controller);
+        self
     }
 
     /// Share a SAMPLE-AES key handle with a downstream `SampleAesDecrypt`: HlsSrc
@@ -185,6 +204,25 @@ fn decrypt_aes128_cbc(key: &[u8; 16], iv: &[u8; 16], mut data: Vec<u8>) -> Resul
     Ok(data)
 }
 
+/// The index of the media segment containing `target_ns` and that segment's
+/// cumulative start time (ns), walking `#EXTINF` durations. A target past the
+/// end clamps to the last segment (GStreamer clamps a seek to the duration).
+/// Empty playlist returns `(0, 0)` (the caller's bounds check breaks the loop).
+fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> (usize, u64) {
+    let mut start_ns = 0u64;
+    let mut last_start = 0u64;
+    for (idx, seg) in media.segments.iter().enumerate() {
+        let dur_ns = (seg.duration_ms as u64).saturating_mul(1_000_000);
+        let end_ns = start_ns.saturating_add(dur_ns);
+        if target_ns < end_ns {
+            return (idx, start_ns);
+        }
+        last_start = start_ns;
+        start_ns = end_ns;
+    }
+    (media.segments.len().saturating_sub(1), last_start)
+}
+
 impl SourceLoop for HlsSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -238,18 +276,51 @@ impl SourceLoop for HlsSrc {
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
             loop {
-                if let Some(map) = &media.map_uri {
+                // Index into `media.segments`; a flushing seek repositions it. The
+                // matching HLS media-sequence number is `media.media_sequence + idx`.
+                let mut idx = 0usize;
+                loop {
+                    // Apply a pending flushing time seek before the next fetch:
+                    // resolve the target time to the segment containing it, flush,
+                    // jump there, and re-emit the init segment (the downstream
+                    // demuxer reset on the flush needs its moov again).
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                        if seek.is_flush() {
+                            let (target_idx, seg_start_ns) =
+                                segment_for_time(&media, seek.start);
+                            out.push(PipelinePacket::Flush).await?;
+                            idx = target_idx;
+                            next_seq = media.media_sequence + target_idx as u64;
+                            init_emitted = false;
+                            out.push(PipelinePacket::Segment(Segment::for_flush_seek(
+                                &Seek::flush_to(seg_start_ns),
+                                None,
+                            )))
+                            .await?;
+                        }
+                        continue; // re-evaluate from the repositioned index
+                    }
+
+                    // fMP4: (re-)emit the EXT-X-MAP init (ftyp+moov) before any
+                    // media fragment, so a downstream fmp4demux sees the moov first.
                     if !init_emitted {
-                        let init_url = resolve_url(&media_url, map);
-                        let bytes = get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?;
-                        if !bytes.is_empty() {
-                            out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
-                            sequence += 1;
+                        if let Some(map) = &media.map_uri {
+                            let init_url = resolve_url(&media_url, map);
+                            let bytes = get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?;
+                            if !bytes.is_empty() {
+                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                                    .await?;
+                                sequence += 1;
+                            }
                         }
                         init_emitted = true;
                     }
-                }
-                for (seg_seq, segment) in (media.media_sequence..).zip(media.segments.iter()) {
+
+                    if idx >= media.segments.len() {
+                        break;
+                    }
+                    let seg_seq = media.media_sequence + idx as u64;
+                    let segment = &media.segments[idx];
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
                         let bytes = get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?;
@@ -282,6 +353,7 @@ impl SourceLoop for HlsSrc {
                         }
                         next_seq = seg_seq + 1;
                     }
+                    idx += 1;
                 }
 
                 if media.end_list {

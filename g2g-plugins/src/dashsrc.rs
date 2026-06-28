@@ -17,16 +17,16 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
 };
 
 use crate::fetch::{
     byte_frame, get_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
-use crate::mpd::parse;
+use crate::mpd::{parse, SegmentRef};
 
 #[derive(Debug)]
 pub struct DashSrc {
@@ -36,12 +36,33 @@ pub struct DashSrc {
     max_bandwidth: u64,
     /// Live-MPD reload interval in ms (0 = derive from `minimumUpdatePeriod`).
     reload_interval_ms: u64,
+    /// Optional time-seek channel (M367): resolves a TIME seek to the media
+    /// segment whose start time precedes the target (the `SegmentRef.time` is
+    /// already a stream-time in `timescale` units), flushes, re-emits the init
+    /// segment, and resumes there. The CMAF/DASH segment-transition case.
+    seek: Option<SeekController>,
     configured: bool,
 }
 
 impl DashSrc {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), max_bandwidth: 0, reload_interval_ms: 0, configured: false }
+        Self {
+            url: url.into(),
+            max_bandwidth: 0,
+            reload_interval_ms: 0,
+            seek: None,
+            configured: false,
+        }
+    }
+
+    /// Make the source time-seekable (M367): `run` polls `controller` before each
+    /// segment fetch and, on a flushing seek, selects the segment containing the
+    /// target (the last whose `$Time$` start precedes it), emits `Flush`, re-emits
+    /// the init segment for a reset downstream demuxer, emits the post-flush
+    /// `Segment`, and resumes there. The application keeps a clone to scrub.
+    pub fn with_seek(mut self, controller: SeekController) -> Self {
+        self.seek = Some(controller);
+        self
     }
 
     /// Cap Representation selection to this bitrate (bits/sec); 0 picks the highest.
@@ -60,6 +81,27 @@ impl DashSrc {
     fn output_caps() -> Caps {
         Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
     }
+}
+
+/// The index of the media segment containing `target_ns` (the last whose
+/// `$Time$` start, converted from `timescale` units to ns, is at or before the
+/// target) and that segment's start time in ns. Segments are time-ordered, so
+/// the scan stops at the first start past the target. A target before the first
+/// segment clamps to it; empty input returns `(0, 0)`.
+fn segment_for_time(segs: &[SegmentRef], timescale: u64, target_ns: u64) -> (usize, u64) {
+    let timescale = timescale.max(1) as u128;
+    let mut chosen = 0usize;
+    let mut chosen_start = 0u64;
+    for (idx, seg) in segs.iter().enumerate() {
+        let start_ns = (seg.time as u128 * 1_000_000_000 / timescale) as u64;
+        if start_ns <= target_ns {
+            chosen = idx;
+            chosen_start = start_ns;
+        } else {
+            break;
+        }
+    }
+    (chosen, chosen_start)
 }
 
 impl SourceLoop for DashSrc {
@@ -114,32 +156,64 @@ impl SourceLoop for DashSrc {
                     None => self.url.clone(),
                 };
                 let rep = mpd.select(cap).ok_or(G2gError::CapsMismatch)?;
+                // SegmentTimeline (if present) or the @duration profile drives the
+                // ordered segments, with $Number$ / $Time$ resolved per segment.
+                let segs = rep.template.segments(mpd.duration_secs);
+                let timescale = rep.template.timescale;
 
-                if !init_emitted {
-                    if let Some(init) = rep.template.init_url(&rep.id) {
+                let mut idx = 0usize;
+                loop {
+                    // Apply a pending flushing time seek before the next fetch:
+                    // jump to the segment containing the target, flush, and re-emit
+                    // the init segment (a downstream demuxer reset on the flush
+                    // needs its moov again).
+                    if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                        if seek.is_flush() {
+                            let (target_idx, start_ns) =
+                                segment_for_time(&segs, timescale, seek.start);
+                            out.push(PipelinePacket::Flush).await?;
+                            idx = target_idx;
+                            // Jumped by index; clear the reload-dedup watermark so
+                            // the target segment is not skipped as "already played".
+                            last_time = None;
+                            init_emitted = false;
+                            out.push(PipelinePacket::Segment(Segment::for_flush_seek(
+                                &Seek::flush_to(start_ns),
+                                None,
+                            )))
+                            .await?;
+                        }
+                        continue; // re-evaluate from the repositioned index
+                    }
+
+                    if !init_emitted {
+                        if let Some(init) = rep.template.init_url(&rep.id) {
+                            let bytes = get_bytes(&client, &resolve_url(&base, &init), MAX_SEGMENT_BYTES)
+                                .await?;
+                            if !bytes.is_empty() {
+                                out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
+                                    .await?;
+                                sequence += 1;
+                            }
+                        }
+                        init_emitted = true;
+                    }
+
+                    if idx >= segs.len() {
+                        break;
+                    }
+                    let seg = segs[idx];
+                    if !last_time.is_some_and(|lt| seg.time <= lt) {
+                        let media = rep.template.media_url(&rep.id, seg);
                         let bytes =
-                            get_bytes(&client, &resolve_url(&base, &init), MAX_SEGMENT_BYTES).await?;
+                            get_bytes(&client, &resolve_url(&base, &media), MAX_SEGMENT_BYTES).await?;
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;
                         }
+                        last_time = Some(seg.time);
                     }
-                    init_emitted = true;
-                }
-                // SegmentTimeline (if present) or the @duration profile drives the
-                // ordered segments, with $Number$ / $Time$ resolved per segment.
-                for seg in rep.template.segments(mpd.duration_secs) {
-                    if last_time.is_some_and(|lt| seg.time <= lt) {
-                        continue; // already played on an earlier reload
-                    }
-                    let media = rep.template.media_url(&rep.id, seg);
-                    let bytes =
-                        get_bytes(&client, &resolve_url(&base, &media), MAX_SEGMENT_BYTES).await?;
-                    if !bytes.is_empty() {
-                        out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
-                        sequence += 1;
-                    }
-                    last_time = Some(seg.time);
+                    idx += 1;
                 }
 
                 if !mpd.dynamic {

@@ -22,8 +22,7 @@ leverage first:
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
    (a dedicated libvpx `VpxDec` is deferred: no pure-Rust decoder exists, and a
    libvpx-FFI element would only duplicate the ffmpeg path). Plus negotiation
-   backward coupling through `DerivedOutput`; seek depth (segment seeks, re-preroll
-   after flushing seek when paused).
+   backward coupling through `DerivedOutput`.
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
@@ -41,11 +40,6 @@ leverage first:
 
 ## Seek and auto-plug
 
-- Container-level segment seeks (CMAF / DASH transitions). The
-  `SeekFlags::SEGMENT` playback-loop mechanism is done (M358 `SeekController`
-  segment-done back-channel + gapless `accumulate_seek`; M359 wakeful
-  `wait_event` park + `Mp4Src` looping a clip on `SEGMENT`); what remains is the
-  demux/container-level segment transitions.
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).

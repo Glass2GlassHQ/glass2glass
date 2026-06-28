@@ -16,10 +16,10 @@ use std::thread;
 use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelinePacket, PushOutcome,
-    Rate, VideoCodec,
+    Rate, Seek, VideoCodec,
 };
 use g2g_plugins::dashsrc::DashSrc;
 use g2g_plugins::fmp4demux::Fmp4Demux;
@@ -29,6 +29,9 @@ use g2g_plugins::mp4mux::Mp4Mux;
 struct CaptureSink {
     body: Vec<u8>,
     aus: Vec<Vec<u8>>,
+    flushes: usize,
+    /// Stream-time start of each post-flush `Segment` emitted (seek observability).
+    segment_starts: Vec<u64>,
 }
 impl OutputSink for CaptureSink {
     fn push<'a>(
@@ -36,11 +39,16 @@ impl OutputSink for CaptureSink {
         packet: PipelinePacket,
     ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
         Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = packet {
-                if let MemoryDomain::System(s) = &f.domain {
-                    self.body.extend_from_slice(s.as_slice());
-                    self.aus.push(s.as_slice().to_vec());
+            match packet {
+                PipelinePacket::DataFrame(f) => {
+                    if let MemoryDomain::System(s) = &f.domain {
+                        self.body.extend_from_slice(s.as_slice());
+                        self.aus.push(s.as_slice().to_vec());
+                    }
                 }
+                PipelinePacket::Flush => self.flushes += 1,
+                PipelinePacket::Segment(seg) => self.segment_starts.push(seg.start),
+                _ => {}
             }
             Ok(PushOutcome::Accepted)
         })
@@ -360,6 +368,52 @@ async fn dash_segment_timeline_time_addressing_demuxes() {
         .await
         .unwrap();
     assert_eq!(dsink.aus, aus, "SegmentTimeline DashSrc -> Fmp4Demux recovers the access units");
+}
+
+#[tokio::test]
+async fn dash_time_seek_jumps_to_the_segment_containing_the_target() {
+    // 3 fragments at 1s each (SegmentTemplate @duration, timescale 1000): segment
+    // start times 0, 1s, 2s. A 1.5s seek lands in seg1 ([1,2)s).
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 3);
+    let url = serve(init.clone(), segs.clone());
+
+    let seek = SeekController::new();
+    // Pre-arm before run(): deterministic, no fetch/EOF race.
+    seek.seek(Seek::flush_to(1_500_000_000));
+
+    let mut src = DashSrc::new(url).with_seek(seek);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    assert_eq!(sink.flushes, 1, "the flushing seek emits exactly one Flush");
+    assert_eq!(
+        sink.segment_starts,
+        vec![1_000_000_000],
+        "the post-flush Segment starts at seg1's $Time$ (1s)"
+    );
+    // After the seek the init is re-emitted (a reset demuxer needs its moov), then
+    // seg1 and seg2: playback resumes at the target segment.
+    let mut expected = init.clone();
+    expected.extend_from_slice(&segs[1]);
+    expected.extend_from_slice(&segs[2]);
+    assert_eq!(sink.body, expected, "init re-emitted, then seg1 onward; seg0 skipped");
+
+    // The re-emitted init + the two fragments still demux to two access units
+    // (the post-target tail). The first emitted AU gets the config-record
+    // parameter sets prepended (fmp4demux re-arms them after the reset), so check
+    // the count and that the last AU is byte-exact rather than equality on all.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = CaptureSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus.len(), 2, "seek output demuxes to the two post-target access units");
+    assert_eq!(dsink.aus[1], aus[2], "the last demuxed AU is byte-exact (no param-set prepend)");
 }
 
 #[tokio::test]
