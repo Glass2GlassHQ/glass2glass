@@ -1838,7 +1838,13 @@ Adaptive streaming sits one layer above these demuxers: an HTTP byte source feed
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`
 feature, `reqwest`) GETs a URL and streams the body as `Caps::ByteStream` chunks,
-the fetch layer the others share. `hlssrc::HlsSrc` (`hls`) parses an RFC 8216
+the fetch layer the others share. Because a manifest/segment URL is
+attacker-controlled, the shared `fetch::get_bytes`/`get_text` never buffer an
+unbounded body: each accumulates the response chunk-by-chunk against a cap
+(`MAX_MANIFEST_BYTES` 16 MiB for playlists/MPDs/keys, `MAX_SEGMENT_BYTES` 256 MiB
+for one media segment), failing loud when an honest `Content-Length` or the
+streamed running total exceeds it, so one oversized reply cannot exhaust memory.
+`hlssrc::HlsSrc` (`hls`) parses an RFC 8216
 `.m3u8` (the pure `no_std` `hls` parser: master variants for bandwidth-capped ABR,
 media segments), selects a variant, and streams its segments, MPEG-TS into
 `tsdemux` or fMP4/CMAF (signalled by `#EXT-X-MAP`, probed at negotiation) as

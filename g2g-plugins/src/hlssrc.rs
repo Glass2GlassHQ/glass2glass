@@ -38,7 +38,9 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
+use crate::fetch::{
+    byte_frame, get_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+};
 use crate::hls::{parse, KeyMethod, MediaPlaylist, Playlist};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
@@ -129,13 +131,13 @@ async fn resolve_media(
     url: &str,
     cap: Option<u64>,
 ) -> Result<(MediaPlaylist, String), G2gError> {
-    let text = get_text(client, url).await?;
+    let text = get_text(client, url, MAX_MANIFEST_BYTES).await?;
     match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
         Playlist::Media(m) => Ok((m, String::from(url))),
         Playlist::Master(master) => {
             let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
             let media_url = resolve_url(url, &variant.uri);
-            let media_text = get_text(client, &media_url).await?;
+            let media_text = get_text(client, &media_url, MAX_MANIFEST_BYTES).await?;
             match parse(&media_text).map_err(|_| G2gError::CapsMismatch)? {
                 Playlist::Media(m) => Ok((m, media_url)),
                 // A master pointing at another master is malformed.
@@ -155,7 +157,7 @@ async fn fetch_key(
     if let Some((_, key)) = cache.iter().find(|(u, _)| u == url) {
         return Ok(*key);
     }
-    let bytes = get_bytes(client, url).await?;
+    let bytes = get_bytes(client, url, MAX_MANIFEST_BYTES).await?;
     let key: [u8; 16] = bytes.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
     cache.push((String::from(url), key));
     Ok(key)
@@ -239,7 +241,7 @@ impl SourceLoop for HlsSrc {
                 if let Some(map) = &media.map_uri {
                     if !init_emitted {
                         let init_url = resolve_url(&media_url, map);
-                        let bytes = get_bytes(&client, &init_url).await?;
+                        let bytes = get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?;
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;
@@ -250,7 +252,7 @@ impl SourceLoop for HlsSrc {
                 for (seg_seq, segment) in (media.media_sequence..).zip(media.segments.iter()) {
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
-                        let bytes = get_bytes(&client, &seg_url).await?;
+                        let bytes = get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?;
                         let bytes = match &segment.key {
                             None => bytes,
                             Some(key) => {
@@ -292,7 +294,7 @@ impl SourceLoop for HlsSrc {
                     u64::from(media.target_duration_secs.max(1)) * 1000
                 };
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms)).await;
-                let text = get_text(&client, &media_url).await?;
+                let text = get_text(&client, &media_url, MAX_MANIFEST_BYTES).await?;
                 media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
                     Playlist::Media(m) => m,
                     Playlist::Master(_) => return Err(G2gError::CapsMismatch),

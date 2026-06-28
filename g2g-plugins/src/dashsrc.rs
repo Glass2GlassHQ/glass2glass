@@ -23,7 +23,9 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::fetch::{byte_frame, get_bytes, get_text, resolve_url};
+use crate::fetch::{
+    byte_frame, get_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+};
 use crate::mpd::parse;
 
 #[derive(Debug)]
@@ -95,7 +97,7 @@ impl SourceLoop for DashSrc {
             let cap = (self.max_bandwidth != 0).then_some(self.max_bandwidth);
 
             let mut mpd = {
-                let text = get_text(&client, &self.url).await?;
+                let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
                 parse(&text).map_err(|_| G2gError::CapsMismatch)?
             };
 
@@ -115,7 +117,8 @@ impl SourceLoop for DashSrc {
 
                 if !init_emitted {
                     if let Some(init) = rep.template.init_url(&rep.id) {
-                        let bytes = get_bytes(&client, &resolve_url(&base, &init)).await?;
+                        let bytes =
+                            get_bytes(&client, &resolve_url(&base, &init), MAX_SEGMENT_BYTES).await?;
                         if !bytes.is_empty() {
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;
@@ -130,7 +133,8 @@ impl SourceLoop for DashSrc {
                         continue; // already played on an earlier reload
                     }
                     let media = rep.template.media_url(&rep.id, seg);
-                    let bytes = get_bytes(&client, &resolve_url(&base, &media)).await?;
+                    let bytes =
+                        get_bytes(&client, &resolve_url(&base, &media), MAX_SEGMENT_BYTES).await?;
                     if !bytes.is_empty() {
                         out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                         sequence += 1;
@@ -148,7 +152,7 @@ impl SourceLoop for DashSrc {
                     (mpd.minimum_update_period_secs.unwrap_or(1.0) * 1000.0) as u64
                 };
                 tokio::time::sleep(core::time::Duration::from_millis(interval_ms.max(1))).await;
-                let text = get_text(&client, &self.url).await?;
+                let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
                 mpd = parse(&text).map_err(|_| G2gError::CapsMismatch)?;
             }
 

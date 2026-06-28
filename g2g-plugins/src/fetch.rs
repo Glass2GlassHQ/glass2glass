@@ -9,20 +9,66 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{FrameTiming, G2gError, HardwareError, MemoryDomain};
 
+/// Body-size cap for manifests and keys (playlists, MPDs, AES-128 keys). These
+/// are small by construction; 16 MiB is generous headroom for the largest live
+/// VOD playlist while still bounding a hostile/buggy server's response.
+pub(crate) const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+
+/// Body-size cap for a single media segment. A few seconds of high-bitrate
+/// video, with headroom; large enough for legitimate 4K segments, small enough
+/// that one bogus segment cannot exhaust memory.
+pub(crate) const MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
+
 /// reqwest transport / status failures map to a hardware-ish I/O error; the run
 /// fails loud and the pipeline surfaces it.
 pub(crate) fn net_err(_e: reqwest::Error) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-pub(crate) async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, G2gError> {
-    let resp = client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
-    Ok(resp.bytes().await.map_err(net_err)?.to_vec())
+/// A response body that exceeds its negotiated cap is treated as a (loud) I/O
+/// failure: a remote URL is attacker-controlled, so an over-cap body is a
+/// denial-of-service attempt, not a recoverable condition. Same error surface as
+/// [`net_err`] so callers need not special-case it.
+fn body_too_large() -> G2gError {
+    G2gError::Hardware(HardwareError::Other)
 }
 
-pub(crate) async fn get_text(client: &reqwest::Client, url: &str) -> Result<String, G2gError> {
-    let resp = client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
-    resp.text().await.map_err(net_err)
+/// Fetch `url`, accumulating the body but never allocating past `max` bytes.
+/// The `Content-Length` header (when present) is an early-out, but it is
+/// advisory: a server can omit or lie about it, so the running total over the
+/// streamed chunks is the real bound.
+pub(crate) async fn get_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<Vec<u8>, G2gError> {
+    let mut resp =
+        client.get(url).send().await.map_err(net_err)?.error_for_status().map_err(net_err)?;
+    if let Some(len) = resp.content_length() {
+        if len > max as u64 {
+            return Err(body_too_large());
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(body_too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Capped text fetch: reuses [`get_bytes`] for the size bound, then decodes as
+/// UTF-8 (HLS playlists and DASH MPDs are UTF-8 by spec; a stray byte decodes
+/// lossily rather than failing the fetch, matching reqwest's `text()`).
+pub(crate) async fn get_text(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<String, G2gError> {
+    let bytes = get_bytes(client, url, max).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A `DataFrame`-ready system-memory frame for a fetched byte chunk.
@@ -63,6 +109,84 @@ pub(crate) fn resolve_url(base: &str, rel: &str) -> String {
         let mut out = String::from(&base[..dir_end]);
         out.push_str(rel);
         out
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    //! The body cap is the DASH/HLS DoS defense: a remote URL is
+    //! attacker-controlled, so one oversized response must not exhaust memory.
+    //! A local one-shot HTTP/1.1 server (no extra deps) serves a known body; the
+    //! tests drive the real `get_bytes` over a real `reqwest` client and assert
+    //! both bound mechanisms, the `Content-Length` early-out and the streamed
+    //! running-total, while an under-cap fetch still returns the whole body.
+    use super::{get_bytes, MAX_SEGMENT_BYTES};
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    /// Serve `body` once. When `declare_length` is set, send an honest
+    /// `Content-Length`; otherwise frame the body by connection close (no
+    /// `Content-Length`), forcing the streamed-accumulator path. Returns the URL.
+    fn serve_once(body: Vec<u8>, declare_length: bool) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let header = if declare_length {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+            } else {
+                String::from("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            };
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+            let _ = stream.flush();
+        });
+        format!("http://127.0.0.1:{port}/body")
+    }
+
+    #[tokio::test]
+    async fn rejects_over_cap_via_content_length() {
+        // A complete, honest body over a small cap: the declared length trips the
+        // early-out before any body is buffered. (Without the cap this fetch
+        // succeeds and returns all 4096 bytes, so the assertion is discriminating.)
+        let url = serve_once(vec![7u8; 4096], true);
+        let client = reqwest::Client::new();
+        assert!(get_bytes(&client, &url, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_over_cap_via_streamed_total() {
+        // No Content-Length, so the early-out cannot fire: the running total over
+        // the streamed chunks is the only thing that can stop an over-cap body.
+        let url = serve_once(vec![9u8; 4096], false);
+        let client = reqwest::Client::new();
+        assert!(get_bytes(&client, &url, 1024).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn accepts_under_cap_body_whole() {
+        // An under-cap fetch returns the entire body unchanged.
+        let body = vec![3u8; 4096];
+        let url = serve_once(body.clone(), true);
+        let client = reqwest::Client::new();
+        let got = get_bytes(&client, &url, MAX_SEGMENT_BYTES).await.unwrap();
+        assert_eq!(got, body);
     }
 }
 

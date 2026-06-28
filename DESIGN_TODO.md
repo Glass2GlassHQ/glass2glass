@@ -444,7 +444,6 @@ export counter; PyTransform worker re-spawn guarded). The audit areas are now
 covered; what remains is lower-priority hardening flagged but not yet fixed (no
 clear untrusted-file path, or a broader policy call):
 
-- `fetch.rs` uncapped HTTP body read (DASH/HLS DoS, network-layer).
 - Free-threaded (PEP 703) build: `host.rs` `MetaSink` uses a `RefCell` that only
   the GIL serializes today; it (and the `unsendable` pyclasses) would need a
   `Mutex` / re-audit before the "no code change" free-threaded claim holds.
