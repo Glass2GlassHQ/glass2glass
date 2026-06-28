@@ -325,6 +325,7 @@ mod factory {
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::format_specs;
     use crate::fanout::MultiOutputElement;
+    use crate::runtime::launch::ParseError;
     use crate::runtime::{
         DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
     };
@@ -719,6 +720,20 @@ mod factory {
         }
     }
 
+    /// A `playbin3 uri=X` auto-fan-out hook (M382): given the registry and the
+    /// URI, probe the container and assemble a complete multi-stream
+    /// `source -> demux -> per-stream decode -> auto sink` graph, the auto
+    /// counterpart of [`Registry::build_playbin3_graph`]. `Ok(Some(graph))`
+    /// handled it; `Ok(None)` declined (e.g. an unprobed scheme or a container
+    /// the hook does not parse), so [`parse_launch`](crate::runtime::parse_launch)
+    /// falls back to single-stream `playbin`; `Err` aborts the parse. A plain
+    /// `fn` pointer, so `Registry` stays `Default` / `Debug`; the plugin crate
+    /// that owns the container parsing registers it via
+    /// [`Registry::register_playbin3`]. Cross-crate by design: the text DSL lives
+    /// in core, the Matroska parsing in `g2g-plugins`.
+    pub type Playbin3Hook =
+        fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory").field("name", &self.desc.name).finish_non_exhaustive()
@@ -744,6 +759,11 @@ mod factory {
         /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
+        /// The `playbin3 uri=X` auto-fan-out hook (M382), if registered. A lone
+        /// `playbin3` in a text pipeline calls it to probe the container and build
+        /// a multi-stream graph; `None` (the default) leaves `playbin3` as a
+        /// single-stream `playbin`. A `fn` pointer, so `Default` still derives.
+        playbin3: Option<Playbin3Hook>,
     }
 
     impl Registry {
@@ -793,6 +813,23 @@ mod factory {
         pub fn register_demux(&mut self, factory: DemuxFactory) -> &mut Self {
             self.demuxes.push(factory);
             self
+        }
+
+        /// Register the `playbin3 uri=X` auto-fan-out hook (M382): a lone
+        /// `playbin3` in a [`parse_launch`](crate::runtime::parse_launch) pipeline
+        /// calls it to probe the container and build a multi-stream graph. One
+        /// hook per registry (the last registered wins). Returns `&mut self` to
+        /// chain calls.
+        pub fn register_playbin3(&mut self, hook: Playbin3Hook) -> &mut Self {
+            self.playbin3 = Some(hook);
+            self
+        }
+
+        /// The registered [`Playbin3Hook`], or `None` if no hook was registered
+        /// (so `playbin3` stays a single-stream `playbin`). The parser consults
+        /// this for a lone `playbin3 uri=`.
+        pub fn playbin3_hook(&self) -> Option<Playbin3Hook> {
+            self.playbin3
         }
 
         /// Register a gst-canonical-name alias (M192): `name` resolves, at
@@ -1254,6 +1291,27 @@ mod factory {
                 return Err(Playbin3Error::NoPorts);
             }
             let (source, _byte_caps) = self.build_uri_source(uri)?;
+            self.build_playbin3_graph_with_source(source, demux, ports, max_depth)
+        }
+
+        /// Like [`build_playbin3_graph`](Self::build_playbin3_graph) but with a
+        /// pre-built byte source instead of one derived from the URI's scheme
+        /// handler. The `playbin3 uri=` auto-fan-out hook (M382) uses this: having
+        /// probed the file to choose the demuxer, it already knows the container,
+        /// so it supplies the matching raw-byte source directly rather than the
+        /// URI handler's source (which, for `file://`, may self-demux a *different*
+        /// container, e.g. MP4). `source` must emit the byte stream `demux`
+        /// expects.
+        pub fn build_playbin3_graph_with_source<D: MultiOutputElement + 'static>(
+            &self,
+            source: Box<dyn DynSourceLoop>,
+            demux: D,
+            ports: Vec<Playbin3Port>,
+            max_depth: usize,
+        ) -> Result<Graph<GraphNode>, Playbin3Error> {
+            if ports.is_empty() {
+                return Err(Playbin3Error::NoPorts);
+            }
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source));
             let outputs = ports.len() as u8;
@@ -1271,8 +1329,8 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
-    MuxerFactory, Playbin3Error, Playbin3Port, PlaybinError, Registry, SourceFactory, Uri, UriError,
-    UriSourceFactory,
+    MuxerFactory, Playbin3Error, Playbin3Hook, Playbin3Port, PlaybinError, Registry, SourceFactory,
+    Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

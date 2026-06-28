@@ -862,7 +862,32 @@ fn queue_leaky_policy(spec: &ElementSpec) -> LinkPolicy {
 /// ```
 pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
     let chains = parse_chains(pipeline)?;
+    // playbin3 uri=X auto-fan-out (M382): a lone `playbin3 uri=` probes the
+    // container via the registered hook and auto-builds source -> demux ->
+    // per-stream decode -> auto sinks. Without a hook (or if it declines, e.g. a
+    // non-Matroska file), fall through to build_graph, where `playbin3` is treated
+    // as a single-stream `playbin`.
+    if let Some(uri) = lone_playbin3_uri(&chains) {
+        if let Some(hook) = registry.playbin3_hook() {
+            if let Some(graph) = hook(registry, uri)? {
+                return Ok(graph);
+            }
+        }
+    }
     build_graph(registry, chains)
+}
+
+/// The `uri=` of a pipeline that is a single bare `playbin3 uri=X` element (and
+/// nothing else), the M382 auto-fan-out trigger. `None` for any other shape: a
+/// `playbin3` mid-pipeline, alongside other elements, or without a `uri=` is left
+/// to the normal builder (single-stream `playbin` expansion).
+fn lone_playbin3_uri(chains: &[Chain]) -> Option<&str> {
+    let [chain] = chains else { return None };
+    let [Item::Element(spec)] = chain.as_slice() else { return None };
+    if spec.name != "playbin3" {
+        return None;
+    }
+    prop(spec, "uri")
 }
 
 #[cfg(test)]

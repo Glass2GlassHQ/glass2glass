@@ -581,6 +581,43 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
     }
 }
 
+/// One forwardable elementary stream discovered in a parsed Matroska container
+/// (M382): which [`MkvStream`] a demux port would carry, the elementary [`Caps`]
+/// a decode branch plugs from (the demux's per-port output caps), and whether it
+/// is video (vs audio). The `playbin3 uri=` auto-fan-out builds one decode branch
+/// per entry.
+#[derive(Debug, Clone)]
+pub struct MkvStreamInfo {
+    /// The stream a demux port forwards for this track.
+    pub stream: MkvStream,
+    /// The elementary-stream caps the decode chain plugs from.
+    pub caps: Caps,
+    /// `true` for a video stream, `false` for audio (picks the auto sink: an
+    /// `autovideosink` vs an `autoaudiosink`).
+    pub video: bool,
+}
+
+/// The forwardable elementary streams a parsed Matroska container carries, in
+/// track order (M382): one [`MkvStreamInfo`] per track whose codec maps to an
+/// [`MkvStream`] (an unmappable track is dropped). `demux` must have parsed its
+/// `Tracks` element (feed a file prefix first); returns empty for a
+/// non-Matroska or not-yet-parsed input, which the `playbin3` hook reads as
+/// "decline, fall through to single-stream playbin".
+pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
+    demux
+        .tracks()
+        .iter()
+        .filter_map(|t| {
+            let stream = codec_to_stream(t.codec)?;
+            let video = matches!(
+                stream,
+                MkvStream::H264 | MkvStream::H265 | MkvStream::Vp8 | MkvStream::Vp9 | MkvStream::Av1
+            );
+            Some(MkvStreamInfo { stream, caps: MkvDemux::output_caps(stream), video })
+        })
+        .collect()
+}
+
 /// Resolve a published stream id (`matroska-track-N`) to the [`MkvStream`] the
 /// demuxer forwards for it, given the parsed tracks (`None` if the id is unknown or
 /// its codec is unforwardable). Needs `Tracks` parsed (the ids come from it).

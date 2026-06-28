@@ -81,8 +81,8 @@ pub use graph_runner::{
 #[cfg(feature = "std")]
 pub use autoplug::{
     declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
-    MuxerFactory, Playbin3Error, Playbin3Port, PlaybinError, Registry, SourceFactory, Uri, UriError,
-    UriSourceFactory,
+    MuxerFactory, Playbin3Error, Playbin3Hook, Playbin3Port, PlaybinError, Registry, SourceFactory,
+    Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

@@ -1451,6 +1451,28 @@ known without sniffing the byte stream.
   produces (geometry resolves at negotiation), which is all the chain search
   needs to pick the right decoder.
 
+- **playbin3 (multi-stream front door)** (`std`, M376-M382). Where `playbin`
+  decodes one stream, `playbin3` splits a container into *all* its streams and
+  decodes each to its own sink, built on the stream-collection model: a demuxer
+  announces every track as a `BusMessage::StreamCollection` (M376), the app
+  selects among them via a `StreamSelectController` (M377), and the multi-output
+  `MkvDemuxN` (a `MultiOutputElement`, M378) routes N elementary streams to N
+  ports in one parse. `Registry::build_playbin3_graph` (M379) assembles
+  `source → demux → {decode chain → sink}` per `Playbin3Port`, with each port's
+  branch statically negotiated against its codec via `port_output_caps` /
+  `NodeConstraint::Demux` (M380) so a real decoder configures at startup, not
+  only at runtime retype. The gst-launch front door is `playbin3 uri=X` (M382):
+  `parse_launch` routes a *lone* `playbin3` to a registry `Playbin3Hook`
+  (`register_playbin3`, a `Default`-friendly fn-pointer slot) that probes the
+  container and auto-builds the multi-stream graph. Cross-crate by design: the
+  text DSL is core, the Matroska probe (`mkv_playbin3`: read a bounded prefix,
+  parse `Tracks`, one branch per `forwardable_streams` entry, video→autovideosink
+  / audio→autoaudiosink) is `g2g-plugins`. The hook declines (`Ok(None)`) for a
+  non-`file://` URI or non-Matroska container, falling back to single-stream
+  `playbin`; it supplies a Matroska byte `FileSrc` via
+  `build_playbin3_graph_with_source` rather than the `file://` handler's
+  MP4-self-demuxing source.
+
 - **Memory-feature-aware selection** (M276). The `Caps` algebra encodes media
   type, format, and geometry but *not* the memory domain a producer emits, so a
   GPU-resident decoder (`NvDec` → NV12 in `MemoryDomain::Cuda`) is
