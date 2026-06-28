@@ -431,11 +431,16 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
     // to the VA display's choice (a `device=` property is a follow-up).
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", |_| {
-        Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
-    }));
+    reg.register(
+        ElementFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", |_| {
+            Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
+        })
+        .hardware(),
+    );
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register(ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())));
+    reg.register(
+        ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new())).hardware(),
+    );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
     // caps geometry / format does not encode. M276 makes that domain a first-class
@@ -445,19 +450,22 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
     reg.register(
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))
-            .produces(g2g_core::MemoryDomainKind::Cuda),
+            .produces(g2g_core::MemoryDomainKind::Cuda)
+            .hardware(),
     );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
     // g2g-launch on-device; the gst analog is `amcviddec-<component>`.
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
-    reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdec", |_| {
-        Box::new(MediaCodecDec::h264())
-    }));
+    reg.register(
+        ElementFactory::of::<MediaCodecDec>("mediacodecdec", |_| Box::new(MediaCodecDec::h264()))
+            .hardware(),
+    );
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
-    reg.register(ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| {
-        Box::new(MediaCodecDec::h265())
-    }));
+    reg.register(
+        ElementFactory::of::<MediaCodecDec>("mediacodecdech265", |_| Box::new(MediaCodecDec::h265()))
+            .hardware(),
+    );
     // Android hardware video encode via the NDK MediaCodec (M306); launch-only
     // (encoders are not auto-plug candidates), one factory per codec. The gst
     // analog is `amcvidenc-<component>`.

@@ -44,7 +44,8 @@ pub use runner::{
     RunStats, SourceLoop,
 };
 pub use autoplug::{
-    find_chain, find_chain_preferring, is_raw_audio, is_raw_video, ChainLink, ElementDesc,
+    find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
+    CapabilityDescriptor, ChainLink, ElementDesc, SelectionContext,
 };
 pub use progress::PipelineProgress;
 pub use seek::SeekController;

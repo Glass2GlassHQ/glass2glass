@@ -35,6 +35,81 @@ use crate::memory::MemoryDomainKind;
 use crate::pad_template::{pad_link, PadCaps, PadDirection, PadTemplate};
 use crate::runtime::solver::NegotiationFailure;
 
+/// Whether an element's path is hardware-accelerated. This is independent of
+/// where the output frames land ([`CapabilityDescriptor::output_memory`]): an
+/// ffmpeg VA-API decoder is hardware yet downloads to `System`, while a CPU
+/// decoder is software and `System`. Auto-plug can prefer / avoid hardware per
+/// request (throughput vs power) separately from the memory domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Acceleration {
+    /// CPU / pure-software path (the default).
+    #[default]
+    Software,
+    /// Fixed-function / GPU / platform hardware decode or encode.
+    Hardware,
+}
+
+/// What an element offers the auto-plug search beyond its pad templates: the
+/// signals used to choose among several elements that satisfy the same caps.
+///
+/// This generalizes a bare output-memory tag, the principled alternative to a
+/// flat global rank. A single integer cannot express that the best element is
+/// context-dependent (a hardware decoder that keeps frames on the GPU beats a
+/// faster one that forces a PCIe download when the consumer is GPU-resident), so
+/// [`score`](Self::score) ranks a candidate against a [`SelectionContext`]; the
+/// numeric [`rank`](Self::rank) is only the deterministic tiebreaker among
+/// otherwise-equal candidates (the explicit-override knob GStreamer's rank gets
+/// right). All-default descriptors score equally, so registration order decides,
+/// leaving a plain pipeline's selection unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityDescriptor {
+    /// The memory feature the source pad emits (a `decodebin` caps feature,
+    /// GStreamer's `memory:CUDAMemory` analog). Caps geometry / format is in the
+    /// pad templates; the *memory domain* is not, so it rides here. Matching the
+    /// consumer's domain avoids a copy / download (e.g. pick `NvDec` -> `Cuda`).
+    pub output_memory: MemoryDomainKind,
+    /// Hardware vs software path.
+    pub acceleration: Acceleration,
+    /// Deterministic tiebreaker among candidates of equal score (higher wins);
+    /// default 0. Use it to order otherwise-equivalent backends (e.g. two ffmpeg
+    /// codecs), or as an operator override, not as the primary selector.
+    pub rank: i16,
+}
+
+impl Default for CapabilityDescriptor {
+    fn default() -> Self {
+        Self { output_memory: MemoryDomainKind::System, acceleration: Acceleration::Software, rank: 0 }
+    }
+}
+
+impl CapabilityDescriptor {
+    /// Score this candidate against what the search wants; higher is tried first.
+    /// Memory-domain match dominates (it removes a download, the structural win),
+    /// then a hardware preference, then the explicit [`rank`](Self::rank).
+    pub fn score(&self, ctx: &SelectionContext) -> i32 {
+        let mut s = 0i32;
+        if self.output_memory == ctx.preferred_memory {
+            s += 1000;
+        }
+        if ctx.prefer_hardware && self.acceleration == Acceleration::Hardware {
+            s += 100;
+        }
+        s + self.rank as i32
+    }
+}
+
+/// What the auto-plug search optimizes for among elements that satisfy the same
+/// caps. The default (`System` memory, no hardware preference) reproduces a plain
+/// pipeline's selection, so existing behavior is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelectionContext {
+    /// The memory domain the consumer wants the frames in (avoids a download when
+    /// it matches a producer's [`CapabilityDescriptor::output_memory`]).
+    pub preferred_memory: MemoryDomainKind,
+    /// Prefer a hardware path when one is available.
+    pub prefer_hardware: bool,
+}
+
 /// An element type's autoplug-relevant metadata: a display name and its static
 /// pad templates (typically `<E as PadTemplates>::pad_templates()`). The search
 /// reads only the first sink and first source template; multi-pad elements
@@ -45,29 +120,41 @@ pub struct ElementDesc {
     pub name: &'static str,
     /// The element type's pad templates, in declaration order.
     pub templates: Vec<PadTemplate>,
-    /// The memory feature the element's source pad emits (a `decodebin` caps
-    /// feature, GStreamer's `memory:CUDAMemory` analog). Caps geometry / format
-    /// is in the pad templates; the *memory domain* is not, so it rides here so
-    /// the search can prefer a producer whose output memory matches the request
-    /// (e.g. pick `NvDec` -> `Cuda` for a GPU consumer). `System` for the CPU
-    /// elements, which is also the search default, so a plain pipeline is
-    /// unaffected.
-    pub output_memory: MemoryDomainKind,
+    /// Auto-plug selection signals (output memory, hardware, rank): how the
+    /// search picks this among elements satisfying the same caps. See
+    /// [`CapabilityDescriptor`].
+    pub capabilities: CapabilityDescriptor,
 }
 
 impl ElementDesc {
-    /// Build a descriptor from a name and its pad templates. The output memory
-    /// feature defaults to `System`; tag a GPU producer with
-    /// [`with_output_memory`](Self::with_output_memory).
+    /// Build a descriptor from a name and its pad templates. The capabilities
+    /// default (software, `System` memory, rank 0); tag a GPU / hardware producer
+    /// with the builders below.
     pub fn new(name: &'static str, templates: Vec<PadTemplate>) -> Self {
-        Self { name, templates, output_memory: MemoryDomainKind::System }
+        Self { name, templates, capabilities: CapabilityDescriptor::default() }
     }
 
-    /// Tag the memory feature this element's source pad produces (see
-    /// [`output_memory`](Self::output_memory)). Builder form.
+    /// Tag the memory feature this element's source pad produces. Builder form.
     pub fn with_output_memory(mut self, kind: MemoryDomainKind) -> Self {
-        self.output_memory = kind;
+        self.capabilities.output_memory = kind;
         self
+    }
+
+    /// Tag this element's path as hardware-accelerated. Builder form.
+    pub fn with_acceleration(mut self, acceleration: Acceleration) -> Self {
+        self.capabilities.acceleration = acceleration;
+        self
+    }
+
+    /// Set the deterministic tiebreaker rank (higher wins among equal scores).
+    pub fn with_rank(mut self, rank: i16) -> Self {
+        self.capabilities.rank = rank;
+        self
+    }
+
+    /// The memory feature the element's source pad emits.
+    pub fn output_memory(&self) -> MemoryDomainKind {
+        self.capabilities.output_memory
     }
 
     /// First sink (input) pad template, if any.
@@ -152,14 +239,8 @@ pub fn find_chain(
 }
 
 /// Like [`find_chain`], but biases ties toward a chain whose terminal element
-/// emits the `preferred` memory feature (see [`ElementDesc::output_memory`]). The
-/// search is still breadth-first, so a shorter chain always wins; among
-/// equal-length chains, candidates producing `preferred` are tried first, so a
-/// GPU consumer can request `Cuda` and get `NvDec` ahead of a CPU decoder without
-/// changing the default (`System`) selection a plain pipeline gets.
-///
-/// The preference only reorders which candidate is *tried first* at each hop; if
-/// no `preferred`-memory chain exists, the search still finds a `System` one.
+/// emits the `preferred` memory feature. Thin wrapper over [`find_chain_with`]
+/// with a memory-only [`SelectionContext`].
 pub fn find_chain_preferring(
     descs: &[ElementDesc],
     input: &Caps,
@@ -167,14 +248,40 @@ pub fn find_chain_preferring(
     max_depth: usize,
     preferred: MemoryDomainKind,
 ) -> Option<Vec<ChainLink>> {
+    find_chain_with(
+        descs,
+        input,
+        target,
+        max_depth,
+        SelectionContext { preferred_memory: preferred, prefer_hardware: false },
+    )
+}
+
+/// Like [`find_chain`], but scores candidates against `ctx` ([`SelectionContext`])
+/// to choose among elements that satisfy the same caps. The search is still
+/// breadth-first, so a shorter chain always wins; among equal-length chains, the
+/// higher-scoring candidate ([`CapabilityDescriptor::score`]) is tried first, so a
+/// GPU consumer can request `Cuda` and get `NvDec` ahead of a CPU decoder.
+///
+/// The context only reorders which candidate is *tried first* at each hop; if no
+/// chain matching the preference exists, the search still finds any valid one. A
+/// default `ctx` scores every candidate equally, so the visit order is
+/// registration order and a plain pipeline's selection is unchanged.
+pub fn find_chain_with(
+    descs: &[ElementDesc],
+    input: &Caps,
+    target: &dyn Fn(&Caps) -> bool,
+    max_depth: usize,
+    ctx: SelectionContext,
+) -> Option<Vec<ChainLink>> {
     if target(input) {
         return Some(Vec::new());
     }
-    // Visit order: candidates whose source-pad memory matches `preferred` first,
-    // then the rest in registration order. Stable, so with the default `System`
-    // preference this is registration order (no behavior change).
+    // Visit order: highest score first, ties broken by registration order (the
+    // sort is stable). A default context scores all candidates 0, so this is
+    // registration order (no behavior change).
     let mut order: Vec<usize> = (0..descs.len()).collect();
-    order.sort_by_key(|&i| descs[i].output_memory != preferred);
+    order.sort_by_key(|&i| core::cmp::Reverse(descs[i].capabilities.score(&ctx)));
     // BFS frontier: each entry is a reached caps state and the element path
     // that produced it. Depth is bounded by max_depth so an unsatisfiable
     // target terminates even with cycle-free same-shape elements.
@@ -259,6 +366,21 @@ mod factory {
         /// Builder form, defaulting to `System`.
         pub fn produces(mut self, kind: crate::memory::MemoryDomainKind) -> Self {
             self.desc = self.desc.with_output_memory(kind);
+            self
+        }
+
+        /// Tag this factory's element as a hardware-accelerated path, so a
+        /// hardware-preferring auto-plug search ([`SelectionContext::prefer_hardware`])
+        /// favors it. Builder form.
+        pub fn hardware(mut self) -> Self {
+            self.desc = self.desc.with_acceleration(Acceleration::Hardware);
+            self
+        }
+
+        /// Set the deterministic tiebreaker rank (higher wins among candidates of
+        /// equal score); the explicit-override knob. Builder form, default 0.
+        pub fn rank(mut self, rank: i16) -> Self {
+            self.desc = self.desc.with_rank(rank);
             self
         }
 
@@ -926,6 +1048,39 @@ mod factory {
             Some(chain.into_iter().map(|link| self.factories[link.index].build(&link.output)).collect())
         }
 
+        /// Capability-aware [`autoplug_names`](Self::autoplug_names): score
+        /// candidates against `ctx` ([`SelectionContext`]) to choose among
+        /// elements satisfying the same caps (memory domain, hardware, then a rank
+        /// tiebreaker). The generalization of
+        /// [`autoplug_names_preferring`](Self::autoplug_names_preferring) (which is
+        /// the memory-only case); a default `ctx` is the plain selection.
+        pub fn autoplug_names_with(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            ctx: SelectionContext,
+        ) -> Option<Vec<&'static str>> {
+            let descs = self.descs();
+            let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
+            Some(chain.into_iter().map(|link| self.factories[link.index].desc.name).collect())
+        }
+
+        /// Capability-aware [`autoplug`](Self::autoplug): instantiate the chain the
+        /// capability-scored search ([`autoplug_names_with`](Self::autoplug_names_with))
+        /// picks.
+        pub fn autoplug_with(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            ctx: SelectionContext,
+        ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+            let descs = self.descs();
+            let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
+            Some(chain.into_iter().map(|link| self.factories[link.index].build(&link.output)).collect())
+        }
+
         /// Domain-aware [`decodebin`](Self::decodebin): splice in the chain the
         /// domain-aware search picks, biased toward `preferred` memory (e.g. `Cuda`
         /// to prefer `NvDec` when the downstream consumer is GPU-resident).
@@ -1076,9 +1231,74 @@ mod tests {
         )
     }
 
+    /// A second H.264 -> NV12 decoder tagged as a Cuda-producing hardware path
+    /// (a native NVDEC analog), to exercise capability-based selection.
+    fn gpu_decoder() -> ElementDesc {
+        ElementDesc::new(
+            "nvdec",
+            Vec::from([
+                PadTemplate::sink(CapsSet::one(h264(Dim::Any))),
+                PadTemplate::source(CapsSet::one(raw(RawVideoFormat::Nv12))),
+            ]),
+        )
+        .with_output_memory(MemoryDomainKind::Cuda)
+        .with_acceleration(Acceleration::Hardware)
+    }
+
     /// Just the descriptor indices of a found chain, for terse assertions.
     fn indices(chain: &[ChainLink]) -> Vec<usize> {
         chain.iter().map(|l| l.index).collect()
+    }
+
+    #[test]
+    fn capability_score_ranks_domain_then_hardware_then_rank() {
+        let sys = CapabilityDescriptor::default();
+        let cuda = CapabilityDescriptor { output_memory: MemoryDomainKind::Cuda, ..Default::default() };
+        let ctx_cuda =
+            SelectionContext { preferred_memory: MemoryDomainKind::Cuda, prefer_hardware: false };
+        assert!(cuda.score(&ctx_cuda) > sys.score(&ctx_cuda), "a memory-domain match dominates");
+
+        let hw = CapabilityDescriptor { acceleration: Acceleration::Hardware, ..Default::default() };
+        let ctx_hw =
+            SelectionContext { preferred_memory: MemoryDomainKind::System, prefer_hardware: true };
+        assert!(hw.score(&ctx_hw) > sys.score(&ctx_hw), "a hardware preference favors hardware");
+
+        let ranked = CapabilityDescriptor { rank: 5, ..Default::default() };
+        let plain = SelectionContext::default();
+        assert!(ranked.score(&plain) > sys.score(&plain), "rank breaks an otherwise-equal tie");
+    }
+
+    #[test]
+    fn default_context_keeps_registration_order() {
+        // CPU decoder first, GPU second: a plain search picks the CPU decoder, so
+        // a default pipeline's selection is unchanged by the capability machinery.
+        let descs = [decoder(), gpu_decoder()];
+        let chain =
+            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, SelectionContext::default())
+                .expect("a decoder reaches raw");
+        assert_eq!(indices(&chain), Vec::from([0usize]), "default = registration order (CPU first)");
+    }
+
+    #[test]
+    fn cuda_preference_selects_the_gpu_decoder() {
+        // The same two decoders; a Cuda preference flips the choice to the GPU
+        // decoder even though it is registered second (avoids a download).
+        let descs = [decoder(), gpu_decoder()];
+        let ctx = SelectionContext { preferred_memory: MemoryDomainKind::Cuda, prefer_hardware: false };
+        let chain =
+            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, ctx).expect("reaches raw");
+        assert_eq!(indices(&chain), Vec::from([1usize]), "Cuda preference picks the GPU decoder");
+    }
+
+    #[test]
+    fn rank_breaks_ties_among_equal_candidates() {
+        // Two equivalent CPU decoders; the higher-ranked one wins regardless of
+        // registration order (the explicit-override tiebreaker).
+        let descs = [decoder(), decoder().with_rank(10)];
+        let chain =
+            find_chain_with(&descs, &h264(Dim::Any), &is_raw_video, 4, SelectionContext::default())
+                .expect("reaches raw");
+        assert_eq!(indices(&chain), Vec::from([1usize]), "higher rank wins the tie");
     }
 
     #[test]

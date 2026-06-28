@@ -1351,19 +1351,33 @@ known without sniffing the byte stream.
   GPU-resident decoder (`NvDec` → NV12 in `MemoryDomain::Cuda`) is
   indistinguishable from a CPU one by caps alone. Rather than thread the domain
   through every `Caps` (446 construction sites, and it is orthogonal to the
-  format algebra), it rides as a *memory feature* on the auto-plug metadata:
-  `ElementDesc::output_memory: MemoryDomainKind` (the GStreamer `memory:CUDAMemory`
-  caps-feature analog), set per factory via `ElementFactory::produces(kind)`,
-  defaulting to `System`. `find_chain_preferring(.., preferred)` /
-  `Registry::{autoplug,decodebin}_preferring(.., preferred)` bias *ties* toward a
-  chain whose terminal element emits `preferred`: still breadth-first (a shorter
-  chain always wins), but among equal-length chains the matching-memory candidate
-  is tried first. With the default `System` preference this is exactly
-  registration order (a plain pipeline is unchanged, so `NvDec` registered last
-  never hijacks a CPU path); a GPU consumer requests `Cuda` and gets `NvDec` ahead
-  of the CPU decoder. Deriving the preference automatically from a downstream
-  consumer's accepted input memory (so a plain `decodebin` into a CUDA sink prefers
-  `NvDec` without an explicit request) is the remaining follow-up.
+  format algebra), it rides on the auto-plug metadata, as one field of a small
+  `CapabilityDescriptor` (`ElementDesc::capabilities`): `output_memory`
+  (`MemoryDomainKind`, the GStreamer `memory:CUDAMemory` caps-feature analog), an
+  `Acceleration` (hardware vs software, independent of the domain: an ffmpeg
+  VA-API decoder is hardware yet downloads to `System`), and a numeric `rank`.
+  These are set per factory via `ElementFactory::produces(kind)` / `.hardware()` /
+  `.rank(n)`, all defaulting to (software, `System`, 0).
+
+  This is deliberately *not* GStreamer's flat global rank. A single integer can't
+  express that the best element is context-dependent: a hardware decoder that
+  keeps frames on the GPU beats a faster one that forces a PCIe download when the
+  consumer is GPU-resident (g2g measured exactly this, the NVDEC-to-system-memory
+  floor). So `CapabilityDescriptor::score(ctx)` ranks a candidate against a
+  `SelectionContext { preferred_memory, prefer_hardware }`: a memory-domain match
+  dominates, then a hardware preference, and `rank` is only the deterministic
+  tiebreaker among otherwise-equal candidates (the explicit-override knob, the
+  genuinely useful 20% of GStreamer's rank). `find_chain_with(.., ctx)` /
+  `Registry::{autoplug,autoplug_names}_with(.., ctx)` score-order which candidate
+  is *tried first*; it is still breadth-first (a shorter chain always wins), and a
+  default `ctx` scores every candidate equally, so the visit order is registration
+  order and a plain pipeline is unchanged (`NvDec` registered last never hijacks a
+  CPU path). `find_chain_preferring` / `{autoplug,decodebin}_preferring(.., domain)`
+  remain as the memory-only special case. Ranking matters *only* on the auto-plug
+  path; an explicit typed graph names its element, so the descriptor never touches
+  the core. Deriving `ctx` automatically from a downstream consumer's accepted
+  input memory (so a plain `decodebin` into a CUDA sink prefers `NvDec` without an
+  explicit request) is the remaining follow-up.
 
 #### 4.13.10 Current limits
 
