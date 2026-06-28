@@ -160,6 +160,21 @@ impl<'a> GraphNodeRef<'a> {
             }
         }
     }
+
+    /// The full set of memory domains this node can emit (M351), the
+    /// producer-capability half of the two-sided allocation-domain negotiation.
+    /// A source's / element's `output_domains`; fan-in / fan-out nodes report a
+    /// System singleton (their domain follows the upstream, like
+    /// [`output_memory`](Self::output_memory)).
+    pub fn output_domains(&self) -> crate::memory::DomainSet {
+        match self {
+            GraphNodeRef::Source(s) => s.output_domains(),
+            GraphNodeRef::Element(e) => e.output_domains(),
+            GraphNodeRef::Muxer(_) | GraphNodeRef::Demux(_) => {
+                crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
+            }
+        }
+    }
 }
 
 impl core::fmt::Debug for GraphNodeRef<'_> {
@@ -683,6 +698,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             NodeKind::Transform => {
                 let in_e = vg.in_edges(node)[0];
                 let out_e = vg.out_edges(node)[0];
+                // A transform is a memory-domain pass-through here: it forwards the
+                // downstream proposal to its own pool and re-proposes upstream
+                // unchanged. Domain capability is enforced at the buffer-pool
+                // origin (the source) and at the sibling join (the tee), not at
+                // every hop, so a GPU proposal merely passing through a plain
+                // transform is not rejected against its System default (M351).
                 if let Some(p) = edge_proposal[out_e] {
                     element_configure_alloc(&mut vg, node, &p);
                 }
@@ -700,10 +721,16 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
                 if let Some(p) = edge_proposal[out_e] {
+                    // M351: reconcile against the source's emittable domains, the
+                    // upstream end of the two-sided negotiation. The reconciled
+                    // proposal is what the source allocates and what `RunStats`
+                    // reports.
+                    let can = node_output_domains(&vg, node);
+                    let resolved = p.resolve_for_producer(can)?;
                     if let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)? {
-                        src.configure_allocation(&p);
+                        src.configure_allocation(&resolved);
                     }
-                    allocation = Some(p);
+                    allocation = Some(resolved);
                 }
             }
             NodeKind::Muxer(_) => {
@@ -1152,6 +1179,18 @@ fn element_propose(
         Some(GraphNodeRef::Element(elem)) => elem.propose_allocation(caps),
         _ => None,
     }
+}
+
+/// The set of memory domains a node can emit (M351), for reconciling a
+/// downstream allocation proposal against the producer's real capability.
+/// Missing nodes report a System singleton (the conservative default).
+fn node_output_domains(
+    vg: &ValidatedGraph<GraphNodeRef<'_>>,
+    node: NodeId,
+) -> crate::memory::DomainSet {
+    vg.element(node)
+        .map(|n| n.output_domains())
+        .unwrap_or(crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System))
 }
 
 /// Apply a downstream-derived allocation proposal to a transform's own pool.

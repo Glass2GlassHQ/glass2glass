@@ -21,8 +21,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, Graph, MemoryDomain, MultiInputElement, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    DomainSet, FrameTiming, G2gError, Graph, MemoryDomain, MemoryDomainKind, MultiInputElement,
+    OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct NullClock;
@@ -68,6 +68,16 @@ impl SourceLoop for PlainSource {
 
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// A test fake standing in for a domain-flexible producer (eg a hardware
+    /// decoder that can deliver to System or keep frames device-resident), so the
+    /// M351 source-side reconciliation honors the device-domain proposals the
+    /// branches join to.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+            .with(MemoryDomainKind::Cuda)
+            .with(MemoryDomainKind::D3D11Texture)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

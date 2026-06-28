@@ -11,7 +11,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
-use crate::memory::MemoryDomainKind;
+use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
@@ -125,6 +125,15 @@ pub trait SourceLoop: ElementBound {
     /// the negotiate-only path for the DOT dump (it is not part of `Caps`).
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::System
+    }
+
+    /// The full set of memory domains this source can emit (M351). The
+    /// producer-capability half of the two-sided allocation-domain negotiation;
+    /// see [`AsyncElement::output_domains`](crate::element::AsyncElement::output_domains).
+    /// Default: just [`output_memory`](Self::output_memory). A GPU capture source
+    /// that can also deliver to System overrides this.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(self.output_memory())
     }
 
     /// The total stream duration in nanoseconds, the source's answer to the
@@ -534,8 +543,15 @@ where
     let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
 
     // M12 allocation query: the sink proposes buffers; the source allocates
-    // its output pool to match (zero-copy handoff when it can honor them).
-    let allocation = sink.propose_allocation(&negotiated_caps);
+    // its output pool to match (zero-copy handoff when it can honor them). M351:
+    // the proposed domain is reconciled against what the source can actually emit
+    // (a two-sided negotiation), so a multi-domain sink/source pair settles on a
+    // shared domain (GPU-preferred) instead of the sink dictating unilaterally;
+    // no shared domain is a loud conflict rather than a silent mismatch.
+    let allocation = match sink.propose_allocation(&negotiated_caps) {
+        Some(p) => Some(p.resolve_for_producer(SourceLoop::output_domains(source))?),
+        None => None,
+    };
     if let Some(p) = &allocation {
         source.configure_allocation(p);
     }

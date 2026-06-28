@@ -1173,12 +1173,32 @@ Two fan structures have non-trivial joins:
 - **Diamond join (tee).** A tee's single input must satisfy *both* branches at
   once, so the branch proposals are joined by a most-restrictive intersection
   (`AllocationParams::join`): the larger size, count, and alignment win, and the
-  memory domain must match. A domain conflict (a CUDA branch and a D3D11 branch)
-  is an empty intersection (no single producer pool serves both) and fails the
-  whole negotiation loud with `G2gError::AllocationConflict`, rather than
-  silently honouring one branch and copying for the other. This is distinct from
-  `AllocationParams::merge`, the asymmetric fold the linear upstream walk uses
-  where the consumer-most proposal legitimately dictates the domain.
+  memory domain is the most-preferred member of the two branches' *accepted
+  domain sets* intersected (`AllocationParams::accepts`, a `DomainSet` bitmask;
+  the preference order favours GPU-resident domains over `System`, M351). A
+  single-domain branch is just `only(domain)`, so two matching single domains
+  reduce to that domain and two disjoint ones to an empty set; a branch that can
+  take more than one domain (a sink that reads GPU textures *or* falls back to
+  System) widens its set so the join can find a domain both branches share. An
+  empty intersection (a CUDA-only branch and a D3D11-only branch) is a real
+  conflict, no single producer pool serves both, and fails the whole negotiation
+  loud with `G2gError::AllocationConflict` rather than silently honouring one and
+  copying for the other. This is distinct from `AllocationParams::merge`, the
+  asymmetric fold the linear upstream walk uses where the consumer-most proposal
+  legitimately dictates the domain.
+- **Producer reconciliation (M351).** Domain choice is two-sided: a producer
+  advertises the set of domains it can *emit* (`output_domains`, default
+  `only(output_memory())`), and at the buffer-pool origin (the source) the
+  joined downstream proposal is reconciled against it
+  (`AllocationParams::resolve_for_producer`): intersect the accepted set with the
+  producer's capability and settle on the most-preferred survivor, so a graph
+  keeps the frame copy-free when both ends can and falls back to System when the
+  producer cannot reach the consumer's preferred domain. No shared domain is an
+  `AllocationConflict` (a genuine case for an auto-plugged domain converter, a
+  later track). Reconciliation runs at the source, not at every hop: a plain
+  transform is a memory-domain pass-through (it forwards whatever domain it
+  receives), so enforcing its `System` default mid-cascade would wrongly reject a
+  GPU proposal merely passing through.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
   so a plain container muxer imposes nothing). At startup the runner stores it on

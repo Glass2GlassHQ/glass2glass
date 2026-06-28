@@ -76,6 +76,98 @@ pub enum MemoryDomainKind {
     WgpuBuffer,
 }
 
+impl MemoryDomainKind {
+    /// Stable bit index for [`DomainSet`]. Keep in sync with the enum (one bit
+    /// per variant, 10 variants fit a `u16`).
+    const fn bit_index(self) -> u16 {
+        match self {
+            MemoryDomainKind::System => 0,
+            MemoryDomainKind::SystemView => 1,
+            MemoryDomainKind::DmaBuf => 2,
+            MemoryDomainKind::VulkanTexture => 3,
+            MemoryDomainKind::WebGPUBuffer => 4,
+            MemoryDomainKind::Cuda => 5,
+            MemoryDomainKind::D3D11Texture => 6,
+            MemoryDomainKind::WebGPUExternalTexture => 7,
+            MemoryDomainKind::WgpuTexture => 8,
+            MemoryDomainKind::WgpuBuffer => 9,
+        }
+    }
+}
+
+/// Preference order for picking a single domain out of a [`DomainSet`]: the
+/// zero-copy GPU-resident domains first, plain `System` bytes last. So when a
+/// producer and its consumer(s) both accept several domains, the negotiation
+/// keeps the frame on the device rather than falling back to a host copy.
+const DOMAIN_PREFERENCE: [MemoryDomainKind; 10] = [
+    MemoryDomainKind::Cuda,
+    MemoryDomainKind::D3D11Texture,
+    MemoryDomainKind::VulkanTexture,
+    MemoryDomainKind::WgpuTexture,
+    MemoryDomainKind::WgpuBuffer,
+    MemoryDomainKind::WebGPUExternalTexture,
+    MemoryDomainKind::WebGPUBuffer,
+    MemoryDomainKind::DmaBuf,
+    MemoryDomainKind::SystemView,
+    MemoryDomainKind::System,
+];
+
+/// A set of [`MemoryDomainKind`]s a producer can emit or a consumer can accept,
+/// packed into a bitmask. The allocation query negotiates a single concrete
+/// domain by intersecting the producer's capability set with the consumer's
+/// acceptance set and picking the most-preferred survivor
+/// ([`preferred`](Self::preferred)). A single-domain producer/consumer (the
+/// default) is just [`only`](Self::only), so the negotiation reduces to today's
+/// exact-match behavior; a multi-domain element (a decoder that can deliver to
+/// System or stay resident on the GPU) names every domain it can satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainSet(u16);
+
+impl DomainSet {
+    /// The empty set: no domain. The intersection result that signals an
+    /// irreconcilable conflict (producer and consumer share no domain).
+    pub const EMPTY: Self = Self(0);
+
+    /// The singleton set holding just `k`. The default capability/acceptance of
+    /// every element, derived from its single `output_memory()`.
+    pub const fn only(k: MemoryDomainKind) -> Self {
+        Self(1 << k.bit_index())
+    }
+
+    /// This set with `k` added.
+    pub const fn with(self, k: MemoryDomainKind) -> Self {
+        Self(self.0 | (1 << k.bit_index()))
+    }
+
+    /// Whether `k` is a member.
+    pub const fn contains(self, k: MemoryDomainKind) -> bool {
+        self.0 & (1 << k.bit_index()) != 0
+    }
+
+    /// The set of domains in both `self` and `other` (the domains a producer and
+    /// consumer can agree on).
+    pub const fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// The set of domains in either `self` or `other`.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether the set holds no domain.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The most-preferred member per [`DOMAIN_PREFERENCE`] (GPU-resident before
+    /// `System`), or `None` if the set is empty. The single concrete domain the
+    /// negotiation settles on.
+    pub fn preferred(self) -> Option<MemoryDomainKind> {
+        DOMAIN_PREFERENCE.iter().copied().find(|&k| self.contains(k))
+    }
+}
+
 impl MemoryDomain {
     /// The payload-free discriminant of this domain.
     pub fn kind(&self) -> MemoryDomainKind {

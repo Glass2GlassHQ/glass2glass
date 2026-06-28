@@ -95,7 +95,7 @@ pub use graph::{
 };
 pub use link::LinkPolicy;
 pub use memory::{
-    CudaKeepAlive, D3D11KeepAlive, MemoryDomain, MemoryDomainKind, OwnedCudaBuffer,
+    CudaKeepAlive, D3D11KeepAlive, DomainSet, MemoryDomain, MemoryDomainKind, OwnedCudaBuffer,
     OwnedD3D11Texture, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer,
     OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SystemSlice, SystemView,
     WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,

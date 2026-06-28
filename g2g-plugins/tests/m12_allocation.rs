@@ -14,8 +14,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_simple_pipeline, run_source_transform_sink, SourceLoop};
 use g2g_core::{
-    AllocationParams, AsyncElement, BufferPool, Caps, ConfigureOutcome, Dim, G2gError, MemoryDomain,
-    MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, BufferPool, Caps, ConfigureOutcome, Dim, DomainSet, G2gError,
+    MemoryDomain, MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
 struct ZeroClock;
@@ -72,6 +72,13 @@ impl SourceLoop for PoolSrc {
 
     fn configure_allocation(&mut self, params: &AllocationParams) {
         self.proposed = Some(*params);
+    }
+
+    /// A test fake standing in for a domain-flexible producer (eg `NvdecCuda`),
+    /// so the M351 source-side reconciliation honors a downstream CUDA proposal
+    /// rather than rejecting it against a System-only default.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda)
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

@@ -8,7 +8,7 @@ use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
 use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
 use crate::frame::PipelinePacket;
-use crate::memory::MemoryDomainKind;
+use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 
@@ -146,6 +146,18 @@ pub trait AsyncElement: ElementBound {
     /// zero-copy links (it is not part of `Caps`; see DESIGN.md 4.13.9).
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::System
+    }
+
+    /// The full set of memory domains this element *can* emit on its output pad,
+    /// not just its preferred one. The producer-capability half of the M351
+    /// two-sided allocation-domain negotiation: the runner intersects it with the
+    /// downstream consumers' acceptance set and settles on a single domain, so a
+    /// decoder that can deliver to System *or* stay resident on the GPU lets the
+    /// runner keep the frame copy-free when a downstream wants it. Default: just
+    /// [`output_memory`](Self::output_memory), so a single-domain element
+    /// negotiates exactly as before. A multi-domain producer overrides this.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(self.output_memory())
     }
 
     /// Answer the upstream peer's allocation query (M12): the buffer size,
@@ -360,6 +372,12 @@ pub trait DynAsyncElement: ElementBound {
         MemoryDomainKind::System
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::output_domains`]. Default
+    /// `only(output_memory())`.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(self.output_memory())
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
     /// element that paces to hardware joins the runner's clock election.
     /// Defaults to none.
@@ -480,6 +498,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::output_memory(self)
     }
 
+    fn output_domains(&self) -> DomainSet {
+        AsyncElement::output_domains(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
@@ -577,6 +599,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn output_memory(&self) -> MemoryDomainKind {
         (**self).output_memory()
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        (**self).output_domains()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

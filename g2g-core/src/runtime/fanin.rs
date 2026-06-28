@@ -33,7 +33,7 @@ use crate::fanout::{
 };
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
-use crate::memory::MemoryDomainKind;
+use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, Receiver, SendError, Sender, SenderSink};
@@ -70,6 +70,12 @@ pub trait DynSourceLoop: ElementBound {
     /// [`System`](MemoryDomainKind::System).
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::System
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::output_domains`]. Default
+    /// `only(output_memory())`.
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(self.output_memory())
     }
 
     /// Dyn-safe mirror of [`SourceLoop::query_duration`] (M203), so the DAG
@@ -163,6 +169,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::output_memory(self)
     }
 
+    fn output_domains(&self) -> DomainSet {
+        SourceLoop::output_domains(self)
+    }
+
     fn query_duration(&self) -> Option<u64> {
         SourceLoop::query_duration(self)
     }
@@ -234,6 +244,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn output_memory(&self) -> MemoryDomainKind {
         (**self).output_memory()
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        (**self).output_domains()
     }
 
     fn query_duration(&self) -> Option<u64> {

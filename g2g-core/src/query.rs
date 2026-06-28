@@ -8,7 +8,7 @@
 //! a runtime query object travelling along pads. The linear runners compute it
 //! once after negotiation and expose it on `RunStats`.
 
-use crate::memory::MemoryDomainKind;
+use crate::memory::{DomainSet, MemoryDomainKind};
 
 /// Downstream-proposed buffer allocation parameters (M12 ALLOCATION query).
 ///
@@ -27,8 +27,17 @@ pub struct AllocationParams {
     /// Required byte alignment of each buffer (`1` = no constraint). Hardware
     /// consumers (DMA, GPU upload) commonly need 64- or 256-byte alignment.
     pub align: usize,
-    /// Memory domain the consumer wants the buffers allocated in.
+    /// Memory domain the consumer *prefers* the buffers allocated in. The
+    /// single concrete domain when there is no choice; the preferred pick out of
+    /// [`accepts`](Self::accepts) when there is.
     pub domain: MemoryDomainKind,
+    /// Every memory domain this consumer can accept, not just its preferred one.
+    /// Defaults to `only(domain)` so a single-domain consumer negotiates exactly
+    /// as before; a consumer that can take more (e.g. a sink that can read GPU
+    /// textures *or* fall back to System) widens this so the producer can keep
+    /// the frame copy-free when it is able to. The producer reconciles this
+    /// against what it can emit ([`resolve_for_producer`](Self::resolve_for_producer)).
+    pub accepts: DomainSet,
 }
 
 impl Default for AllocationParams {
@@ -38,6 +47,7 @@ impl Default for AllocationParams {
             min_buffers: 1,
             align: 1,
             domain: MemoryDomainKind::System,
+            accepts: DomainSet::only(MemoryDomainKind::System),
         }
     }
 }
@@ -51,6 +61,7 @@ impl AllocationParams {
             min_buffers,
             align: 1,
             domain: MemoryDomainKind::System,
+            accepts: DomainSet::only(MemoryDomainKind::System),
         }
     }
 
@@ -63,6 +74,7 @@ impl AllocationParams {
             min_buffers,
             align,
             domain: MemoryDomainKind::Cuda,
+            accepts: DomainSet::only(MemoryDomainKind::Cuda),
         }
     }
 
@@ -75,6 +87,7 @@ impl AllocationParams {
             min_buffers,
             align,
             domain: MemoryDomainKind::D3D11Texture,
+            accepts: DomainSet::only(MemoryDomainKind::D3D11Texture),
         }
     }
 
@@ -87,27 +100,54 @@ impl AllocationParams {
             min_buffers: self.min_buffers.max(upstream.min_buffers),
             align: self.align.max(upstream.align),
             domain: self.domain,
+            // The consumer-most side dictates the domain, so its acceptance set
+            // carries forward unchanged.
+            accepts: self.accepts,
         }
     }
 
     /// Join two *sibling* proposals that share one producer (the two branches of
     /// a tee's diamond). Unlike [`merge`](Self::merge), neither side dominates,
     /// so the memory domain cannot be picked unilaterally: the producer must
-    /// allocate one pool both branches can consume. Same domain joins to the
-    /// most-restrictive per parameter (the larger size, count, and alignment).
-    /// A differing domain is an empty intersection (no single pool satisfies a
-    /// CUDA consumer and a D3D11 consumer), so the join fails loud with
-    /// [`G2gError::AllocationConflict`] rather than silently honouring one branch.
+    /// allocate one pool both branches can consume. The result accepts the
+    /// domains *both* branches accept ([`DomainSet::intersect`]); the preferred
+    /// domain is the most-preferred survivor, and the rest is the most-restrictive
+    /// per parameter (the larger size, count, and alignment). An empty
+    /// intersection (no domain satisfies, say, a CUDA-only branch and a
+    /// D3D11-only branch) fails loud with [`G2gError::AllocationConflict`] rather
+    /// than silently honouring one branch.
+    ///
+    /// Single-domain branches reduce to the old behavior exactly: two matching
+    /// domains intersect to that one domain; two differing single domains
+    /// intersect to empty and conflict.
     pub fn join(self, other: Self) -> Result<Self, crate::error::G2gError> {
-        if self.domain != other.domain {
-            return Err(crate::error::G2gError::AllocationConflict);
-        }
+        let accepts = self.accepts.intersect(other.accepts);
+        let domain = accepts.preferred().ok_or(crate::error::G2gError::AllocationConflict)?;
         Ok(Self {
             size_bytes: self.size_bytes.max(other.size_bytes),
             min_buffers: self.min_buffers.max(other.min_buffers),
             align: self.align.max(other.align),
-            domain: self.domain,
+            domain,
+            accepts,
         })
+    }
+
+    /// Reconcile this downstream proposal against what the producer can actually
+    /// emit (`can`): intersect the accepted domains with the producer's
+    /// capability and settle on the most-preferred common domain. This turns the
+    /// allocation handoff from a one-sided dictate (consumer names a domain, the
+    /// producer silently obeys or mismatches) into a real two-sided negotiation.
+    /// Fails [`G2gError::AllocationConflict`] when producer and consumer share no
+    /// domain, which is a genuine conflict needing an auto-plugged converter
+    /// rather than something either side can resolve alone.
+    ///
+    /// A single-domain producer/consumer reduces to today's behavior: the result
+    /// is the consumer's one domain when the producer can emit it, else a
+    /// conflict.
+    pub fn resolve_for_producer(self, can: DomainSet) -> Result<Self, crate::error::G2gError> {
+        let accepts = self.accepts.intersect(can);
+        let domain = accepts.preferred().ok_or(crate::error::G2gError::AllocationConflict)?;
+        Ok(Self { domain, accepts, ..self })
     }
 }
 
@@ -245,6 +285,7 @@ mod tests {
             min_buffers: 4,
             align: 64,
             domain: MemoryDomainKind::DmaBuf,
+            accepts: DomainSet::only(MemoryDomainKind::DmaBuf),
         };
         let upstream = AllocationParams::system(4096, 2);
         let merged = downstream.merge(upstream);
@@ -252,6 +293,74 @@ mod tests {
         assert_eq!(merged.min_buffers, 4, "larger buffer count wins");
         assert_eq!(merged.align, 64, "stricter alignment wins");
         assert_eq!(merged.domain, MemoryDomainKind::DmaBuf, "consumer domain dictates");
+    }
+
+    #[test]
+    fn join_matching_single_domains_intersects_to_that_domain() {
+        // Backward-compat: two single-domain branches that agree join exactly as
+        // the old equality check did.
+        let a = AllocationParams::cuda(2048, 2, 256);
+        let b = AllocationParams::cuda(4096, 4, 256);
+        let j = a.join(b).expect("matching domains join");
+        assert_eq!(j.domain, MemoryDomainKind::Cuda);
+        assert_eq!(j.size_bytes, 4096);
+        assert_eq!(j.min_buffers, 4);
+    }
+
+    #[test]
+    fn join_disjoint_single_domains_conflicts() {
+        // Backward-compat: two differing single domains still fail loud.
+        let cuda = AllocationParams::cuda(1024, 2, 256);
+        let d3d = AllocationParams::d3d11(1024, 2, 256);
+        assert_eq!(cuda.join(d3d), Err(crate::error::G2gError::AllocationConflict));
+    }
+
+    #[test]
+    fn join_overlapping_multidomain_branches_picks_common_preferred() {
+        // The new win: branch A accepts {System, Cuda}, branch B accepts {Cuda}
+        // only. Their intersection is {Cuda}, so the join succeeds on Cuda where
+        // the old single-domain equality check (System vs Cuda) would conflict.
+        let mut a = AllocationParams::system(1024, 2);
+        a.accepts = DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda);
+        let b = AllocationParams::cuda(1024, 2, 256);
+        let j = a.join(b).expect("overlapping accept sets join");
+        assert_eq!(j.domain, MemoryDomainKind::Cuda, "common domain, GPU-preferred");
+    }
+
+    #[test]
+    fn resolve_for_producer_keeps_frame_on_gpu_when_both_can() {
+        // Consumer accepts {System, Cuda} preferring System; producer can emit
+        // {System, Cuda}. The reconciliation keeps it on the GPU (zero-copy)
+        // because Cuda outranks System in the preference order.
+        let mut want = AllocationParams::system(1024, 2);
+        want.accepts = DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda);
+        let can = DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::Cuda);
+        let r = want.resolve_for_producer(can).expect("shared domain");
+        assert_eq!(r.domain, MemoryDomainKind::Cuda);
+    }
+
+    #[test]
+    fn resolve_for_producer_falls_back_to_system_when_gpu_unavailable() {
+        // Consumer accepts {System, Cuda}; producer can only do System. The
+        // reconciliation settles on System rather than blindly honouring Cuda.
+        let mut want = AllocationParams::cuda(1024, 2, 256);
+        want.accepts = DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System);
+        let can = DomainSet::only(MemoryDomainKind::System);
+        let r = want.resolve_for_producer(can).expect("System is shared");
+        assert_eq!(r.domain, MemoryDomainKind::System);
+    }
+
+    #[test]
+    fn resolve_for_producer_conflicts_with_no_shared_domain() {
+        // A Cuda-only consumer against a System-only producer is a genuine
+        // conflict (needs a converter), surfaced loud instead of silently
+        // mishandled as today's one-sided dictate would.
+        let want = AllocationParams::cuda(1024, 2, 256);
+        let can = DomainSet::only(MemoryDomainKind::System);
+        assert_eq!(
+            want.resolve_for_producer(can),
+            Err(crate::error::G2gError::AllocationConflict)
+        );
     }
 
     #[test]
