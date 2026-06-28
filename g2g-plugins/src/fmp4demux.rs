@@ -20,12 +20,14 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, VideoCodec,
+    PipelinePacket, Rate, Seek, Segment, VideoCodec,
 };
 
+use crate::demuxseek::{Admit, DemuxSeek};
 use crate::fmp4::{parse_fragments, parse_header, starts_with_param_set, CencDefaults, Header, Sample};
 #[cfg(feature = "hls")]
 use crate::fmp4::Subsample;
@@ -47,6 +49,9 @@ pub struct Fmp4Demux {
     caps_sent: bool,
     sequence: u64,
     configured: bool,
+    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `with_seek` wired the controllers.
+    seek: DemuxSeek,
 }
 
 impl Default for Fmp4Demux {
@@ -68,7 +73,27 @@ impl Fmp4Demux {
             caps_sent: false,
             sequence: 0,
             configured: false,
+            seek: DemuxSeek::default(),
         }
+    }
+
+    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller,
+    /// which a time seek drives to reposition the stream. On the resulting
+    /// `Flush` the parser resets and re-syncs from the keyframe at/after target.
+    pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
+        self.seek.with(app, upstream);
+        self
+    }
+
+    /// Reset the parser for a discontinuity (a `Flush` / seek): drop buffered
+    /// bytes and any half-formed fragment, and re-prepend parameter sets to the
+    /// next emitted access unit. The codec / caps are unchanged (same file), so
+    /// `header` / `caps_sent` are kept (no redundant `CapsChanged`).
+    fn reset_parser(&mut self) {
+        self.buffer.clear();
+        self.pending_moof = None;
+        self.need_param_sets = true;
     }
 
     /// Share the cbcs key handle a `HlsSrc` publishes into (the auto-wired HLS
@@ -142,14 +167,19 @@ impl Fmp4Demux {
             match &kind {
                 b"moov" => {
                     let header = parse_header(&box_bytes)?;
-                    let caps = Self::output_caps(
-                        header.codec,
-                        Dim::Fixed(header.width),
-                        Dim::Fixed(header.height),
-                    );
-                    out.push(PipelinePacket::CapsChanged(caps)).await?;
-                    self.out_codec = header.codec;
-                    self.caps_sent = true;
+                    // Re-reading the moov on a seek re-parses the header (for
+                    // timescale / parameter sets) but does not re-announce the
+                    // unchanged caps.
+                    if !self.caps_sent {
+                        let caps = Self::output_caps(
+                            header.codec,
+                            Dim::Fixed(header.width),
+                            Dim::Fixed(header.height),
+                        );
+                        out.push(PipelinePacket::CapsChanged(caps)).await?;
+                        self.out_codec = header.codec;
+                        self.caps_sent = true;
+                    }
                     self.header = Some(header);
                 }
                 b"moof" => self.pending_moof = Some(box_bytes),
@@ -168,6 +198,16 @@ impl Fmp4Demux {
                     frag.extend_from_slice(&box_bytes);
                     let samples = self.parse_fragment_samples(&frag, timescale, codec, cenc.as_ref())?;
                     for s in samples {
+                        // M362 seek: drop samples until the keyframe at/after the
+                        // target; the resuming keyframe emits a fresh segment.
+                        match self.seek.admit(s.pts_ns, s.keyframe) {
+                            Admit::Drop => continue,
+                            Admit::Resume(start) => {
+                                let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                                out.push(PipelinePacket::Segment(seg)).await?;
+                            }
+                            Admit::Emit => {}
+                        }
                         let mut annexb = s.annexb;
                         if self.need_param_sets && !starts_with_param_set(&annexb, codec) {
                             let mut with_sets = Vec::new();
@@ -333,13 +373,26 @@ impl AsyncElement for Fmp4Demux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            // M362: a pending app seek triggers an upstream byte-seek; until its
+            // `Flush` returns, drop input so no stale pre-seek units are emitted.
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.buffer.extend_from_slice(slice.as_slice());
                     self.drain(out).await?;
+                }
+                // The upstream byte-seek's flush: reset the parser, then re-sync
+                // from the re-read stream. Forward it downstream.
+                PipelinePacket::Flush => {
+                    self.seek.on_flush();
+                    self.reset_parser();
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 // Nothing to flush (incomplete trailing boxes are dropped); the
                 // runner's transform arm forwards the EOS itself.

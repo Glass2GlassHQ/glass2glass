@@ -106,6 +106,9 @@ pub mod gst_compat;
 pub mod plugin_loader;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
+// Shared seek helper for byte-stream demuxers (M362): drives an upstream
+// byte-seek (FileSrc) and re-syncs from the returned Flush.
+mod demuxseek;
 // MPEG-TS demuxer parsing core (no_std): PAT/PMT/PES -> elementary access units.
 pub mod mpegts;
 // MPEG-TS demuxer element (no_std): Caps::ByteStream{MpegTs} -> H.264, wrapping
