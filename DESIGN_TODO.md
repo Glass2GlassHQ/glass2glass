@@ -46,8 +46,6 @@ leverage first:
   segment-done back-channel + gapless `accumulate_seek`; M359 wakeful
   `wait_event` park + `Mp4Src` looping a clip on `SEGMENT`); what remains is the
   demux/container-level segment transitions.
-- Re-preroll after a flushing seek when paused.
-- Make `FileSrc` and the demuxers seek-aware (only `Mp4Src` is today).
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).

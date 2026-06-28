@@ -23,13 +23,51 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, Tag, TagList,
+    PadTemplates, PipelinePacket, Seek, Segment, Tag, TagList,
 };
 
+use crate::demuxseek::{Admit, DemuxSeek};
 use crate::ogg::{OggCodec, OggDemuxer};
+
+/// Number of 48 kHz samples an Opus packet decodes to, from its TOC byte
+/// (RFC 6716 §3.1): config (top 5 bits) gives the per-frame duration, the frame
+/// count code (low 2 bits) the frame count. Opus is always 48 kHz, so this maps
+/// directly to a duration. `0` for an empty packet.
+fn opus_packet_samples(pkt: &[u8]) -> u32 {
+    let Some(&toc) = pkt.first() else {
+        return 0;
+    };
+    let frame_samples: u32 = match toc >> 3 {
+        // SILK NB/MB/WB and Hybrid SWB/FB: 10 / 20 / 40 / 60 ms.
+        0 | 4 | 8 => 480,
+        1 | 5 | 9 => 960,
+        2 | 6 | 10 => 1920,
+        3 | 7 | 11 => 2880,
+        12 | 14 => 480,
+        13 | 15 => 960,
+        // CELT NB/WB/SWB/FB: 2.5 / 5 / 10 / 20 ms.
+        16 | 20 | 24 | 28 => 120,
+        17 | 21 | 25 | 29 => 240,
+        18 | 22 | 26 | 30 => 480,
+        _ => 960,
+    };
+    let frames: u32 = match toc & 0x3 {
+        0 => 1,
+        1 | 2 => 2,
+        // Code 3: the frame count is the low 6 bits of the following byte.
+        _ => pkt.get(1).map(|b| (b & 0x3F) as u32).unwrap_or(1).max(1),
+    };
+    frame_samples.saturating_mul(frames)
+}
+
+/// Convert a 48 kHz sample count to nanoseconds.
+fn opus_samples_to_ns(samples: u64) -> u64 {
+    samples.saturating_mul(1_000_000_000) / 48_000
+}
 
 /// Demuxes an Ogg byte stream into its Opus audio elementary stream.
 #[derive(Debug)]
@@ -40,6 +78,12 @@ pub struct OggDemux {
     last_caps: Option<Caps>,
     bus: Option<BusHandle>,
     tags_posted: bool,
+    /// Running stream-time (ns) of the next audio packet, accumulated from each
+    /// Opus packet's decoded duration (the demuxer carries no per-packet PTS).
+    pts_ns: u64,
+    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `with_seek` wired the controllers.
+    seek: DemuxSeek,
 }
 
 impl Default for OggDemux {
@@ -57,7 +101,27 @@ impl OggDemux {
             last_caps: None,
             bus: None,
             tags_posted: false,
+            pts_ns: 0,
+            seek: DemuxSeek::default(),
         }
+    }
+
+    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// On a time seek the demuxer rewinds the source and re-syncs from the packet
+    /// at/after the target (every audio packet is a resync point).
+    pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
+        self.seek.with(app, upstream);
+        self
+    }
+
+    /// Reset the parser for a discontinuity (a `Flush` / seek): drop the Ogg
+    /// page/packet state and the running PTS, which the re-read stream
+    /// re-establishes from its first page. The caps are unchanged (same file), so
+    /// `last_caps` is kept (no redundant `CapsChanged`).
+    fn reset_parser(&mut self) {
+        self.demux = OggDemuxer::new();
+        self.pts_ns = 0;
     }
 
     /// Attach the pipeline bus so the stream's VorbisComment metadata posts as a
@@ -123,9 +187,23 @@ impl OggDemux {
             if !is_opus {
                 continue;
             }
+            let pts_ns = self.pts_ns;
+            self.pts_ns = self.pts_ns.saturating_add(opus_samples_to_ns(
+                opus_packet_samples(&packet) as u64,
+            ));
+            // M362 seek: every audio packet is a resync point, so drop until the
+            // first packet at/after the target, which emits a fresh segment.
+            match self.seek.admit(pts_ns, true) {
+                Admit::Drop => continue,
+                Admit::Resume(start) => {
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                Admit::Emit => {}
+            }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(packet.into_boxed_slice())),
-                FrameTiming::default(),
+                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
                 self.emitted,
             );
             self.emitted += 1;
@@ -171,13 +249,26 @@ impl AsyncElement for OggDemux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            // M362: a pending app seek triggers an upstream byte-seek; until its
+            // `Flush` returns, drop input so no stale pre-seek packets are emitted.
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.demux.push_data(slice.as_slice());
                     self.emit_ready(out).await?;
+                }
+                // The upstream byte-seek's flush: reset the parser, then re-sync
+                // from the re-read stream. Forward it downstream.
+                PipelinePacket::Flush => {
+                    self.seek.on_flush();
+                    self.reset_parser();
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
                     // Emit any final packets; the runner's transform arm forwards EOS.

@@ -1627,9 +1627,19 @@ re-prerolls. The arm drains the stale pre-seek frames (discarding, not presentin
 until the `Flush`, then prerolls the post-flush target and re-fires `AsyncDone`,
 so scrubbing a paused pipeline updates the shown frame. **Byte-source seek
 (M361).** `FileSrc` is BYTES-format seekable (`with_seek`): a flushing seek
-repositions the file read to a byte offset and emits `Flush`; a downstream demuxer
-that resolves a time seek to a byte offset drives a clone of its controller.
-Container-level segment seeks (CMAF / DASH transitions) remain open (DESIGN_TODO).
+repositions the file read to a byte offset and emits `Flush`. **Demuxer seek
+(M362-M366).** A byte-stream demuxer (a transform with no random access) becomes
+seekable by driving that upstream byte source. A shared `DemuxSeek` helper turns
+an app time seek into an upstream byte-seek to offset 0, drops in-flight pre-seek
+input until the returned `Flush`, resets the demuxer's parser, then discards
+decoded units until the keyframe at/after the target and emits a resume
+`Segment` (correct for any container without an index; a re-scan, with an
+index-derived offset a later optimization). All five carry it
+(`fmp4demux` / `tsdemux` / `mkvdemux` / `flvdemux` / `oggdemux`), each using its
+own keyframe signal (the container flag, or `annexb::au_is_keyframe` for TS whose
+units have none; every audio packet is a resync point, and `oggdemux` now
+accumulates an Opus PTS from the TOC byte). Container-level segment seeks
+(CMAF / DASH transitions) remain open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 
