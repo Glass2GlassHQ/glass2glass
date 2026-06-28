@@ -63,7 +63,11 @@ OS-coupled elements live behind cargo features:
 | `WaylandSink` | `wayland-sink` | Linux + Wayland |
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
-| `CudaDownload`, `CudaGlSink` | `cuda`, `cuda-gl` | Linux + NVIDIA driver (libcuda) + EGL + GL |
+| `NvDec` (native NVDEC H.264/H.265 → CUDA NV12, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
+| `NvEnc` (native NVENC CUDA NV12 → H.264/H.265) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
+| `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
+| `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
+| `CudaToWgpu` / `WgpuToCuda` (CUDA ↔ wgpu zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + RTP packetizer | `udp-egress` | — |
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
@@ -131,6 +135,30 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 
 Features: `rtsp ffmpeg cuda cuda-gl`. Linux + NVIDIA only. See
 [DESIGN.md §4.11.5](DESIGN.md).
+
+### Native NVDEC → NVENC transcode, GPU-resident, with domain auto-plug
+
+`NvDec` / `NvEnc` drive NVCUVID / NVENC directly (no libavcodec). The decode
+stays in `MemoryDomain::Cuda` straight into the encoder. Memory-domain
+negotiation settles a shared domain when one exists; where it can't (a CPU-side
+NV12 source feeding the CUDA-only `NvEnc`), `auto_plug_cuda_converters` splices a
+`CudaUpload` automatically — no hand-wiring.
+
+```rust
+let mut g: Graph<GraphNode> = Graph::new();
+let src = g.add_source(GraphNode::source(my_nv12_source));   // System NV12
+let enc = g.add_transform(GraphNode::element(NvEnc::new())); // CUDA NV12 → H.264
+let snk = g.add_sink(GraphNode::element(my_h264_sink));
+g.link(src, enc).unwrap();
+g.link(enc, snk).unwrap();
+
+let g = auto_plug_cuda_converters(g);   // splices CudaUpload: src → [CudaUpload] → enc → snk
+run_graph(g, &clock, LatencyProfile::Live).await?;
+```
+
+Features: `nvenc` (`nvdec` for the decoder). Linux + NVIDIA only. `NvDec`
+itself is multi-domain: driven by downstream demand it keeps frames on the GPU
+(zero-copy) or downloads to System.
 
 ### RTSP → decode → KMS (tty / no compositor)
 

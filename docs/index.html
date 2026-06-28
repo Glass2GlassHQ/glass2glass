@@ -631,7 +631,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
                 <h3>Decode + encode: ffmpeg / VAAPI / MF / VideoToolbox / MediaCodec / WebCodecs</h3>
-                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda / VAAPI backends (the VAAPI hwaccel is the Linux AMD / Intel path, <code>ffmpegvaapidec</code>); <code>MfDecode</code> (Windows), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK, H.264 / H.265, on-device validated, with a zero-copy GPU-texture output path), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust), <code>VtEncode</code> (macOS), <code>MfEncode</code> (Windows).</p>
+                <p><code>FfmpegVideoDec</code> (H.264/265, VP8/9, AV1) with sw / NvdecCuvid / NvdecCuda / VAAPI backends (the VAAPI hwaccel is the Linux AMD / Intel path, <code>ffmpegvaapidec</code>); native NVIDIA <code>NvDec</code> / <code>NvEnc</code> drive NVCUVID / NVENC directly (no libavcodec) keeping H.264/265 GPU-resident in <code>MemoryDomain::Cuda</code>; <code>MfDecode</code> (Windows), <code>VtDecode</code> (macOS VideoToolbox), <code>MediaCodecDec</code> (Android NDK, H.264 / H.265, on-device validated, with a zero-copy GPU-texture output path), <code>WebCodecsDecode</code>; encoders <code>Av1Enc</code> (rav1e), <code>VpxEnc</code> (libvpx), <code>MjpegDec</code> / <code>MjpegEnc</code> (pure Rust), <code>VtEncode</code> (macOS), <code>MfEncode</code> (Windows).</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
@@ -709,7 +709,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128279;</span>
                 <h3>CSP caps negotiation</h3>
-                <p><code>CapsSet</code> with alternatives + preferences, <code>solve_linear</code> with arc consistency, structured <code>NegotiationFailure</code>, mid-stream re-solve over the downstream subgraph (Caps-α).</p>
+                <p><code>CapsSet</code> with alternatives + preferences; <code>solve_graph</code> runs arc consistency over the whole DAG with backtracking fixation (true diamonds), <code>solve_linear</code> for chains; structured <code>NegotiationFailure</code>; mid-stream re-solve over the downstream subgraph (Caps-α). Memory-domain negotiation runs alongside caps: producers advertise <code>output_domains</code>, consumers <code>accepts</code> / <code>input_domains</code>, and the runner settles a shared domain (GPU-preferred) or auto-plugs a converter.</p>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
@@ -757,7 +757,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128293;</span>
                 <h3>CUDA zero-copy track</h3>
-                <p><code>MemoryDomain::Cuda</code> in core, <code>Backend::NvdecCuda</code> keeps NV12 in device memory, <code>CudaDownload</code> + <code>CudaGlSink</code> via CUDA&harr;GL interop (not dmabuf &mdash; doesn't work on NVIDIA).</p>
+                <p>Native <code>NvDec</code> / <code>NvEnc</code> (NVCUVID / NVENC, no libavcodec) keep H.264/265 in <code>MemoryDomain::Cuda</code> end to end; <code>CudaToWgpu</code> / <code>WgpuToCuda</code> bridge CUDA &harr; wgpu zero-copy; <code>CudaGlSink</code> / <code>CudaKmsSink</code> present via CUDA&harr;GL interop (not dmabuf &mdash; doesn't work on NVIDIA). <code>CudaUpload</code> / <code>CudaDownload</code> convert System &harr; CUDA, auto-plugged on a domain mismatch. <code>NvDec</code> is multi-domain (keep-on-GPU vs download by negotiation). Validated on an RTX 3060.</p>
                 <span class="feature-tag tag-gpu">GPU</span>
             </div>
             <div class="feature-card">
