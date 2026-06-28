@@ -17,7 +17,10 @@ use crate::state::PipelineState;
 use crate::tag::TagList;
 
 /// An out-of-band message from an element to the application.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Not `Eq`: `StreamCollection` carries `Caps`, which is only `PartialEq` (its
+// geometry / rate placeholders are not totally ordered). `PartialEq` is enough
+// for the bus (assert_eq! in tests, direct comparison); nothing keys on it.
+#[derive(Debug, Clone, PartialEq)]
 pub enum BusMessage {
     /// A new stream has started: posted by the runner's source arm before the
     /// source produces any data, one per source (the GStreamer
@@ -92,6 +95,14 @@ pub enum BusMessage {
     /// demuxer with a tag source (e.g. `oggdemux` parsing VorbisComment) posts
     /// it once the metadata header is parsed.
     Tag(TagList),
+    /// The elementary streams a demuxer found in the container (the GStreamer
+    /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin3 is
+    /// built on). Posted out of band once the demuxer has parsed its track list,
+    /// listing *every* available audio / video / text stream (its type and
+    /// [`Caps`](crate::caps::Caps)) regardless of which one(s) the demuxer
+    /// forwards, so the application can discover what is in the container. App
+    /// driven selection among them is a follow-up.
+    StreamCollection(crate::stream::StreamCollection),
     /// The total stream duration became known or changed (the GStreamer
     /// `GST_MESSAGE_DURATION_CHANGED` analog, M203). Posted by the runner's
     /// source arm when a source first reports a duration

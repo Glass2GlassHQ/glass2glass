@@ -43,7 +43,7 @@ use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
-    TagList, VideoCodec,
+    Stream, StreamCollection, StreamType, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -88,6 +88,9 @@ pub struct MkvDemux {
     /// Count of tags already posted, so newly parsed tags (the `Tags` element
     /// can trail the `Info` `Title`) post once each.
     tags_posted: usize,
+    /// Set once the `StreamCollection` has been announced (M376), so the demuxer
+    /// posts the available-streams list once, when the `Tracks` element parses.
+    collection_posted: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -116,6 +119,7 @@ impl MkvDemux {
             last_caps: None,
             bus: None,
             tags_posted: 0,
+            collection_posted: false,
             seek: DemuxSeek::default(),
             app: None,
             upstream: None,
@@ -277,11 +281,66 @@ impl MkvDemux {
         }
     }
 
+    /// Announce every elementary stream the container declares as a
+    /// [`BusMessage::StreamCollection`] (M376), once, when the `Tracks` element
+    /// has parsed. Lists all tracks regardless of which one this instance
+    /// forwards: the discovery half of the playbin3 model. A no-op without a bus,
+    /// before Tracks is parsed, or once already posted (kept across a mid-segment
+    /// seek's `reset_keeping_tracks`, so an unchanged collection re-posts).
+    fn post_stream_collection(&mut self) {
+        if self.collection_posted {
+            return;
+        }
+        let tracks = self.demux.tracks();
+        if tracks.is_empty() {
+            return;
+        }
+        let streams: alloc::vec::Vec<Stream> =
+            tracks.iter().filter_map(Self::track_to_stream).collect();
+        if streams.is_empty() {
+            return;
+        }
+        self.collection_posted = true;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("matroska-0", streams)));
+        }
+    }
+
+    /// Map one parsed Matroska track to a [`Stream`] for the collection: its kind
+    /// (video / audio) and the [`Caps`] it carries, with concrete geometry / audio
+    /// parameters when the track declared them. `None` for an unmappable codec.
+    fn track_to_stream(track: &crate::matroska::MkvTrack) -> Option<Stream> {
+        let id = alloc::format!("matroska-track-{}", track.number);
+        let video = |codec| Caps::CompressedVideo {
+            codec,
+            width: if track.width > 0 { Dim::Fixed(track.width) } else { Dim::Any },
+            height: if track.height > 0 { Dim::Fixed(track.height) } else { Dim::Any },
+            framerate: Rate::Any,
+        };
+        let audio = |format| Caps::Audio {
+            format,
+            channels: track.channels.max(1),
+            sample_rate: track.sample_rate,
+        };
+        let (stream_type, caps) = match track.codec {
+            MkvCodec::H264 => (StreamType::Video, video(VideoCodec::H264)),
+            MkvCodec::H265 => (StreamType::Video, video(VideoCodec::H265)),
+            MkvCodec::Vp8 => (StreamType::Video, video(VideoCodec::Vp8)),
+            MkvCodec::Vp9 => (StreamType::Video, video(VideoCodec::Vp9)),
+            MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
+            MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
+            MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
+            MkvCodec::Other => return None,
+        };
+        Some(Stream::new(id, stream_type, caps))
+    }
+
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         if self.bus.is_some() {
             self.post_tags();
+            self.post_stream_collection();
         }
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {

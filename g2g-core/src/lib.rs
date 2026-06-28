@@ -44,6 +44,7 @@ pub mod query;
 pub mod segment;
 pub mod state;
 pub mod staticpool;
+pub mod stream;
 pub mod tag;
 pub mod tensor;
 
@@ -106,6 +107,7 @@ pub use query::{AllocationParams, LatencyReport};
 pub use segment::{Seek, SeekFlags, SeekType, Segment};
 pub use state::{PipelineState, StateChangeReturn};
 pub use staticpool::{RingSlot, StaticAcquire, StaticBufferPool, StaticLendRing, StaticPooled};
+pub use stream::{Stream, StreamCollection, StreamType};
 pub use tag::{Tag, TagList};
 
 #[cfg(feature = "runtime")]
