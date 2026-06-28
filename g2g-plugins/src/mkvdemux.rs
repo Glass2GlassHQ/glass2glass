@@ -20,8 +20,15 @@
 //! needed for the dimensions). The default is `Vp9`, WebM's video codec; set the
 //! `stream` property to match the file.
 //!
+//! Seeking uses the `Cues` index when it has been parsed (M373): the demuxer
+//! byte-seeks straight to the target Cluster, keeping its parser state, instead
+//! of the M364 re-scan from offset 0 (the fallback when `Cues` are not yet known).
+//!
 //! Scope (v1): the first track of the selected codec; multi-track-of-one-codec
-//! selection, lacing, and seeking (Cues) are follow-ups (DESIGN.md §4.17).
+//! selection and lacing are follow-ups (DESIGN.md §4.17). `Cues` placed at the
+//! end of the file (the common layout) are only available for the fast path once
+//! read past during playback; a `SeekHead`-driven prefetch is a follow-up (the
+//! re-scan fallback handles the not-yet-known case correctly meanwhile).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -293,9 +300,14 @@ impl AsyncElement for MkvDemux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            // M362: a pending app seek triggers an upstream byte-seek; until its
-            // `Flush` returns, drop input so no stale pre-seek frames are emitted.
-            self.seek.poll_request();
+            // M362/M373: a pending app seek triggers an upstream byte-seek; until
+            // its `Flush` returns, drop input so no stale pre-seek frames are
+            // emitted. If the `Cues` index is already parsed, seek straight to the
+            // target Cluster (mid-segment, parser state kept); else re-scan from 0.
+            {
+                let demux = &self.demux;
+                self.seek.poll_request_indexed(|target| demux.cue_seek_offset(target));
+            }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if self.seek.dropping_input() {
@@ -308,10 +320,17 @@ impl AsyncElement for MkvDemux {
                     self.emit_ready(out).await?;
                 }
                 // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. Forward it downstream.
+                // from the re-read stream. A `Cues` (indexed) seek landed inside
+                // the Segment, so keep the Tracks / TimestampScale / Cues the
+                // landing point does not re-send; a from-start re-scan fully resets
+                // (it re-reads the EBML header). Forward the flush downstream.
                 PipelinePacket::Flush => {
                     self.seek.on_flush();
-                    self.reset_parser();
+                    if self.seek.keeps_state() {
+                        self.demux.reset_keeping_tracks();
+                    } else {
+                        self.reset_parser();
+                    }
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {

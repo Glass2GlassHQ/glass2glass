@@ -18,8 +18,10 @@
 //! handled, the latter (the live-streaming shape) descended into and its children
 //! parsed until the next top-level element ends it. SimpleBlock / Block frames,
 //! including all three lacing modes (Xiph / EBML / fixed), are split; laced frames
-//! share the block timestamp. Cues (seeking), BlockGroup reference tracking, and
-//! per-frame timestamp interpolation from DefaultDuration are follow-ups.
+//! share the block timestamp. The `Cues` index is parsed into a time -> Cluster
+//! byte-position map ([`MatroskaDemuxer::cue_seek_offset`]) for indexed seeking
+//! (M373). BlockGroup reference tracking and per-frame timestamp interpolation
+//! from DefaultDuration are follow-ups.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -59,6 +61,10 @@ const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
 const ID_SEEK_HEAD: u32 = 0x114D_9B74;
 const ID_CUES: u32 = 0x1C53_BB6B;
+const ID_CUE_POINT: u32 = 0x00BB;
+const ID_CUE_TIME: u32 = 0x00B3;
+const ID_CUE_TRACK_POSITIONS: u32 = 0x00B7;
+const ID_CUE_CLUSTER_POSITION: u32 = 0x00F1;
 const ID_CHAPTERS: u32 = 0x1043_A770;
 const ID_ATTACHMENTS: u32 = 0x1941_A469;
 
@@ -167,6 +173,19 @@ pub struct MkvTrack {
     pub default_duration_ns: u64,
 }
 
+/// One `CuePoint` from the Segment `Cues` index: a seekable time and the byte
+/// position of the Cluster that holds it. `cluster_position` is **relative to the
+/// Segment's data start** (the byte after the Segment element header), per the
+/// Matroska spec; [`MatroskaDemuxer::cue_seek_offset`] adds the tracked Segment
+/// data offset to give an absolute file offset for an upstream byte-seek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CuePoint {
+    /// Seekable presentation time in nanoseconds (`CueTime` scaled).
+    pub time_ns: u64,
+    /// `CueClusterPosition`: the Cluster's byte offset from the Segment data start.
+    pub cluster_position: u64,
+}
+
 /// One demuxed frame (a SimpleBlock / Block payload) of an elementary stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MkvFrame {
@@ -190,6 +209,16 @@ pub struct MatroskaDemuxer {
     /// `Some` while its children are being parsed at the top level, `None`
     /// otherwise. A definite-size Cluster never sets this (it is consumed whole).
     open_cluster_ts: Option<u64>,
+    /// Absolute byte offset of `buf[0]` in the source stream (bytes consumed so
+    /// far). Used once to fix `segment_data_pos`, the anchor for Cue positions.
+    consumed: u64,
+    /// Absolute byte offset of the Segment's data start (first byte after the
+    /// Segment header), the anchor `CueClusterPosition` is relative to. `None`
+    /// until the Segment header is seen; kept across a mid-segment seek.
+    segment_data_pos: Option<u64>,
+    /// The parsed `Cues` index (empty until the `Cues` element is seen), the
+    /// time -> Cluster-position map [`cue_seek_offset`](Self::cue_seek_offset) uses.
+    cues: Vec<CuePoint>,
     completed: Vec<MkvFrame>,
 }
 
@@ -208,8 +237,53 @@ impl MatroskaDemuxer {
             tracks: Vec::new(),
             tags: TagList::new(),
             open_cluster_ts: None,
+            consumed: 0,
+            segment_data_pos: None,
+            cues: Vec::new(),
             completed: Vec::new(),
         }
+    }
+
+    /// The parsed `Cues` index (empty until the `Cues` element is seen).
+    pub fn cues(&self) -> &[CuePoint] {
+        &self.cues
+    }
+
+    /// The absolute byte offset to seek to for `target_ns` using the `Cues` index:
+    /// the Segment data start plus the position of the Cluster with the largest
+    /// `CueTime` at or before the target (the keyframe at/before it; the demuxer's
+    /// re-sync then advances to the first keyframe >= target). `None` if no `Cues`
+    /// have been parsed or the Segment offset is unknown, so the caller falls back
+    /// to a re-scan from the start. A target before the first cue clamps to it.
+    pub fn cue_seek_offset(&self, target_ns: u64) -> Option<u64> {
+        let base = self.segment_data_pos?;
+        if self.cues.is_empty() {
+            return None;
+        }
+        let cue = self
+            .cues
+            .iter()
+            .filter(|c| c.time_ns <= target_ns)
+            .max_by_key(|c| c.time_ns)
+            .or_else(|| self.cues.iter().min_by_key(|c| c.time_ns))?;
+        Some(base.saturating_add(cue.cluster_position))
+    }
+
+    /// Reset for a mid-segment (Cue-indexed) seek: drop the byte buffer and any
+    /// open-Cluster state, but keep what the file already established and the
+    /// landing point does not re-send, the `Tracks` / `TimestampScale` / `Tags` /
+    /// `Cues` / Segment offset. (A full re-scan from offset 0 uses [`new`](Self::new)
+    /// instead, since it re-reads the EBML header and Tracks.)
+    pub fn reset_keeping_tracks(&mut self) {
+        self.buf.clear();
+        self.open_cluster_ts = None;
+        self.completed.clear();
+    }
+
+    /// Consume `n` bytes from the front of `buf`, advancing the absolute position.
+    fn consume(&mut self, n: usize) {
+        self.buf.drain(..n);
+        self.consumed = self.consumed.saturating_add(n as u64);
     }
 
     /// The elementary streams announced by `Tracks` (empty until it is seen).
@@ -248,7 +322,12 @@ impl MatroskaDemuxer {
             if id == ID_SEGMENT {
                 // Descend: a Segment's children are parsed at this level, so its
                 // own size (definite or unknown) is never needed.
-                self.buf.drain(..header);
+                self.consume(header);
+                // Anchor for Cue cluster positions: the Segment data start. Fixed
+                // once (a mid-segment seek lands past the header, never re-here).
+                if self.segment_data_pos.is_none() {
+                    self.segment_data_pos = Some(self.consumed);
+                }
                 self.in_segment = true;
                 continue;
             }
@@ -257,7 +336,7 @@ impl MatroskaDemuxer {
             // its children are parsed at this level until the next top-level
             // element ends it.
             if id == ID_CLUSTER && unknown {
-                self.buf.drain(..header);
+                self.consume(header);
                 self.open_cluster_ts = Some(0);
                 continue;
             }
@@ -287,7 +366,7 @@ impl MatroskaDemuxer {
                             );
                             self.completed.extend(frames);
                         }
-                        self.buf.drain(..total);
+                        self.consume(total);
                         continue;
                     }
                     // A real level-1 sibling ends the Cluster; handle it below.
@@ -303,7 +382,7 @@ impl MatroskaDemuxer {
                         if self.buf.len() < total {
                             return;
                         }
-                        self.buf.drain(..total);
+                        self.consume(total);
                         continue;
                     }
                 }
@@ -340,13 +419,51 @@ impl MatroskaDemuxer {
                             parse_cluster(&self.buf[header..total], &self.tracks, self.timestamp_scale);
                         self.completed.extend(frames);
                     }
-                    _ => {} // SeekHead / Cues / Chapters / Void, etc.
+                    // The Cues index: time -> Cluster byte position, for indexed
+                    // seeking (`cue_seek_offset`). Often trails the Clusters.
+                    ID_CUES => {
+                        self.cues = parse_cues(&self.buf[header..total], self.timestamp_scale);
+                    }
+                    _ => {} // SeekHead / Chapters / Void, etc.
                 }
             }
             // (elements before the Segment, e.g. the EBML header, are skipped.)
-            self.buf.drain(..total);
+            self.consume(total);
         }
     }
+}
+
+/// Parse a `Cues` element into its [`CuePoint`]s. Each `CuePoint` carries a
+/// `CueTime` (scaled to ns here) and, in its `CueTrackPositions`, a
+/// `CueClusterPosition` (kept relative to the Segment data start). Points missing
+/// either field are skipped; the track of the position is ignored (v1: one
+/// indexed track, the muxer writes a single set).
+fn parse_cues(body: &[u8], timestamp_scale: u64) -> Vec<CuePoint> {
+    let mut out = Vec::new();
+    for (id, cue_point) in children(body) {
+        if id != ID_CUE_POINT {
+            continue;
+        }
+        let mut time = None;
+        let mut pos = None;
+        for (cid, c) in children(cue_point) {
+            match cid {
+                ID_CUE_TIME => time = Some(read_uint(c)),
+                ID_CUE_TRACK_POSITIONS => {
+                    for (pid, p) in children(c) {
+                        if pid == ID_CUE_CLUSTER_POSITION {
+                            pos = Some(read_uint(p));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(t), Some(p)) = (time, pos) {
+            out.push(CuePoint { time_ns: t.saturating_mul(timestamp_scale), cluster_position: p });
+        }
+    }
+    out
 }
 
 /// Iterate the direct child elements of a master element body, yielding
@@ -1501,5 +1618,71 @@ mod tests {
         let bytes = MatroskaMuxer::new(spec).push_frame(&[0], 0, true);
         // The DocType string appears in the EBML header for a WebM codec.
         assert!(bytes.windows(4).any(|w| w == b"webm"), "VP9 muxes as WebM");
+    }
+
+    /// A `CuePoint`: CueTime + CueTrackPositions(CueTrack, CueClusterPosition).
+    fn cue_point(time: u64, track: u64, pos: u64) -> Vec<u8> {
+        let tp = [elem(&[0xF7], &uint_body(track)), elem(&[0xF1], &uint_body(pos))].concat();
+        let body = [elem(&[0xB3], &uint_body(time)), elem(&[0xB7], &tp)].concat();
+        elem(&[0xBB], &body)
+    }
+
+    #[test]
+    fn parses_cues_and_resolves_seek_offsets() {
+        let ebml = elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]);
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((320, 240)), None));
+        let cluster = |ts: u64, frame: &[u8]| {
+            elem(
+                &[0x1F, 0x43, 0xB6, 0x75],
+                &[elem(&[0xE7], &uint_body(ts)), elem(&[0xA3], &block_body(1, 0, true, frame))]
+                    .concat(),
+            )
+        };
+        let cluster0 = cluster(0, &[0xAA]);
+        let cluster1 = cluster(1000, &[0xBB]); // 1000 ms with the default 1 ms scale = 1 s
+        // Cues sit after the Clusters (the common layout): positions are relative
+        // to the Segment data start.
+        let cluster0_pos = tracks.len() as u64;
+        let cluster1_pos = (tracks.len() + cluster0.len()) as u64;
+        let cues = elem(
+            &[0x1C, 0x53, 0xBB, 0x6B],
+            &[cue_point(0, 1, cluster0_pos), cue_point(1000, 1, cluster1_pos)].concat(),
+        );
+        let body = [tracks.clone(), cluster0.clone(), cluster1, cues].concat();
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &body);
+        let seg_data_pos = ebml.len() as u64 + (segment.len() - body.len()) as u64;
+        let file = [ebml, segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+
+        assert_eq!(d.cues().len(), 2);
+        assert_eq!(d.cues()[0], CuePoint { time_ns: 0, cluster_position: cluster0_pos });
+        assert_eq!(
+            d.cues()[1],
+            CuePoint { time_ns: 1000 * DEFAULT_TIMESTAMP_SCALE, cluster_position: cluster1_pos }
+        );
+
+        // A seek at the second cue's exact time lands on Cluster1; the absolute
+        // offset points at the Cluster element id in the file.
+        let off = d.cue_seek_offset(1000 * DEFAULT_TIMESTAMP_SCALE).unwrap();
+        assert_eq!(off, seg_data_pos + cluster1_pos);
+        assert_eq!(&file[off as usize..off as usize + 4], &[0x1F, 0x43, 0xB6, 0x75]);
+
+        // A target between cues snaps back to the largest cue at/before it (Cluster0).
+        assert_eq!(
+            d.cue_seek_offset(500 * DEFAULT_TIMESTAMP_SCALE),
+            Some(seg_data_pos + cluster0_pos)
+        );
+        // A target before the first cue clamps to it.
+        assert_eq!(d.cue_seek_offset(0), Some(seg_data_pos + cluster0_pos));
+    }
+
+    #[test]
+    fn cue_seek_offset_none_without_cues() {
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&synthetic_webm()); // no Cues element
+        assert!(d.cues().is_empty());
+        assert_eq!(d.cue_seek_offset(0), None, "no index -> caller re-scans from 0");
     }
 }

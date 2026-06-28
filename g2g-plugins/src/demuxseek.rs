@@ -65,6 +65,11 @@ pub(crate) struct DemuxSeek {
     /// Demuxer -> upstream byte source (e.g. `FileSrc`) byte-offset seeks.
     upstream: Option<SeekController>,
     phase: Phase,
+    /// Whether the in-flight seek resolved to a real byte offset (an index hit,
+    /// `poll_request_indexed`) rather than a re-scan from `0`. The caller reads it
+    /// in its `Flush` handler to decide whether to keep mid-stream parser state
+    /// (a mid-segment landing) or fully reset (a from-start re-scan).
+    keep_state: bool,
 }
 
 impl DemuxSeek {
@@ -75,10 +80,23 @@ impl DemuxSeek {
         self.upstream = Some(upstream);
     }
 
-    /// Poll for a pending flushing time seek. On one, request an upstream
-    /// byte-seek to the file start and enter the awaiting-flush phase; returns
-    /// `true` so the caller knows seeking began. A no-op without both controllers.
+    /// Poll for a pending flushing time seek, re-scanning from the file start
+    /// (offset `0`): correct for any container without an index. A no-op without
+    /// both controllers. (The default; [`poll_request_indexed`](Self::poll_request_indexed)
+    /// adds an index fast path.)
     pub(crate) fn poll_request(&mut self) -> bool {
+        self.poll_request_indexed(|_| None)
+    }
+
+    /// Like [`poll_request`](Self::poll_request), but `resolve(target_ns)` may
+    /// return an upstream byte offset from an index (e.g. Matroska `Cues`) to seek
+    /// directly to the target region. `Some(offset)` seeks there and marks the
+    /// seek state-preserving ([`keeps_state`](Self::keeps_state)) since the landing
+    /// is mid-stream; `None` falls back to a re-scan from `0` (full reset).
+    pub(crate) fn poll_request_indexed(
+        &mut self,
+        resolve: impl FnOnce(u64) -> Option<u64>,
+    ) -> bool {
         if self.phase != Phase::Idle {
             return false;
         }
@@ -87,13 +105,23 @@ impl DemuxSeek {
         };
         match app.take_pending() {
             Some(seek) if seek.is_flush() => {
-                // Re-scan from the start (offset 0): correct for any container.
-                upstream.seek(Seek::flush_to(0));
+                let (offset, keep) = match resolve(seek.start) {
+                    Some(o) => (o, true),
+                    None => (0, false),
+                };
+                upstream.seek(Seek::flush_to(offset));
+                self.keep_state = keep;
                 self.phase = Phase::AwaitingFlush { target_ns: seek.start };
                 true
             }
             _ => false,
         }
+    }
+
+    /// Whether the in-flight seek landed mid-stream via an index hit (so the
+    /// caller keeps its parser's stream state) rather than re-scanning from `0`.
+    pub(crate) fn keeps_state(&self) -> bool {
+        self.keep_state
     }
 
     /// Whether the demuxer should ignore input now (awaiting the upstream flush,

@@ -212,8 +212,10 @@ leverage first:
 
 ## Containers
 
-- **MKV / WebM:** Cues / seeking; `Targets`-scoped (per-track) tags.
-  (Multi-track A/V muxing landed: `mkvmuxn`, M294.)
+- **MKV / WebM:** `SeekHead`-driven `Cues` prefetch (so an end-of-file `Cues`
+  index is usable before reaching it); the muxer writing a `Cues` element;
+  `Targets`-scoped (per-track) tags. (Multi-track A/V muxing landed: `mkvmuxn`,
+  M294; `Cues` parsing + indexed demuxer seek landed, M373.)
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
 - **OGG:** granule-position timing; Vorbis output; multi-stream; `oggmux`.
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
