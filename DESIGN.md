@@ -1473,6 +1473,24 @@ known without sniffing the byte stream.
   `build_playbin3_graph_with_source` rather than the `file://` handler's
   MP4-self-demuxing source.
 
+- **Gapless playback** (`std`, M383). The playbin `about-to-finish` + next-`uri`
+  analog: `GaplessSrc` (`g2g-plugins`) concatenates a playlist of sources into
+  one continuous, monotonically-timed stream, reusing the downstream decode chain
+  across items (the read-side analog of GStreamer reusing one decodebin across
+  URIs). It wraps a current `DynSourceLoop` and a shared `GaplessController`
+  (core, the `SeekController`-shaped app<->source channel: an `enqueue` playlist
+  queue, an about-to-finish back-channel, a latching `finish`, and a wakeful
+  `wait_event` idle). The source plays the current item, posts about-to-finish
+  when nothing is queued behind it (so the app enqueues the next item *during*
+  playback for a seamless swap), and on the item's EOS pulls the next, rebasing
+  its PTS/DTS onto the running timeline via an interposing `ShiftSink` that also
+  swallows the inner item's `Eos` — so the only terminal `Eos` is the one
+  `GaplessSrc` emits when the `finish`ed playlist drains. This is the source-swap
+  counterpart of the M358 segment loop (which loops *one* item via a `SEGMENT`
+  seek); both are poll-based with a wakeful idle. v1 concatenates same-codec items
+  (a per-item caps refinement still flows via the inner source's `CapsChanged`);
+  instant (flush) URI switching and an A/V offset are follow-ups.
+
 - **Memory-feature-aware selection** (M276). The `Caps` algebra encodes media
   type, format, and geometry but *not* the memory domain a producer emits, so a
   GPU-resident decoder (`NvDec` → NV12 in `MemoryDomain::Cuda`) is

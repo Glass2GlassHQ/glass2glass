@@ -28,6 +28,9 @@ mod blocking;
 mod fanin;
 
 #[cfg(feature = "std")]
+mod gapless;
+
+#[cfg(feature = "std")]
 mod graph_runner;
 
 #[cfg(feature = "std")]
@@ -70,6 +73,9 @@ pub use fanin::{
     run_muxer_sink, run_muxer_sink_dynamic, run_muxer_sink_with_bus, DynMultiInputElement,
     DynamicFaninHandle, DynSourceLoop,
 };
+
+#[cfg(feature = "std")]
+pub use gapless::{GaplessController, GaplessWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
