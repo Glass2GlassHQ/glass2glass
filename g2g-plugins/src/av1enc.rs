@@ -8,9 +8,10 @@
 //! came from (`Packet::input_frameno`), since AV1 may reorder. Output is the
 //! low-overhead OBU stream that [`crate::av1parse::Av1Parse`] reads.
 //!
-//! Scope (v1): 8-bit 4:2:0 (I420), geometry fixed at configure. The speed preset
-//! is builder-configurable (`with_speed`, 0..=10); rate control uses the rav1e
-//! quantizer default.
+//! Scope: 8-bit planar YUV (4:2:0 `I420`, 4:2:2 `I422`, 4:4:4 `I444`), geometry
+//! fixed at configure. The speed preset is builder-configurable (`with_speed`,
+//! 0..=10); rate control uses the rav1e quantizer default. (10/12-bit encode, which
+//! needs a `Context<u16>`, is a follow-up; decode already handles all depths.)
 
 use core::future::Future;
 use core::pin::Pin;
@@ -40,11 +41,14 @@ const DEFAULT_SPEED: u8 = 9;
 /// a keyframe); this damps a jittery BWE estimate.
 const BITRATE_HYSTERESIS_PCT: u64 = 20;
 
-/// Encodes raw I420 video into an AV1 elementary stream.
+/// Encodes raw planar-YUV video into an AV1 elementary stream.
 pub struct Av1Enc {
     speed: u8,
     width: u32,
     height: u32,
+    /// The negotiated input format (8-bit `I420` / `I422` / `I444`); fixes the
+    /// rav1e chroma sampling and the per-frame plane geometry.
+    format: RawVideoFormat,
     framerate: Rate,
     ctx: Option<Context<u8>>,
     /// Source PTS keyed by `Packet::input_frameno`. Entries are removed as their
@@ -89,6 +93,7 @@ impl Av1Enc {
             speed: DEFAULT_SPEED,
             width: 0,
             height: 0,
+            format: RawVideoFormat::I420,
             framerate: Rate::Any,
             ctx: None,
             pts_by_frameno: BTreeMap::new(),
@@ -112,15 +117,6 @@ impl Av1Enc {
         self.emitted
     }
 
-    fn input_template() -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::I420,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        }
-    }
-
     fn output_caps(&self) -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::Av1,
@@ -135,7 +131,7 @@ impl Av1Enc {
             width: self.width as usize,
             height: self.height as usize,
             bit_depth: 8,
-            chroma_sampling: ChromaSampling::Cs420,
+            chroma_sampling: chroma_for(self.format).ok_or(G2gError::CapsMismatch)?,
             speed_settings: SpeedSettings::from_preset(self.speed),
             // 0 = rav1e's default quantizer mode; a downstream BWE target switches
             // to rate control (rav1e's `bitrate` is bits/second).
@@ -150,12 +146,16 @@ impl Av1Enc {
         Ok(())
     }
 
-    /// Encode one I420 access unit, returning the ready packets as `(data, pts)`.
-    fn encode(&mut self, i420: &[u8], pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
+    /// Encode one planar-YUV access unit, returning the ready packets as `(data, pts)`.
+    /// The chroma plane size follows the configured format's subsampling, so 4:2:0 /
+    /// 4:2:2 / 4:4:4 share this path.
+    fn encode(&mut self, planar: &[u8], pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
-        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        // `chroma_shift` is `Some` for every supported (planar) input format.
+        let (hs, vs) = self.format.chroma_shift().ok_or(G2gError::CapsMismatch)?;
+        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
         let (y_size, c_size) = (w * h, cw * ch);
-        if i420.len() < y_size + 2 * c_size {
+        if planar.len() < y_size + 2 * c_size {
             return Err(G2gError::CapsMismatch);
         }
         self.pts_by_frameno.insert(self.next_frameno, pts_ns);
@@ -173,9 +173,9 @@ impl Av1Enc {
         let raw = {
             let ctx = self.ctx.as_mut().ok_or(G2gError::NotConfigured)?;
             let mut frame = ctx.new_frame();
-            frame.planes[0].copy_from_raw_u8(&i420[..y_size], w, 1);
-            frame.planes[1].copy_from_raw_u8(&i420[y_size..y_size + c_size], cw, 1);
-            frame.planes[2].copy_from_raw_u8(&i420[y_size + c_size..y_size + 2 * c_size], cw, 1);
+            frame.planes[0].copy_from_raw_u8(&planar[..y_size], w, 1);
+            frame.planes[1].copy_from_raw_u8(&planar[y_size..y_size + c_size], cw, 1);
+            frame.planes[2].copy_from_raw_u8(&planar[y_size + c_size..y_size + 2 * c_size], cw, 1);
             let arc = Arc::new(frame);
             let mut packets = Vec::new();
             // send_frame asks us to drain (EnoughData) when its lookahead is full.
@@ -280,6 +280,18 @@ impl Av1Enc {
     }
 }
 
+/// The rav1e chroma sampling for a supported input format, or `None` if the format
+/// is not an 8-bit planar YUV the encoder accepts (the v1 scope). 10/12-bit planar
+/// formats are planar too but need a `Context<u16>`, so they are excluded here.
+fn chroma_for(format: RawVideoFormat) -> Option<ChromaSampling> {
+    match format {
+        RawVideoFormat::I420 => Some(ChromaSampling::Cs420),
+        RawVideoFormat::I422 => Some(ChromaSampling::Cs422),
+        RawVideoFormat::I444 => Some(ChromaSampling::Cs444),
+        _ => None,
+    }
+}
+
 /// Drain the packets rav1e has ready. `Encoded` means a frame was consumed
 /// without emitting a packet (keep going); any other status means nothing more is
 /// ready right now (`NeedMoreData`) or the stream is finished (`LimitReached`).
@@ -302,12 +314,24 @@ impl AsyncElement for Av1Enc {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_template())
+        // Accept any supported planar-YUV input, narrowing only geometry; the format
+        // itself is kept (the encoder configures its chroma sampling to match).
+        if let Caps::RawVideo { format, .. } = upstream_caps {
+            if chroma_for(*format).is_some() {
+                return upstream_caps.intersect(&Caps::RawVideo {
+                    format: *format,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                });
+            }
+        }
+        Err(G2gError::CapsMismatch)
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } => {
+            Caps::RawVideo { format, width, height, framerate } if chroma_for(*format).is_some() => {
                 CapsSet::one(Caps::CompressedVideo {
                     codec: VideoCodec::Av1,
                     width: width.clone(),
@@ -320,16 +344,18 @@ impl AsyncElement for Av1Enc {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let Caps::RawVideo { format: RawVideoFormat::I420, width, height, framerate } =
-            absolute_caps
-        else {
+        let Caps::RawVideo { format, width, height, framerate } = absolute_caps else {
             return Err(G2gError::CapsMismatch);
         };
+        if chroma_for(*format).is_none() {
+            return Err(G2gError::CapsMismatch);
+        }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
             return Err(G2gError::CapsMismatch);
         };
         self.width = *w;
         self.height = *h;
+        self.format = *format;
         self.framerate = framerate.clone();
         self.build_context()?;
         self.configured = true;
@@ -340,7 +366,7 @@ impl AsyncElement for Av1Enc {
         ElementMetadata::new(
             "AV1 encoder",
             "Codec/Encoder/Video",
-            "Encodes raw I420 video to AV1 via rav1e",
+            "Encodes raw planar YUV (I420/I422/I444) to AV1 via rav1e",
             "g2g",
         )
     }
@@ -385,10 +411,18 @@ impl PadTemplates for Av1Enc {
             height: Dim::Any,
             framerate: Rate::Any,
         };
-        Vec::from([
-            PadTemplate::sink(CapsSet::one(Self::input_template())),
-            PadTemplate::source(CapsSet::one(out)),
-        ])
+        let any = |format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let sink = CapsSet::from_alternatives(Vec::from([
+            any(RawVideoFormat::I420),
+            any(RawVideoFormat::I422),
+            any(RawVideoFormat::I444),
+        ]));
+        Vec::from([PadTemplate::sink(sink), PadTemplate::source(CapsSet::one(out))])
     }
 }
 

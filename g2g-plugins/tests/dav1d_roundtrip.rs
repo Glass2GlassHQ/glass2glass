@@ -113,3 +113,77 @@ async fn av1_encode_then_dav1d_decode_round_trips_i420() {
         assert!((120..=136).contains(&mean), "decoded luma mean {mean} is near the grey input");
     }
 }
+
+/// Flat-grey planar frame of `format` (8-bit): a Y plane plus two chroma planes
+/// sized by the format's subsampling.
+fn planar_grey(format: RawVideoFormat, w: u32, h: u32) -> Vec<u8> {
+    let (hs, vs) = format.chroma_shift().unwrap();
+    let (w, h) = (w as usize, h as usize);
+    let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
+    let mut v = vec![GREY; w * h]; // luma
+    v.extend(vec![GREY; cw * ch]); // U
+    v.extend(vec![GREY; cw * ch]); // V
+    v
+}
+
+fn raw_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
+    Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Any }
+}
+
+/// Encode flat-grey `format` frames with rav1e, decode with `Dav1dDec`, and assert
+/// the decoder announces that exact format/geometry and recovers a tight buffer
+/// whose luma survives the lossy round trip. Proves the multi-plane / subsampling
+/// packing path beyond 4:2:0.
+async fn roundtrip_chroma(format: RawVideoFormat) {
+    let (hs, vs) = format.chroma_shift().unwrap();
+    let mut enc = Av1Enc::new().with_speed(10);
+    enc.configure_pipeline(&raw_caps(format, W, H)).unwrap();
+    let mut encoded = CaptureSink::default();
+    for i in 0..6u64 {
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(planar_grey(format, W, H).into_boxed_slice())),
+            FrameTiming { pts_ns: i * 33_000_000, ..FrameTiming::default() },
+            i,
+        );
+        enc.process(PipelinePacket::DataFrame(frame), &mut encoded).await.unwrap();
+    }
+    enc.process(PipelinePacket::Eos, &mut encoded).await.unwrap();
+    assert!(!encoded.frames.is_empty(), "the encoder produced AV1 packets for {format:?}");
+
+    let mut dec = Dav1dDec::new();
+    dec.configure_pipeline(&encoded.caps[0]).unwrap();
+    let mut decoded = CaptureSink::default();
+    for data in &encoded.frames {
+        let f = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(data.clone().into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        dec.process(PipelinePacket::DataFrame(f), &mut decoded).await.unwrap();
+    }
+
+    assert!(
+        decoded.caps.contains(&raw_caps(format, W, H)),
+        "dav1d announced {format:?} 64x64, got {:?}",
+        decoded.caps,
+    );
+    assert!(!decoded.frames.is_empty(), "dav1d decoded at least one {format:?} frame");
+    let (cw, ch) = ((W as usize).div_ceil(1 << hs), (H as usize).div_ceil(1 << vs));
+    let expected_len = (W * H) as usize + 2 * cw * ch;
+    for plane in &decoded.frames {
+        assert_eq!(plane.len(), expected_len, "tight {format:?} buffer");
+        let y = &plane[..(W * H) as usize];
+        let mean = y.iter().map(|&b| b as u64).sum::<u64>() / y.len() as u64;
+        assert!((120..=136).contains(&mean), "{format:?} luma mean {mean} near grey");
+    }
+}
+
+#[tokio::test]
+async fn av1_4_2_2_round_trips_through_dav1d() {
+    roundtrip_chroma(RawVideoFormat::I422).await;
+}
+
+#[tokio::test]
+async fn av1_4_4_4_round_trips_through_dav1d() {
+    roundtrip_chroma(RawVideoFormat::I444).await;
+}

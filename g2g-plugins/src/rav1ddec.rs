@@ -11,10 +11,13 @@
 //! drain the ready pictures via `get_picture` and push the pending data with
 //! `send_pending_data`. Decoded geometry is recovered per picture, so a
 //! `CapsChanged` carries it before the first frame and on any mid-stream change
-//! (the source may negotiate `Any` dims). 8-bit 4:2:0 (the dominant AV1 profile)
-//! is packed into planar I420 (matching the other decoders / `VideoConvert`);
-//! 10/12-bit and 4:2:2 / 4:4:4 are rejected at decode (a follow-up). System
-//! memory. Pure Rust, but it pays a speed cost versus libdav1d's hand-written asm.
+//! (the source may negotiate `Any` dims). The decoded picture is packed into the
+//! matching fully-planar [`RawVideoFormat`]: 4:2:0 / 4:2:2 / 4:4:4 at 8 / 10 /
+//! 12-bit (`I420` / `I422` / `I444` and their `p10` / `p12` variants), recovered
+//! per picture from the layout + bit depth and carried in the `CapsChanged`;
+//! 10/12-bit samples pass through as native little-endian 2-byte words. Monochrome
+//! (I400) is rejected. System memory. Pure Rust, but it pays a speed cost versus
+//! libdav1d's hand-written asm.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -32,15 +35,15 @@ use g2g_core::{
 
 use re_rav1d::{Decoder, Picture, PixelLayout, PlanarImageComponent};
 
-/// Decoded pictures from one fed unit: each `(packed I420 pixels, (width, height))`.
-type DecodedFrames = Vec<(Vec<u8>, (u32, u32))>;
+/// Decoded pictures from one fed unit: each `(format, packed pixels, (width, height))`.
+type DecodedFrames = Vec<(RawVideoFormat, Vec<u8>, (u32, u32))>;
 
-/// Decodes an AV1 stream into planar I420 via the pure-Rust `re_rav1d` decoder.
+/// Decodes an AV1 stream into a fully-planar YUV format via the pure-Rust `re_rav1d`.
 pub struct Rav1dDec {
     decoder: Option<Decoder>,
     framerate: Rate,
-    /// Last emitted geometry, so `CapsChanged` is sent only on change.
-    out_dims: Option<(u32, u32)>,
+    /// Last emitted (format, width, height), so `CapsChanged` is sent only on change.
+    out: Option<(RawVideoFormat, u32, u32)>,
     sequence: u64,
     configured: bool,
 }
@@ -49,7 +52,7 @@ impl core::fmt::Debug for Rav1dDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // `re_rav1d::Decoder` is not Debug; report only the element's own state.
         f.debug_struct("Rav1dDec")
-            .field("out_dims", &self.out_dims)
+            .field("out", &self.out)
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
             .finish_non_exhaustive()
@@ -64,7 +67,7 @@ impl Default for Rav1dDec {
 
 impl Rav1dDec {
     pub fn new() -> Self {
-        Self { decoder: None, framerate: Rate::Any, out_dims: None, sequence: 0, configured: false }
+        Self { decoder: None, framerate: Rate::Any, out: None, sequence: 0, configured: false }
     }
 
     fn input_template() -> Caps {
@@ -76,9 +79,9 @@ impl Rav1dDec {
         }
     }
 
-    fn output_caps(&self, w: u32, h: u32) -> Caps {
+    fn output_caps(&self, format: RawVideoFormat, w: u32, h: u32) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::I420,
+            format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
@@ -96,7 +99,10 @@ impl Rav1dDec {
             // Drain all pictures ready right now.
             loop {
                 match decoder.get_picture() {
-                    Ok(pic) => frames.push((Self::pack_i420(&pic)?, Self::last_dims(&pic))),
+                    Ok(pic) => {
+                        let format = pic_format(&pic)?;
+                        frames.push((format, pack_planar(&pic, format)?, (pic.width(), pic.height())));
+                    }
                     Err(e) if e.is_again() => break,
                     Err(_) => return Err(G2gError::CapsMismatch),
                 }
@@ -109,39 +115,54 @@ impl Rav1dDec {
         }
         Ok(frames)
     }
+}
 
-    /// Pack a decoded 8-bit 4:2:0 picture into tight planar I420 (Y then U then
-    /// V), copying each plane row honoring its stride. Returns the packed pixels;
-    /// geometry comes from [`last_dims`]. Rejects non-8-bit / non-4:2:0 pictures.
-    fn pack_i420(pic: &Picture) -> Result<Vec<u8>, G2gError> {
-        if pic.pixel_layout() != PixelLayout::I420 || pic.bit_depth() != 8 {
-            return Err(G2gError::CapsMismatch); // only 8-bit 4:2:0 for now
-        }
-        let (w, h) = (pic.width(), pic.height());
-        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let mut out = Vec::with_capacity((w * h + 2 * cw * ch) as usize);
-        for (comp, pw, ph) in [
-            (PlanarImageComponent::Y, w, h),
-            (PlanarImageComponent::U, cw, ch),
-            (PlanarImageComponent::V, cw, ch),
-        ] {
-            let plane = pic.plane(comp);
-            let (stride, _) = pic.plane_data_geometry(comp);
-            let bytes: &[u8] = &plane;
-            for row in 0..ph {
-                let start = (row * stride) as usize;
-                let end = start + pw as usize;
-                // The plane buffer is stride*height; a row never overruns it.
-                out.extend_from_slice(bytes.get(start..end).ok_or(G2gError::CapsMismatch)?);
-            }
-        }
-        Ok(out)
-    }
+/// The fully-planar [`RawVideoFormat`] matching a decoded picture's chroma layout
+/// and bit depth. Rejects monochrome (I400), which has no planar-YUV format.
+fn pic_format(pic: &Picture) -> Result<RawVideoFormat, G2gError> {
+    use RawVideoFormat as F;
+    Ok(match (pic.pixel_layout(), pic.bit_depth()) {
+        (PixelLayout::I420, 8) => F::I420,
+        (PixelLayout::I420, 10) => F::I420p10,
+        (PixelLayout::I420, 12) => F::I420p12,
+        (PixelLayout::I422, 8) => F::I422,
+        (PixelLayout::I422, 10) => F::I422p10,
+        (PixelLayout::I422, 12) => F::I422p12,
+        (PixelLayout::I444, 8) => F::I444,
+        (PixelLayout::I444, 10) => F::I444p10,
+        (PixelLayout::I444, 12) => F::I444p12,
+        _ => return Err(G2gError::CapsMismatch),
+    })
+}
 
-    /// The decoded geometry of `pic` (its width and height), for the `CapsChanged`.
-    fn last_dims(pic: &Picture) -> (u32, u32) {
-        (pic.width(), pic.height())
+/// Pack a decoded picture into the tight planar layout of `format` (Y then U then
+/// V), copying each plane row honoring its stride. The chroma plane dimensions and
+/// per-sample byte size come from the format itself, so 4:2:0 / 4:2:2 / 4:4:4 at
+/// 8 / 10 / 12-bit share one path; 10/12-bit samples are the native LE 2-byte words.
+fn pack_planar(pic: &Picture, format: RawVideoFormat) -> Result<Vec<u8>, G2gError> {
+    let bps = format.bytes_per_sample();
+    // `chroma_shift` is always `Some` here: `pic_format` only yields planar formats.
+    let (hs, vs) = format.chroma_shift().ok_or(G2gError::CapsMismatch)?;
+    let (w, h) = (pic.width(), pic.height());
+    let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
+    let mut out = Vec::with_capacity(((w * h + 2 * cw * ch) as usize) * bps);
+    for (comp, pw, ph) in [
+        (PlanarImageComponent::Y, w, h),
+        (PlanarImageComponent::U, cw, ch),
+        (PlanarImageComponent::V, cw, ch),
+    ] {
+        let plane = pic.plane(comp);
+        let (stride, _) = pic.plane_data_geometry(comp);
+        let bytes: &[u8] = &plane;
+        let row_len = pw as usize * bps;
+        for row in 0..ph {
+            let start = (row * stride) as usize;
+            let end = start + row_len;
+            // The plane buffer is stride*height; a row never overruns it.
+            out.extend_from_slice(bytes.get(start..end).ok_or(G2gError::CapsMismatch)?);
+        }
     }
+    Ok(out)
 }
 
 impl AsyncElement for Rav1dDec {
@@ -204,10 +225,11 @@ impl AsyncElement for Rav1dDec {
                     let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
                     let unit = slice.as_slice().to_vec();
                     let frames = Self::feed(decoder, unit)?;
-                    for (pixels, (w, h)) in frames {
-                        if self.out_dims != Some((w, h)) {
-                            out.push(PipelinePacket::CapsChanged(self.output_caps(w, h))).await?;
-                            self.out_dims = Some((w, h));
+                    for (format, pixels, (w, h)) in frames {
+                        if self.out != Some((format, w, h)) {
+                            out.push(PipelinePacket::CapsChanged(self.output_caps(format, w, h)))
+                                .await?;
+                            self.out = Some((format, w, h));
                         }
                         let decoded = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
