@@ -1198,7 +1198,14 @@ Two fan structures have non-trivial joins:
   later track). Reconciliation runs at the source, not at every hop: a plain
   transform is a memory-domain pass-through (it forwards whatever domain it
   receives), so enforcing its `System` default mid-cascade would wrongly reject a
-  GPU proposal merely passing through.
+  GPU proposal merely passing through. A transform that *is* a genuine domain
+  producer (a hardware decoder allocating its own output surfaces) consumes the
+  same contract from inside the element: its `configure_allocation` calls
+  `resolve_for_producer` against its own `output_domains` to settle its output
+  domain. `NvDec` does exactly this (M352): it advertises `{Cuda, System}` and
+  either keeps the decoded NV12 surface device-resident (zero-copy) or downloads
+  it, chosen by the negotiated proposal alone, validated end-to-end on an RTX
+  3060.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
   so a plain container muxer imposes nothing). At startup the runner stores it on

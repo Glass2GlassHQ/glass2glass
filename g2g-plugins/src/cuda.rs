@@ -229,13 +229,15 @@ fn nv12_plane_copies(
 }
 
 /// Copy both NV12 planes of `buf` from CUDA device memory into a freshly
-/// allocated packed system buffer (device->host).
+/// allocated packed system buffer (device->host). `pub(crate)` so `NvDec`'s
+/// download-on-demand path (M352) reuses the same copy when negotiation settles
+/// its output on `System`.
 ///
 /// # Safety
 /// `buf`'s plane pointers must be valid device memory in `buf.context`, and
 /// the backing allocation must stay alive for the duration of the call (its
 /// keep-alive owner guarantees this while the [`OwnedCudaBuffer`] is held).
-unsafe fn download_nv12(buf: &OwnedCudaBuffer) -> Result<Box<[u8]>, G2gError> {
+pub(crate) unsafe fn download_nv12(buf: &OwnedCudaBuffer) -> Result<Box<[u8]>, G2gError> {
     let (luma, chroma, total) =
         nv12_plane_copies(buf.width, buf.height, buf.luma_pitch, buf.chroma_pitch);
     let mut dst = vec![0u8; total].into_boxed_slice();

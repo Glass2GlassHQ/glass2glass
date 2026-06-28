@@ -46,11 +46,11 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use g2g_core::memory::{CudaKeepAlive, OwnedCudaBuffer};
+use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    RawVideoFormat, Rate, VideoCodec,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, RawVideoFormat, Rate, SystemSlice, VideoCodec,
 };
 
 /// Number of decode surfaces the parser cycles through. Also the cap on the
@@ -76,6 +76,12 @@ pub struct NvDec {
     emitted: u64,
     caps_sent: bool,
     configured: bool,
+    /// The memory domain the negotiation settled this decoder's output on (M352).
+    /// `Cuda` keeps frames device-resident (zero-copy, the default); `System`
+    /// downloads each decoded surface to host memory before emitting. Chosen in
+    /// `configure_allocation` by reconciling the downstream proposal against
+    /// [`Self::OUTPUT_DOMAINS`].
+    out_domain: MemoryDomainKind,
 }
 
 /// State the parser callbacks read and write (decoder handle, geometry, the ready
@@ -154,8 +160,15 @@ impl NvDec {
             emitted: 0,
             caps_sent: false,
             configured: false,
+            out_domain: MemoryDomainKind::Cuda,
         }
     }
+
+    /// Domains this decoder can emit (M352): `Cuda` (device-resident, zero-copy)
+    /// or `System` (downloaded). The producer-capability half of the M351
+    /// two-sided allocation-domain negotiation.
+    const OUTPUT_DOMAINS: DomainSet =
+        DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System);
 
     /// Frames decoded and emitted so far.
     pub fn emitted(&self) -> u64 {
@@ -300,8 +313,20 @@ impl NvDec {
             self.caps_sent = true;
         }
         for f in frames {
+            // M352: keep the surface on the GPU (zero-copy) unless negotiation
+            // settled this decoder's output on System, in which case download it
+            // device->host before emitting.
+            let domain = if self.out_domain == MemoryDomainKind::System {
+                // SAFETY: `f.buffer`'s plane pointers are valid CUDA device memory
+                // in its context, pinned by the buffer's keep-alive owner for the
+                // duration of this copy.
+                let bytes = unsafe { crate::cuda::download_nv12(&f.buffer)? };
+                MemoryDomain::System(SystemSlice::from_boxed(bytes))
+            } else {
+                MemoryDomain::Cuda(f.buffer)
+            };
             let frame = g2g_core::frame::Frame::new(
-                MemoryDomain::Cuda(f.buffer),
+                domain,
                 g2g_core::FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..Default::default() },
                 self.emitted,
             );
@@ -668,9 +693,32 @@ impl AsyncElement for NvDec {
     }
 
     /// NVDEC emits NV12 in CUDA device memory (the zero-copy hwframe domain),
-    /// so a downstream link from this element is a GPU link (M285).
+    /// so a downstream link from this element is a GPU link (M285). This is the
+    /// *preferred* domain; [`output_domains`](Self::output_domains) widens it to
+    /// the full set the decoder can satisfy.
     fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
         g2g_core::memory::MemoryDomainKind::Cuda
+    }
+
+    /// M352: the decoder can keep frames on the GPU *or* download them to System,
+    /// so it advertises both. The runner's allocation cascade narrows this against
+    /// the downstream consumers' accepted domains (a tee join over the branches),
+    /// and [`configure_allocation`](Self::configure_allocation) settles the choice.
+    fn output_domains(&self) -> DomainSet {
+        Self::OUTPUT_DOMAINS
+    }
+
+    /// Receive the (possibly tee-joined) downstream allocation proposal and settle
+    /// this decoder's output domain (M352). Reconciles the consumer's accepted
+    /// domains against what NVDEC can emit (`resolve_for_producer`, the
+    /// producer-side of the M351 negotiation): a CUDA-capable consumer keeps the
+    /// frame device-resident (zero-copy), a System-only consumer makes the decoder
+    /// download. No reconcilable domain leaves the default (`Cuda`) in place; the
+    /// consumer then rejects the domain at `process` as it would today.
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        if let Ok(resolved) = params.resolve_for_producer(Self::OUTPUT_DOMAINS) {
+            self.out_domain = resolved.domain;
+        }
     }
 
     fn metadata(&self) -> ElementMetadata {
