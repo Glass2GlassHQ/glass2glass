@@ -34,8 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Graceful per-branch drop on fan-out** (`FanOutPolicy::AllowBranchDrop`); a
-  rejecting branch fails the run loud today.
 - **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
   (M320) drives a *terminal* aggregator; the `run_muxer_sink` shape (a trailing
   sink with output-caps coupling) for runtime-added inputs is still owed.

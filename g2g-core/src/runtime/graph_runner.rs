@@ -47,7 +47,7 @@ use crate::aggregator::InputAggregator;
 use crate::fanout::{MultiInputElement, MultiOutputElement, MultiOutputSink, MultiSenderSink};
 use crate::format_element::CapsConstraint;
 use crate::frame::{Frame, PipelinePacket};
-use crate::graph::{Graph, NodeId, NodeKind, ValidatedGraph};
+use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
@@ -343,24 +343,47 @@ fn nearest_upstream_arm<E>(vg: &ValidatedGraph<E>, edge_id: usize) -> Option<Nod
     }
 }
 
-/// Whether a tee sits on the path from `node` up toward a source. A node behind
-/// a tee shares its upstream with sibling branches, so it can't reverse-
-/// reconfigure on a rejected mid-stream change and instead fails loud (the
-/// `run_source_fanout` strict default). A node on a single-producer chain
-/// (`run_linear_chain` / `run_source_transform_sink`) reverse-reconfigures and
-/// keeps flowing.
-fn behind_tee<E>(vg: &ValidatedGraph<E>, node: NodeId) -> bool {
+/// The fan-out policy of the nearest tee on the path from `node` up toward a
+/// source, or `None` if `node` is on a single-producer chain. A node behind a
+/// tee shares its upstream with sibling branches, so it can't reverse-
+/// reconfigure on a rejected mid-stream change: under `FailLoud` it fails the
+/// run (the `run_source_fanout` strict default), under `AllowBranchDrop` it
+/// drops out. A node on a single-producer chain (`run_linear_chain` /
+/// `run_source_transform_sink`) reverse-reconfigures and keeps flowing.
+fn behind_tee_policy<E>(vg: &ValidatedGraph<E>, node: NodeId) -> Option<FanOutPolicy> {
     let mut cur = node;
     loop {
         let ins = vg.in_edges(cur);
         if ins.is_empty() {
-            return false;
+            return None;
         }
         let src = vg.edge(ins[0]).src.node;
         if matches!(vg.kind(src), NodeKind::Tee(_)) {
-            return true;
+            return Some(vg.fanout_policy(src));
         }
         cur = src;
+    }
+}
+
+/// How a branch arm reacts to a mid-stream `CapsChanged` it cannot negotiate,
+/// derived from its position ([`behind_tee_policy`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BranchMode {
+    /// Single-producer chain: post the failure and reverse-reconfigure into the
+    /// boundary that emitted the change, then keep flowing.
+    Reconfigure,
+    /// Behind a `FailLoud` tee: a rejected change fails the whole run loud.
+    FailLoud,
+    /// Behind an `AllowBranchDrop` tee: a rejected change drops this branch (its
+    /// arm ends Ok) while the siblings keep flowing.
+    Drop,
+}
+
+fn branch_mode<E>(vg: &ValidatedGraph<E>, node: NodeId) -> BranchMode {
+    match behind_tee_policy(vg, node) {
+        None => BranchMode::Reconfigure,
+        Some(FanOutPolicy::FailLoud) => BranchMode::FailLoud,
+        Some(FanOutPolicy::AllowBranchDrop) => BranchMode::Drop,
     }
 }
 
@@ -869,7 +892,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     node,
                     out_caps,
                     downstream_feasible,
-                    behind_tee(&vg, node),
+                    branch_mode(&vg, node),
                     bus.cloned(),
                 ))
             }
@@ -883,7 +906,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     in_rx,
                     coord_handle.clone(),
                     node,
-                    behind_tee(&vg, node),
+                    branch_mode(&vg, node),
                     bus.cloned(),
                     state.clone(),
                     progress.cloned(),
@@ -892,10 +915,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
                 // A tee-shaped node carrying a demux element routes per-output;
-                // a plain tee broadcasts.
+                // a plain tee broadcasts. Under `AllowBranchDrop` the broadcast
+                // tolerates a branch that has dropped out (closed its channel).
+                let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
                     Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(demux, in_rx, out_txs)),
-                    _ => Box::pin(tee_arm(in_rx, out_txs)),
+                    _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
@@ -1207,7 +1232,7 @@ async fn transform_arm<'a>(
     node: NodeId,
     mut out_caps: Caps,
     downstream_feasible: Option<CapsSet>,
-    strict: bool,
+    mode: BranchMode,
     bus: Option<BusHandle>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
@@ -1265,16 +1290,23 @@ async fn transform_arm<'a>(
                         ForwardResolve::Fixed(caps) => caps,
                         ForwardResolve::Defer => new_caps.clone(),
                         ForwardResolve::Infeasible(failure) => {
-                            // Behind a tee (shared upstream): fail loud
-                            // (`run_source_fanout` strict default). On a
-                            // single-producer chain: post the failure and reverse-
-                            // reconfigure into the boundary, then keep flowing.
-                            if strict {
-                                return Err(G2gError::CapsMismatch);
+                            // Behind a tee (shared upstream): can't reverse-
+                            // reconfigure. `FailLoud` fails the run; `Drop` ends
+                            // this branch (siblings continue). On a single-producer
+                            // chain: post the failure and reverse-reconfigure into
+                            // the boundary, then keep flowing.
+                            match mode {
+                                BranchMode::FailLoud => return Err(G2gError::CapsMismatch),
+                                BranchMode::Drop => {
+                                    report_nego_failure(bus.as_ref(), failure);
+                                    return Ok(0);
+                                }
+                                BranchMode::Reconfigure => {
+                                    report_nego_failure(bus.as_ref(), failure);
+                                    in_rx.request_reconfigure(Reconfigure::Renegotiate);
+                                    continue;
+                                }
                             }
-                            report_nego_failure(bus.as_ref(), failure);
-                            in_rx.request_reconfigure(Reconfigure::Renegotiate);
-                            continue;
                         }
                     }
                 };
@@ -1313,7 +1345,7 @@ async fn sink_arm<'a>(
     in_rx: LinkReceiver,
     coord: GraphCoordHandle,
     node: NodeId,
-    strict: bool,
+    mode: BranchMode,
     bus: Option<BusHandle>,
     state: Option<StateController>,
     progress: Option<PipelineProgress>,
@@ -1359,20 +1391,24 @@ async fn sink_arm<'a>(
                 return Ok(consumed);
             }
             Some(PipelinePacket::CapsChanged(new_caps)) => {
-                // Behind a tee (shared upstream): a rejected change fails loud
-                // (`run_source_fanout` strict default). On a single-producer
-                // chain: post the failure and reverse-reconfigure into the
-                // boundary that emitted the change, then keep flowing.
+                // Behind a tee (shared upstream): can't reverse-reconfigure.
+                // `FailLoud` fails the run; `Drop` ends this branch (siblings
+                // continue). On a single-producer chain: post the failure and
+                // reverse-reconfigure into the boundary, then keep flowing.
                 let sink_caps = match re_solve_downstream_dyn_sink(&new_caps, &*elem) {
                     Ok(caps) => caps,
-                    Err(failure) => {
-                        if strict {
-                            return Err(G2gError::CapsMismatch);
+                    Err(failure) => match mode {
+                        BranchMode::FailLoud => return Err(G2gError::CapsMismatch),
+                        BranchMode::Drop => {
+                            report_nego_failure(bus.as_ref(), failure);
+                            return Ok(consumed);
                         }
-                        report_nego_failure(bus.as_ref(), failure);
-                        in_rx.request_reconfigure(Reconfigure::Renegotiate);
-                        continue;
-                    }
+                        BranchMode::Reconfigure => {
+                            report_nego_failure(bus.as_ref(), failure);
+                            in_rx.request_reconfigure(Reconfigure::Renegotiate);
+                            continue;
+                        }
+                    },
                 };
                 match elem.configure_pipeline(&sink_caps)? {
                     ConfigureOutcome::Accepted => {
@@ -1446,22 +1482,68 @@ async fn sink_arm<'a>(
     }
 }
 
-async fn tee_arm(in_rx: LinkReceiver, out_txs: Vec<LinkSender>) -> Result<u64, G2gError> {
+async fn tee_arm(
+    in_rx: LinkReceiver,
+    out_txs: Vec<LinkSender>,
+    branch_drop: bool,
+) -> Result<u64, G2gError> {
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     loop {
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
                 for s in senders.iter_mut() {
-                    s.push(PipelinePacket::Eos).await?;
+                    match s.push(PipelinePacket::Eos).await {
+                        Ok(_) => {}
+                        // A dropped branch (`AllowBranchDrop`) has closed its
+                        // channel; skip it. Under `FailLoud` a closed branch is a
+                        // genuine error and propagates.
+                        Err(G2gError::Shutdown) if branch_drop => {}
+                        Err(e) => return Err(e),
+                    }
                 }
                 return Ok(0);
             }
             Some(packet) => {
-                broadcast(&mut senders, packet).await?;
+                if branch_drop {
+                    broadcast_drop_closed(&mut senders, packet).await?;
+                    // Every branch has dropped: the fan-out has no consumers left,
+                    // so this tee is done.
+                    if senders.is_empty() {
+                        return Ok(0);
+                    }
+                } else {
+                    broadcast(&mut senders, packet).await?;
+                }
             }
             None => return Ok(0),
         }
     }
+}
+
+/// Broadcast like [`broadcast`], but a branch whose receiver has closed
+/// (a dropped `AllowBranchDrop` branch) is removed from `senders` instead of
+/// failing the fan-out. A genuine downstream error still surfaces through that
+/// branch arm's own result, so swallowing the closed channel here is safe.
+async fn broadcast_drop_closed(
+    senders: &mut Vec<SenderSink>,
+    mut packet: PipelinePacket,
+) -> Result<(), G2gError> {
+    if let PipelinePacket::DataFrame(frame) = &mut packet {
+        frame.domain.make_shareable();
+    }
+    let mut dead: Vec<usize> = Vec::new();
+    for (i, s) in senders.iter_mut().enumerate() {
+        match s.push(try_clone_packet(&packet)?).await {
+            Ok(_) => {}
+            Err(G2gError::Shutdown) => dead.push(i),
+            Err(e) => return Err(e),
+        }
+    }
+    // Remove dead senders high-index-first so earlier indices stay valid.
+    for &i in dead.iter().rev() {
+        senders.remove(i);
+    }
+    Ok(())
 }
 
 /// The demux arm: drain the single input edge and let the routing element

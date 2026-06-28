@@ -1073,8 +1073,15 @@ constructs the corresponding borrowing `Graph` and delegates to `run_graph`,
 so the four historical runner shapes share one negotiation + data plane. A
 node's mid-stream rejection policy is topology-derived: a node on a
 single-producer chain reverse-reconfigures and keeps flowing (posting the
-structured failure to the bus), while a node behind a tee fails the run loud
-(a shared upstream can't honor a per-branch reconfigure).
+structured failure to the bus), while a node behind a tee cannot (a shared
+upstream can't honour a per-branch reconfigure). What a behind-a-tee rejection
+then does is the tee's [`FanOutPolicy`](crate::graph::FanOutPolicy): `FailLoud`
+(the `add_tee` default) fails the whole run, and `AllowBranchDrop`
+(`add_tee_with_policy`) drops just that branch (its arm ends, the tee removes its
+now-closed sender via `broadcast_drop_closed` and keeps broadcasting to the rest)
+so an optional branch (a preview that can't follow a format switch) does not kill
+the essential ones. A genuine downstream error still surfaces through that branch
+arm's own result, so swallowing the closed channel at the tee is safe.
 
 #### 4.13.4 Mid-stream re-solve
 

@@ -74,6 +74,22 @@ pub enum PadDir {
     Out,
 }
 
+/// How a tee handles a branch that rejects a mid-stream `CapsChanged` it cannot
+/// negotiate. The default fails the whole run loud (a shared upstream cannot
+/// honour a per-branch reconfigure, so a silent partial pipeline would be worse
+/// than a clear failure). `AllowBranchDrop` instead lets that one branch fall
+/// away (its arm ends, the tee stops broadcasting to it) while the siblings keep
+/// flowing, for fan-outs where a branch is genuinely optional (a preview window
+/// that can't follow a format switch should not kill the recording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FanOutPolicy {
+    /// A rejecting branch fails the whole run with `CapsMismatch` (default).
+    #[default]
+    FailLoud,
+    /// A rejecting branch drops out; the remaining branches continue.
+    AllowBranchDrop,
+}
+
 /// The `NodeId` shift applied when one graph is merged into another
 /// ([`Graph::merge`]). Translates a node id, and the pad ids on it, from the
 /// merged-in graph's local id space into the host graph's. The shift is the
@@ -184,6 +200,9 @@ struct Node<E> {
     kind: NodeKind,
     /// `Some` for source/transform/sink; `None` for tee/muxer (runner shapes).
     element: Option<E>,
+    /// Fan-out rejection policy; only meaningful on a `Tee` node, `FailLoud`
+    /// elsewhere.
+    fanout: FanOutPolicy,
 }
 
 /// Builder for a multimedia DAG. Add nodes, link their pads, then `finish()`
@@ -220,6 +239,16 @@ impl<E> Graph<E> {
         Tee(self.push(NodeKind::Tee(outputs), None))
     }
 
+    /// Add a tee with an explicit [`FanOutPolicy`]. `add_tee` is the
+    /// `FailLoud` shorthand; this opts a fan-out into `AllowBranchDrop` so a
+    /// branch that cannot follow a mid-stream `CapsChanged` drops out instead of
+    /// failing the run.
+    pub fn add_tee_with_policy(&mut self, outputs: u8, policy: FanOutPolicy) -> Tee {
+        let id = self.push(NodeKind::Tee(outputs), None);
+        self.nodes[id.0 as usize].fanout = policy;
+        Tee(id)
+    }
+
     pub fn add_muxer(&mut self, element: E, inputs: u8) -> Muxer {
         Muxer(self.push(NodeKind::Muxer(inputs), Some(element)))
     }
@@ -237,7 +266,7 @@ impl<E> Graph<E> {
 
     fn push(&mut self, kind: NodeKind, element: Option<E>) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
-        self.nodes.push(Node { kind, element });
+        self.nodes.push(Node { kind, element, fanout: FanOutPolicy::FailLoud });
         id
     }
 
@@ -554,6 +583,11 @@ impl<E> ValidatedGraph<E> {
 
     pub fn kind(&self, node: NodeId) -> NodeKind {
         self.nodes[node.0 as usize].kind
+    }
+
+    /// This node's fan-out rejection policy (meaningful only on a `Tee`).
+    pub fn fanout_policy(&self, node: NodeId) -> FanOutPolicy {
+        self.nodes[node.0 as usize].fanout
     }
 
     pub fn edge(&self, id: usize) -> &Edge {
