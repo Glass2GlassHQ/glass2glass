@@ -17,9 +17,13 @@ leverage first:
    Android: encode, Camera2, AAudio, Surface present.
 2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
    + key rotation; FlexFEC + multi-level burst FEC.
-3. **Depth.** Pure-Rust / wasm codec decode (dav1d/rav1d, vpx) to drop the
-   ffmpeg FFI; negotiation backward coupling through `DerivedOutput`; seek depth
-   (segment seeks, re-preroll after flushing seek when paused).
+3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 via libdav1d
+   landed (`Dav1dDec`, `dav1d` feature, C FFI). The pure-Rust / wasm goal still
+   wants `rav1d` (the Rust dav1d port; it ships only dav1d's C ABI, so it needs
+   hand-rolled FFI to its `dav1d_*` exports or a staticlib-link swap behind
+   `Dav1dDec`) and a `vpx` decoder. Plus negotiation backward coupling through
+   `DerivedOutput`; seek depth (segment seeks, re-preroll after flushing seek
+   when paused).
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The

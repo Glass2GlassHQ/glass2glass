@@ -314,6 +314,11 @@ mod encoder_base;
 #[cfg(feature = "av1-encode")]
 pub mod av1enc;
 
+// AV1 decode via libdav1d (FFI through the `dav1d` crate). Not pure Rust; links
+// system libdav1d, gated behind the `dav1d` feature.
+#[cfg(feature = "dav1d")]
+pub mod dav1ddec;
+
 // VP8/VP9 software encode via libvpx (FFI through vpx-encode). Not pure Rust;
 // links system libvpx, gated behind the `vpx` feature.
 #[cfg(feature = "vpx")]
