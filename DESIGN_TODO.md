@@ -21,8 +21,7 @@ leverage first:
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
    (a dedicated libvpx `VpxDec` is deferred: no pure-Rust decoder exists, and a
-   libvpx-FFI element would only duplicate the ffmpeg path). Plus negotiation
-   backward coupling through `DerivedOutput`.
+   libvpx-FFI element would only duplicate the ffmpeg path).
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
