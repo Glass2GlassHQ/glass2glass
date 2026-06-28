@@ -60,6 +60,9 @@ const ID_SIMPLE_BLOCK: u32 = 0x00A3;
 const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
 const ID_SEEK_HEAD: u32 = 0x114D_9B74;
+const ID_SEEK: u32 = 0x4DBB;
+const ID_SEEK_ID: u32 = 0x53AB;
+const ID_SEEK_POSITION: u32 = 0x53AC;
 const ID_CUES: u32 = 0x1C53_BB6B;
 const ID_CUE_POINT: u32 = 0x00BB;
 const ID_CUE_TIME: u32 = 0x00B3;
@@ -219,6 +222,10 @@ pub struct MatroskaDemuxer {
     /// The parsed `Cues` index (empty until the `Cues` element is seen), the
     /// time -> Cluster-position map [`cue_seek_offset`](Self::cue_seek_offset) uses.
     cues: Vec<CuePoint>,
+    /// `Cues` byte position from a `SeekHead` (relative to the Segment data start),
+    /// so the demuxer can prefetch an end-of-file `Cues` before reaching it
+    /// (M374). `None` until a `SeekHead` indexing `Cues` is parsed.
+    cues_index_pos: Option<u64>,
     completed: Vec<MkvFrame>,
 }
 
@@ -240,8 +247,17 @@ impl MatroskaDemuxer {
             consumed: 0,
             segment_data_pos: None,
             cues: Vec::new(),
+            cues_index_pos: None,
             completed: Vec::new(),
         }
+    }
+
+    /// The absolute byte offset of the `Cues` element located by a `SeekHead`
+    /// (Segment data start + the indexed position), or `None` if no `SeekHead`
+    /// pointing at `Cues` has been parsed. The demuxer byte-seeks here to prefetch
+    /// an end-of-file `Cues` index before a seek (M374).
+    pub fn cue_index_offset(&self) -> Option<u64> {
+        Some(self.segment_data_pos?.saturating_add(self.cues_index_pos?))
     }
 
     /// The parsed `Cues` index (empty until the `Cues` element is seen).
@@ -424,13 +440,45 @@ impl MatroskaDemuxer {
                     ID_CUES => {
                         self.cues = parse_cues(&self.buf[header..total], self.timestamp_scale);
                     }
-                    _ => {} // SeekHead / Chapters / Void, etc.
+                    // A SeekHead (at the Segment start) locates the Cues element,
+                    // so a seek can prefetch an end-of-file Cues before reaching it.
+                    ID_SEEK_HEAD => {
+                        if let Some(pos) = parse_seekhead_cues(&self.buf[header..total]) {
+                            self.cues_index_pos = Some(pos);
+                        }
+                    }
+                    _ => {} // Chapters / Void, etc.
                 }
             }
             // (elements before the Segment, e.g. the EBML header, are skipped.)
             self.consume(total);
         }
     }
+}
+
+/// Parse a `SeekHead` for the `Cues` byte position (relative to the Segment data
+/// start), if it indexes one. Each `Seek` entry pairs a `SeekID` (the target
+/// element's ID, kept whole) with a `SeekPosition`; the entry whose `SeekID` is
+/// `Cues` gives the position. `None` if `Cues` is not indexed.
+fn parse_seekhead_cues(body: &[u8]) -> Option<u64> {
+    for (id, seek) in children(body) {
+        if id != ID_SEEK {
+            continue;
+        }
+        let mut seek_id = None;
+        let mut pos = None;
+        for (sid, s) in children(seek) {
+            match sid {
+                ID_SEEK_ID => seek_id = read_id(s, 0).map(|(id, _)| id),
+                ID_SEEK_POSITION => pos = Some(read_uint(s)),
+                _ => {}
+            }
+        }
+        if seek_id == Some(ID_CUES) {
+            return pos;
+        }
+    }
+    None
 }
 
 /// Parse a `Cues` element into its [`CuePoint`]s. Each `CuePoint` carries a
@@ -1684,5 +1732,43 @@ mod tests {
         d.push_data(&synthetic_webm()); // no Cues element
         assert!(d.cues().is_empty());
         assert_eq!(d.cue_seek_offset(0), None, "no index -> caller re-scans from 0");
+    }
+
+    /// A SeekHead Seek entry: SeekID (the target element ID, whole) + SeekPosition.
+    fn seek_entry(target_id: &[u8], pos: u64) -> Vec<u8> {
+        let body = [elem(&[0x53, 0xAB], target_id), elem(&[0x53, 0xAC], &uint_body(pos))].concat();
+        elem(&[0x4D, 0xBB], &body)
+    }
+
+    #[test]
+    fn seekhead_locates_the_cues_element() {
+        let ebml = elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]);
+        // SeekHead points at Cues at position 5000 (relative to Segment data).
+        let seekhead = elem(
+            &[0x11, 0x4D, 0x9B, 0x74],
+            &[
+                seek_entry(&[0x16, 0x54, 0xAE, 0x6B], 100), // Tracks (ignored)
+                seek_entry(&[0x1C, 0x53, 0xBB, 0x6B], 5000), // Cues
+            ]
+            .concat(),
+        );
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"V_VP9", Some((320, 240)), None));
+        let body = [seekhead, tracks].concat();
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &body);
+        let seg_data_pos = ebml.len() as u64 + (segment.len() - body.len()) as u64;
+        let file = [ebml, segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        // The Cues are not parsed (none in the file), but their location is known.
+        assert!(d.cues().is_empty());
+        assert_eq!(d.cue_index_offset(), Some(seg_data_pos + 5000));
+    }
+
+    #[test]
+    fn cue_index_offset_none_without_seekhead() {
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&synthetic_webm());
+        assert_eq!(d.cue_index_offset(), None);
     }
 }

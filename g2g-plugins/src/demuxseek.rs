@@ -124,6 +124,25 @@ impl DemuxSeek {
         self.keep_state
     }
 
+    /// Whether a seek is in flight (awaiting its flush or discarding to the
+    /// target). The caller skips starting a new one until this clears.
+    pub(crate) fn is_seeking(&self) -> bool {
+        self.phase != Phase::Idle
+    }
+
+    /// Begin an indexed seek to an already-resolved byte `offset` for `target_ns`,
+    /// when the caller consumed the app seek itself (the multi-hop Matroska `Cues`
+    /// prefetch: the `Cues` are fetched first, then this seeks to the target
+    /// Cluster). Issues the upstream byte-seek, marks the seek state-preserving,
+    /// and awaits its flush (so `admit` then discards to the keyframe >= target).
+    pub(crate) fn begin_indexed_seek(&mut self, target_ns: u64, offset: u64) {
+        if let Some(upstream) = &self.upstream {
+            upstream.seek(Seek::flush_to(offset));
+        }
+        self.keep_state = true;
+        self.phase = Phase::AwaitingFlush { target_ns };
+    }
+
     /// Whether the demuxer should ignore input now (awaiting the upstream flush,
     /// so the in-flight pre-seek bytes must not produce output).
     pub(crate) fn dropping_input(&self) -> bool {

@@ -20,15 +20,15 @@
 //! needed for the dimensions). The default is `Vp9`, WebM's video codec; set the
 //! `stream` property to match the file.
 //!
-//! Seeking uses the `Cues` index when it has been parsed (M373): the demuxer
-//! byte-seeks straight to the target Cluster, keeping its parser state, instead
-//! of the M364 re-scan from offset 0 (the fallback when `Cues` are not yet known).
+//! Seeking uses the `Cues` index: with it parsed (M373) the demuxer byte-seeks
+//! straight to the target Cluster, keeping its parser state. When `Cues` sit at
+//! the end of the file (the common layout) and a `SeekHead` at the start locates
+//! them, a seek first prefetches them (a byte-seek to `Cues`, parse, then a
+//! byte-seek to the target, M374) so the first seek is index-fast without reading
+//! the whole file. With neither, it falls back to the M364 re-scan from offset 0.
 //!
 //! Scope (v1): the first track of the selected codec; multi-track-of-one-codec
-//! selection and lacing are follow-ups (DESIGN.md §4.17). `Cues` placed at the
-//! end of the file (the common layout) are only available for the fast path once
-//! read past during playback; a `SeekHead`-driven prefetch is a follow-up (the
-//! re-scan fallback handles the not-yet-known case correctly meanwhile).
+//! selection and lacing are follow-ups (DESIGN.md §4.17).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -65,6 +65,17 @@ pub enum MkvStream {
     Opus,
 }
 
+/// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
+/// located by a `SeekHead` is fetched via a byte-seek *before* the real seek, so
+/// the demuxer can then jump straight to the target Cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CuePrefetch {
+    Idle,
+    /// Byte-seek to the `Cues` element issued; `flushed` flips on the upstream
+    /// flush, after which incoming bytes are the `Cues` element to parse.
+    Fetching { target_ns: u64, flushed: bool },
+}
+
 /// Demuxes a Matroska / WebM byte stream into one selected elementary stream.
 #[derive(Debug)]
 pub struct MkvDemux {
@@ -80,6 +91,13 @@ pub struct MkvDemux {
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
+    /// Clones of the seek controllers (M374): the `Cues` prefetch consumes the app
+    /// seek and drives the two-hop upstream byte-seek directly, so it needs the
+    /// same channels `seek` holds. `None` unless `with_seek` wired them.
+    app: Option<SeekController>,
+    upstream: Option<SeekController>,
+    /// `Cues`-prefetch state (M374). `Idle` outside a prefetch.
+    prefetch: CuePrefetch,
 }
 
 impl Default for MkvDemux {
@@ -99,16 +117,53 @@ impl MkvDemux {
             bus: None,
             tags_posted: 0,
             seek: DemuxSeek::default(),
+            app: None,
+            upstream: None,
+            prefetch: CuePrefetch::Idle,
         }
     }
 
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
     /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
     /// On a time seek the demuxer rewinds the source and re-syncs from the
-    /// keyframe at/after the target.
+    /// keyframe at/after the target; with a `Cues` index (parsed, or located via a
+    /// `SeekHead` and prefetched, M373/M374) it jumps straight to the Cluster.
     pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
+        self.app = Some(app.clone());
+        self.upstream = Some(upstream.clone());
         self.seek.with(app, upstream);
         self
+    }
+
+    /// Service a pending app seek (M373/M374). Three paths, cheapest first:
+    /// `Cues` already parsed -> seek straight to the target Cluster; only a
+    /// `SeekHead` locating `Cues` -> prefetch them (byte-seek to `Cues`, then to
+    /// the target); neither -> re-scan from offset 0. A no-op while a seek or
+    /// prefetch is already in flight, or with no pending app seek.
+    fn poll_seek(&mut self) {
+        if self.prefetch != CuePrefetch::Idle || self.seek.is_seeking() {
+            return;
+        }
+        match &self.app {
+            Some(app) if app.has_pending() => {}
+            _ => return,
+        }
+        if !self.demux.cues().is_empty() {
+            // Index known: seek directly to the target Cluster.
+            let demux = &self.demux;
+            self.seek.poll_request_indexed(|t| demux.cue_seek_offset(t));
+        } else if let Some(cues_off) = self.demux.cue_index_offset() {
+            // Index located but not parsed: prefetch it before the real seek.
+            if let (Some(app), Some(upstream)) = (&self.app, &self.upstream) {
+                if let Some(seek) = app.take_pending() {
+                    upstream.seek(Seek::flush_to(cues_off));
+                    self.prefetch = CuePrefetch::Fetching { target_ns: seek.start, flushed: false };
+                }
+            }
+        } else {
+            // No index at all: re-scan from the start (M364).
+            self.seek.poll_request_indexed(|_| None);
+        }
     }
 
     /// Reset the parser for a discontinuity (a `Flush` / seek): drop the
@@ -300,31 +355,50 @@ impl AsyncElement for MkvDemux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            // M362/M373: a pending app seek triggers an upstream byte-seek; until
-            // its `Flush` returns, drop input so no stale pre-seek frames are
-            // emitted. If the `Cues` index is already parsed, seek straight to the
-            // target Cluster (mid-segment, parser state kept); else re-scan from 0.
-            {
-                let demux = &self.demux;
-                self.seek.poll_request_indexed(|target| demux.cue_seek_offset(target));
-            }
+            // M362/M373/M374: service a pending app seek (direct index hit,
+            // SeekHead-located Cues prefetch, or re-scan from 0). Until the
+            // resulting flush returns, input is dropped so no stale frames emit.
+            self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.seek.dropping_input() {
-                        return Ok(());
-                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    match self.prefetch {
+                        // Awaiting the prefetch byte-seek's flush: drop in-flight
+                        // pre-seek bytes (the same as `dropping_input`).
+                        CuePrefetch::Fetching { flushed: false, .. } => return Ok(()),
+                        // Reading the Cues element: parse it (emit nothing); once
+                        // the index is populated, seek to the real target Cluster.
+                        CuePrefetch::Fetching { flushed: true, target_ns } => {
+                            self.demux.push_data(slice.as_slice());
+                            if !self.demux.cues().is_empty() {
+                                let off = self.demux.cue_seek_offset(target_ns).unwrap_or(0);
+                                self.seek.begin_indexed_seek(target_ns, off);
+                                self.prefetch = CuePrefetch::Idle;
+                            }
+                            return Ok(());
+                        }
+                        CuePrefetch::Idle => {}
+                    }
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     self.demux.push_data(slice.as_slice());
                     self.emit_ready(out).await?;
                 }
-                // The upstream byte-seek's flush: reset the parser, then re-sync
-                // from the re-read stream. A `Cues` (indexed) seek landed inside
-                // the Segment, so keep the Tracks / TimestampScale / Cues the
-                // landing point does not re-send; a from-start re-scan fully resets
-                // (it re-reads the EBML header). Forward the flush downstream.
+                // The upstream byte-seek's flush. The internal Cues-prefetch flush
+                // is consumed (not forwarded): downstream sees a flush only on the
+                // real seek. The real seek's flush resets the parser, keeping the
+                // Tracks / TimestampScale / Cues a mid-segment (indexed) landing
+                // does not re-send (a from-start re-scan fully resets, re-reading
+                // the EBML header), then forwards the flush.
                 PipelinePacket::Flush => {
+                    if let CuePrefetch::Fetching { target_ns, flushed: false } = self.prefetch {
+                        self.prefetch = CuePrefetch::Fetching { target_ns, flushed: true };
+                        self.demux.reset_keeping_tracks();
+                        return Ok(());
+                    }
                     self.seek.on_flush();
                     if self.seek.keeps_state() {
                         self.demux.reset_keeping_tracks();

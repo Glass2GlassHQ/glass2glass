@@ -1852,13 +1852,15 @@ caps itself via `CapsChanged` once Tracks is parsed, without a downstream bitstr
 parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
 lacing (Xiph / EBML / fixed) is split (M113), so multi-frame audio blocks demux.
 The `Cues` index is parsed into a time -> Cluster-byte-position map
-(`cue_seek_offset`, M373), and `MkvDemux` seeks through it: when `Cues` are known
-it byte-seeks straight to the target Cluster (`DemuxSeek::poll_request_indexed`),
-keeping Tracks / TimestampScale across the mid-segment landing
-(`reset_keeping_tracks`), versus the M364 re-scan from offset 0 used when no index
-is parsed yet. (`CueClusterPosition` is relative to the Segment data start, which
-the parser tracks; an end-of-file `Cues` index needs read-past or a `SeekHead`
-prefetch, a follow-up.) The MKV muxer (`matroskamux`: `MatroskaMuxer` + the
+(`cue_seek_offset`, M373), and `MkvDemux` seeks through it in three tiers
+(`poll_seek`): with `Cues` parsed it byte-seeks straight to the target Cluster
+(`DemuxSeek::poll_request_indexed`), keeping Tracks / TimestampScale across the
+mid-segment landing (`reset_keeping_tracks`); with only a `SeekHead` locating an
+end-of-file `Cues` it prefetches them first (M374: a byte-seek to `Cues`, parse,
+then `begin_indexed_seek` to the target Cluster, the internal prefetch flush
+consumed so downstream sees one only on the real seek); with neither it re-scans
+from offset 0 (M364). (`CueClusterPosition` / `SeekPosition` are relative to the
+Segment data start, which the parser tracks.) The MKV muxer (`matroskamux`: `MatroskaMuxer` + the
 `MkvMux` element) is the inverse path (M115), writing the EBML header, an
 unknown-size Segment, Tracks, and one Cluster per frame, with the `webm` DocType
 for the WebM codec subset. Scope is one Segment / one track with definite-size
