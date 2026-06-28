@@ -433,11 +433,11 @@ fn apply_demux_props(
 /// Build the runnable [`Graph`] from parsed chains: flatten elements, resolve
 /// `t.` references into directed links, derive each element's role (and any tee's
 /// fan-out width) from its link degree, then construct and wire the nodes.
-/// `decodebin` / `decodebin3`: not an element, but a macro that expands, at
-/// parse time, into the chain of decoders / parsers the auto-plug search finds
-/// from its upstream caps down to raw video or audio (M193).
+/// `decodebin`: not an element, but a macro that expands, at parse time, into the
+/// chain of decoders / parsers the auto-plug search finds from its upstream caps
+/// down to raw video or audio (M193).
 fn is_decodebin(name: &str) -> bool {
-    matches!(name, "decodebin" | "decodebin3")
+    matches!(name, "decodebin")
 }
 
 /// Depth bound for the decodebin auto-plug search: a parse + decode (+ a spare

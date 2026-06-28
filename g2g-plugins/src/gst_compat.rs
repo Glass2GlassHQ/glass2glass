@@ -30,7 +30,7 @@ pub enum GstEquivalent {
 
 /// Launch keywords the parser handles that are not registry elements.
 static LAUNCH_KEYWORDS: &[&str] =
-    &["decodebin", "decodebin3", "uridecodebin", "playbin", "queue", "queue2", "tee"];
+    &["decodebin", "uridecodebin", "playbin", "queue", "queue2", "tee"];
 
 /// gst element name -> guidance, for names NOT registered under the same name.
 /// Registered names (incl. aliases like `avdec_h264` -> `ffmpegdec`) resolve to

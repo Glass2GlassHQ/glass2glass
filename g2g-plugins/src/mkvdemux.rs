@@ -670,7 +670,7 @@ impl PadTemplates for MkvDemux {
 }
 
 /// Multi-output Matroska / WebM demuxer (M378): one Matroska byte stream in, N
-/// elementary streams out, one per output port (the decodebin3 core). The
+/// elementary streams out, one per output port (the decodebin core). The
 /// multi-output counterpart of [`MkvDemux`] (which forwards a single selected
 /// stream); the read-side analog of [`crate::mkvmuxn::MkvMuxN`].
 ///

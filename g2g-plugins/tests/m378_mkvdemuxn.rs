@@ -1,9 +1,9 @@
-//! M378 - multi-output Matroska demuxer (the decodebin3 core). One Matroska byte
+//! M378 - multi-output Matroska demuxer (the decodebin core). One Matroska byte
 //! stream in, N elementary streams out, one per output port. `MkvDemuxN` parses
 //! the container once and routes each track's access units to its port by codec,
 //! emitting each port's concrete caps before its first frame. This is what lets a
 //! single demuxer feed multiple decode branches (audio + video together) in one
-//! pipeline, the playbin / decodebin3 model.
+//! pipeline, the playbin / decodebin model.
 //!
 //! Mux an A/V Matroska stream (H.264 video + AAC audio) with `MkvMuxN`, then demux
 //! it with a two-port `MkvDemuxN` (port 0 = H.264, port 1 = AAC) and assert each
