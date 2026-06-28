@@ -533,6 +533,126 @@ async fn fmp4_hls_emits_init_then_fragments_and_demuxes() {
     assert_eq!(dsink.aus, aus, "HlsSrc -> Fmp4Demux recovers the original access units");
 }
 
+// --- single-file CMAF via #EXT-X-BYTERANGE (M368) -------------------------
+
+/// Parse a `Range: bytes=a-b` request header, returning the inclusive `(a, b)`.
+fn parse_range_header(req: &str) -> Option<(usize, usize)> {
+    let line = req.lines().find(|l| l.to_ascii_lowercase().starts_with("range:"))?;
+    let spec = line.split_once('=')?.1.trim();
+    let (a, b) = spec.split_once('-')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Serve one resource `all.m4s` (init + fragments concatenated) honouring HTTP
+/// `Range` requests with `206 Partial Content`, plus the byte-range playlist.
+fn serve_byterange(resource: Vec<u8>, playlist: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&req);
+            let path = text.split_whitespace().nth(1).unwrap_or("");
+            if path == "/cmaf.m3u8" {
+                let body = playlist.clone().into_bytes();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            } else if path == "/all.m4s" {
+                // Honour a Range with 206 + the exact slice; otherwise full body.
+                let (body, status, extra) = match parse_range_header(&text) {
+                    Some((a, b)) => {
+                        let end = (b + 1).min(resource.len());
+                        let start = a.min(end);
+                        let total = resource.len();
+                        (
+                            resource[start..end].to_vec(),
+                            "206 Partial Content",
+                            format!("Content-Range: bytes {start}-{}/{total}\r\n", end - 1),
+                        )
+                    }
+                    None => (resource.clone(), "200 OK", String::new()),
+                };
+                let header = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        }
+    });
+    format!("http://127.0.0.1:{port}/cmaf.m3u8")
+}
+
+#[tokio::test]
+async fn byterange_single_file_cmaf_fetches_subranges_and_demuxes() {
+    let aus = access_units();
+    let fmp4 = make_fmp4(&aus).await;
+    let (init, segs) = split_fmp4(&fmp4);
+    assert_eq!(segs.len(), 3);
+
+    // One resource: init then the three fragments back to back.
+    let mut resource = init.clone();
+    for s in &segs {
+        resource.extend_from_slice(s);
+    }
+
+    // Playlist addresses each piece by byte range of `all.m4s`: the MAP carries an
+    // explicit offset, seg0 an explicit offset, seg1/seg2 implicit (continuing).
+    let init_len = init.len();
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n\
+         #EXT-X-MAP:URI=\"all.m4s\",BYTERANGE=\"{}@0\"\n\
+         #EXTINF:1.0,\n#EXT-X-BYTERANGE:{}@{}\nall.m4s\n\
+         #EXTINF:1.0,\n#EXT-X-BYTERANGE:{}\nall.m4s\n\
+         #EXTINF:1.0,\n#EXT-X-BYTERANGE:{}\nall.m4s\n\
+         #EXT-X-ENDLIST\n",
+        init_len,
+        segs[0].len(),
+        init_len,
+        segs[1].len(),
+        segs[2].len(),
+    );
+    let url = serve_byterange(resource.clone(), playlist);
+
+    let mut src = HlsSrc::new(url);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut sink = CaptureSink::default();
+    src.run(&mut sink).await.unwrap();
+
+    // The reassembled byte stream is init + the three fragments, byte-exact: each
+    // came from its own Range request against the single resource.
+    assert_eq!(sink.body, resource, "byte-range fetches reassemble the single-file resource");
+
+    // End to end: the reassembled fMP4 demuxes back to the original access units.
+    let mut dmx = Fmp4Demux::new();
+    dmx.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }).unwrap();
+    let mut dsink = DemuxSink::default();
+    dmx.process(PipelinePacket::DataFrame(au_frame(sink.body.clone(), 0, 0)), &mut dsink)
+        .await
+        .unwrap();
+    assert_eq!(dsink.aus, aus, "byte-range CMAF -> Fmp4Demux recovers the access units");
+}
+
 #[derive(Default)]
 struct DemuxSink {
     aus: Vec<Vec<u8>>,

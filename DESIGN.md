@@ -1896,7 +1896,12 @@ streamed running total exceeds it, so one oversized reply cannot exhaust memory.
 media segments), selects a variant, and streams its segments, MPEG-TS into
 `tsdemux` or fMP4/CMAF (signalled by `#EXT-X-MAP`, probed at negotiation) as
 `ByteStream{IsoBmff}` into `fmp4demux`. It reloads a no-ENDLIST live playlist on an
-interval, playing each new segment once by media sequence.
+interval, playing each new segment once by media sequence. Single-file CMAF is
+supported through `#EXT-X-BYTERANGE` (and `#EXT-X-MAP`'s `BYTERANGE`): a segment
+carrying one fetches only its sub-range with an HTTP `Range` request (M368), the
+offset continuing from the previous sub-range of the same resource when the tag
+omits an explicit `@offset`; a server that ignores the `Range` (replies `200`)
+is handled by slicing the requested window from the full body.
 `#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place (AES-128-CBC via
 `aes`/`cbc`, key fetched from the key URI and cached, IV explicit or derived from
 the media-sequence number). `METHOD=SAMPLE-AES` encrypts only the media samples
@@ -1924,8 +1929,9 @@ and as a `SegmentTimeline` (the `<S t d r>` entries expanded into per-segment
 times), addressed by `$Number$` or `$Time$`. A dynamic (live) MPD is reloaded on
 its `minimumUpdatePeriod`, each new segment played once (tracked by start time),
 ending when the manifest turns static, the same shape as the HLS live reload.
-Throughput-driven ABR, byte-range segments, and the wall-clock `@duration` live
-profile are follow-ups (DESIGN_TODO).
+Throughput-driven ABR and the wall-clock `@duration` live profile are follow-ups
+(DESIGN_TODO); DASH byte-range addressing (`SegmentList` / `SegmentBase`) is the
+DASH counterpart of the HLS `#EXT-X-BYTERANGE` support above, still open.
 
 ### 4.18 Subtitle Overlay (`textoverlay`)
 

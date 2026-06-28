@@ -185,9 +185,10 @@ leverage first:
 ## Adaptive streaming (HLS / DASH)
 
 - **HLS:** SAMPLE-AES key rotation mid-stream; cbcs audio (AAC) + per-sample IV
-  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups; byte-range
-  segments; throughput-driven ABR; live-edge start; mid-stream variant
-  switching. (Encrypted fMP4 cbcs *video* init segments are done, M164.)
+  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups; throughput-driven
+  ABR; live-edge start; mid-stream variant switching. (Encrypted fMP4 cbcs
+  *video* init segments are done, M164; `#EXT-X-BYTERANGE` single-file CMAF is
+  done, M368.)
 - **DASH:** wall-clock `@duration` live profile; `SegmentList` / `SegmentBase`
   byte-range; multi-period; throughput-driven ABR.
 

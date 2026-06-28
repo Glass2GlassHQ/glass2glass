@@ -20,10 +20,14 @@
 //! forwarded undecrypted; without a handle a SAMPLE-AES playlist is rejected. The
 //! init segment (`#EXT-X-MAP`) is assumed unencrypted.
 //!
+//! Single-file CMAF is supported via `#EXT-X-BYTERANGE` (and `#EXT-X-MAP`'s
+//! `BYTERANGE`): a segment that carries one fetches only its sub-range with an
+//! HTTP `Range` request (M368), the offset continuing from the previous
+//! sub-range of the same resource when the tag omits an explicit `@offset`.
+//!
 //! Scope: in-order segment fetch, one `DataFrame` per segment, a fixed variant
-//! (no mid-stream ABR switch). fMP4/CMAF segments, byte-range segments,
-//! throughput-driven ABR, and live-edge start (skip to the last few segments)
-//! are follow-ups (DESIGN_TODO).
+//! (no mid-stream ABR switch). Throughput-driven ABR and live-edge start (skip
+//! to the last few segments) are follow-ups (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -39,7 +43,8 @@ use g2g_core::{
 };
 
 use crate::fetch::{
-    byte_frame, get_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
+    MAX_SEGMENT_BYTES,
 };
 use crate::hls::{parse, KeyMethod, MediaPlaylist, Playlist};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
@@ -306,7 +311,13 @@ impl SourceLoop for HlsSrc {
                     if !init_emitted {
                         if let Some(map) = &media.map_uri {
                             let init_url = resolve_url(&media_url, map);
-                            let bytes = get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?;
+                            let bytes = match media.map_byte_range {
+                                Some(r) => {
+                                    get_range_bytes(&client, &init_url, r.offset, r.length, MAX_SEGMENT_BYTES)
+                                        .await?
+                                }
+                                None => get_bytes(&client, &init_url, MAX_SEGMENT_BYTES).await?,
+                            };
                             if !bytes.is_empty() {
                                 out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence)))
                                     .await?;
@@ -323,7 +334,13 @@ impl SourceLoop for HlsSrc {
                     let segment = &media.segments[idx];
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
-                        let bytes = get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?;
+                        let bytes = match segment.byte_range {
+                            Some(r) => {
+                                get_range_bytes(&client, &seg_url, r.offset, r.length, MAX_SEGMENT_BYTES)
+                                    .await?
+                            }
+                            None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
+                        };
                         let bytes = match &segment.key {
                             None => bytes,
                             Some(key) => {

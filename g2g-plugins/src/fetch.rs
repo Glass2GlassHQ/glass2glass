@@ -59,6 +59,58 @@ pub(crate) async fn get_bytes(
     Ok(body)
 }
 
+/// Fetch the byte sub-range `[offset, offset + length)` of `url` via an HTTP
+/// `Range` request, capped at `max` like [`get_bytes`]. A `length` of `0`
+/// fetches nothing (a malformed `#EXT-X-BYTERANGE` is inert, not fatal). A
+/// server that ignores the `Range` (replies `200 OK` with the whole resource)
+/// is handled by slicing the requested window from the full body, so a
+/// non-range-capable origin still yields the right bytes.
+///
+/// `hls`-only today (`#EXT-X-BYTERANGE`); DASH byte-range addressing will reuse it.
+#[cfg(feature = "hls")]
+pub(crate) async fn get_range_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    offset: u64,
+    length: u64,
+    max: usize,
+) -> Result<Vec<u8>, G2gError> {
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    if length > max as u64 {
+        return Err(body_too_large());
+    }
+    // Inclusive end per RFC 7233: bytes=offset-(offset+length-1).
+    let end = offset.saturating_add(length).saturating_sub(1);
+    let range = alloc::format!("bytes={offset}-{end}");
+    let resp = client
+        .get(url)
+        .header(reqwest::header::RANGE, range)
+        .send()
+        .await
+        .map_err(net_err)?
+        .error_for_status()
+        .map_err(net_err)?;
+    // 200 means the server ignored the Range and sent the whole resource; 206 is
+    // exactly the requested span. Either way bound the accumulation by `max`.
+    let range_ignored = resp.status() == reqwest::StatusCode::OK;
+    let mut resp = resp;
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(body_too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if range_ignored {
+        let start = (offset as usize).min(body.len());
+        let stop = start.saturating_add(length as usize).min(body.len());
+        body = body[start..stop].to_vec();
+    }
+    Ok(body)
+}
+
 /// Capped text fetch: reuses [`get_bytes`] for the size bound, then decodes as
 /// UTF-8 (HLS playlists and DASH MPDs are UTF-8 by spec; a stray byte decodes
 /// lossily rather than failing the fetch, matching reqwest's `text()`).

@@ -40,6 +40,15 @@ pub struct SegmentKey {
     pub iv: Option<[u8; 16]>,
 }
 
+/// A byte sub-range of a resource (`#EXT-X-BYTERANGE` / `#EXT-X-MAP:BYTERANGE`):
+/// `length` bytes starting at `offset`. Single-file CMAF/fMP4 packs the init
+/// segment and every media fragment into one resource addressed by range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub length: u64,
+}
+
 /// One media segment in a media playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
@@ -48,6 +57,8 @@ pub struct Segment {
     pub duration_ms: u32,
     /// Decryption context from the `#EXT-X-KEY` in effect, `None` if unencrypted.
     pub key: Option<SegmentKey>,
+    /// `#EXT-X-BYTERANGE` sub-range of `uri`, `None` for a whole-resource segment.
+    pub byte_range: Option<ByteRange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +74,9 @@ pub struct MediaPlaylist {
     /// `#EXT-X-MAP:URI` initialization segment (fMP4/CMAF): the `ftyp`+`moov`
     /// prepended before the media fragments. `None` for an MPEG-TS playlist.
     pub map_uri: Option<String>,
+    /// `#EXT-X-MAP:BYTERANGE` sub-range of `map_uri` (single-file CMAF), `None`
+    /// when the init segment is the whole resource.
+    pub map_byte_range: Option<ByteRange>,
     /// `#EXT-X-ENDLIST` present: a complete VOD playlist (no live reload).
     pub end_list: bool,
 }
@@ -109,6 +123,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     let mut target_duration_secs = 0u32;
     let mut media_sequence = 0u64;
     let mut map_uri = None;
+    let mut map_byte_range = None;
     let mut end_list = false;
     // The `#EXT-X-KEY` carries forward to every following segment until the next
     // one changes or clears it.
@@ -117,21 +132,35 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     // or the variant being built for a stream-inf.
     let mut pending_segment: Option<u32> = None;
     let mut pending_variant: Option<Variant> = None;
+    // `#EXT-X-BYTERANGE` for the next segment: (length, explicit offset). An
+    // absent offset is resolved from the previous sub-range of the same URI.
+    let mut pending_byterange: Option<(u64, Option<u64>)> = None;
 
     for line in lines {
         if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
             pending_variant = Some(parse_stream_inf(attrs));
         } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
             pending_segment = Some(parse_extinf_ms(rest));
+        } else if let Some(rest) = line.strip_prefix("#EXT-X-BYTERANGE:") {
+            pending_byterange = Some(parse_byterange(rest));
         } else if let Some(rest) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
             target_duration_secs = rest.trim().parse().unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
             media_sequence = rest.trim().parse().unwrap_or(0);
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-MAP:") {
-            map_uri = attr_pairs(attrs)
-                .into_iter()
+            let pairs = attr_pairs(attrs);
+            map_uri = pairs
+                .iter()
                 .find(|(k, _)| *k == "URI")
                 .map(|(_, v)| String::from(v.trim_matches('"')));
+            map_byte_range = pairs
+                .iter()
+                .find(|(k, _)| *k == "BYTERANGE")
+                .and_then(|(_, v)| {
+                    let (length, offset) = parse_byterange(v.trim_matches('"'));
+                    (length > 0)
+                        .then_some(ByteRange { offset: offset.unwrap_or(0), length })
+                });
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
             current_key = parse_key(attrs);
         } else if line == "#EXT-X-ENDLIST" {
@@ -142,11 +171,20 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             variant.uri = String::from(line);
             variants.push(variant);
         } else if let Some(duration_ms) = pending_segment.take() {
-            segments.push(Segment {
-                uri: String::from(line),
-                duration_ms,
-                key: current_key.clone(),
+            let uri = String::from(line);
+            let byte_range = pending_byterange.take().map(|(length, offset)| {
+                // An absent `@offset` continues from the previous sub-range of the
+                // same resource (RFC 8216 §4.3.2.2), else starts at 0.
+                let offset = offset.unwrap_or_else(|| {
+                    segments
+                        .last()
+                        .filter(|s: &&Segment| s.uri == uri)
+                        .and_then(|s| s.byte_range)
+                        .map_or(0, |r| r.offset.saturating_add(r.length))
+                });
+                ByteRange { offset, length }
             });
+            segments.push(Segment { uri, duration_ms, key: current_key.clone(), byte_range });
         }
         // a bare URI with no pending tag is ignored
     }
@@ -163,6 +201,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             media_sequence,
             segments,
             map_uri,
+            map_byte_range,
             end_list,
         }))
     }
@@ -246,6 +285,19 @@ fn parse_resolution(value: &str) -> Option<(u32, u32)> {
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
+/// `<n>[@<o>]` (an `#EXT-X-BYTERANGE` value or a MAP `BYTERANGE` attribute) ->
+/// (length `n`, optional offset `o`). A missing / malformed length yields `0`,
+/// so a bogus tag produces an inert range rather than a parse failure.
+fn parse_byterange(rest: &str) -> (u64, Option<u64>) {
+    let (n, o) = match rest.trim().split_once('@') {
+        Some((n, o)) => (n, Some(o)),
+        None => (rest.trim(), None),
+    };
+    let length = n.trim().parse().unwrap_or(0);
+    let offset = o.and_then(|o| o.trim().parse().ok());
+    (length, offset)
+}
+
 /// `#EXTINF:<seconds>[,<title>]` -> duration in ms. Seconds may be fractional.
 fn parse_extinf_ms(rest: &str) -> u32 {
     let secs = rest.split(',').next().unwrap_or("").trim();
@@ -294,7 +346,10 @@ mod tests {
         assert_eq!(m.media_sequence, 7);
         assert!(m.end_list);
         assert_eq!(m.segments.len(), 3);
-        assert_eq!(m.segments[0], Segment { uri: "seg0.ts".into(), duration_ms: 9009, key: None });
+        assert_eq!(
+            m.segments[0],
+            Segment { uri: "seg0.ts".into(), duration_ms: 9009, key: None, byte_range: None }
+        );
         assert_eq!(m.segments[2].duration_ms, 3003);
     }
 
@@ -311,6 +366,31 @@ mod tests {
         };
         assert_eq!(m.map_uri.as_deref(), Some("init.mp4"), "EXT-X-MAP init segment recovered");
         assert_eq!(m.segments[0].uri, "seg0.m4s");
+    }
+
+    #[test]
+    fn parses_byterange_segments_with_implicit_and_explicit_offsets() {
+        // Single-file CMAF: init + three fragments are sub-ranges of one resource.
+        // The first BYTERANGE gives an explicit offset; the rest continue from the
+        // previous sub-range of the same URI (absent @offset).
+        let text = "#EXTM3U\n\
+            #EXT-X-TARGETDURATION:1\n\
+            #EXT-X-MAP:URI=\"all.mp4\",BYTERANGE=\"800@0\"\n\
+            #EXTINF:1.0,\n#EXT-X-BYTERANGE:200@800\nall.mp4\n\
+            #EXTINF:1.0,\n#EXT-X-BYTERANGE:300\nall.mp4\n\
+            #EXTINF:1.0,\n#EXT-X-BYTERANGE:150\nall.mp4\n\
+            #EXT-X-ENDLIST\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(m.map_uri.as_deref(), Some("all.mp4"));
+        assert_eq!(m.map_byte_range, Some(ByteRange { offset: 0, length: 800 }));
+        assert_eq!(m.segments.len(), 3);
+        assert_eq!(m.segments[0].byte_range, Some(ByteRange { offset: 800, length: 200 }));
+        // Implicit offset continues after the previous sub-range (800+200=1000).
+        assert_eq!(m.segments[1].byte_range, Some(ByteRange { offset: 1000, length: 300 }));
+        // And again (1000+300=1300).
+        assert_eq!(m.segments[2].byte_range, Some(ByteRange { offset: 1300, length: 150 }));
     }
 
     #[test]
