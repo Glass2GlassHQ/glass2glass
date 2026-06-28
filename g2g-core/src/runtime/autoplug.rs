@@ -324,6 +324,7 @@ mod factory {
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::format_specs;
+    use crate::fanout::MultiOutputElement;
     use crate::runtime::{
         DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
     };
@@ -663,6 +664,58 @@ mod factory {
     impl From<DecodebinError> for PlaybinError {
         fn from(e: DecodebinError) -> Self {
             PlaybinError::Decode(e)
+        }
+    }
+
+    /// One output branch of a `playbin3` graph (M379): the elementary stream a
+    /// demux port carries, the raw target to decode it to, and the sink it ends in.
+    /// The caller derives these from the demux's announced
+    /// [`StreamCollection`](crate::stream::StreamCollection) and its selection: one
+    /// `Playbin3Port` per selected stream, in demux port order.
+    pub struct Playbin3Port {
+        /// The port's elementary-stream caps (e.g. H.264), the decode-chain input
+        /// the registry auto-plugs from.
+        pub input_caps: Caps,
+        /// The raw shape to decode the port to (commonly [`is_raw_video`] for a
+        /// video port, [`is_raw_audio`] for an audio port).
+        pub target: Box<dyn Fn(&Caps) -> bool>,
+        /// The terminal sink for this branch (e.g. an `autovideosink` /
+        /// `autoaudiosink` chosen by the stream kind).
+        pub sink: Box<dyn DynAsyncElement>,
+    }
+
+    impl core::fmt::Debug for Playbin3Port {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("Playbin3Port").field("input_caps", &self.input_caps).finish_non_exhaustive()
+        }
+    }
+
+    /// Why [`Registry::build_playbin3_graph`] could not assemble a graph.
+    #[derive(Debug)]
+    pub enum Playbin3Error {
+        /// No output ports were given (a `playbin3` needs at least one stream).
+        NoPorts,
+        /// The URI could not be dispatched to a source (wraps the scheme failure).
+        Uri(UriError),
+        /// Linking the source to the demux failed.
+        Graph(GraphError),
+        /// A port's decode chain could not be spliced (no chain, or a link error).
+        Decode(DecodebinError),
+    }
+
+    impl From<UriError> for Playbin3Error {
+        fn from(e: UriError) -> Self {
+            Playbin3Error::Uri(e)
+        }
+    }
+    impl From<GraphError> for Playbin3Error {
+        fn from(e: GraphError) -> Self {
+            Playbin3Error::Graph(e)
+        }
+    }
+    impl From<DecodebinError> for Playbin3Error {
+        fn from(e: DecodebinError) -> Self {
+            Playbin3Error::Decode(e)
         }
     }
 
@@ -1171,13 +1224,55 @@ mod factory {
             self.decodebin(&mut graph, src, snk, &output, target, max_depth)?;
             Ok(graph)
         }
+
+        /// `playbin3`-equivalent (M379): assemble a complete runnable graph that
+        /// splits a container into its selected streams and decodes each to its own
+        /// sink. Builds the source from `uri`, adds `demux` (a
+        /// [`MultiOutputElement`], e.g. `MkvDemuxN`) as a fan-out node, and for each
+        /// [`Playbin3Port`] (one per selected stream, in port order) auto-plugs a
+        /// decode chain from that port's elementary caps to its sink. Returns
+        /// `source -> demux -> {decode chain -> sink}` ready for
+        /// [`run_graph`](crate::runtime::run_graph), the multi-stream counterpart of
+        /// [`build_uridecodebin`](Self::build_uridecodebin).
+        ///
+        /// The app derives `ports` from the demux's announced
+        /// [`StreamCollection`](crate::stream::StreamCollection) (M376) and its
+        /// selection (M377); `demux`'s port count must equal `ports.len()`. Each
+        /// branch retypes from the demux's (byte-stream) input caps to its
+        /// elementary stream via the per-port `CapsChanged` the demux emits, so a
+        /// branch element must tolerate the startup broadcast and re-solve then (the
+        /// M210 demux-node contract); per-branch static negotiation against the port
+        /// caps is a follow-up.
+        pub fn build_playbin3_graph<D: MultiOutputElement + 'static>(
+            &self,
+            uri: &str,
+            demux: D,
+            ports: Vec<Playbin3Port>,
+            max_depth: usize,
+        ) -> Result<Graph<GraphNode>, Playbin3Error> {
+            if ports.is_empty() {
+                return Err(Playbin3Error::NoPorts);
+            }
+            let (source, _byte_caps) = self.build_uri_source(uri)?;
+            let mut graph: Graph<GraphNode> = Graph::new();
+            let src = graph.add_source(GraphNodeRef::Source(source));
+            let outputs = ports.len() as u8;
+            let demux = graph.add_demux(GraphNode::demux(demux), outputs);
+            graph.link(src, demux.input())?;
+            for (i, port) in ports.into_iter().enumerate() {
+                let snk = graph.add_sink(GraphNodeRef::Element(port.sink));
+                self.decodebin(&mut graph, demux.out(i as u8), snk, &port.input_caps, &*port.target, max_depth)?;
+            }
+            Ok(graph)
+        }
     }
 }
 
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
-    MuxerFactory, PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    MuxerFactory, Playbin3Error, Playbin3Port, PlaybinError, Registry, SourceFactory, Uri, UriError,
+    UriSourceFactory,
 };
 
 #[cfg(test)]
