@@ -385,18 +385,7 @@ impl MkvDemux {
     /// demuxer would forward for it, or `None` if the id is unknown / its codec is
     /// not forwardable. Needs `Tracks` parsed (the collection's ids come from it).
     fn resolve_stream_id(&self, id: &str) -> Option<MkvStream> {
-        let num: u64 = id.strip_prefix("matroska-track-")?.parse().ok()?;
-        let track = self.demux.tracks().iter().find(|t| t.number == num)?;
-        match track.codec {
-            MkvCodec::H264 => Some(MkvStream::H264),
-            MkvCodec::H265 => Some(MkvStream::H265),
-            MkvCodec::Vp8 => Some(MkvStream::Vp8),
-            MkvCodec::Vp9 => Some(MkvStream::Vp9),
-            MkvCodec::Av1 => Some(MkvStream::Av1),
-            MkvCodec::Aac => Some(MkvStream::Aac),
-            MkvCodec::Opus => Some(MkvStream::Opus),
-            MkvCodec::Other => None,
-        }
+        resolve_stream_id(&self.demux, id)
     }
 
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
@@ -577,6 +566,30 @@ static MKVDEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "elementary stream to emit: h264 | h265 | vp8 | vp9 | av1 | aac | opus",
 )];
 
+/// The [`MkvStream`] a demuxer forwards for a parsed track's codec, or `None` for
+/// an unmappable one. Shared by the single-output and multi-output selection paths.
+fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
+    match codec {
+        MkvCodec::H264 => Some(MkvStream::H264),
+        MkvCodec::H265 => Some(MkvStream::H265),
+        MkvCodec::Vp8 => Some(MkvStream::Vp8),
+        MkvCodec::Vp9 => Some(MkvStream::Vp9),
+        MkvCodec::Av1 => Some(MkvStream::Av1),
+        MkvCodec::Aac => Some(MkvStream::Aac),
+        MkvCodec::Opus => Some(MkvStream::Opus),
+        MkvCodec::Other => None,
+    }
+}
+
+/// Resolve a published stream id (`matroska-track-N`) to the [`MkvStream`] the
+/// demuxer forwards for it, given the parsed tracks (`None` if the id is unknown or
+/// its codec is unforwardable). Needs `Tracks` parsed (the ids come from it).
+fn resolve_stream_id(demux: &MatroskaDemuxer, id: &str) -> Option<MkvStream> {
+    let num: u64 = id.strip_prefix("matroska-track-")?.parse().ok()?;
+    let track = demux.tracks().iter().find(|t| t.number == num)?;
+    codec_to_stream(track.codec)
+}
+
 fn mkv_stream_from_str(s: &str) -> Option<MkvStream> {
     match s {
         "h264" => Some(MkvStream::H264),
@@ -649,6 +662,10 @@ pub struct MkvDemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced (M376), so it posts once.
     collection_posted: bool,
+    /// App-driven stream selection (M381): the app names the stream id each port
+    /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
+    /// Inert unless `with_stream_select` wired it.
+    stream_select: Option<StreamSelectController>,
     emitted: u64,
 }
 
@@ -664,6 +681,7 @@ impl MkvDemuxN {
             announced,
             bus: None,
             collection_posted: false,
+            stream_select: None,
             emitted: 0,
         }
     }
@@ -673,6 +691,41 @@ impl MkvDemuxN {
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    /// Make the per-port stream assignment app-selectable (M381): the controller
+    /// carries stream ids (from the announced collection); port `i` re-maps to the
+    /// stream named by selection id `i`. The demuxer re-emits that port's
+    /// `CapsChanged` for the new stream and confirms the active ids on the bus
+    /// ([`BusMessage::StreamsSelected`]). Switching a port to a different *codec*
+    /// needs its downstream decode branch re-plugged (a follow-up); a same-codec
+    /// switch (e.g. between two AAC language tracks) takes effect directly.
+    pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
+        self.stream_select = Some(select);
+        self
+    }
+
+    /// Apply any pending app selection (M381): re-map port `i` to the stream named
+    /// by the `i`-th selected id, re-arming that port's `CapsChanged` when its
+    /// stream changes, and confirm the active ids on the bus. A no-op without a
+    /// controller, with no pending selection, or before `Tracks` is parsed.
+    fn apply_stream_selection(&mut self) {
+        let Some(ctrl) = &self.stream_select else { return };
+        let Some(ids) = ctrl.take_pending() else { return };
+        let mut active = Vec::new();
+        for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
+            let Some(stream) = resolve_stream_id(&self.demux, id) else { continue };
+            if self.ports[port] != stream {
+                self.ports[port] = stream;
+                self.announced[port] = false; // re-emit caps for the new stream
+            }
+            active.push(id.clone());
+        }
+        if !active.is_empty() {
+            if let Some(bus) = &self.bus {
+                bus.try_post(BusMessage::StreamsSelected { ids: active });
+            }
+        }
     }
 
     /// Number of output ports (the selected-stream count).
@@ -749,6 +802,9 @@ impl MultiOutputElement for MkvDemuxN {
                     if self.bus.is_some() {
                         self.post_stream_collection();
                     }
+                    // Honor an app selection before routing this batch, so a re-map
+                    // (and its re-armed CapsChanged) takes effect for the frames now.
+                    self.apply_stream_selection();
                     for f in self.demux.take_frames() {
                         let Some(port) = self.port_for_codec(f.codec) else {
                             continue; // a track no selected port carries
