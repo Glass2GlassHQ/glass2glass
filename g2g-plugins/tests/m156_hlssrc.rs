@@ -371,6 +371,109 @@ async fn time_seek_jumps_to_the_segment_containing_the_target() {
     assert_eq!(sink.body, expected, "playback starts at seg1, seg0 skipped");
 }
 
+// --- throughput-driven ABR (M371) -----------------------------------------
+
+/// Master with two far-apart variants so the bandwidth estimate selects one
+/// unambiguously: high = 50 Mbit/s, low = 500 kbit/s.
+const ABR_MASTER: &str = "#EXTM3U\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=50000000,RESOLUTION=1920x1080\n\
+    v/high.m3u8\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=320x180\n\
+    v/low.m3u8\n";
+
+/// Two time-aligned media playlists (same 3 x 1s segments), distinct URIs.
+fn abr_media(kind: &str) -> String {
+    format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+         #EXTINF:1.0,\n{kind}0.ts\n#EXTINF:1.0,\n{kind}1.ts\n#EXTINF:1.0,\n{kind}2.ts\n\
+         #EXT-X-ENDLIST\n"
+    )
+}
+
+/// Serve the ABR master + variants, throttling each `.ts` response by sleeping
+/// ~1ms per KiB so a large (high-variant) segment yields a low measured
+/// throughput, forcing a downswitch; small (low-variant) segments stay cheap.
+fn serve_abr(high: Vec<Vec<u8>>, low: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let seg = |kind: &[Vec<u8>], p: &str, pre: &str| {
+                p.strip_prefix(pre)
+                    .and_then(|s| s.strip_suffix(".ts"))
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .and_then(|i| kind.get(i).cloned())
+            };
+            let body: Vec<u8> = match path {
+                "/master.m3u8" => ABR_MASTER.as_bytes().to_vec(),
+                "/v/high.m3u8" => abr_media("high").into_bytes(),
+                "/v/low.m3u8" => abr_media("low").into_bytes(),
+                p if p.starts_with("/v/high") => seg(&high, p, "/v/high").unwrap_or_default(),
+                p if p.starts_with("/v/low") => seg(&low, p, "/v/low").unwrap_or_default(),
+                _ => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                }
+            };
+            // Throttle media segments so download time is measurable (~1ms/KiB);
+            // playlists are served immediately.
+            if path.ends_with(".ts") {
+                thread::sleep(std::time::Duration::from_millis((body.len() / 1024) as u64));
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/master.m3u8")
+}
+
+#[tokio::test]
+async fn abr_downswitches_when_measured_bandwidth_is_low() {
+    // High segments are large (slow over the throttled server), low segments tiny.
+    let high: Vec<Vec<u8>> =
+        (0..3u8).map(|s| (0..60_000u32).map(|i| (i as u8) ^ (s + 1)).collect()).collect();
+    let low: Vec<Vec<u8>> =
+        (0..3u8).map(|s| (0..2_000u32).map(|i| (i as u8) ^ (0xF0 + s)).collect()).collect();
+    let url = serve_abr(high.clone(), low.clone());
+
+    let mut src = HlsSrc::new(url).with_abr();
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos);
+    assert_eq!(count, 3, "three segments played (variants are time-aligned)");
+    // No estimate yet -> the first segment is the high variant. The measured
+    // throughput of that large/slow segment then downswitches to low for the rest.
+    let mut expected = high[0].clone();
+    expected.extend_from_slice(&low[1]);
+    expected.extend_from_slice(&low[2]);
+    assert_eq!(
+        sink.body, expected,
+        "ABR starts on high, then switches to low after measuring the slow download"
+    );
+}
+
 // --- fMP4 / CMAF over HLS (EXT-X-MAP) -------------------------------------
 
 fn au_frame(bytes: Vec<u8>, pts_ns: u64, seq: u64) -> Frame {

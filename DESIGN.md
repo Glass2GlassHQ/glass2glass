@@ -1896,7 +1896,14 @@ streamed running total exceeds it, so one oversized reply cannot exhaust memory.
 media segments), selects a variant, and streams its segments, MPEG-TS into
 `tsdemux` or fMP4/CMAF (signalled by `#EXT-X-MAP`, probed at negotiation) as
 `ByteStream{IsoBmff}` into `fmp4demux`. It reloads a no-ENDLIST live playlist on an
-interval, playing each new segment once by media sequence. Single-file CMAF is
+interval, playing each new segment once by media sequence. With `with_abr()`
+(M371) it is throughput-adaptive: a shared `abr::BandwidthEstimator` keeps an EWMA
+of measured download throughput (bytes over elapsed `monotonic_ns`) and yields an
+effective bandwidth cap (estimate scaled by a safety factor, bounded by
+`max-bandwidth`); the run loop feeds that cap to the existing `MasterPlaylist`
+selection, re-picks the best-fitting variant after each segment, and on a change
+swaps the active media playlist and re-emits the init, keeping the time-aligned
+segment index. Off by default (a fixed up-front variant). Single-file CMAF is
 supported through `#EXT-X-BYTERANGE` (and `#EXT-X-MAP`'s `BYTERANGE`): a segment
 carrying one fetches only its sub-range with an HTTP `Range` request (M368), the
 offset continuing from the previous sub-range of the same resource when the tag

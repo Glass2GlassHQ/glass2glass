@@ -46,7 +46,8 @@ use crate::fetch::{
     byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
     MAX_SEGMENT_BYTES,
 };
-use crate::hls::{parse, KeyMethod, MediaPlaylist, Playlist};
+use crate::abr::BandwidthEstimator;
+use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, Playlist};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
 
 #[derive(Debug)]
@@ -75,6 +76,12 @@ pub struct HlsSrc {
     /// `fmp4demux` reset on the flush gets its `moov` again), emits the post-flush
     /// `Segment`, and resumes from there. The CMAF/DASH segment-transition case.
     seek: Option<SeekController>,
+    /// Throughput-driven ABR (M371): when set and the playlist is a master, the
+    /// run loop measures each segment's download and re-selects the variant whose
+    /// declared bandwidth fits the estimate (scaled, and under `max_bandwidth`),
+    /// switching the active media playlist and re-emitting the init on a change.
+    /// Off by default, so a plain run picks one variant up front and keeps it.
+    abr: bool,
     configured: bool,
 }
 
@@ -88,8 +95,19 @@ impl HlsSrc {
             probed: None,
             sample_aes_key: None,
             seek: None,
+            abr: false,
             configured: false,
         }
+    }
+
+    /// Enable throughput-driven ABR (M371): measure each segment's download and
+    /// re-select the variant whose declared bandwidth fits the smoothed estimate
+    /// (under any `max_bandwidth` cap), switching mid-stream and re-emitting the
+    /// init segment on a change. A no-op for a media-only playlist (one
+    /// rendition). Off by default (a fixed up-front variant).
+    pub fn with_abr(mut self) -> Self {
+        self.abr = true;
+        self
     }
 
     /// Make the source time-seekable (M367): `run` polls `controller` before each
@@ -168,6 +186,25 @@ async fn resolve_media(
                 Playlist::Master(_) => Err(G2gError::CapsMismatch),
             }
         }
+    }
+}
+
+/// Select a variant from a master by bandwidth `cap`, fetch its media playlist,
+/// and return it with its resolved URL and the chosen variant URI (so ABR can
+/// detect a later switch). Used by the ABR path, which keeps the master around.
+async fn fetch_variant_media(
+    client: &reqwest::Client,
+    master: &MasterPlaylist,
+    master_url: &str,
+    cap: Option<u64>,
+) -> Result<(MediaPlaylist, String, String), G2gError> {
+    let variant = master.select(cap).ok_or(G2gError::CapsMismatch)?;
+    let variant_uri = variant.uri.clone();
+    let media_url = resolve_url(master_url, &variant_uri);
+    let media_text = get_text(client, &media_url, MAX_MANIFEST_BYTES).await?;
+    match parse(&media_text).map_err(|_| G2gError::CapsMismatch)? {
+        Playlist::Media(m) => Ok((m, media_url, variant_uri)),
+        Playlist::Master(_) => Err(G2gError::CapsMismatch),
     }
 }
 
@@ -264,11 +301,33 @@ impl SourceLoop for HlsSrc {
                 return Err(G2gError::NotConfigured);
             }
             let client = reqwest::Client::new();
-            // Reuse the playlist the probe already fetched at negotiation; only
-            // resolve again if run() is entered without a prior probe.
-            let (mut media, media_url) = match self.probed.take() {
-                Some(probed) => probed,
-                None => resolve_media(&client, &self.url, self.cap()).await?,
+            // ABR keeps the master playlist so the run loop can re-select a variant
+            // per segment; `current_variant` tracks the loaded one to detect a
+            // switch. Non-ABR reuses the probe's media playlist (one fixed variant).
+            let mut master: Option<(MasterPlaylist, String)> = None;
+            let mut current_variant: Option<String> = None;
+            let mut estimator = BandwidthEstimator::new();
+            let (mut media, mut media_url) = if self.abr {
+                // Drop any probed media: ABR resolves fresh, keeping the master.
+                self.probed = None;
+                let text = get_text(&client, &self.url, MAX_MANIFEST_BYTES).await?;
+                match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
+                    Playlist::Media(m) => (m, self.url.clone()),
+                    Playlist::Master(mst) => {
+                        let (m, murl, uri) =
+                            fetch_variant_media(&client, &mst, &self.url, self.cap()).await?;
+                        master = Some((mst, self.url.clone()));
+                        current_variant = Some(uri);
+                        (m, murl)
+                    }
+                }
+            } else {
+                // Reuse the playlist the probe already fetched at negotiation; only
+                // resolve again if run() is entered without a prior probe.
+                match self.probed.take() {
+                    Some(probed) => probed,
+                    None => resolve_media(&client, &self.url, self.cap()).await?,
+                }
             };
 
             let mut sequence = 0u64;
@@ -331,9 +390,13 @@ impl SourceLoop for HlsSrc {
                         break;
                     }
                     let seg_seq = media.media_sequence + idx as u64;
+                    // Bytes + elapsed of the segment just fetched, for the ABR
+                    // estimator (None when this index was skipped on a live reload).
+                    let mut measured: Option<(usize, u64)> = None;
                     let segment = &media.segments[idx];
                     if seg_seq >= next_seq {
                         let seg_url = resolve_url(&media_url, &segment.uri);
+                        let t0 = g2g_core::metrics::monotonic_ns();
                         let bytes = match segment.byte_range {
                             Some(r) => {
                                 get_range_bytes(&client, &seg_url, r.offset, r.length, MAX_SEGMENT_BYTES)
@@ -341,6 +404,9 @@ impl SourceLoop for HlsSrc {
                             }
                             None => get_bytes(&client, &seg_url, MAX_SEGMENT_BYTES).await?,
                         };
+                        // Measure the downloaded (pre-decrypt) size against wall time.
+                        measured =
+                            Some((bytes.len(), g2g_core::metrics::monotonic_ns().saturating_sub(t0)));
                         let bytes = match &segment.key {
                             None => bytes,
                             Some(key) => {
@@ -371,6 +437,33 @@ impl SourceLoop for HlsSrc {
                         next_seq = seg_seq + 1;
                     }
                     idx += 1;
+
+                    // ABR: feed the measured throughput and, if the best-fitting
+                    // variant changed, switch to it (its media playlist), keeping
+                    // the aligned index and re-emitting the new variant's init. The
+                    // segment borrow above has ended, so reassigning `media` is safe.
+                    if let (Some((len, elapsed)), Some((mst, master_url))) =
+                        (measured, master.as_ref())
+                    {
+                        estimator.sample(len, elapsed);
+                        if let Some(best) = mst.select(estimator.effective_cap(self.max_bandwidth)) {
+                            if current_variant.as_deref() != Some(best.uri.as_str()) {
+                                let new_uri = best.uri.clone();
+                                let new_url = resolve_url(master_url, &new_uri);
+                                let text = get_text(&client, &new_url, MAX_MANIFEST_BYTES).await?;
+                                if let Playlist::Media(m) =
+                                    parse(&text).map_err(|_| G2gError::CapsMismatch)?
+                                {
+                                    // Variants are time-aligned by media sequence, so
+                                    // `idx` / `next_seq` carry over; re-emit the init.
+                                    media = m;
+                                    media_url = new_url;
+                                    current_variant = Some(new_uri);
+                                    init_emitted = false;
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if media.end_list {
