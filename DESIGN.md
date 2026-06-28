@@ -1469,12 +1469,25 @@ is not:
   arc-consistency boundary, not a missing feature: a partial inverse over the
   invertible fields is exactly what is modelled.
 
-- **Non-tree topologies are not guaranteed.** Arc consistency is incomplete on
-  cyclic constraint graphs. Independent fan-out (a tee feeding unrelated sink
-  branches) stays a tree and is fine, but a true *diamond* (split, then divergent
-  transforms, then a fan-in whose inputs are caps-coupled) can fail loud even
-  when a satisfying assignment exists; resolving it needs higher consistency or
-  backtracking search.
+- **Non-tree topologies: arc consistency plus a backtracking fixation.** Arc
+  consistency is incomplete on cyclic constraint graphs, so for a true *diamond*
+  (a tee whose branches diverge through format-changing transforms and re-converge
+  at a fan-in) the per-link sweep can leave each edge with a locally-valid domain
+  whose *greedy* per-edge fixation picks a jointly-impossible combination (two
+  branches mapping the shared tee value to outputs whose alternative orders
+  disagree). `solve_graph` therefore fixates by **backtracking search** over the
+  arc-consistency-narrowed domains, not greedily: it assigns one fixated `Caps`
+  per edge in id order, trying each edge's greedy choice first and pruning the
+  moment a fully-assigned node violates its relation (a tee's branches must all
+  carry its input; a transform's `(in, out)` must be a real `Mapping` pair /
+  `Identity` equality / `f(in)` image). A chain or an independent fan-out has
+  single-candidate domains and so fixates byte-for-byte as the greedy code did;
+  only a genuinely coupled diamond explores alternatives, and one with no
+  jointly-valid assignment fails loud (`NoConsistentFixation`). Diamonds are now
+  solved, not a caveat. (A muxer that itself *couples* its input pads, beyond the
+  per-pad accept sets the constraint vocabulary expresses today, would be the next
+  step up; the search already has the shape to enforce it once such a constraint
+  exists.)
 
 - **Cross-field validity within one element is not modelled.** Constraints
   *among an element's own caps fields* (a 4:2:0 format requiring even dimensions,
@@ -1489,10 +1502,12 @@ is not:
   should feed back into the *caps* choice is not expressed; this is the most
   likely future pressure point as real GPU/hardware allocators land.
 
-Reaching for a full CSP search (backtracking, path consistency) is only
-warranted once a real pipeline exercises the non-tree or `DerivedOutput`-inverse
-cases above; today every shape that arises in practice is either complete or
-fails loud rather than mis-fixating.
+The fixation step is now a bounded backtracking search (above), so a diamond is
+solved rather than greedily mis-fixated. Full *path consistency* during the
+narrowing sweep (versus arc consistency plus search at fixation) is still not
+implemented, but the search closes the practical gap: every shape that arises is
+either complete or fails loud, and a coupled diamond with a satisfying assignment
+now finds it instead of mis-fixating.
 
 ### 4.14 Pipeline Lifecycle: State Machine, Preroll, and Seek
 

@@ -57,6 +57,12 @@ pub enum NegotiationFailure {
     /// Reserved for the non-linear solver. The linear solver never
     /// returns this variant.
     Cyclic,
+    /// Arc consistency left a non-empty domain on every edge, but no single
+    /// assignment of one fixated `Caps` per edge satisfies every node at once:
+    /// an over-constrained diamond (a tee whose branches re-converge at a fan-in
+    /// with no jointly-valid choice). Only the DAG solver's backtracking
+    /// fixation returns this.
+    NoConsistentFixation,
     /// Transitional: the chain mixes `Legacy*` variants with the
     /// native `Accepts` / `Produces` / `Identity` / `Mapping` /
     /// `DerivedOutput` variants. Mixed handling is added once step 5
@@ -899,10 +905,21 @@ pub fn solve_graph_labeled<E>(
         }
     }
 
-    let mut out = Vec::with_capacity(ne);
+    // Build a per-edge candidate domain (each surviving alternative, fixated, in
+    // the set's own preference order so the first candidate is exactly what the
+    // old per-edge `fixate()` would have picked). Then assign one candidate per
+    // edge by backtracking search so the chosen combination is *globally*
+    // consistent. Arc consistency above narrows each edge against its neighbours
+    // pairwise, but a diamond (a tee whose branches re-converge at a fan-in)
+    // couples branch choices in a way pairwise narrowing cannot see, so per-edge
+    // greedy fixation can pick a locally-valid yet jointly-impossible combination
+    // (e.g. two branches that map the shared tee value to different outputs whose
+    // alternative orders disagree). The search tries the greedy choice first, so a
+    // chain or an independent fan-out fixates byte-for-byte as before and only a
+    // genuinely coupled diamond ever explores alternatives.
+    let mut domains: Vec<Vec<Caps>> = Vec::with_capacity(ne);
     for (id, slot) in edges.iter().enumerate() {
         let (up, down) = edge_endpoints(graph, id);
-        let e = graph.edge(id);
         let set = match slot.as_ref() {
             Some(s) if !s.is_empty() => s,
             _ => {
@@ -911,33 +928,130 @@ pub fn solve_graph_labeled<E>(
                 return Err(f);
             }
         };
-        match set.fixate() {
-            Some(c) => {
-                if trace {
-                    crate::g2g_debug!(
-                        t,
-                        "{} -> {}: {} ✓ -> {}",
-                        label(e.src.node),
-                        label(e.dst.node),
-                        fmt_set(set),
-                        c.to_gst_string()
-                    );
+        let mut doms: Vec<Caps> = Vec::new();
+        for alt in set.alternatives() {
+            if let Ok(c) = alt.fixate() {
+                if !doms.contains(&c) {
+                    doms.push(c);
                 }
-                out.push(c);
             }
-            None => {
-                crate::g2g_error!(
-                    t,
-                    "{} -> {}: {} ✗ cannot fixate (still ambiguous after narrowing)",
-                    label(e.src.node),
-                    label(e.dst.node),
-                    fmt_set(set)
-                );
-                return Err(NegotiationFailure::Unfixable { upstream: up, downstream: down });
-            }
+        }
+        if doms.is_empty() {
+            crate::g2g_error!(
+                t,
+                "{} -> {}: {} ✗ cannot fixate (still ambiguous after narrowing)",
+                label(graph.edge(id).src.node),
+                label(graph.edge(id).dst.node),
+                fmt_set(set)
+            );
+            return Err(NegotiationFailure::Unfixable { upstream: up, downstream: down });
+        }
+        domains.push(doms);
+    }
+
+    let mut assign: Vec<Option<Caps>> = alloc::vec![None; ne];
+    if !fixate_backtrack(graph, constraints, &domains, &mut assign, 0) {
+        let f = NegotiationFailure::NoConsistentFixation;
+        report(&f, &edges);
+        return Err(f);
+    }
+    let out: Vec<Caps> = assign.into_iter().map(|a| a.expect("every edge assigned")).collect();
+    if trace {
+        for (id, c) in out.iter().enumerate() {
+            let e = graph.edge(id);
+            crate::g2g_debug!(
+                t,
+                "{} -> {}: {} ✓ -> {}",
+                label(e.src.node),
+                label(e.dst.node),
+                fmt_set(edges[id].as_ref().expect("edge set present")),
+                c.to_gst_string()
+            );
         }
     }
     Ok(out)
+}
+
+/// Backtracking search for a globally-consistent edge assignment, run after arc
+/// consistency has narrowed each edge's domain. Assigns edges in id order, trying
+/// each candidate (greedy choice first) and pruning the moment a node whose edges
+/// are all assigned violates its relation. Returns `true` with `assign` filled on
+/// success. Recursion depth is the edge count and domains are tiny in practice
+/// (almost always one candidate), so the worst-case product is never approached
+/// for real graphs.
+fn fixate_backtrack<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    domains: &[Vec<Caps>],
+    assign: &mut [Option<Caps>],
+    edge: usize,
+) -> bool {
+    if edge == domains.len() {
+        return true;
+    }
+    let e = graph.edge(edge);
+    for cand in &domains[edge] {
+        assign[edge] = Some(cand.clone());
+        if node_consistent(graph, constraints, assign, e.src.node)
+            && node_consistent(graph, constraints, assign, e.dst.node)
+            && fixate_backtrack(graph, constraints, domains, assign, edge + 1)
+        {
+            return true;
+        }
+    }
+    assign[edge] = None;
+    false
+}
+
+/// Whether `node`'s relation holds for the currently-assigned values of its
+/// incident edges. Returns `true` while any incident edge is still unassigned
+/// (the relation cannot be violated yet), so the caller can check a node the
+/// moment its last edge is assigned. Per-edge membership (a source's produce set,
+/// a sink's / muxer pad's accept set) is already guaranteed by arc consistency;
+/// the load-bearing checks here are the cross-edge ones a diamond needs: a tee's
+/// branches all carrying its input, an `Identity`'s in == out, a `Mapping`'s
+/// (in, out) being one declared pair, and a derived transform's out in f(in).
+fn node_consistent<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    assign: &[Option<Caps>],
+    node: NodeId,
+) -> bool {
+    let in_e = graph.in_edges(node);
+    let out_e = graph.out_edges(node);
+    if in_e.iter().chain(out_e.iter()).any(|&e| assign[e].is_none()) {
+        return true;
+    }
+    let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
+    match graph.kind(node) {
+        // Membership is already ensured by arc consistency; nothing cross-edge.
+        NodeKind::Source | NodeKind::Sink | NodeKind::Muxer(_) => true,
+        NodeKind::Tee(_) => {
+            let inp = get(in_e[0]);
+            out_e.iter().all(|&o| get(o) == inp)
+        }
+        NodeKind::Transform => match &constraints[node.0 as usize] {
+            NodeConstraint::Element(c) => transform_pair_consistent(c, get(in_e[0]), get(out_e[0])),
+            _ => true,
+        },
+    }
+}
+
+/// The cross-edge relation a transform's `(input, output)` pair must satisfy, for
+/// [`node_consistent`]'s backtracking check.
+fn transform_pair_consistent(c: &CapsConstraint<'_>, inp: &Caps, outp: &Caps) -> bool {
+    match c {
+        CapsConstraint::Identity(_) | CapsConstraint::IdentityAny => inp == outp,
+        CapsConstraint::Mapping(pairs) => {
+            pairs.iter().any(|(i, o)| i.accepts(inp) && o.accepts(outp))
+        }
+        CapsConstraint::DerivedOutput(f) => f(inp).accepts(outp),
+        CapsConstraint::DerivedCoupled { derive, .. } => derive(inp).accepts(outp),
+        // Produce / accept shapes on a transform slot, or legacy bridges: not a
+        // cross-edge relation re-checked here (arc consistency handled the forward
+        // cascade; the legacy bridge stays permissive through the migration).
+        _ => true,
+    }
 }
 
 /// Default node label for the caps explainer: `n{id}:{kind}` (e.g. `n2:xform`),
@@ -2097,6 +2211,79 @@ mod tests {
         assert!(
             matches!(solve_graph(&v, &cs), Err(NegotiationFailure::EmptyLink { .. })),
             "an incompatible branch fails the whole solve"
+        );
+    }
+
+    #[test]
+    fn solve_graph_diamond_fixates_globally_consistent() {
+        // True diamond: source {V,W} -> tee -> two Mapping branches -> muxer.
+        // Branch 1 maps V->A, W->C; branch 2 maps W->B, V->D (orders misaligned).
+        // The muxer accepts {A,C} on pad 0 and {B,D} on pad 1. Valid solutions
+        // exist (source=V => b1=A, b2=D; or source=W => b1=C, b2=B), but greedy
+        // per-edge fixation picks source=V, b1=A (first of {A,C}), b2=B (first of
+        // {B,D}) -- and (V, B) is not a branch-2 mapping pair. Arc consistency
+        // can't catch this; the backtracking fixation must.
+        let v = fixed_compressed(VideoCodec::H264, 64, 48, 30);
+        let w = fixed_compressed(VideoCodec::H265, 64, 48, 30);
+        let a = fixed_video(RawVideoFormat::Nv12, 64, 48, 30);
+        let c = fixed_video(RawVideoFormat::I420, 64, 48, 30);
+        let b = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let d = fixed_video(RawVideoFormat::I422, 64, 48, 30);
+        let muxed = fixed_video(RawVideoFormat::I444, 64, 48, 30);
+
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(vec![
+                v.clone(),
+                w.clone(),
+            ]))),
+            NodeConstraint::Element(CapsConstraint::IdentityAny), // tee
+            NodeConstraint::Element(CapsConstraint::Mapping(vec![
+                (CapsSet::one(v.clone()), CapsSet::one(a.clone())),
+                (CapsSet::one(w.clone()), CapsSet::one(c.clone())),
+            ])),
+            NodeConstraint::Element(CapsConstraint::Mapping(vec![
+                (CapsSet::one(w.clone()), CapsSet::one(b.clone())),
+                (CapsSet::one(v.clone()), CapsSet::one(d.clone())),
+            ])),
+            NodeConstraint::Muxer {
+                inputs: vec![
+                    CapsConstraint::Accepts(CapsSet::from_alternatives(vec![a.clone(), c.clone()])),
+                    CapsConstraint::Accepts(CapsSet::from_alternatives(vec![b.clone(), d.clone()])),
+                ],
+                output: CapsConstraint::Produces(CapsSet::one(muxed)),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tee = g.add_tee(2);
+        let b1 = g.add_transform(());
+        let b2 = g.add_transform(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(src, tee.input()).unwrap();
+        g.link(tee.out(0), b1).unwrap();
+        g.link(tee.out(1), b2).unwrap();
+        g.link(b1, mux.input(0)).unwrap();
+        g.link(b2, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let vg = g.finish().unwrap();
+
+        let sol = solve_graph(&vg, &cs).expect("diamond has a satisfying assignment");
+        // Edges: 0 src->tee, 1 tee->b1, 2 tee->b2, 3 b1->mux, 4 b2->mux, 5 mux->sink.
+        // The tee broadcasts one value, so both branch inputs equal the source.
+        assert_eq!(sol[1], sol[0], "tee broadcasts to branch 1");
+        assert_eq!(sol[2], sol[0], "tee broadcasts to branch 2");
+        // Each branch's (in, out) must be one of its declared mapping pairs.
+        let b1_pair = (sol[1].clone(), sol[3].clone());
+        assert!(
+            b1_pair == (v.clone(), a.clone()) || b1_pair == (w.clone(), c.clone()),
+            "branch 1 fixated to a real mapping pair, got {b1_pair:?}"
+        );
+        let b2_pair = (sol[2].clone(), sol[4].clone());
+        assert!(
+            b2_pair == (w.clone(), b.clone()) || b2_pair == (v.clone(), d.clone()),
+            "branch 2 fixated to a real mapping pair, got {b2_pair:?}"
         );
     }
 
