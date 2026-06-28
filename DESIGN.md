@@ -1133,6 +1133,29 @@ This is the same machinery a future mid-stream clock change or latency
 adjustment uses: cross-element mid-stream coordination becomes a coordinator
 event instead of an ad-hoc back-channel.
 
+The startup cascade runs once in reverse topological order: each element
+absorbs the proposal on its output edge and re-proposes onto its input edge.
+Two fan structures have non-trivial joins:
+
+- **Diamond join (tee).** A tee's single input must satisfy *both* branches at
+  once, so the branch proposals are joined by a most-restrictive intersection
+  (`AllocationParams::join`): the larger size, count, and alignment win, and the
+  memory domain must match. A domain conflict (a CUDA branch and a D3D11 branch)
+  is an empty intersection (no single producer pool serves both) and fails the
+  whole negotiation loud with `G2gError::AllocationConflict`, rather than
+  silently honouring one branch and copying for the other. This is distinct from
+  `AllocationParams::merge`, the asymmetric fold the linear upstream walk uses
+  where the consumer-most proposal legitimately dictates the domain.
+- **Muxer boundary.** A muxer states its per-pad demand through
+  `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
+  so a plain container muxer imposes nothing). The runner stores it on each
+  input edge so the demand crosses the boundary and re-cascades up that branch
+  independently (a device-resident interleave muxer asking each video pad for
+  GPU buffers). The muxer's byte output has no memory-domain tie to its inputs,
+  so its output-edge proposal is not absorbed. The *mid-stream* per-pad
+  re-cascade (a live `CapsChanged` re-deriving across the muxer) still
+  terminates at the boundary, a follow-up.
+
 #### 4.13.6 Fan-out and fan-in
 
 `run_source_fanout` per-branch re-solves a mid-stream `CapsChanged` via

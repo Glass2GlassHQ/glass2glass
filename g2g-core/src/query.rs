@@ -89,6 +89,26 @@ impl AllocationParams {
             domain: self.domain,
         }
     }
+
+    /// Join two *sibling* proposals that share one producer (the two branches of
+    /// a tee's diamond). Unlike [`merge`](Self::merge), neither side dominates,
+    /// so the memory domain cannot be picked unilaterally: the producer must
+    /// allocate one pool both branches can consume. Same domain joins to the
+    /// most-restrictive per parameter (the larger size, count, and alignment).
+    /// A differing domain is an empty intersection (no single pool satisfies a
+    /// CUDA consumer and a D3D11 consumer), so the join fails loud with
+    /// [`G2gError::AllocationConflict`] rather than silently honouring one branch.
+    pub fn join(self, other: Self) -> Result<Self, crate::error::G2gError> {
+        if self.domain != other.domain {
+            return Err(crate::error::G2gError::AllocationConflict);
+        }
+        Ok(Self {
+            size_bytes: self.size_bytes.max(other.size_bytes),
+            min_buffers: self.min_buffers.max(other.min_buffers),
+            align: self.align.max(other.align),
+            domain: self.domain,
+        })
+    }
 }
 
 /// One element's contribution to a path's latency, plus the aggregate of a

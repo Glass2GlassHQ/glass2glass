@@ -335,6 +335,22 @@ pub trait MultiInputElement: ElementBound {
         Ok(CapsConstraint::LegacySource(self.output_caps()?))
     }
 
+    /// The allocation this muxer wants on one input pad, given that pad's
+    /// negotiated caps. The DAG runner stores it on the input edge during the
+    /// reverse-topo allocation cascade, so the demand crosses the muxer boundary
+    /// and re-cascades up that branch independently (a CUDA-resident interleave
+    /// muxer asking each video pad for device buffers, say). Default `None`: a
+    /// plain container muxer imposes no per-pad allocation, so the branch keeps
+    /// its own. Mirrors [`AsyncElement::propose_allocation`](crate::AsyncElement::propose_allocation),
+    /// but per input pad rather than on the single input.
+    fn propose_allocation_for_input(
+        &self,
+        _input: usize,
+        _caps: &Caps,
+    ) -> Option<crate::query::AllocationParams> {
+        None
+    }
+
     /// Runtime properties this muxer exposes (M104), mirroring
     /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
     /// none. A muxer overrides this (with `set_property` / `get_property`) to be

@@ -290,6 +290,8 @@ pub trait DynMultiInputElement: ElementBound {
     fn input_pts_ordered(&self) -> bool;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
+    /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
+    fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
     fn configure_pipeline(
         &mut self,
         input: usize,
@@ -321,6 +323,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         MultiInputElement::caps_constraint_for_output(self)
+    }
+
+    fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
+        MultiInputElement::propose_allocation_for_input(self, input, caps)
     }
 
     fn configure_pipeline(
@@ -372,6 +378,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         (**self).caps_constraint_for_output()
+    }
+
+    fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
+        (**self).propose_allocation_for_input(input, caps)
     }
 
     fn configure_pipeline(

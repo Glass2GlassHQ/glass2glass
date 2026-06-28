@@ -22,10 +22,13 @@
 //! and a sink re-solves its input against its declared constraint. A node-keyed
 //! [`GraphCoordinator`] walks the sink's re-derived allocation proposal one hop
 //! upstream per reply via [`ValidatedGraph::in_edges`], resolving through
-//! structural tee nodes; a source or muxer terminates the walk. Tee branches
-//! re-solve independently (each broadcast `CapsChanged` lands in its own arm);
-//! muxer inputs re-configure per pad. A muxer is a β boundary: its inputs carry
-//! no per-pad allocation channel, so the proposal stops there (a follow-up).
+//! structural tee nodes; a source or muxer terminates the *mid-stream* walk.
+//! Tee branches re-solve independently (each broadcast `CapsChanged` lands in
+//! its own arm); muxer inputs re-configure per pad. At startup negotiation a
+//! muxer's per-pad allocation demand (`propose_allocation_for_input`) does
+//! cross the boundary and re-cascades up each branch; only the *mid-stream*
+//! re-cascade still stops at a muxer (its inputs carry no per-pad re-cascade
+//! channel yet, a follow-up).
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -582,9 +585,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // proposal arriving on its output edge(s) (`configure_allocation`), then
     // proposes from its output-link caps; the proposal is stored on its input
     // edge(s) for its upstream to absorb. A tee joins its branch proposals
-    // (most-demanding) onto its single input; a muxer is a boundary. The
-    // source's absorbed proposal is the reported `allocation`. For a linear
-    // chain this is byte-for-byte the linear runner's sink->source fold.
+    // (most-restrictive intersection, loud failure on a domain conflict) onto
+    // its single input; a muxer proposes its own per-pad demand onto each input
+    // edge (the boundary now crosses at startup). The source's absorbed proposal
+    // is the reported `allocation`. For a linear chain this is byte-for-byte the
+    // linear runner's sink->source fold.
     let nee = vg.edge_count();
     let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
     let mut allocation: Option<AllocationParams> = None;
@@ -608,7 +613,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 let in_e = vg.in_edges(node)[0];
                 let mut joined: Option<AllocationParams> = None;
                 for &oe in vg.out_edges(node) {
-                    joined = join_alloc(joined, edge_proposal[oe]);
+                    joined = join_alloc(joined, edge_proposal[oe])?;
                 }
                 edge_proposal[in_e] = joined;
             }
@@ -621,7 +626,21 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     allocation = Some(p);
                 }
             }
-            NodeKind::Muxer(_) => {}
+            NodeKind::Muxer(_) => {
+                // A muxer asks each input pad for the allocation it wants (most
+                // are content-agnostic and propose nothing), storing it on that
+                // input edge so the demand crosses the boundary and re-cascades
+                // up the branch like any other downstream proposal. The muxer's
+                // own output edge proposal is not absorbed here: a container
+                // muxer's byte output has no memory-domain tie to its inputs.
+                if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
+                    for &in_e in vg.in_edges(node) {
+                        let pad = vg.edge(in_e).dst.index as usize;
+                        let caps = solution[in_e].clone();
+                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
+                    }
+                }
+            }
         }
     }
 
@@ -1057,17 +1076,20 @@ fn element_clock(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<
     }
 }
 
-/// Join two allocation proposals at a tee's input: keep the most-demanding
-/// (largest `size_bytes`). No test exercises a divergent tee allocation yet; a
-/// full per-param intersection is a follow-up (the DAG plan's open question).
+/// Join two allocation proposals at a tee's input. Both branches consume the
+/// one upstream producer, so the result is the most-restrictive per-parameter
+/// intersection ([`AllocationParams::join`]): the larger size, count, and
+/// alignment, with a matching memory domain. Divergent domains are an empty
+/// intersection and fail loud with [`G2gError::AllocationConflict`] (no single
+/// pool can satisfy, say, a CUDA branch and a D3D11 branch at once).
 fn join_alloc(
     a: Option<AllocationParams>,
     b: Option<AllocationParams>,
-) -> Option<AllocationParams> {
+) -> Result<Option<AllocationParams>, G2gError> {
     match (a, b) {
-        (Some(x), Some(y)) => Some(if y.size_bytes > x.size_bytes { y } else { x }),
-        (Some(x), None) => Some(x),
-        (None, b) => b,
+        (Some(x), Some(y)) => x.join(y).map(Some),
+        (Some(x), None) => Ok(Some(x)),
+        (None, b) => Ok(b),
     }
 }
 

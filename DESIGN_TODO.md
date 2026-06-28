@@ -41,11 +41,10 @@ leverage first:
 - **Merged downstream output for dynamic fan-in.** `run_aggregator_dynamic`
   (M320) drives a *terminal* aggregator; the `run_muxer_sink` shape (a trailing
   sink with output-caps coupling) for runtime-added inputs is still owed.
-- **β allocation re-cascade across a muxer.** A muxer's inputs have no per-pad
-  re-cascade channel, so the DAG β walk terminates at a muxer.
-- **Allocation join policy across diamonds.** Two branches downstream of a tee
-  proposing different allocation params need a join policy (sketch:
-  most-restrictive intersection, loud failure on empty).
+- **Mid-stream β re-cascade across a muxer.** Startup negotiation now crosses
+  the boundary (`MultiInputElement::propose_allocation_for_input`, M343), but a
+  muxer's inputs still carry no per-pad re-cascade channel, so a *mid-stream*
+  `CapsChanged`-driven β walk terminates at the muxer.
 - **`Graph` re-run / clone for seek-and-replay.** `run_graph` consumes elements
   via `take()`; a `GraphTemplate::instantiate() -> Graph` two-step is cleaner
   than making `Graph` reusable.
@@ -58,7 +57,6 @@ leverage first:
 
 ## Seek and auto-plug
 
-- Non-flushing / accumulating `do_seek` (advance base by elapsed running time).
 - Segment seeks (CMAF / DASH transitions).
 - Re-preroll after a flushing seek when paused.
 - Make `FileSrc` and the demuxers seek-aware (only `Mp4Src` is today).
@@ -236,10 +234,9 @@ leverage first:
 
 ## Containers
 
-- **MKV / WebM:** Cues / seeking; multi-track muxing; `Targets`-scoped
-  (per-track) tags.
+- **MKV / WebM:** Cues / seeking; `Targets`-scoped (per-track) tags.
+  (Multi-track A/V muxing landed: `mkvmuxn`, M294.)
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
-- **FLV:** codec-config / extradata plumbing; multi-track muxing.
 - **OGG:** granule-position timing; Vorbis output; multi-stream; `oggmux`.
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
 

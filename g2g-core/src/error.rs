@@ -12,6 +12,11 @@ pub enum G2gError {
     PoolExhausted,
     /// A `MemoryDomain` variant was handed to an element that cannot consume it.
     UnsupportedDomain,
+    /// Two branches of a fan-out (a tee's diamond) proposed allocation
+    /// parameters with no common memory domain, so there is no pool the shared
+    /// producer can allocate that satisfies both. The negotiation fails loud
+    /// rather than silently honouring one branch and copying for the other.
+    AllocationConflict,
     /// Backend-specific hardware or driver failure.
     Hardware(HardwareError),
     /// Pipeline is shutting down; element should drain and propagate `Eos`.
