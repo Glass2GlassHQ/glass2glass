@@ -1,7 +1,7 @@
-//! M379 - `playbin3`-equivalent graph builder. `Registry::build_playbin3_graph`
+//! M379 - `playbin`-equivalent graph builder. `Registry::build_playbin_graph`
 //! assembles `source(uri) -> demux(MkvDemuxN) -> {decode chain -> sink}` per
 //! selected stream: the multi-stream counterpart of `build_uridecodebin`. The app
-//! derives one `Playbin3Port` per stream from the demux's announced
+//! derives one `PlaybinPort` per stream from the demux's announced
 //! `StreamCollection` (M376) + its selection (M377).
 //!
 //! Two checks: the builder assembles the right topology (structural, the
@@ -20,7 +20,7 @@ use g2g_core::element::AsyncElement;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{
-    is_raw_audio, is_raw_video, run_graph, ElementFactory, GraphNode, Playbin3Error, Playbin3Port,
+    is_raw_audio, is_raw_video, run_graph, ElementFactory, GraphNode, PlaybinGraphError, PlaybinPort,
     Registry, SourceLoop, UriError, UriSourceFactory,
 };
 use g2g_core::{
@@ -112,17 +112,17 @@ impl AsyncElement for CountSink {
 }
 
 #[test]
-fn build_playbin3_graph_assembles_per_stream_decode_branches() {
+fn build_playbin_graph_assembles_per_stream_decode_branches() {
     let reg = registry_with_stubs();
     let demux = MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Aac]);
     let ports = vec![
-        Playbin3Port { input_caps: h264_any(), target: Box::new(is_raw_video), sink: Box::new(CountSink::default()) },
-        Playbin3Port { input_caps: aac_any(), target: Box::new(is_raw_audio), sink: Box::new(CountSink::default()) },
+        PlaybinPort { input_caps: h264_any(), target: Box::new(is_raw_video), sink: Box::new(CountSink::default()) },
+        PlaybinPort { input_caps: aac_any(), target: Box::new(is_raw_audio), sink: Box::new(CountSink::default()) },
     ];
 
     let graph = reg
-        .build_playbin3_graph("mem://clip.mkv", demux, ports, 6)
-        .expect("playbin3 graph assembles");
+        .build_playbin_graph("mem://clip.mkv", demux, ports, 6)
+        .expect("playbin graph assembles");
 
     // source -> demux(2); each port: demux.out(i) -> stub decoder -> sink.
     // Nodes: source + demux + 2 decoders + 2 sinks = 6.
@@ -132,30 +132,30 @@ fn build_playbin3_graph_assembles_per_stream_decode_branches() {
 }
 
 #[test]
-fn build_playbin3_graph_rejects_no_ports() {
+fn build_playbin_graph_rejects_no_ports() {
     let reg = registry_with_stubs();
     let demux = MkvDemuxN::new(vec![MkvStream::H264]);
-    let err = reg.build_playbin3_graph("mem://clip.mkv", demux, Vec::new(), 6).unwrap_err();
-    assert!(matches!(err, Playbin3Error::NoPorts), "got {err:?}");
+    let err = reg.build_playbin_graph("mem://clip.mkv", demux, Vec::new(), 6).unwrap_err();
+    assert!(matches!(err, PlaybinGraphError::NoPorts), "got {err:?}");
 }
 
 #[test]
-fn build_playbin3_graph_rejects_unknown_scheme() {
+fn build_playbin_graph_rejects_unknown_scheme() {
     let reg = registry_with_stubs();
     let demux = MkvDemuxN::new(vec![MkvStream::H264]);
-    let ports = vec![Playbin3Port {
+    let ports = vec![PlaybinPort {
         input_caps: h264_any(),
         target: Box::new(is_raw_video),
         sink: Box::new(CountSink::default()),
     }];
-    let err = reg.build_playbin3_graph("bogus://x", demux, ports, 6).unwrap_err();
-    assert!(matches!(err, Playbin3Error::Uri(UriError::UnknownScheme)), "got {err:?}");
+    let err = reg.build_playbin_graph("bogus://x", demux, ports, 6).unwrap_err();
+    assert!(matches!(err, PlaybinGraphError::Uri(UriError::UnknownScheme)), "got {err:?}");
 }
 
 // --- end-to-end: MkvDemuxN runs as a run_graph demux node feeding two branches ---
 
 /// A one-shot byte source emitting `bytes` as a single `ByteStream{Matroska}`
-/// frame, then EOS. The container source half of the playbin3 graph (the URI
+/// frame, then EOS. The container source half of the playbin graph (the URI
 /// handler's real job; here constructed directly so the test owns the bytes).
 #[derive(Debug)]
 struct BytesSrc {
@@ -266,7 +266,7 @@ async fn mkvdemuxn_runs_as_a_graph_demux_node() {
     g.link(demux.out(0), s0).unwrap();
     g.link(demux.out(1), s1).unwrap();
 
-    let stats = run_graph(g, &NullClock, 4).await.expect("playbin3 demux graph runs");
+    let stats = run_graph(g, &NullClock, 4).await.expect("playbin demux graph runs");
     assert_eq!(stats.frames_consumed, 4, "all four access units reached a branch");
     assert_eq!(video.load(Ordering::Relaxed), 2, "two H.264 access units on the video port");
     assert_eq!(audio.load(Ordering::Relaxed), 2, "two AAC packets on the audio port");

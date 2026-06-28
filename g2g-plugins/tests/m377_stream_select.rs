@@ -1,4 +1,4 @@
-//! M377 - app-driven stream selection, the playbin3 SELECT_STREAMS analog. After
+//! M377 - app-driven stream selection, the playbin SELECT_STREAMS analog. After
 //! a demuxer announces its streams (M376), the app names a stream id to forward
 //! via a `StreamSelectController`; the demuxer switches its single output to that
 //! track, re-negotiates caps, and confirms the active id on the bus

@@ -92,20 +92,20 @@ pub fn v4l2_handler() -> UriSourceFactory {
     })
 }
 
-/// Bytes read to probe the container's `Tracks` for the `playbin3` auto-fan-out.
+/// Bytes read to probe the container's `Tracks` for the `playbin` auto-fan-out.
 /// `Tracks` sits near the front of a Matroska Segment, so a few MiB is ample.
 #[cfg(feature = "std")]
-const PLAYBIN3_PROBE_BYTES: u64 = 4 * 1024 * 1024;
+const PLAYBIN_PROBE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Per-port decode-chain search depth, matching the `decodebin` / `playbin` macro.
 #[cfg(feature = "std")]
-const PLAYBIN3_MAX_DEPTH: usize = 6;
+const PLAYBIN_MAX_DEPTH: usize = 6;
 
-/// The `playbin3 uri=X` auto-fan-out hook (M382): probe a `file://` Matroska
+/// The `playbin uri=X` auto-fan-out hook (M382): probe a `file://` Matroska
 /// container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto sink}` with
-/// one branch per forwardable stream, the multi-stream counterpart of the
-/// `playbin` macro. Register it on a [`Registry`] with
-/// [`Registry::register_playbin3`] (done by [`default_registry`]).
+/// one branch per forwardable stream, the multi-stream form of `playbin` (vs the
+/// M196 single-stream expansion). Register it on a [`Registry`] with
+/// [`Registry::register_playbin`] (done by [`default_registry`]).
 ///
 /// Declines (returns `Ok(None)`, so the parser falls back to single-stream
 /// `playbin`) for a non-`file://` URI, an unreadable file, or a file whose
@@ -115,7 +115,7 @@ const PLAYBIN3_MAX_DEPTH: usize = 6;
 ///
 /// [`default_registry`]: crate::registry::default_registry
 #[cfg(feature = "std")]
-pub fn mkv_playbin3(
+pub fn mkv_playbin(
     reg: &g2g_core::runtime::Registry,
     uri: &str,
 ) -> Result<Option<g2g_core::Graph<g2g_core::runtime::GraphNode>>, g2g_core::runtime::ParseError> {
@@ -125,7 +125,7 @@ pub fn mkv_playbin3(
     use alloc::vec::Vec;
 
     use g2g_core::runtime::{
-        is_raw_audio, is_raw_video, ParseError, Playbin3Error, Playbin3Port,
+        is_raw_audio, is_raw_video, ParseError, PlaybinGraphError, PlaybinPort,
     };
     use g2g_core::{ByteStreamEncoding, Caps};
 
@@ -144,7 +144,7 @@ pub fn mkv_playbin3(
     let mut prefix = Vec::new();
     match std::fs::File::open(parsed.rest) {
         Ok(f) => {
-            if f.take(PLAYBIN3_PROBE_BYTES).read_to_end(&mut prefix).is_err() {
+            if f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).is_err() {
                 return Ok(None);
             }
         }
@@ -169,21 +169,21 @@ pub fn mkv_playbin3(
         let sink = reg
             .make_element(sink_name)
             .ok_or_else(|| ParseError::UnknownElement(sink_name.to_string()))?;
-        ports.push(Playbin3Port { input_caps: info.caps.clone(), target, sink });
+        ports.push(PlaybinPort { input_caps: info.caps.clone(), target, sink });
     }
 
     // The URI handler's file:// source self-demuxes MP4, so build the matching
     // Matroska byte source directly and feed it to the multi-output demuxer.
     let source = FileSrc::new(parsed.rest, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
     let demux_n = MkvDemuxN::new(streams);
-    reg.build_playbin3_graph_with_source(Box::new(source), demux_n, ports, PLAYBIN3_MAX_DEPTH)
+    reg.build_playbin_graph_with_source(Box::new(source), demux_n, ports, PLAYBIN_MAX_DEPTH)
         .map(Some)
         .map_err(|e| match e {
-            Playbin3Error::NoPorts => {
-                ParseError::NoDecodeChain("playbin3: no forwardable streams".to_string())
+            PlaybinGraphError::NoPorts => {
+                ParseError::NoDecodeChain("playbin: no forwardable streams".to_string())
             }
-            Playbin3Error::Uri(e) => ParseError::Uri(alloc::format!("{uri}: {e:?}")),
-            Playbin3Error::Graph(e) => ParseError::Graph(e),
-            Playbin3Error::Decode(e) => ParseError::NoDecodeChain(alloc::format!("{e:?}")),
+            PlaybinGraphError::Uri(e) => ParseError::Uri(alloc::format!("{uri}: {e:?}")),
+            PlaybinGraphError::Graph(e) => ParseError::Graph(e),
+            PlaybinGraphError::Decode(e) => ParseError::NoDecodeChain(alloc::format!("{e:?}")),
         })
 }

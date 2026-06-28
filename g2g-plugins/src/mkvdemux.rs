@@ -308,7 +308,7 @@ impl MkvDemux {
     /// Announce every elementary stream the container declares as a
     /// [`BusMessage::StreamCollection`] (M376), once, when the `Tracks` element
     /// has parsed. Lists all tracks regardless of which one this instance
-    /// forwards: the discovery half of the playbin3 model. A no-op without a bus,
+    /// forwards: the discovery half of the playbin model. A no-op without a bus,
     /// before Tracks is parsed, or once already posted (kept across a mid-segment
     /// seek's `reset_keeping_tracks`, so an unchanged collection re-posts).
     fn post_stream_collection(&mut self) {
@@ -584,7 +584,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
 /// One forwardable elementary stream discovered in a parsed Matroska container
 /// (M382): which [`MkvStream`] a demux port would carry, the elementary [`Caps`]
 /// a decode branch plugs from (the demux's per-port output caps), and whether it
-/// is video (vs audio). The `playbin3 uri=` auto-fan-out builds one decode branch
+/// is video (vs audio). The `playbin uri=` auto-fan-out builds one decode branch
 /// per entry.
 #[derive(Debug, Clone)]
 pub struct MkvStreamInfo {
@@ -601,7 +601,7 @@ pub struct MkvStreamInfo {
 /// track order (M382): one [`MkvStreamInfo`] per track whose codec maps to an
 /// [`MkvStream`] (an unmappable track is dropped). `demux` must have parsed its
 /// `Tracks` element (feed a file prefix first); returns empty for a
-/// non-Matroska or not-yet-parsed input, which the `playbin3` hook reads as
+/// non-Matroska or not-yet-parsed input, which the `playbin` hook reads as
 /// "decline, fall through to single-stream playbin".
 pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
     demux
@@ -688,7 +688,7 @@ impl PadTemplates for MkvDemux {
 ///
 /// The app picks the per-port streams from the announced
 /// [`StreamCollection`](BusMessage::StreamCollection) (M376); wiring a `demux`
-/// node into the `gst-launch` text DSL and a `playbin3` element are the follow-ups.
+/// node into the `gst-launch` text DSL and a `playbin` element are the follow-ups.
 #[derive(Debug)]
 pub struct MkvDemuxN {
     demux: MatroskaDemuxer,

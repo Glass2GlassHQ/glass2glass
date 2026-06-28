@@ -3,7 +3,7 @@
 //! the container once and routes each track's access units to its port by codec,
 //! emitting each port's concrete caps before its first frame. This is what lets a
 //! single demuxer feed multiple decode branches (audio + video together) in one
-//! pipeline, the playbin3 / decodebin3 model.
+//! pipeline, the playbin / decodebin3 model.
 //!
 //! Mux an A/V Matroska stream (H.264 video + AAC audio) with `MkvMuxN`, then demux
 //! it with a two-port `MkvDemuxN` (port 0 = H.264, port 1 = AAC) and assert each

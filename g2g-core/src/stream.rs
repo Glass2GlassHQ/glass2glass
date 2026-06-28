@@ -1,5 +1,5 @@
 //! Stream discovery: the available elementary streams of a container (the
-//! GStreamer `GstStreamCollection` analog, the data model playbin3 is built on).
+//! GStreamer `GstStreamCollection` analog, the data model playbin is built on).
 //!
 //! A demuxer parses a container's track list and announces *every* elementary
 //! stream it found, out of band on the bus
@@ -7,7 +7,7 @@
 //! independent of which one(s) it actually forwards. The application reads the
 //! collection to learn what audio / video / text streams exist (their type and
 //! [`Caps`]) so it can later select among them. This is the discovery half of
-//! the playbin3 model; app-driven selection is a follow-up.
+//! the playbin model; app-driven selection is a follow-up.
 //!
 //! `no_std + alloc`: the types are in the baseline so any demuxer can build one,
 //! even though today only the bus (a `runtime` feature) carries it. Mirrors the

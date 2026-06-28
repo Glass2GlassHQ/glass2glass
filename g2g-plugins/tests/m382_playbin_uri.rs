@@ -1,12 +1,12 @@
-//! M382 - `playbin3 uri=X` auto-fan-out. A lone `playbin3 uri=file://x.mkv` in a
+//! M382 - `playbin uri=X` auto-fan-out. A lone `playbin uri=file://x.mkv` in a
 //! text pipeline probes the Matroska container, then auto-builds
 //! `FileSrc -> MkvDemuxN -> {decode -> auto sink}` with one branch per forwardable
 //! stream, the multi-stream counterpart of the `playbin` macro (M196). The core
-//! `parse_launch` calls a registry-installed `Playbin3Hook`; the Matroska probe
+//! `parse_launch` calls a registry-installed `PlaybinHook`; the Matroska probe
 //! lives in `g2g-plugins` (cross-crate by design).
 //!
 //! Structural (the graph is asserted, not run, like m379): the hook only fires for
-//! a lone `playbin3`, only for a probed Matroska file, and a registry without the
+//! a lone `playbin`, only for a probed Matroska file, and a registry without the
 //! hook (or a non-Matroska file) falls back to the single-stream `playbin`.
 
 #![cfg(feature = "std")]
@@ -71,7 +71,7 @@ impl AsyncElement for NullSink {
 }
 
 /// A registry with the `file://` handler, stub H.264 / AAC decoders (so the
-/// per-port auto-plug reaches raw), and the auto-sink names. The playbin3 hook is
+/// per-port auto-plug reaches raw), and the auto-sink names. The playbin hook is
 /// added separately so a no-hook control registry can omit it.
 fn base_registry() -> Registry {
     let mut reg = Registry::new();
@@ -169,14 +169,14 @@ async fn mux_av() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn playbin3_uri_auto_fans_out_a_matroska_file() {
+async fn playbin_uri_auto_fans_out_a_matroska_file() {
     let file = mux_av().await;
     let (path, uri) = temp_uri("av", &file);
 
     let mut reg = base_registry();
-    reg.register_playbin3(g2g_plugins::uridecodebin::mkv_playbin3);
+    reg.register_playbin(g2g_plugins::uridecodebin::mkv_playbin);
 
-    let graph = parse_launch(&reg, &format!("playbin3 uri={uri}")).expect("playbin3 fans out");
+    let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("playbin fans out");
     std::fs::remove_file(&path).ok();
 
     // FileSrc -> MkvDemuxN(2); each port: demux.out(i) -> stub decoder -> auto sink.
@@ -186,46 +186,46 @@ async fn playbin3_uri_auto_fans_out_a_matroska_file() {
 }
 
 #[tokio::test]
-async fn playbin3_uri_without_hook_stays_single_stream() {
+async fn playbin_uri_without_hook_stays_single_stream() {
     let file = mux_av().await;
     let (path, uri) = temp_uri("nohook", &file);
 
-    // No register_playbin3: parse_launch falls through to the single-stream
+    // No register_playbin: parse_launch falls through to the single-stream
     // playbin expansion (source -> one decoder -> one auto sink).
     let reg = base_registry();
-    let graph = parse_launch(&reg, &format!("playbin3 uri={uri}")).expect("single-stream playbin3");
+    let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("single-stream playbin");
     std::fs::remove_file(&path).ok();
 
     assert_eq!(graph.node_count(), 3, "source, one decoder, one sink: single-stream playbin");
 }
 
 #[tokio::test]
-async fn playbin3_uri_non_matroska_falls_through() {
+async fn playbin_uri_non_matroska_falls_through() {
     // A file the Matroska probe cannot parse: the hook declines (Ok(None)) and the
     // single-stream playbin path takes over, so it is still a 3-node graph.
     let (path, uri) = temp_uri("notmkv", b"this is not a matroska container");
 
     let mut reg = base_registry();
-    reg.register_playbin3(g2g_plugins::uridecodebin::mkv_playbin3);
+    reg.register_playbin(g2g_plugins::uridecodebin::mkv_playbin);
 
-    let graph = parse_launch(&reg, &format!("playbin3 uri={uri}")).expect("falls back to playbin");
+    let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("falls back to playbin");
     std::fs::remove_file(&path).ok();
 
     assert_eq!(graph.node_count(), 3, "non-Matroska declines: single-stream playbin");
 }
 
-/// A `playbin3` that is *not* alone (here, with a trailing element) does not take
+/// A `playbin` that is *not* alone (here, with a trailing element) does not take
 /// the auto-fan-out path; the lone-element guard leaves it to the normal builder.
 #[test]
-fn non_lone_playbin3_is_not_hooked() {
-    // `playbin3 ! fakesink` is two elements, so `lone_playbin3_uri` returns None
+fn non_lone_playbin_is_not_hooked() {
+    // `playbin ! fakesink` is two elements, so `lone_playbin_uri` returns None
     // and the hook never fires. With no `uri=` the single-stream expansion errors
     // (MissingUri) rather than the hook running, proving the guard held.
     let mut reg = base_registry();
     reg.register_launch(LaunchFactory::of::<NullSink>("fakesink", || Box::new(NullSink)));
-    reg.register_playbin3(|_, _| panic!("hook must not fire for a non-lone playbin3"));
+    reg.register_playbin(|_, _| panic!("hook must not fire for a non-lone playbin"));
 
-    let err = parse_launch(&reg, "playbin3 ! fakesink").unwrap_err();
-    // Two-element line, playbin3 with no uri -> the normal builder's MissingUri.
+    let err = parse_launch(&reg, "playbin ! fakesink").unwrap_err();
+    // Two-element line, playbin with no uri -> the normal builder's MissingUri.
     let _ = err; // any error is fine; the point is the hook panic did not fire.
 }

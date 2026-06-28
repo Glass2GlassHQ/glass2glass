@@ -1,7 +1,7 @@
-//! M376 - stream discovery, the playbin3 foundation. A demuxer announces *every*
+//! M376 - stream discovery, the playbin foundation. A demuxer announces *every*
 //! elementary stream the container declares as a `BusMessage::StreamCollection`,
 //! out of band on the bus, regardless of which one(s) it forwards. This is the
-//! discovery half of the playbin3 stream-collection model (app-driven selection
+//! discovery half of the playbin stream-collection model (app-driven selection
 //! among them is a follow-up).
 //!
 //! Mux an A/V Matroska stream (H.264 video + AAC audio) with `MkvMuxN`, feed it to

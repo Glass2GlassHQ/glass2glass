@@ -96,7 +96,7 @@ pub enum BusMessage {
     /// it once the metadata header is parsed.
     Tag(TagList),
     /// The elementary streams a demuxer found in the container (the GStreamer
-    /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin3 is
+    /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin is
     /// built on). Posted out of band once the demuxer has parsed its track list,
     /// listing *every* available audio / video / text stream (its type and
     /// [`Caps`](crate::caps::Caps)) regardless of which one(s) the demuxer

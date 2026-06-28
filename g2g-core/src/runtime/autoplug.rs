@@ -668,12 +668,12 @@ mod factory {
         }
     }
 
-    /// One output branch of a `playbin3` graph (M379): the elementary stream a
+    /// One output branch of a `playbin` graph (M379): the elementary stream a
     /// demux port carries, the raw target to decode it to, and the sink it ends in.
     /// The caller derives these from the demux's announced
     /// [`StreamCollection`](crate::stream::StreamCollection) and its selection: one
-    /// `Playbin3Port` per selected stream, in demux port order.
-    pub struct Playbin3Port {
+    /// `PlaybinPort` per selected stream, in demux port order.
+    pub struct PlaybinPort {
         /// The port's elementary-stream caps (e.g. H.264), the decode-chain input
         /// the registry auto-plugs from.
         pub input_caps: Caps,
@@ -685,16 +685,16 @@ mod factory {
         pub sink: Box<dyn DynAsyncElement>,
     }
 
-    impl core::fmt::Debug for Playbin3Port {
+    impl core::fmt::Debug for PlaybinPort {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("Playbin3Port").field("input_caps", &self.input_caps).finish_non_exhaustive()
+            f.debug_struct("PlaybinPort").field("input_caps", &self.input_caps).finish_non_exhaustive()
         }
     }
 
-    /// Why [`Registry::build_playbin3_graph`] could not assemble a graph.
+    /// Why [`Registry::build_playbin_graph`] could not assemble a graph.
     #[derive(Debug)]
-    pub enum Playbin3Error {
-        /// No output ports were given (a `playbin3` needs at least one stream).
+    pub enum PlaybinGraphError {
+        /// No output ports were given (a `playbin` needs at least one stream).
         NoPorts,
         /// The URI could not be dispatched to a source (wraps the scheme failure).
         Uri(UriError),
@@ -704,34 +704,34 @@ mod factory {
         Decode(DecodebinError),
     }
 
-    impl From<UriError> for Playbin3Error {
+    impl From<UriError> for PlaybinGraphError {
         fn from(e: UriError) -> Self {
-            Playbin3Error::Uri(e)
+            PlaybinGraphError::Uri(e)
         }
     }
-    impl From<GraphError> for Playbin3Error {
+    impl From<GraphError> for PlaybinGraphError {
         fn from(e: GraphError) -> Self {
-            Playbin3Error::Graph(e)
+            PlaybinGraphError::Graph(e)
         }
     }
-    impl From<DecodebinError> for Playbin3Error {
+    impl From<DecodebinError> for PlaybinGraphError {
         fn from(e: DecodebinError) -> Self {
-            Playbin3Error::Decode(e)
+            PlaybinGraphError::Decode(e)
         }
     }
 
-    /// A `playbin3 uri=X` auto-fan-out hook (M382): given the registry and the
+    /// A `playbin uri=X` auto-fan-out hook (M382): given the registry and the
     /// URI, probe the container and assemble a complete multi-stream
     /// `source -> demux -> per-stream decode -> auto sink` graph, the auto
-    /// counterpart of [`Registry::build_playbin3_graph`]. `Ok(Some(graph))`
+    /// counterpart of [`Registry::build_playbin_graph`]. `Ok(Some(graph))`
     /// handled it; `Ok(None)` declined (e.g. an unprobed scheme or a container
     /// the hook does not parse), so [`parse_launch`](crate::runtime::parse_launch)
     /// falls back to single-stream `playbin`; `Err` aborts the parse. A plain
     /// `fn` pointer, so `Registry` stays `Default` / `Debug`; the plugin crate
     /// that owns the container parsing registers it via
-    /// [`Registry::register_playbin3`]. Cross-crate by design: the text DSL lives
+    /// [`Registry::register_playbin`]. Cross-crate by design: the text DSL lives
     /// in core, the Matroska parsing in `g2g-plugins`.
-    pub type Playbin3Hook =
+    pub type PlaybinHook =
         fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
     impl core::fmt::Debug for ElementFactory {
@@ -759,11 +759,11 @@ mod factory {
         /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
-        /// The `playbin3 uri=X` auto-fan-out hook (M382), if registered. A lone
-        /// `playbin3` in a text pipeline calls it to probe the container and build
-        /// a multi-stream graph; `None` (the default) leaves `playbin3` as a
-        /// single-stream `playbin`. A `fn` pointer, so `Default` still derives.
-        playbin3: Option<Playbin3Hook>,
+        /// The `playbin uri=X` auto-fan-out hook (M382), if registered. A lone
+        /// `playbin` in a text pipeline calls it to probe the container and build
+        /// a multi-stream graph; `None` (the default) leaves `playbin` as the
+        /// M196 single-stream pipeline. A `fn` pointer, so `Default` still derives.
+        playbin: Option<PlaybinHook>,
     }
 
     impl Registry {
@@ -815,21 +815,21 @@ mod factory {
             self
         }
 
-        /// Register the `playbin3 uri=X` auto-fan-out hook (M382): a lone
-        /// `playbin3` in a [`parse_launch`](crate::runtime::parse_launch) pipeline
+        /// Register the `playbin uri=X` auto-fan-out hook (M382): a lone
+        /// `playbin` in a [`parse_launch`](crate::runtime::parse_launch) pipeline
         /// calls it to probe the container and build a multi-stream graph. One
         /// hook per registry (the last registered wins). Returns `&mut self` to
         /// chain calls.
-        pub fn register_playbin3(&mut self, hook: Playbin3Hook) -> &mut Self {
-            self.playbin3 = Some(hook);
+        pub fn register_playbin(&mut self, hook: PlaybinHook) -> &mut Self {
+            self.playbin = Some(hook);
             self
         }
 
-        /// The registered [`Playbin3Hook`], or `None` if no hook was registered
-        /// (so `playbin3` stays a single-stream `playbin`). The parser consults
-        /// this for a lone `playbin3 uri=`.
-        pub fn playbin3_hook(&self) -> Option<Playbin3Hook> {
-            self.playbin3
+        /// The registered [`PlaybinHook`], or `None` if no hook was registered
+        /// (so `playbin` stays the M196 single-stream pipeline). The parser
+        /// consults this for a lone `playbin uri=`.
+        pub fn playbin_hook(&self) -> Option<PlaybinHook> {
+            self.playbin
         }
 
         /// Register a gst-canonical-name alias (M192): `name` resolves, at
@@ -1262,11 +1262,11 @@ mod factory {
             Ok(graph)
         }
 
-        /// `playbin3`-equivalent (M379): assemble a complete runnable graph that
+        /// `playbin`-equivalent (M379): assemble a complete runnable graph that
         /// splits a container into its selected streams and decodes each to its own
         /// sink. Builds the source from `uri`, adds `demux` (a
         /// [`MultiOutputElement`], e.g. `MkvDemuxN`) as a fan-out node, and for each
-        /// [`Playbin3Port`] (one per selected stream, in port order) auto-plugs a
+        /// [`PlaybinPort`] (one per selected stream, in port order) auto-plugs a
         /// decode chain from that port's elementary caps to its sink. Returns
         /// `source -> demux -> {decode chain -> sink}` ready for
         /// [`run_graph`](crate::runtime::run_graph), the multi-stream counterpart of
@@ -1280,37 +1280,37 @@ mod factory {
         /// branch element must tolerate the startup broadcast and re-solve then (the
         /// M210 demux-node contract); per-branch static negotiation against the port
         /// caps is a follow-up.
-        pub fn build_playbin3_graph<D: MultiOutputElement + 'static>(
+        pub fn build_playbin_graph<D: MultiOutputElement + 'static>(
             &self,
             uri: &str,
             demux: D,
-            ports: Vec<Playbin3Port>,
+            ports: Vec<PlaybinPort>,
             max_depth: usize,
-        ) -> Result<Graph<GraphNode>, Playbin3Error> {
+        ) -> Result<Graph<GraphNode>, PlaybinGraphError> {
             if ports.is_empty() {
-                return Err(Playbin3Error::NoPorts);
+                return Err(PlaybinGraphError::NoPorts);
             }
             let (source, _byte_caps) = self.build_uri_source(uri)?;
-            self.build_playbin3_graph_with_source(source, demux, ports, max_depth)
+            self.build_playbin_graph_with_source(source, demux, ports, max_depth)
         }
 
-        /// Like [`build_playbin3_graph`](Self::build_playbin3_graph) but with a
+        /// Like [`build_playbin_graph`](Self::build_playbin_graph) but with a
         /// pre-built byte source instead of one derived from the URI's scheme
-        /// handler. The `playbin3 uri=` auto-fan-out hook (M382) uses this: having
+        /// handler. The `playbin uri=` auto-fan-out hook (M382) uses this: having
         /// probed the file to choose the demuxer, it already knows the container,
         /// so it supplies the matching raw-byte source directly rather than the
         /// URI handler's source (which, for `file://`, may self-demux a *different*
         /// container, e.g. MP4). `source` must emit the byte stream `demux`
         /// expects.
-        pub fn build_playbin3_graph_with_source<D: MultiOutputElement + 'static>(
+        pub fn build_playbin_graph_with_source<D: MultiOutputElement + 'static>(
             &self,
             source: Box<dyn DynSourceLoop>,
             demux: D,
-            ports: Vec<Playbin3Port>,
+            ports: Vec<PlaybinPort>,
             max_depth: usize,
-        ) -> Result<Graph<GraphNode>, Playbin3Error> {
+        ) -> Result<Graph<GraphNode>, PlaybinGraphError> {
             if ports.is_empty() {
-                return Err(Playbin3Error::NoPorts);
+                return Err(PlaybinGraphError::NoPorts);
             }
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source));
@@ -1329,7 +1329,7 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
-    MuxerFactory, Playbin3Error, Playbin3Hook, Playbin3Port, PlaybinError, Registry, SourceFactory,
+    MuxerFactory, PlaybinGraphError, PlaybinHook, PlaybinPort, PlaybinError, Registry, SourceFactory,
     Uri, UriError, UriSourceFactory,
 };
 

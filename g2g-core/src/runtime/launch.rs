@@ -529,7 +529,7 @@ fn resolve_upstream_caps(
 /// to raw; `playbin uri=X` is that plus an auto sink (`autovideosink`, or the
 /// `video-sink=` override), i.e. a complete pipeline.
 fn is_uri_source(name: &str) -> bool {
-    matches!(name, "uridecodebin" | "uridecodebin3" | "playbin" | "playbin3")
+    matches!(name, "uridecodebin" | "playbin")
 }
 
 /// The value of a spec property by key, if present.
@@ -862,13 +862,13 @@ fn queue_leaky_policy(spec: &ElementSpec) -> LinkPolicy {
 /// ```
 pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
     let chains = parse_chains(pipeline)?;
-    // playbin3 uri=X auto-fan-out (M382): a lone `playbin3 uri=` probes the
+    // playbin uri=X auto-fan-out (M382): a lone `playbin uri=` probes the
     // container via the registered hook and auto-builds source -> demux ->
-    // per-stream decode -> auto sinks. Without a hook (or if it declines, e.g. a
-    // non-Matroska file), fall through to build_graph, where `playbin3` is treated
-    // as a single-stream `playbin`.
-    if let Some(uri) = lone_playbin3_uri(&chains) {
-        if let Some(hook) = registry.playbin3_hook() {
+    // per-stream decode -> auto sinks (multi-stream). Without a hook (or if it
+    // declines, e.g. a non-Matroska file), fall through to build_graph, which
+    // expands `playbin` to the single-stream pipeline (M196).
+    if let Some(uri) = lone_playbin_uri(&chains) {
+        if let Some(hook) = registry.playbin_hook() {
             if let Some(graph) = hook(registry, uri)? {
                 return Ok(graph);
             }
@@ -877,14 +877,14 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
     build_graph(registry, chains)
 }
 
-/// The `uri=` of a pipeline that is a single bare `playbin3 uri=X` element (and
-/// nothing else), the M382 auto-fan-out trigger. `None` for any other shape: a
-/// `playbin3` mid-pipeline, alongside other elements, or without a `uri=` is left
-/// to the normal builder (single-stream `playbin` expansion).
-fn lone_playbin3_uri(chains: &[Chain]) -> Option<&str> {
+/// The `uri=` of a pipeline that is a single bare `playbin uri=X` element (and
+/// nothing else), the M382 multi-stream auto-fan-out trigger. `None` for any
+/// other shape: a `playbin` mid-pipeline, alongside other elements, or without a
+/// `uri=` is left to the normal builder (the M196 single-stream expansion).
+fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
     let [chain] = chains else { return None };
     let [Item::Element(spec)] = chain.as_slice() else { return None };
-    if spec.name != "playbin3" {
+    if spec.name != "playbin" {
         return None;
     }
     prop(spec, "uri")
