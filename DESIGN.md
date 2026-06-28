@@ -1618,9 +1618,18 @@ clips playback to the segment `stop`, reports segment-done at the boundary, and
 parks on `wait_event` for the app's loop seek (non-flushing, snapping to the
 keyframe at or before the target so a decoder resumes cleanly) or `shutdown`. It
 also now honours non-flushing repositioning seeks (accumulating `Segment`, no
-`Flush`), not just flushing ones. Container-level segment seeks (CMAF / DASH
-transitions) and re-preroll after a flushing seek when paused remain open
-(DESIGN_TODO).
+`Flush`), not just flushing ones. **Re-preroll when paused (M360).** A paused,
+prerolled pipeline backpressures its source, so a flushing seek issued now would
+never take effect (the held sink never drains). `StateController::request_repreroll`
+(called by the app alongside the seek) bumps a preroll generation; `flow_gate`
+takes the arm's generation and reopens for a stale one, so each sink arm
+re-prerolls. The arm drains the stale pre-seek frames (discarding, not presenting)
+until the `Flush`, then prerolls the post-flush target and re-fires `AsyncDone`,
+so scrubbing a paused pipeline updates the shown frame. **Byte-source seek
+(M361).** `FileSrc` is BYTES-format seekable (`with_seek`): a flushing seek
+repositions the file read to a byte offset and emits `Flush`; a downstream demuxer
+that resolves a time seek to a byte offset drives a clone of its controller.
+Container-level segment seeks (CMAF / DASH transitions) remain open (DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

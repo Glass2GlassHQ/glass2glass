@@ -21,12 +21,12 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek as _, SeekFrom};
 use std::path::PathBuf;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SourceLoop;
+use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
@@ -52,6 +52,11 @@ pub struct FileSrc {
     auto_detect: bool,
     chunk_size: usize,
     configured: bool,
+    /// Optional byte-offset seek channel (M361). A `FileSrc` is a byte source, so
+    /// a [`Seek`](g2g_core::Seek) it observes is in **BYTES** format: `start` is a
+    /// file byte offset, not a timestamp. A downstream demuxer drives this to
+    /// reposition the read for a time seek it resolved to a byte offset.
+    seek: Option<SeekController>,
 }
 
 impl FileSrc {
@@ -66,7 +71,18 @@ impl FileSrc {
             auto_detect: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
             configured: false,
+            seek: None,
         }
+    }
+
+    /// Make the source byte-seekable (M361): `run` polls `controller` between
+    /// chunks and, on a flushing seek, emits `Flush`, repositions the file read
+    /// to `seek.start` (a **byte** offset, since `FileSrc` is a byte source), and
+    /// resumes. A downstream demuxer that resolved a time seek to a byte offset
+    /// holds a clone of this controller to drive the reposition.
+    pub fn with_seek(mut self, controller: SeekController) -> Self {
+        self.seek = Some(controller);
+        self
     }
 
     /// Resolve `bytestream-format=auto`: read the file header once and sniff the
@@ -153,6 +169,18 @@ impl SourceLoop for FileSrc {
             let mut file = File::open(&self.path).map_err(io_err)?;
             let mut sequence = 0u64;
             loop {
+                // A flushing byte-seek repositions the read before the next chunk
+                // (GStreamer BYTES-format seek: `start` is a file offset). Emit
+                // `Flush` so a downstream demuxer drops its parse buffer and
+                // re-syncs from the new position.
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                    if seek.is_flush() {
+                        out.push(PipelinePacket::Flush).await?;
+                        file.seek(SeekFrom::Start(seek.start)).map_err(io_err)?;
+                    }
+                    continue; // re-evaluate from the repositioned offset
+                }
+
                 let mut buf = alloc::vec![0u8; self.chunk_size];
                 let mut filled = 0usize;
                 // A reader may return short reads; fill the chunk until EOF
@@ -165,6 +193,11 @@ impl SourceLoop for FileSrc {
                     filled += n;
                 }
                 if filled == 0 {
+                    // EOF: honor a seek that arrived as the read drained (a
+                    // reposition before ending), else end the stream.
+                    if self.seek.as_ref().is_some_and(|c| c.has_pending()) {
+                        continue;
+                    }
                     break;
                 }
                 buf.truncate(filled);
