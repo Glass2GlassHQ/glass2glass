@@ -97,8 +97,6 @@ leverage first:
   refcount).
 - H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
 - Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
-- `MfDecode` zero-copy + DXVA (`D3D11Texture`, `MF_SA_D3D11_AWARE`, strided
-  NV12; SW path assumes `stride == width`).
 - 10-bit pixel formats in `FfmpegH264Dec` (`YUV420P10` / `P010`).
 
 ## CUDA / display
@@ -191,9 +189,9 @@ leverage first:
 ## Adaptive streaming (HLS / DASH)
 
 - **HLS:** SAMPLE-AES key rotation mid-stream; cbcs audio (AAC) + per-sample IV
-  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups; encrypted fMP4
-  init segments; byte-range segments; throughput-driven ABR; live-edge start;
-  mid-stream variant switching.
+  (cenc/cbc1); `saiz`/`saio` aux-info + `seig` sample groups; byte-range
+  segments; throughput-driven ABR; live-edge start; mid-stream variant
+  switching. (Encrypted fMP4 cbcs *video* init segments are done, M164.)
 - **DASH:** wall-clock `@duration` live profile; `SegmentList` / `SegmentBase`
   byte-range; multi-period; throughput-driven ABR.
 
@@ -214,7 +212,6 @@ leverage first:
   on a real device; channel-count / sample-format reconciliation beyond stereo
   S16/F32; DMABUF / zero-copy.
 - Generic `GlSink` over EGL (vendor-neutral NV12 / RGBA present, no CUDA).
-- `autovideosink` / `autoaudiosink`.
 
 ## Containers
 
@@ -227,8 +224,9 @@ leverage first:
 ## Codecs
 
 - **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
-- **AV1 encode** (`Av1Enc`): bitrate / quantizer rate control. (8/10/12-bit in
-  4:2:0 / 4:2:2 / 4:4:4 all done.)
+- **AV1 encode** (`Av1Enc`): explicit quantizer rate control. (Target-bitrate
+  rate control with hysteresis is done; 8/10/12-bit in 4:2:0 / 4:2:2 / 4:4:4
+  all done.)
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
@@ -330,8 +328,9 @@ leverage first:
 ## Properties / introspection / DSL
 
 - Carry metadata + properties on muxers (their inspect path builds no instance).
-- Property-set the feature-gated sources from text (`location=` / `uri=` on
-  rtsp/http/hls/dash/v4l2, default placeholders today).
+- Property-set the remaining feature-gated sources from text (`location=` /
+  `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
+  `location`).
 - A value grammar for spaces / enums-as-named-flags.
 - A GUI / tooling introspection surface beyond the text dump.
 
@@ -353,15 +352,14 @@ leverage first:
   presenting the layout as working.
 - Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
   + a `link_capacity` note for the GIL-serialized case.
-- A `backend/g2g/` package in gst-python-ml mirroring `backend/gst/`.
 
 ## Aggregation helper adoption (M199+)
 
-- Migrate the four hand-rolled per-input collectors onto
-  `g2g-core::InputAggregator<T>`: enterprise `batcher` (closest fit), then `mux`,
-  `audiomixer`, and `compositor` (compositor needs a second latest-wins
-  `SyncPolicy` variant first). Behaviour-preserving, each guarded by existing
-  tests.
+- Migrate the remaining hand-rolled per-input collectors onto
+  `g2g-core::InputAggregator<T>` (`mux` is migrated): enterprise `batcher`
+  (closest fit), `audiomixer`, and `compositor` (compositor needs a second
+  latest-wins `SyncPolicy` variant first). Behaviour-preserving, each guarded by
+  existing tests.
 
 ## Dynamic plugin loading (M201+)
 
@@ -446,12 +444,7 @@ export counter; PyTransform worker re-spawn guarded). The audit areas are now
 covered; what remains is lower-priority hardening flagged but not yet fixed (no
 clear untrusted-file path, or a broader policy call):
 
-- Bound caps geometry at `configure_pipeline` so a malformed container's huge
-  width/height fails fast instead of driving a multi-GiB GPU allocation
-  (`wgpupreprocess.rs`, and the weightless `wgpuinfer.rs` constructors whose
-  `u32` shape products are still unchecked).
 - `fetch.rs` uncapped HTTP body read (DASH/HLS DoS, network-layer).
-- `mp4` `parse_progressive` allocation amplification (bounded by file size).
 - Free-threaded (PEP 703) build: `host.rs` `MetaSink` uses a `RefCell` that only
   the GIL serializes today; it (and the `unsendable` pyclasses) would need a
   `Mutex` / re-audit before the "no code change" free-threaded claim holds.

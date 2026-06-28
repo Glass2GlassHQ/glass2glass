@@ -5,10 +5,11 @@
 //! the fetching (via `reqwest`, shared with [`HlsSrc`](crate::hlssrc)) and the
 //! `SegmentTemplate` `$Number$` / `$Time$` addressing.
 //!
-//! Scope: static (VOD) manifests, `SegmentTemplate` with the `@duration` profile
-//! or `SegmentTimeline`, one `DataFrame` per segment, a fixed Representation.
-//! Dynamic (live) reload, `SegmentList`/`SegmentBase`, and mid-stream switching
-//! are follow-ups (DESIGN_TODO).
+//! Scope: `SegmentTemplate` with the `@duration` profile or `SegmentTimeline`,
+//! one `DataFrame` per segment, a fixed Representation. Dynamic (live) manifests
+//! are handled by reloading on the MPD's refresh period. The wall-clock
+//! `availabilityStartTime` live profile, `SegmentList`/`SegmentBase`, multi-period,
+//! and mid-stream switching are follow-ups (DESIGN_TODO).
 
 use core::future::Future;
 use core::pin::Pin;

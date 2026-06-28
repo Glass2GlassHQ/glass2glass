@@ -41,9 +41,12 @@
 //! `nvEncReconfigureEncoder` (M277): a `set_property("bitrate", ..)` (e.g. a
 //! WebRTC BWE drop) is applied before the next frame with no session re-open.
 //!
-//! Deferred (v1): system-memory NV12 input (host upload, already covered by
-//! `FfmpegH264Enc` for I420), finite-GOP periodic IDRs with `repeatSPSPPS`,
-//! 10-bit (P010 / Main10), and mid-stream resolution reconfigure.
+//! A CPU-side NV12 source is fed in via the `CudaUpload` converter, which the
+//! M354 domain auto-plug splices ahead of this Cuda-only encoder (`input_domains`
+//! declares `{Cuda}`); the encoder itself stays device-resident.
+//!
+//! Deferred (v1): finite-GOP periodic IDRs with `repeatSPSPPS`, 10-bit
+//! (P010 / Main10), and mid-stream resolution reconfigure.
 
 use core::future::Future;
 use core::pin::Pin;
