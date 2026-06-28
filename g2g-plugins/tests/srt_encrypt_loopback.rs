@@ -188,6 +188,60 @@ async fn aes256_encrypted_stream_round_trips() {
 }
 
 #[tokio::test]
+async fn key_rotation_rolls_the_cipher_mid_stream() {
+    // The caller rekeys every 3 packets: the cipher key changes several times
+    // over the stream, alternating even/odd parity, and the listener installs
+    // each new key from the KM control packet and keeps decrypting in order.
+    const N: u8 = 12;
+
+    let listener_std = StdUdpSocket::bind("127.0.0.1:0").expect("bind listener");
+    let listener_addr = listener_std.local_addr().unwrap();
+
+    let mut src =
+        SrtSrc::from_socket(listener_std).unwrap().with_frame_limit(N as u64).with_passphrase(PASS);
+    let mut sink_collect = TagSink::default();
+    let clock = ZeroClock;
+
+    let caller = async {
+        let mut sink =
+            SrtSink::new(listener_addr).with_passphrase(PASS).with_key_rotation(3);
+        sink.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
+            .expect("configure");
+        let mut null = NullOut;
+        for i in 0u8..(N * 2) {
+            let payload = vec![i % N; 100];
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(payload.into_boxed_slice())),
+                timing: FrameTiming { pts_ns: i as u64 * 10_000_000, ..FrameTiming::default() },
+                sequence: i as u64,
+                meta: Default::default(),
+            };
+            if sink.process(PipelinePacket::DataFrame(frame), &mut null).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        }
+        sink.rekeys()
+    };
+
+    let recv = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_simple_pipeline(&mut src, &mut sink_collect, &clock, LatencyProfile::Live.link_capacity()),
+    );
+
+    let (recv_res, rekeys) = tokio::join!(recv, caller);
+
+    let stats = recv_res.expect("listener finishes within 15s").expect("receive pipeline ok");
+    assert_eq!(stats.frames_emitted, N as u64, "every payload delivered across the rekeys");
+    let expected: Vec<u8> = (0..N).collect();
+    assert_eq!(
+        sink_collect.tags, expected,
+        "payloads decrypt to the original tags in order across multiple key rotations"
+    );
+    assert!(rekeys >= 2, "the cipher rotated mid-stream at least twice (got {rekeys})");
+}
+
+#[tokio::test]
 async fn wrong_passphrase_fails_to_decrypt() {
     const N: u8 = 6;
 
