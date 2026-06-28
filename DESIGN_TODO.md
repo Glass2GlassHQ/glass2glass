@@ -17,13 +17,11 @@ leverage first:
    Android: encode, Camera2, AAudio, Surface present.
 2. **Egress / transports.** SRT congestion control + real-peer interop, AES-256
    + key rotation; FlexFEC + multi-level burst FEC.
-3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 via libdav1d
-   landed (`Dav1dDec`, `dav1d` feature, C FFI). The pure-Rust / wasm goal still
-   wants `rav1d` (the Rust dav1d port; it ships only dav1d's C ABI, so it needs
-   hand-rolled FFI to its `dav1d_*` exports or a staticlib-link swap behind
-   `Dav1dDec`) and a `vpx` decoder. Plus negotiation backward coupling through
-   `DerivedOutput`; seek depth (segment seeks, re-preroll after flushing seek
-   when paused).
+3. **Depth.** Codec decode to cut reliance on the ffmpeg FFI: AV1 landed both as
+   libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
+   `rav1d` feature, via `re_rav1d`). Still wants a `vpx` decoder. Plus negotiation
+   backward coupling through `DerivedOutput`; seek depth (segment seeks, re-preroll
+   after flushing seek when paused).
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
@@ -247,8 +245,9 @@ leverage first:
 
 - **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
 - **AV1 encode** (`Av1Enc`): bitrate / quantizer rate control; 10-bit / 4:4:4.
-- **Pure-Rust / wasm decode** to drop the ffmpeg FFI: `Av1Dec` (dav1d / rav1d),
-  VP8 / VP9 decode, a pure-Rust Opus path.
+- **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`);
+  still VP8 / VP9 decode and a pure-Rust Opus path. Rav1dDec depth: 10/12-bit
+  and 4:2:2 / 4:4:4 (currently 8-bit 4:2:0 only).
 - **Opus:** float (F32) PCM in/out; other frame durations; packet-loss
   concealment; bitrate / complexity tuning.
 - **MJPEG / JPEG:** a `mozjpeg` fast path under a feature flag; a direct

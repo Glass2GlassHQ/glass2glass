@@ -73,7 +73,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader
       - name: check g2g-ml (wgpu + burn)
         run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc

@@ -293,9 +293,18 @@ av1-encode = ["std", "dep:rav1e"]
 # `dav1d` crate's safe bindings (Dav1dDec, CompressedVideo{Av1} -> RawVideo{I420}).
 # NOT pure Rust: it links the system `libdav1d` (Debian/Ubuntu: `libdav1d-dev`;
 # Fedora: `libdav1d-devel`) via pkg-config, so it is gated here and excluded from
-# pure-Rust / no_std builds. Implies std. The pure-Rust `rav1d` port is a separate
-# follow-up (it ships only dav1d's C ABI, not a Rust API).
+# pure-Rust / no_std builds. Implies std. For a pure-Rust AV1 decoder (no system
+# libdav1d, no NASM) use the `rav1d` feature below instead.
 dav1d = ["std", "dep:dav1d"]
+# AV1 decode via `re_rav1d`, the pure-Rust port of dav1d (Rav1dDec, same caps as
+# Dav1dDec: CompressedVideo{Av1} -> RawVideo{I420}). `re_rav1d` re-exports dav1d-rs's
+# safe API, so the element is Dav1dDec with the backend swapped from libdav1d (FFI)
+# to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
+# bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
+# the libdav1d path cannot. Implies std; the decoder needs alloc + threads. NOTE:
+# re_rav1d's MSRV is 1.79 (above the workspace 1.75), so this feature raises the
+# build floor to 1.79; the no_std baseline stays at 1.75.
+rav1d = ["std", "dep:re_rav1d"]
 # VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
 # bindgen (needs clang/LLVM) at build, so it is gated here and excluded from
@@ -373,6 +382,10 @@ rav1e = { version = "0.8", optional = true, default-features = false }
 # libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
 # which links the system libdav1d (pkg-config) at build.
 dav1d = { version = "0.11", optional = true }
+# Pure-Rust AV1 decoder (rav1d feature): the Rust port of dav1d, re-exporting
+# dav1d-rs's safe API. default-features = false drops the NASM asm; bitdepth_8 /
+# bitdepth_16 keep 8- and 10/12-bit decode (parity with libdav1d). No system deps.
+re_rav1d = { version = "0.1", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 # libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
 # codec alongside VP8. `ffi-generate` forwards to env-libvpx-sys's bindgen path so
 # the FFI is generated against the installed libvpx headers: that crate only ships

@@ -73,6 +73,8 @@ use crate::av1enc::Av1Enc;
 use crate::vpxenc::VpxEnc;
 #[cfg(feature = "dav1d")]
 use crate::dav1ddec::Dav1dDec;
+#[cfg(feature = "rav1d")]
+use crate::rav1ddec::Rav1dDec;
 #[cfg(feature = "mjpeg")]
 use crate::mjpegdec::MjpegDec;
 #[cfg(feature = "mjpeg-encode")]
@@ -431,6 +433,12 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // for AV1 -> I420, alongside av1parse.
     #[cfg(feature = "dav1d")]
     reg.register(ElementFactory::of::<Dav1dDec>("dav1ddec", |_| Box::new(Dav1dDec::new())));
+    // Pure-Rust AV1 decode via re_rav1d (software, System memory): same AV1 -> I420
+    // candidate. Negative rank so libdav1d (hand-written asm, faster) wins the
+    // auto-plug tiebreak when both are built; rav1ddec is the portable fallback and
+    // the sole AV1 decoder on pure-Rust targets.
+    #[cfg(feature = "rav1d")]
+    reg.register(ElementFactory::of::<Rav1dDec>("rav1ddec", |_| Box::new(Rav1dDec::new())).rank(-10));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |_| Box::new(FfmpegH264Dec::new())));
     // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
@@ -505,8 +513,9 @@ fn register_aliases(reg: &mut Registry) {
     // feature is on; the alias resolves to the first registered target.
     reg.register_alias("avdec_h264", &["ffmpegdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
-    // AV1 decode: gst's libav name -> the libdav1d decoder (when the feature is on).
-    reg.register_alias("avdec_av1", &["dav1ddec"]);
+    // AV1 decode: gst's libav name -> the libdav1d decoder, falling back to the
+    // pure-Rust re_rav1d decoder when only the `rav1d` feature is built.
+    reg.register_alias("avdec_av1", &["dav1ddec", "rav1ddec"]);
     reg.register_alias("vah264dec", &["ffmpegvaapidec", "vaapidec"]);
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
@@ -549,6 +558,8 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<MjpegDec>("mjpegdec", || Box::new(MjpegDec::new())));
     #[cfg(feature = "dav1d")]
     reg.register_launch(LaunchFactory::of::<Dav1dDec>("dav1ddec", || Box::new(Dav1dDec::new())));
+    #[cfg(feature = "rav1d")]
+    reg.register_launch(LaunchFactory::of::<Rav1dDec>("rav1ddec", || Box::new(Rav1dDec::new())));
     #[cfg(feature = "mjpeg-encode")]
     reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || Box::new(MjpegEnc::new())));
 

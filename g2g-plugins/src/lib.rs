@@ -319,6 +319,11 @@ pub mod av1enc;
 #[cfg(feature = "dav1d")]
 pub mod dav1ddec;
 
+// AV1 decode via `re_rav1d`, the pure-Rust port of dav1d. Same caps as `dav1ddec`,
+// no system deps; gated behind the `rav1d` feature.
+#[cfg(feature = "rav1d")]
+pub mod rav1ddec;
+
 // VP8/VP9 software encode via libvpx (FFI through vpx-encode). Not pure Rust;
 // links system libvpx, gated behind the `vpx` feature.
 #[cfg(feature = "vpx")]

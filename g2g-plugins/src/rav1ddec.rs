@@ -1,6 +1,10 @@
-//! AV1 decode element (Dav1dDec, `dav1d` feature): `CompressedVideo{Av1}` in,
-//! `RawVideo{I420}` out, via the `dav1d` crate's safe bindings to libdav1d (the C
-//! AV1 decoder with hand-written assembly, the speed reference).
+//! Pure-Rust AV1 decode element (Rav1dDec, `rav1d` feature): `CompressedVideo{Av1}`
+//! in, `RawVideo{I420}` out, via `re_rav1d`, the Rust port of dav1d. Same codec, no
+//! C: `re_rav1d` is a line-for-line safe-Rust reimplementation of the dav1d decoder
+//! and re-exports dav1d-rs's safe API, so this element is `Dav1dDec` with the backend
+//! swapped from libdav1d (FFI) to `re_rav1d` (Rust). It builds with no system deps
+//! and no NASM (`default-features = false`), so it reaches the pure-Rust / wasm
+//! targets that the libdav1d path cannot.
 //!
 //! The decoder is stateful (frame threading / reordering), so the send/drain
 //! protocol is: hand each AV1 temporal unit to `send_data`, and on a `Try again`
@@ -10,8 +14,7 @@
 //! (the source may negotiate `Any` dims). 8-bit 4:2:0 (the dominant AV1 profile)
 //! is packed into planar I420 (matching the other decoders / `VideoConvert`);
 //! 10/12-bit and 4:2:2 / 4:4:4 are rejected at decode (a follow-up). System
-//! memory. NOT pure Rust (links libdav1d); for a pure-Rust AV1 decoder see
-//! `rav1ddec.rs` (`Rav1dDec`, the `re_rav1d` port) behind the `rav1d` feature.
+//! memory. Pure Rust, but it pays a speed cost versus libdav1d's hand-written asm.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -27,13 +30,13 @@ use g2g_core::{
     VideoCodec,
 };
 
-use dav1d::{Decoder, PixelLayout, PlanarImageComponent};
+use re_rav1d::{Decoder, Picture, PixelLayout, PlanarImageComponent};
 
 /// Decoded pictures from one fed unit: each `(packed I420 pixels, (width, height))`.
 type DecodedFrames = Vec<(Vec<u8>, (u32, u32))>;
 
-/// Decodes an AV1 stream into planar I420 via libdav1d.
-pub struct Dav1dDec {
+/// Decodes an AV1 stream into planar I420 via the pure-Rust `re_rav1d` decoder.
+pub struct Rav1dDec {
     decoder: Option<Decoder>,
     framerate: Rate,
     /// Last emitted geometry, so `CapsChanged` is sent only on change.
@@ -42,10 +45,10 @@ pub struct Dav1dDec {
     configured: bool,
 }
 
-impl core::fmt::Debug for Dav1dDec {
+impl core::fmt::Debug for Rav1dDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // `dav1d::Decoder` is not Debug; report only the element's own state.
-        f.debug_struct("Dav1dDec")
+        // `re_rav1d::Decoder` is not Debug; report only the element's own state.
+        f.debug_struct("Rav1dDec")
             .field("out_dims", &self.out_dims)
             .field("sequence", &self.sequence)
             .field("configured", &self.configured)
@@ -53,13 +56,13 @@ impl core::fmt::Debug for Dav1dDec {
     }
 }
 
-impl Default for Dav1dDec {
+impl Default for Rav1dDec {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Dav1dDec {
+impl Rav1dDec {
     pub fn new() -> Self {
         Self { decoder: None, framerate: Rate::Any, out_dims: None, sequence: 0, configured: false }
     }
@@ -110,7 +113,7 @@ impl Dav1dDec {
     /// Pack a decoded 8-bit 4:2:0 picture into tight planar I420 (Y then U then
     /// V), copying each plane row honoring its stride. Returns the packed pixels;
     /// geometry comes from [`last_dims`]. Rejects non-8-bit / non-4:2:0 pictures.
-    fn pack_i420(pic: &dav1d::Picture) -> Result<Vec<u8>, G2gError> {
+    fn pack_i420(pic: &Picture) -> Result<Vec<u8>, G2gError> {
         if pic.pixel_layout() != PixelLayout::I420 || pic.bit_depth() != 8 {
             return Err(G2gError::CapsMismatch); // only 8-bit 4:2:0 for now
         }
@@ -136,12 +139,12 @@ impl Dav1dDec {
     }
 
     /// The decoded geometry of `pic` (its width and height), for the `CapsChanged`.
-    fn last_dims(pic: &dav1d::Picture) -> (u32, u32) {
+    fn last_dims(pic: &Picture) -> (u32, u32) {
         (pic.width(), pic.height())
     }
 }
 
-impl AsyncElement for Dav1dDec {
+impl AsyncElement for Rav1dDec {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -177,9 +180,9 @@ impl AsyncElement for Dav1dDec {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "AV1 decoder (dav1d)",
+            "AV1 decoder (rav1d)",
             "Codec/Decoder/Video",
-            "Decodes AV1 to I420 via libdav1d",
+            "Decodes AV1 to I420 via the pure-Rust re_rav1d",
             "g2g",
         )
     }
@@ -225,7 +228,7 @@ impl AsyncElement for Dav1dDec {
     }
 }
 
-impl PadTemplates for Dav1dDec {
+impl PadTemplates for Rav1dDec {
     fn pad_templates() -> Vec<PadTemplate> {
         let av1 = Self::input_template();
         let raw = Caps::RawVideo {
