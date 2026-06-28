@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
@@ -91,6 +91,10 @@ pub struct MkvDemux {
     /// Set once the `StreamCollection` has been announced (M376), so the demuxer
     /// posts the available-streams list once, when the `Tracks` element parses.
     collection_posted: bool,
+    /// App-driven stream selection (M377): the app names the stream id to forward
+    /// (from the announced collection); the demuxer switches its single output to
+    /// that track. Inert unless `with_stream_select` wired it.
+    stream_select: Option<StreamSelectController>,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -120,6 +124,7 @@ impl MkvDemux {
             bus: None,
             tags_posted: 0,
             collection_posted: false,
+            stream_select: None,
             seek: DemuxSeek::default(),
             app: None,
             upstream: None,
@@ -188,6 +193,16 @@ impl MkvDemux {
     /// posts as a [`BusMessage::Tag`] once parsed.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Make the demuxer's output stream app-selectable (M377): the controller
+    /// carries a selection of stream ids (from the announced collection); the
+    /// demuxer switches its single output to the named track and confirms the
+    /// active id on the bus ([`BusMessage::StreamsSelected`]). Pair with
+    /// [`with_bus`](Self::with_bus) so the app can discover the ids first.
+    pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
+        self.stream_select = Some(select);
         self
     }
 
@@ -335,6 +350,46 @@ impl MkvDemux {
         Some(Stream::new(id, stream_type, caps))
     }
 
+    /// Apply any pending app stream selection (M377): switch the single output to
+    /// the first selected id that names a forwardable track, force a `CapsChanged`
+    /// for the new stream, and confirm the active id on the bus
+    /// ([`BusMessage::StreamsSelected`]). A no-op without a controller, with no
+    /// pending selection, or when no id resolves (the current stream stays).
+    fn apply_stream_selection(&mut self) {
+        let Some(ctrl) = &self.stream_select else { return };
+        let Some(ids) = ctrl.take_pending() else { return };
+        for id in &ids {
+            let Some(stream) = self.resolve_stream_id(id) else { continue };
+            if stream != self.stream {
+                self.stream = stream;
+                // Re-emit caps for the newly selected stream on the next frame.
+                self.last_caps = None;
+            }
+            if let Some(bus) = &self.bus {
+                bus.try_post(BusMessage::StreamsSelected { ids: alloc::vec![id.clone()] });
+            }
+            return; // single output: the first resolvable id wins
+        }
+    }
+
+    /// Resolve a published stream id (`matroska-track-N`) to the [`MkvStream`] this
+    /// demuxer would forward for it, or `None` if the id is unknown / its codec is
+    /// not forwardable. Needs `Tracks` parsed (the collection's ids come from it).
+    fn resolve_stream_id(&self, id: &str) -> Option<MkvStream> {
+        let num: u64 = id.strip_prefix("matroska-track-")?.parse().ok()?;
+        let track = self.demux.tracks().iter().find(|t| t.number == num)?;
+        match track.codec {
+            MkvCodec::H264 => Some(MkvStream::H264),
+            MkvCodec::H265 => Some(MkvStream::H265),
+            MkvCodec::Vp8 => Some(MkvStream::Vp8),
+            MkvCodec::Vp9 => Some(MkvStream::Vp9),
+            MkvCodec::Av1 => Some(MkvStream::Av1),
+            MkvCodec::Aac => Some(MkvStream::Aac),
+            MkvCodec::Opus => Some(MkvStream::Opus),
+            MkvCodec::Other => None,
+        }
+    }
+
     /// Emit a `CapsChanged` once the selected track's concrete caps are known,
     /// then forward each demuxed frame of that stream.
     async fn emit_ready(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
@@ -342,6 +397,9 @@ impl MkvDemux {
             self.post_tags();
             self.post_stream_collection();
         }
+        // Honor an app stream selection before computing this batch's caps, so the
+        // switch (and its CapsChanged) takes effect for the frames forwarded now.
+        self.apply_stream_selection();
         if let Some(caps) = self.concrete_caps() {
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;

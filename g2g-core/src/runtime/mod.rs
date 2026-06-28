@@ -19,6 +19,7 @@ mod runner;
 mod seek;
 pub mod solver;
 mod state;
+mod stream_select;
 
 #[cfg(feature = "std")]
 mod blocking;
@@ -50,6 +51,7 @@ pub use autoplug::{
 pub use progress::PipelineProgress;
 pub use seek::{SeekController, WaitEvent};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
+pub use stream_select::StreamSelectController;
 pub use solver::NegotiationFailure;
 
 #[cfg(feature = "std")]

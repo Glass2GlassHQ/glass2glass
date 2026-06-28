@@ -103,6 +103,16 @@ pub enum BusMessage {
     /// forwards, so the application can discover what is in the container. App
     /// driven selection among them is a follow-up.
     StreamCollection(crate::stream::StreamCollection),
+    /// The set of streams a demuxer now forwards changed in response to an
+    /// application selection (the GStreamer `GST_MESSAGE_STREAMS_SELECTED`
+    /// analog, M377). Carries the active stream ids (the ids from the
+    /// [`StreamCollection`](BusMessage::StreamCollection)), so the app confirms
+    /// which streams took effect after a
+    /// [`StreamSelectController::select`](crate::runtime::StreamSelectController::select).
+    StreamsSelected {
+        /// The stream ids the demuxer is now forwarding.
+        ids: alloc::vec::Vec<alloc::string::String>,
+    },
     /// The total stream duration became known or changed (the GStreamer
     /// `GST_MESSAGE_DURATION_CHANGED` analog, M203). Posted by the runner's
     /// source arm when a source first reports a duration
