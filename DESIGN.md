@@ -411,7 +411,7 @@ slot.handle.store(Arc::new(Box::new(new_element)));
 
 Frames mid-`process()` against the old element complete naturally; the next push observes the new element. Cost: one atomic store plus the new element's `configure_pipeline()` work. No drain, no pipeline stall.
 
-This is the primary response to a Phase 3 `ReFixate` or a mid-stream `Reconfigure` signal: replace the affected slot's contents, do not rebuild the graph.
+This is the primary response to a Phase 3 `ReFixate` or a mid-stream `Reconfigure` signal: replace the affected slot's contents, do not rebuild the graph. The swap is validated live under load (M349): an `ElementSlot` sits as a transform in `source -> slot -> sink` driven by `run_graph`, and a `SwapHandle::swap` mid-stream reroutes the remaining frames to the replacement element while every frame still reaches the sink, no drain or rebuild.
 
 #### 4.8.3 `BranchSlot` — Multi-Element Sub-Graph Swap
 A branch with one logical input and one logical output is structurally an element. `BranchSlot` is the multi-element analog of `ElementSlot`, with the swap trade-off made explicit at the type level:

@@ -34,8 +34,6 @@ leverage first:
 
 ## Negotiation
 
-- **Mid-stream element hot-swap.** `ElementSlot::swap` scaffolding exists; live
-  swap of a real element under load isn't wired.
 - **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
   needs a real competing-constraint scenario to drive it.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
