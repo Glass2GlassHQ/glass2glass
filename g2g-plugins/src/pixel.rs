@@ -13,12 +13,6 @@ pub(crate) fn rgba_rb_offsets(format: RawVideoFormat) -> (usize, usize) {
     }
 }
 
-/// True for the planar 4:2:0 formats whose chroma is half-width and
-/// half-height, so callers must validate even dimensions before slicing planes.
-pub(crate) fn is_yuv420(format: RawVideoFormat) -> bool {
-    matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::I420)
-}
-
 /// Whether a format's chroma subsampling forces an even (width, height): a
 /// horizontally-subsampled format needs even width, a vertically-subsampled one
 /// needs even height, so a crop / scale stays on chroma-sample boundaries. NV12

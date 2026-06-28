@@ -18,7 +18,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{frame_byte_size, is_yuv420};
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -29,21 +29,37 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-const FORMATS: [RawVideoFormat; 4] = [
+const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
 ];
 
 /// Formats accepted as **input**. Superset of [`FORMATS`]: `Yuyv` (packed
 /// 4:2:2, the usual webcam output) is unpacked to a planar / RGB target but is
 /// never produced, so it is input-only.
-const INPUT_FORMATS: [RawVideoFormat; 5] = [
+const INPUT_FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
     RawVideoFormat::Yuyv,
 ];
 
@@ -122,13 +138,16 @@ impl VideoConvert {
         if !INPUT_FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if (is_yuv420(*format) || self.target.is_some_and(is_yuv420)) && (*w % 2 != 0 || *h % 2 != 0)
-        {
-            return Err(G2gError::CapsMismatch);
+        // The dims must be even on every axis either the input or the (known)
+        // target format subsamples, so chroma planes divide cleanly. YUYV folds in
+        // as a horizontally-subsampled (even-width) format.
+        let (mut ew, mut eh) = even_dims_required(*format);
+        if let Some(target) = self.target {
+            let (tw, th) = even_dims_required(target);
+            ew |= tw;
+            eh |= th;
         }
-        // YUYV pairs two horizontal pixels per macropixel, so the width must be
-        // even regardless of the target.
-        if *format == RawVideoFormat::Yuyv && *w % 2 != 0 {
+        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *w, *h, framerate.clone()))
@@ -220,11 +239,10 @@ impl AsyncElement for VideoConvert {
         if !FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(*format) {
-            if let Some((_, w, h, _)) = self.input {
-                if w % 2 != 0 || h % 2 != 0 {
-                    return Err(G2gError::CapsMismatch);
-                }
+        let (ew, eh) = even_dims_required(*format);
+        if let Some((_, w, h, _)) = self.input {
+            if (ew && w % 2 != 0) || (eh && h % 2 != 0) {
+                return Err(G2gError::CapsMismatch);
             }
         }
         self.resolved = Some(*format);
@@ -431,10 +449,225 @@ pub fn convert(
         (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
         (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2),
         (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0),
-        // every reachable pair is enumerated; identical pairs hit the guard,
-        // and no path converts *to* Yuyv (it is never a `target`).
-        _ => unreachable!("unhandled raw-video conversion {from:?} -> {to:?}"),
+        // Any conversion involving a high-bit-depth / 4:2:2 / 4:4:4 format (the
+        // pairs above are the fast 8-bit paths) goes through the general hub:
+        // unpack to 4:4:4 YUV at a working depth, then repack to the target.
+        _ => convert_via_hub(src, from, to, w, h),
     }
+}
+
+/// General conversion for any format pair, used for everything the fast 8-bit
+/// paths above do not special-case (i.e. anything touching a high-bit-depth or
+/// 4:2:2 / 4:4:4 format). The frame is unpacked to a canonical full-resolution
+/// (4:4:4) planar YUV intermediate at a single working depth, then repacked to the
+/// target: this turns the N x N matrix into N unpackers + N packers. Chroma is
+/// upsampled by replication and downsampled by box-averaging; bit depth is scaled
+/// by the full-range ratio; the YUV <-> RGB color step (BT.601 limited range) runs
+/// at 8-bit, the precision an `Rgba8` endpoint carries anyway.
+fn convert_via_hub(src: &[u8], from: RawVideoFormat, to: RawVideoFormat, w: usize, h: usize) -> Box<[u8]> {
+    let (y, u, v, wd) = to_hub(src, from, w, h);
+    from_hub(&y, &u, &v, wd, to, w, h)
+}
+
+/// Scale one sample from `from_d`-bit to `to_d`-bit full range, rounded to nearest.
+fn scale_depth(v: i32, from_d: u8, to_d: u8) -> i32 {
+    if from_d == to_d {
+        return v;
+    }
+    let (fm, tm) = (((1i64 << from_d) - 1).max(1), (1i64 << to_d) - 1);
+    (((v as i64 * tm + fm / 2) / fm) as i32).clamp(0, tm as i32)
+}
+
+/// RGB -> YUV (BT.601 limited range, 8-bit), the per-pixel form of `rgb_to_yuv420`.
+fn rgb_to_yuv(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
+    let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+    let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+    let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+    (y.clamp(0, 255), u.clamp(0, 255), v.clamp(0, 255))
+}
+
+/// YUV -> RGB (BT.601 limited range, 8-bit), the per-pixel form of `yuv420_to_rgb`.
+fn yuv_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
+    let c = y - 16;
+    let (d, e) = (u - 128, v - 128);
+    let r = (298 * c + 409 * e + 128) >> 8;
+    let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
+    let b = (298 * c + 516 * d + 128) >> 8;
+    (r.clamp(0, 255), g.clamp(0, 255), b.clamp(0, 255))
+}
+
+/// Unpack any format to full-resolution (4:4:4) planar Y, U, V plus the working
+/// bit depth: RGB is color-converted to 8-bit YUV; YUYV / NV12 / the planar family
+/// are read at their own depth with chroma replicated up to full resolution.
+fn to_hub(src: &[u8], from: RawVideoFormat, w: usize, h: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, u8) {
+    let n = w * h;
+    let mut y = vec![0i32; n];
+    let mut u = vec![0i32; n];
+    let mut v = vec![0i32; n];
+    match from {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
+            let (r_off, b_off) = crate::pixel::rgba_rb_offsets(from);
+            for i in 0..n {
+                let p = i * 4;
+                let (yy, uu, vv) =
+                    rgb_to_yuv(src[p + r_off] as i32, src[p + 1] as i32, src[p + b_off] as i32);
+                (y[i], u[i], v[i]) = (yy, uu, vv);
+            }
+            (y, u, v, 8)
+        }
+        RawVideoFormat::Yuyv => {
+            // Packed Y0 U Y1 V: each macropixel is two luma, one shared chroma pair,
+            // replicated to both columns for 4:4:4.
+            for row in 0..h {
+                for col2 in 0..w / 2 {
+                    let s = (row * (w / 2) + col2) * 4;
+                    let (y0, cu, y1, cv) =
+                        (src[s] as i32, src[s + 1] as i32, src[s + 2] as i32, src[s + 3] as i32);
+                    let i = row * w + col2 * 2;
+                    (y[i], u[i], v[i]) = (y0, cu, cv);
+                    (y[i + 1], u[i + 1], v[i + 1]) = (y1, cu, cv);
+                }
+            }
+            (y, u, v, 8)
+        }
+        RawVideoFormat::Nv12 => {
+            let cw = w / 2;
+            for row in 0..h {
+                for col in 0..w {
+                    let ci = (row / 2) * cw + col / 2;
+                    let i = row * w + col;
+                    y[i] = src[i] as i32;
+                    u[i] = src[n + 2 * ci] as i32;
+                    v[i] = src[n + 2 * ci + 1] as i32;
+                }
+            }
+            (y, u, v, 8)
+        }
+        // The fully-planar family: read each plane at the format's depth, replicate
+        // chroma up to 4:4:4 per the subsampling.
+        f => {
+            let d = f.bit_depth();
+            let bps = f.bytes_per_sample();
+            let (hs, vs) = f.chroma_shift().expect("planar format");
+            let planes = planar_planes(f, w, h);
+            let rd = |off: usize, idx: usize| -> i32 {
+                if bps == 2 {
+                    u16::from_le_bytes([src[off + idx * 2], src[off + idx * 2 + 1]]) as i32
+                } else {
+                    src[off + idx] as i32
+                }
+            };
+            let (_, ucw, _) = planes[1];
+            for row in 0..h {
+                for col in 0..w {
+                    let i = row * w + col;
+                    y[i] = rd(planes[0].0, i);
+                    let ci = (row >> vs) * ucw + (col >> hs);
+                    u[i] = rd(planes[1].0, ci);
+                    v[i] = rd(planes[2].0, ci);
+                }
+            }
+            (y, u, v, d)
+        }
+    }
+}
+
+/// Repack full-resolution (4:4:4) planar Y, U, V at working depth `wd` into `to`:
+/// RGB is color-converted from 8-bit YUV; the YUV targets downsample chroma by
+/// box-averaging and scale the depth.
+fn from_hub(
+    y: &[i32],
+    u: &[i32],
+    v: &[i32],
+    wd: u8,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+) -> Box<[u8]> {
+    let n = w * h;
+    match to {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
+            let (r_off, b_off) = crate::pixel::rgba_rb_offsets(to);
+            let mut dst = vec![0u8; n * 4];
+            for i in 0..n {
+                let (yy, uu, vv) =
+                    (scale_depth(y[i], wd, 8), scale_depth(u[i], wd, 8), scale_depth(v[i], wd, 8));
+                let (r, g, b) = yuv_to_rgb(yy, uu, vv);
+                let p = i * 4;
+                dst[p + r_off] = r as u8;
+                dst[p + 1] = g as u8;
+                dst[p + b_off] = b as u8;
+                dst[p + 3] = 255;
+            }
+            dst.into_boxed_slice()
+        }
+        RawVideoFormat::Nv12 => {
+            let (cw, ch) = (w / 2, h / 2);
+            let mut dst = vec![0u8; n + 2 * cw * ch];
+            for i in 0..n {
+                dst[i] = scale_depth(y[i], wd, 8) as u8;
+            }
+            for cy in 0..ch {
+                for cx in 0..cw {
+                    let (su, sv) = avg_chroma(u, v, w, cx, cy, 1, 1);
+                    let ci = cy * cw + cx;
+                    dst[n + 2 * ci] = scale_depth(su, wd, 8) as u8;
+                    dst[n + 2 * ci + 1] = scale_depth(sv, wd, 8) as u8;
+                }
+            }
+            dst.into_boxed_slice()
+        }
+        // The fully-planar family: downsample chroma to the target subsampling
+        // (averaging each block), scale to the target depth, write LE u16 if > 8.
+        f => {
+            let d = f.bit_depth();
+            let bps = f.bytes_per_sample();
+            let (hs, vs) = f.chroma_shift().expect("planar format");
+            let planes = planar_planes(f, w, h);
+            let total = planes[2].0 + planes[2].1 * planes[2].2 * bps;
+            let mut dst = vec![0u8; total];
+            let mut wr = |off: usize, idx: usize, val: i32| {
+                let val = scale_depth(val, wd, d);
+                if bps == 2 {
+                    let b = (val as u16).to_le_bytes();
+                    dst[off + idx * 2] = b[0];
+                    dst[off + idx * 2 + 1] = b[1];
+                } else {
+                    dst[off + idx] = val as u8;
+                }
+            };
+            for (i, &val) in y.iter().enumerate() {
+                wr(planes[0].0, i, val);
+            }
+            let (_, cw, chh) = planes[1];
+            for cy in 0..chh {
+                for cx in 0..cw {
+                    let (su, sv) = avg_chroma(u, v, w, cx, cy, hs, vs);
+                    let ci = cy * cw + cx;
+                    wr(planes[1].0, ci, su);
+                    wr(planes[2].0, ci, sv);
+                }
+            }
+            dst.into_boxed_slice()
+        }
+    }
+}
+
+/// Average the `2^hs x 2^vs` block of full-resolution chroma at chroma cell
+/// `(cx, cy)` (the box filter for chroma downsampling). For 4:4:4 (`hs = vs = 0`)
+/// this is the single co-located sample.
+fn avg_chroma(u: &[i32], v: &[i32], w: usize, cx: usize, cy: usize, hs: u32, vs: u32) -> (i32, i32) {
+    let (bw, bh) = (1usize << hs, 1usize << vs);
+    let (mut su, mut sv) = (0i32, 0i32);
+    for dy in 0..bh {
+        for dx in 0..bw {
+            let i = (cy * bh + dy) * w + cx * bw + dx;
+            su += u[i];
+            sv += v[i];
+        }
+    }
+    let count = (bw * bh) as i32;
+    ((su + count / 2) / count, (sv + count / 2) / count)
 }
 
 /// Packed YUYV (4:2:2, byte order Y0 U Y1 V) -> 4:2:0 YUV. The luma plane is a
@@ -775,5 +1008,46 @@ mod tests {
         assert_eq!(p0[0], p0[1], "grey: R == G");
         assert_eq!(p0[1], p0[2], "grey: G == B");
         assert_eq!(p0[3], 255, "alpha opaque");
+    }
+
+    #[test]
+    fn hub_scales_depth_8_to_10() {
+        // 2x2 I420 (8-bit): luma all 255, chroma 128. Converting to I420p10 scales
+        // each sample to 10-bit full range (luma 255 -> 1023) as little-endian u16.
+        let src = vec![255u8, 255, 255, 255, 128, 128];
+        let out = convert(&src, RawVideoFormat::I420, RawVideoFormat::I420p10, 2, 2);
+        assert_eq!(out.len(), (4 + 1 + 1) * 2);
+        let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
+        assert_eq!(rd(0), 1023, "luma 255 -> 10-bit 1023");
+    }
+
+    #[test]
+    fn hub_high_bit_depth_yuv_to_rgba_is_grey() {
+        // 2x2 I444p10 with neutral chroma (U = V = 512, the 10-bit center) and a
+        // mid luma converts to an opaque grey RGBA (R == G == B).
+        let plane = |val: u16| (0..4).flat_map(move |_| val.to_le_bytes());
+        let src: Vec<u8> = plane(512).chain(plane(512)).chain(plane(512)).collect();
+        let out = convert(&src, RawVideoFormat::I444p10, RawVideoFormat::Rgba8, 2, 2);
+        assert_eq!(out.len(), 2 * 2 * 4);
+        for px in out.chunks_exact(4) {
+            assert_eq!(px[0], px[1], "grey: R == G");
+            assert_eq!(px[1], px[2], "grey: G == B");
+            assert_eq!(px[3], 255, "alpha opaque");
+            assert!((120..=140).contains(&px[0]), "neutral grey near mid");
+        }
+    }
+
+    #[test]
+    fn hub_chroma_resample_round_trips_a_flat_field() {
+        // 4x4 I444 (8-bit) flat field: down to 4:2:0 (averaging equal samples) and
+        // back up to 4:4:4 (replicating) recovers the original flat Y / U / V.
+        let n = 16;
+        let mut src = vec![100u8; n];
+        src.extend(vec![120u8; n]);
+        src.extend(vec![140u8; n]);
+        let i420 = convert(&src, RawVideoFormat::I444, RawVideoFormat::I420, 4, 4);
+        let back = convert(&i420, RawVideoFormat::I420, RawVideoFormat::I444, 4, 4);
+        assert_eq!(back.len(), 3 * n);
+        assert_eq!((back[0], back[n], back[2 * n]), (100, 120, 140), "flat Y / U / V preserved");
     }
 }
