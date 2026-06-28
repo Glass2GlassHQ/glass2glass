@@ -29,7 +29,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, Segment,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment,
 };
 
 use crate::filesink::io_err;
@@ -69,8 +69,13 @@ impl Mp4Src {
 
     /// Make the source seekable: `run` polls `controller` between frames and, on a
     /// flushing seek, emits `Flush`, repositions to the keyframe at or before the
-    /// target, emits the post-flush `Segment`, and resumes. The application keeps a
-    /// clone of the controller to drive scrubbing / editing.
+    /// target, emits the post-flush `Segment`, and resumes. A non-flushing seek
+    /// repositions and emits an accumulating `Segment` (no flush). A
+    /// `SeekFlags::SEGMENT` seek (M358) clips playback to the segment `stop` and,
+    /// at the boundary, reports segment-done (`notify_segment_done`) and parks for
+    /// the next loop seek or `shutdown` instead of running to `Eos`, so the app can
+    /// loop a clip gaplessly. The application keeps a clone of the controller to
+    /// drive scrubbing / editing / looping.
     pub fn with_seek(mut self, controller: SeekController) -> Self {
         self.seek = Some(controller);
         self
@@ -167,19 +172,69 @@ impl SourceLoop for Mp4Src {
             // after every seek, since the landed keyframe also needs them.
             let mut need_param_sets = true;
             let mut i = 0usize;
-            while i < samples.len() {
-                // A flushing seek repositions to the keyframe at or before the
-                // target before the next frame is produced (GStreamer-style:
-                // upstream to the source, latest-wins).
+            // The active playback segment (M211/M358). Open-ended until a seek
+            // with a `stop` arrives; `segment_mode` tracks whether that seek
+            // asked for SEGMENT looping (segment-done at `stop` instead of Eos).
+            let mut segment = Segment::new();
+            let mut segment_mode = false;
+            // Stream-time playback has reached (last emitted PTS), so a
+            // non-flushing `accumulate_seek` anchors its running-time base.
+            let mut position = 0u64;
+            loop {
+                // Apply a pending seek before the next frame (GStreamer-style:
+                // upstream to the source, latest-wins). A flushing seek emits
+                // `Flush` + a reset segment; a non-flushing one accumulates the
+                // running-time base (no flush). Both snap to the keyframe at or
+                // before the target so a decoder resumes from a clean reference.
                 if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
-                    if seek.is_flush() {
+                    let new_seg = if seek.is_flush() {
                         out.push(PipelinePacket::Flush).await?;
-                        i = keyframe_index_for(&samples, seek.start);
-                        need_param_sets = true;
-                        out.push(PipelinePacket::Segment(Segment::for_flush_seek(&seek, None)))
-                            .await?;
-                    }
+                        Segment::for_flush_seek(&seek, None)
+                    } else {
+                        // Anchor accumulation at the running time reached, clamped
+                        // to the segment stop (playback is clipped there).
+                        segment.position = segment.stop.map_or(position, |s| position.min(s));
+                        segment.accumulate_seek(&seek, None)
+                    };
+                    segment = new_seg;
+                    segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
+                    position = new_seg.start;
+                    i = keyframe_index_for(&samples, seek.start);
+                    need_param_sets = true;
+                    out.push(PipelinePacket::Segment(new_seg)).await?;
                     continue; // re-evaluate from the repositioned index
+                }
+
+                // End of the stream, or past the active segment's stop: a SEGMENT
+                // segment reports segment-done and parks for the next loop seek;
+                // anything else ends with Eos.
+                let at_end = i >= samples.len();
+                let past_stop =
+                    !at_end && segment.stop.is_some_and(|stop| samples[i].pts_ns > stop);
+                if at_end || past_stop {
+                    if segment_mode {
+                        if let Some(ctl) = self.seek.as_ref() {
+                            let done_pos = segment.stop.unwrap_or(position);
+                            // Anchor the next loop's accumulation at the segment
+                            // end, so a gapless loop advances base by a full span.
+                            position = done_pos;
+                            ctl.notify_segment_done(done_pos);
+                            // Park (wakefully) until the app loops or shuts down.
+                            loop {
+                                if ctl.has_pending() {
+                                    break; // the loop top applies it
+                                }
+                                if ctl.is_shutdown() {
+                                    out.push(PipelinePacket::Eos).await?;
+                                    return Ok(sequence);
+                                }
+                                ctl.wait_event().await;
+                            }
+                            continue;
+                        }
+                    }
+                    out.push(PipelinePacket::Eos).await?;
+                    return Ok(sequence);
                 }
 
                 let s = &samples[i];
@@ -196,6 +251,7 @@ impl SourceLoop for Mp4Src {
                     annexb = with_sets;
                 }
                 need_param_sets = false;
+                position = s.pts_ns;
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(
                         annexb.into_boxed_slice(),
@@ -215,9 +271,6 @@ impl SourceLoop for Mp4Src {
                 i += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
-
-            out.push(PipelinePacket::Eos).await?;
-            Ok(sequence)
         })
     }
 }

@@ -421,6 +421,104 @@ async fn mid_stream_scrub_repositions_after_frames_flow() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// M359: `Mp4Src` loops a clip gaplessly on a `SeekFlags::SEGMENT` seek. The
+/// source plays `[0, stop]`, reports segment-done at the boundary instead of
+/// Eos, and the app re-arms a non-flushing SEGMENT seek to loop (accumulating
+/// running time, no flush); after N loops the app shuts the source down.
+#[tokio::test]
+async fn segment_seek_loops_clip_gaplessly_then_shuts_down() {
+    use g2g_core::runtime::SeekController;
+    use g2g_core::{Seek, SeekFlags, SeekType};
+
+    fn segment_seek(flush: bool, stop: u64) -> Seek {
+        let flags = if flush {
+            SeekFlags::FLUSH | SeekFlags::SEGMENT
+        } else {
+            SeekFlags::SEGMENT
+        };
+        Seek { rate: 1.0, flags, start_type: SeekType::Set, start: 0, stop_type: SeekType::Set, stop }
+    }
+
+    let path = temp_path("segloop");
+    let sps = [0x67u8, 0x42, 0xC0, 0x1E, 0x11];
+    let pps = [0x68u8, 0xCE, 0x3C, 0x80];
+    let idr0: Vec<u8> =
+        [&[0, 0, 0, 1][..], &sps, &[0, 0, 0, 1], &pps, &[0, 0, 0, 1], &[0x65, 0xA0]].concat();
+    let p = |tag: u8| [&[0, 0, 0, 1][..], &[0x41, tag][..]].concat();
+    // 4 AUs at pts 0, 33.3, 66.6, 100 ms; keyframe only at index 0.
+    record(&path, &[idr0, p(0xA1), p(0xA2), p(0xA3)], 64, 48).await;
+
+    // stop = 50 ms: the segment [0, 50ms] holds AUs 0 (0ms) and 1 (33.3ms); AU 2
+    // (66.6ms) is past stop and triggers the boundary, so 2 frames per loop.
+    let stop = 50_000_000u64;
+    let n_loops = 3u64;
+
+    let ctl = SeekController::new();
+    ctl.seek(segment_seek(true, stop)); // arm the initial flushing segment seek
+
+    let mut src = Mp4Src::new(&path).with_seek(ctl.clone());
+    let caps = src.intercept_caps().await.expect("probe");
+    src.configure_pipeline(&caps).expect("configure");
+    let mut out = Collect::default();
+
+    let driver_ctl = ctl.clone();
+    let driver = async move {
+        // Track how many segment-dones we've handled, so a done that lands before
+        // we first look (the source runs a whole segment in one poll, no yield) is
+        // still seen rather than waited-on forever.
+        let mut handled = 0u64;
+        loop {
+            while driver_ctl.segment_done_count() <= handled {
+                tokio::task::yield_now().await;
+            }
+            handled = driver_ctl.segment_done_count();
+            assert_eq!(driver_ctl.take_segment_done(), Some(stop));
+            if handled >= n_loops {
+                driver_ctl.shutdown();
+                break;
+            }
+            driver_ctl.seek(segment_seek(false, stop)); // non-flushing loop
+        }
+    };
+
+    let (run_res, ()) = tokio::join!(src.run(&mut out), driver);
+    run_res.expect("run");
+
+    assert_eq!(ctl.segment_done_count(), n_loops, "one segment-done per loop");
+    // 2 frames per loop, N loops.
+    assert_eq!(out.frames().len(), (n_loops * 2) as usize);
+    // Each loop replays the same clip from its keyframe: every other frame is the
+    // IDR (idr0), so the loop genuinely restarted at the segment start.
+    let frames = out.frames();
+    for k in 0..n_loops as usize {
+        assert!(
+            frame_bytes(frames[k * 2]).windows(2).any(|w| w == [0x65, 0xA0]),
+            "loop {k} restarted at the keyframe idr0"
+        );
+    }
+
+    // Only the initial seek flushed; the loop seeks are gapless (no flush).
+    let flushes = out.packets.iter().filter(|p| matches!(p, PipelinePacket::Flush)).count();
+    assert_eq!(flushes, 1, "only the initial segment seek flushes");
+    // The running-time base accumulates one span (stop) per loop, so the last
+    // loop's segment starts at (n_loops - 1) * stop: gapless across the loops.
+    let segments: Vec<_> = out
+        .packets
+        .iter()
+        .filter_map(|p| match p {
+            PipelinePacket::Segment(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(segments.len() as u64, n_loops, "one segment per loop iteration");
+    let last = segments.last().expect("a loop segment");
+    assert_eq!(last.base, (n_loops - 1) * stop, "base accumulates one span per loop");
+    assert_eq!(last.to_running_time(0), Some((n_loops - 1) * stop), "gapless across the loop");
+
+    assert!(out.packets.iter().any(|p| matches!(p, PipelinePacket::Eos)), "shutdown ends with Eos");
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::test]
 async fn missing_or_invalid_file_fails_loud() {
     let mut missing = Mp4Src::new(temp_path("missing"));

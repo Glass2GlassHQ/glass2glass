@@ -1609,11 +1609,18 @@ and parks (polling) for the app's next move. The app observes
 `segment_done_count()` / `take_segment_done()` and re-arms a *non-flushing*
 `SEGMENT` seek to loop (so `accumulate_seek` advances `base` by one span per
 iteration, gapless, no `Flush` downstream) or calls `shutdown()` to end the loop,
-at which point the idle source emits `Eos`. The idle park is a poll (the
-poll-model analog of GStreamer pausing the source task; a wakeful wait is a
-follow-up). Wiring the in-tree repositioning sources (`Mp4Src`) to loop on
-`SEGMENT`, container-level segment seeks (CMAF / DASH transitions), and re-preroll
-after a flushing seek when paused remain open (DESIGN_TODO).
+at which point the idle source emits `Eos`. The idle park is **wakeful**
+(`SeekController::wait_event`, M359): the source `await`s a future that resolves
+when `seek` / `shutdown` wakes the registered waker, so a looping source between
+loops costs nothing (no busy-poll), the poll-free analog of GStreamer pausing the
+source task. `Mp4Src` is the first real source to loop on `SEGMENT` (M359): it
+clips playback to the segment `stop`, reports segment-done at the boundary, and
+parks on `wait_event` for the app's loop seek (non-flushing, snapping to the
+keyframe at or before the target so a decoder resumes cleanly) or `shutdown`. It
+also now honours non-flushing repositioning seeks (accumulating `Segment`, no
+`Flush`), not just flushing ones. Container-level segment seeks (CMAF / DASH
+transitions) and re-preroll after a flushing seek when paused remain open
+(DESIGN_TODO).
 
 ### 4.15 Bus and Observability
 

@@ -42,11 +42,10 @@ leverage first:
 ## Seek and auto-plug
 
 - Container-level segment seeks (CMAF / DASH transitions). The
-  `SeekFlags::SEGMENT` playback-loop mechanism is done (M358, `SeekController`
-  segment-done back-channel + gapless `accumulate_seek` looping); what remains is
-  driving it from real sources (`Mp4Src`) and the demux/container transitions.
-- A wakeful (vs polled) park for a segment-looping source idling between loops
-  (M358 uses a poll loop + `shutdown()`); the GStreamer source-task-pause analog.
+  `SeekFlags::SEGMENT` playback-loop mechanism is done (M358 `SeekController`
+  segment-done back-channel + gapless `accumulate_seek`; M359 wakeful
+  `wait_event` park + `Mp4Src` looping a clip on `SEGMENT`); what remains is the
+  demux/container-level segment transitions.
 - Re-preroll after a flushing seek when paused.
 - Make `FileSrc` and the demuxers seek-aware (only `Mp4Src` is today).
 - Richer auto-plug factory construction params (geometry / device / file path).

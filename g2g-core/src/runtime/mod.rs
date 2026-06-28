@@ -48,7 +48,7 @@ pub use autoplug::{
     CapabilityDescriptor, ChainLink, ElementDesc, SelectionContext,
 };
 pub use progress::PipelineProgress;
-pub use seek::SeekController;
+pub use seek::{SeekController, WaitEvent};
 pub use state::{Flow, FlowGate, PrerollGate, StateController};
 pub use solver::NegotiationFailure;
 

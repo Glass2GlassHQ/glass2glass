@@ -32,7 +32,10 @@
 //! it can emit `Eos` and terminate (the poll-model analog of pausing the source
 //! task; a wakeful wait is a follow-up).
 
+use core::future::Future;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{Context, Poll, Waker};
 
 use alloc::sync::Arc;
 
@@ -61,6 +64,10 @@ struct SeekInner {
     /// App -> source stop request: ends a segment-looping source idling between
     /// loop seeks. Latches once set (a run is torn down, not resumed).
     shutdown: AtomicBool,
+    /// Waker a source parked in [`SeekController::wait_event`] registered, woken
+    /// by `seek` / `shutdown` so an idle segment-looping source resumes without
+    /// busy-polling. `None` when no source is parked.
+    waker: Mutex<Option<Waker>>,
 }
 
 /// Cloneable seek channel. Every clone shares one pending-seek slot, one
@@ -80,6 +87,7 @@ impl SeekController {
     /// (latest-wins).
     pub fn seek(&self, seek: Seek) {
         *self.inner.pending.lock() = Some(seek);
+        self.wake();
     }
 
     /// Source side: take and clear the pending seek, or `None` if none is set.
@@ -126,11 +134,59 @@ impl SeekController {
     /// Latching: a torn-down run is not resumed.
     pub fn shutdown(&self) {
         self.inner.shutdown.store(true, Ordering::SeqCst);
+        self.wake();
     }
 
     /// Source side: whether the app has requested shutdown.
     pub fn is_shutdown(&self) -> bool {
         self.inner.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// Source side: park until a seek is pending or shutdown is requested, then
+    /// resolve. The wakeful idle for a segment-looping source between loops (the
+    /// poll-free analog of pausing the source task): `seek` / `shutdown` wake the
+    /// registered waker. The caller re-checks `take_pending` / `is_shutdown`
+    /// after it resolves (a spurious early resolve is harmless, just a re-poll).
+    pub fn wait_event(&self) -> WaitEvent<'_> {
+        WaitEvent { ctl: self }
+    }
+
+    /// Resolve any parked [`wait_event`](Self::wait_event).
+    fn wake(&self) {
+        if let Some(w) = self.inner.waker.lock().take() {
+            w.wake();
+        }
+    }
+
+    /// Whether a seek is pending or shutdown is set (the `wait_event` ready
+    /// condition).
+    fn has_event(&self) -> bool {
+        self.has_pending() || self.is_shutdown()
+    }
+}
+
+/// Future returned by [`SeekController::wait_event`]. Resolves when a seek is
+/// pending or shutdown is requested.
+#[derive(Debug)]
+pub struct WaitEvent<'a> {
+    ctl: &'a SeekController,
+}
+
+impl Future for WaitEvent<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.ctl.has_event() {
+            return Poll::Ready(());
+        }
+        // Register before the final check so a `seek` / `shutdown` that lands in
+        // the gap still wakes us (it either sees the waker, or we see its state).
+        *self.ctl.inner.waker.lock() = Some(cx.waker().clone());
+        if self.ctl.has_event() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -210,5 +266,39 @@ mod tests {
         assert!(src.is_shutdown());
         // Latching: it stays set (a run is torn down, not resumed).
         assert!(src.is_shutdown());
+    }
+
+    #[test]
+    fn wait_event_resolves_and_wakes() {
+        use crate::runtime::block_on;
+        // Already-pending: resolves immediately.
+        let c = SeekController::new();
+        c.seek(Seek::flush_to(1));
+        block_on(c.wait_event());
+
+        // A wake from `seek` resolves a previously-pending wait, and a wake from
+        // `shutdown` resolves the idle case. Drive a parked wait by polling it
+        // once (Pending), then satisfying it and polling again (Ready).
+        let c2 = SeekController::new();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = core::pin::pin!(c2.wait_event());
+        assert!(fut.as_mut().poll(&mut cx).is_pending(), "no event yet");
+        c2.shutdown();
+        assert!(fut.as_mut().poll(&mut cx).is_ready(), "shutdown resolves the wait");
+    }
+
+    /// A no-op waker so a `wait_event` future can be polled directly in a test.
+    fn noop_waker() -> Waker {
+        use core::task::{RawWaker, RawWakerVTable};
+        const VT: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(core::ptr::null(), &VT),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+        // SAFETY: the vtable's clone returns a valid RawWaker over the same
+        // vtable, and wake/wake_by_ref/drop are no-ops on a null data pointer.
+        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) }
     }
 }
