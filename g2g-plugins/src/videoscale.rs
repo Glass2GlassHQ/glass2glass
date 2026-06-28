@@ -24,7 +24,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{frame_byte_size, is_yuv420};
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -33,12 +33,27 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-const FORMATS: [RawVideoFormat; 4] = [
+const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
 ];
+
+/// True when `(w, h)` violates the even-width / even-height a format's chroma
+/// subsampling requires (so a scale stays on chroma-sample boundaries).
+fn bad_even_dims(format: RawVideoFormat, w: u32, h: u32) -> bool {
+    let (ew, eh) = even_dims_required(format);
+    (ew && w % 2 != 0) || (eh && h % 2 != 0)
+}
 
 /// Upper bound on the scalable output range advertised in caps-driven (auto)
 /// mode (M185). Covers up to 8K with headroom; a downstream capsfilter pins a
@@ -109,7 +124,7 @@ impl VideoScale {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(*format) && (*w % 2 != 0 || *h % 2 != 0) {
+        if bad_even_dims(*format, *w, *h) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *w, *h, framerate.clone()))
@@ -121,7 +136,7 @@ impl VideoScale {
         if self.target_w == 0 || self.target_h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(format) && (self.target_w % 2 != 0 || self.target_h % 2 != 0) {
+        if bad_even_dims(format, self.target_w, self.target_h) {
             return Err(G2gError::CapsMismatch);
         }
         Ok(())
@@ -164,7 +179,7 @@ impl AsyncElement for VideoScale {
             Caps::RawVideo { format, width, height, framerate } if FORMATS.contains(format) => {
                 if tw > 0 && th > 0 {
                     // Property-driven: fixed target geometry.
-                    if is_yuv420(*format) && (tw % 2 != 0 || th % 2 != 0) {
+                    if bad_even_dims(*format, tw, th) {
                         return CapsSet::from_alternatives(Vec::new());
                     }
                     CapsSet::one(Caps::RawVideo {
@@ -225,7 +240,7 @@ impl AsyncElement for VideoScale {
         if *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(*format) && (*w % 2 != 0 || *h % 2 != 0) {
+        if bad_even_dims(*format, *w, *h) {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*w, *h));
@@ -469,45 +484,63 @@ fn scale(
             out.extend_from_slice(&chroma);
             out.into_boxed_slice()
         }
-        RawVideoFormat::I420 => {
-            let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2);
-            let mut out = resample_plane(&src[..luma_in], in_w, in_h, out_w, out_h, 1);
-            let u = resample_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
-                in_h / 2,
-                out_w / 2,
-                out_h / 2,
-                1,
-            );
-            let v = resample_plane(
-                &src[luma_in + chroma_in..luma_in + 2 * chroma_in],
-                in_w / 2,
-                in_h / 2,
-                out_w / 2,
-                out_h / 2,
-                1,
-            );
-            out.extend_from_slice(&u);
-            out.extend_from_slice(&v);
+        // YUYV is input-only / not produced here; negotiation never admits it.
+        RawVideoFormat::Yuyv => unreachable!("videoscale: YUYV is not negotiated"),
+        // The fully-planar family (I420 / I422 / I444 at 8 / 10 / 12-bit): resample
+        // each plane at its subsampled geometry. 10/12-bit samples are interpolated
+        // as little-endian `u16` (byte-wise bilerp would blend the high and low byte
+        // of a sample independently and corrupt it).
+        f => {
+            let (hs, vs) = f.chroma_shift().expect("planar format");
+            let bps = f.bytes_per_sample();
+            let planes = planar_planes(f, in_w, in_h);
+            let resample = |plane: &[u8], sw, sh, dw, dh| {
+                if bps == 2 {
+                    resample_plane16(plane, sw, sh, dw, dh)
+                } else {
+                    resample_plane(plane, sw, sh, dw, dh, 1)
+                }
+            };
+            let (ocw, och) = (out_w.div_ceil(1 << hs), out_h.div_ceil(1 << vs));
+            let mut out = resample(&src[..planes[1].0], in_w, in_h, out_w, out_h);
+            for (off, pw, ph) in [planes[1], planes[2]] {
+                let plane = resample(&src[off..off + pw * ph * bps], pw, ph, ocw, och);
+                out.extend_from_slice(&plane);
+            }
             out.into_boxed_slice()
         }
-        // YUYV and the high-bit-depth / 4:2:2 / 4:4:4 planar formats are absent
-        // from SUPPORTED, so negotiation never admits them here; convert to a
-        // supported format upstream before scaling.
-        RawVideoFormat::Yuyv
-        | RawVideoFormat::I420p10
-        | RawVideoFormat::I420p12
-        | RawVideoFormat::I422
-        | RawVideoFormat::I422p10
-        | RawVideoFormat::I422p12
-        | RawVideoFormat::I444
-        | RawVideoFormat::I444p10
-        | RawVideoFormat::I444p12 => {
-            unreachable!("videoscale: format is not negotiated")
+    }
+}
+
+/// Bilinear blend of four `u16` neighbours with Q16 weights, rounded to nearest;
+/// the high-bit-depth analog of [`bilerp`]. The result is a convex combination of
+/// the inputs so it stays in range.
+fn bilerp16(p00: u32, p10: u32, p01: u32, p11: u32, fx: u32, fy: u32) -> u16 {
+    let (fx, fy) = (fx as i64, fy as i64);
+    let one = 1i64 << 16;
+    let top = p00 as i64 * (one - fx) + p10 as i64 * fx;
+    let bot = p01 as i64 * (one - fx) + p11 as i64 * fx;
+    let val = top * (one - fy) + bot * fy;
+    ((val + (1i64 << 31)) >> 32) as u16
+}
+
+/// Bilinear-resample one single-channel plane of little-endian `u16` samples
+/// (a 10/12-bit luma or chroma plane) from `src_w x src_h` to `dst_w x dst_h`.
+fn resample_plane16(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+    let rd = |i: usize| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]) as u32;
+    let cols: Vec<(usize, usize, u32)> =
+        (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
+    let mut dst = vec![0u8; dst_w * dst_h * 2];
+    for oy in 0..dst_h {
+        let (y0, y1, fy) = map_axis(oy, dst_h, src_h);
+        let (row0, row1) = (y0 * src_w, y1 * src_w);
+        for (ox, &(x0, x1, fx)) in cols.iter().enumerate() {
+            let v = bilerp16(rd(row0 + x0), rd(row0 + x1), rd(row1 + x0), rd(row1 + x1), fx, fy);
+            let o = (oy * dst_w + ox) * 2;
+            dst[o..o + 2].copy_from_slice(&v.to_le_bytes());
         }
     }
+    dst
 }
 
 #[cfg(test)]
@@ -530,6 +563,30 @@ mod tests {
         let src = [0u8, 100];
         let out = resample_plane(&src, 2, 1, 4, 1, 1);
         assert_eq!(&out[..], &[0, 25, 75, 100]);
+    }
+
+    #[test]
+    fn resample16_interpolates_u16_endpoints() {
+        // Same 2px -> 4px mapping as the u8 case, but on LE-u16 samples [0, 1000]:
+        // the interior points land at 1/4 and 3/4 (250, 750), proving samples are
+        // interpolated as whole u16 values, not byte-wise.
+        let src: Vec<u8> = [0u16, 1000].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let out = resample_plane16(&src, 2, 1, 4, 1);
+        let got: Vec<u16> =
+            out.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(got, vec![0, 250, 750, 1000]);
+    }
+
+    #[test]
+    fn scales_high_bit_depth_4_2_0() {
+        // 4x4 I420p10 (LE u16): luma 16 samples, two 2x2 chroma planes. Downscale to
+        // 2x2 and check the buffer is a tight 2x2 I420p10 (4 + 2*1 samples, 2 bytes).
+        let (w, h) = (4usize, 4usize);
+        let n = w * h + 2 * (w / 2) * (h / 2);
+        let src: Vec<u8> = (0..n as u16).flat_map(|s| s.to_le_bytes()).collect();
+        let out = scale(&src, RawVideoFormat::I420p10, w, h, 2, 2);
+        // tight 2x2 I420 = 4 luma + 2x(1x1) chroma = 6 samples, 2 bytes each.
+        assert_eq!(out.len(), 6 * 2);
     }
 
     #[test]

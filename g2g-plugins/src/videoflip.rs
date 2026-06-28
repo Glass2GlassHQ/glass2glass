@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{frame_byte_size, is_yuv420};
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::tensor::TensorView;
@@ -28,11 +28,19 @@ use g2g_core::{
 use g2g_core::{g2g_info, g2g_trace};
 use alloc::string::String;
 
-const FORMATS: [RawVideoFormat; 4] = [
+const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
 ];
 
 /// The geometric operation `VideoFlip` applies. The two 90-degree rotations
@@ -96,8 +104,20 @@ impl VideoFlip {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(*format) && (*w % 2 != 0 || *h % 2 != 0) {
+        let (ew, eh) = even_dims_required(*format);
+        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
+        }
+        // A 90-degree rotation transposes the frame, swapping the horizontal and
+        // vertical chroma subsampling. That is fine for symmetric subsampling
+        // (4:2:0, 4:4:4) but a transposed 4:2:2 is not a representable I422 layout,
+        // so reject an asymmetric format under a dimension-swapping method.
+        if self.method.swaps_dims() {
+            if let Some((hs, vs)) = format.chroma_shift() {
+                if hs != vs {
+                    return Err(G2gError::CapsMismatch);
+                }
+            }
         }
         Ok((*format, *w, *h, framerate.clone()))
     }
@@ -452,41 +472,22 @@ fn flip(
             out.extend_from_slice(&chroma);
             out.into_boxed_slice()
         }
-        RawVideoFormat::I420 => {
-            let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2);
-            let mut out = transform_plane(src, in_w, in_h, 1, method);
-            let u = transform_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
-                in_h / 2,
-                1,
-                method,
-            );
-            let v = transform_plane(
-                &src[luma_in + chroma_in..luma_in + 2 * chroma_in],
-                in_w / 2,
-                in_h / 2,
-                1,
-                method,
-            );
-            out.extend_from_slice(&u);
-            out.extend_from_slice(&v);
+        // YUYV is input-only / not produced here; negotiation never admits it.
+        RawVideoFormat::Yuyv => unreachable!("videoflip: YUYV is not negotiated"),
+        // The fully-planar family (I420 / I422 / I444 at 8 / 10 / 12-bit): flip each
+        // of the three planes, treating a sample as an opaque `bytes_per_sample`-wide
+        // unit (a flip / rotation moves samples, never blends, so it is depth
+        // agnostic). A dimension-swapping method on an asymmetric (4:2:2) format was
+        // rejected at negotiation, so each plane transposes to a valid output plane.
+        f => {
+            let bps = f.bytes_per_sample();
+            let planes = planar_planes(f, in_w, in_h);
+            let mut out = transform_plane(src, in_w, in_h, bps, method);
+            for (off, pw, ph) in [planes[1], planes[2]] {
+                let plane = transform_plane(&src[off..off + pw * ph * bps], pw, ph, bps, method);
+                out.extend_from_slice(&plane);
+            }
             out.into_boxed_slice()
-        }
-        // YUYV and the high-bit-depth / 4:2:2 / 4:4:4 planar formats are absent
-        // from SUPPORTED, so negotiation never admits them here; convert to a
-        // supported format upstream before flipping.
-        RawVideoFormat::Yuyv
-        | RawVideoFormat::I420p10
-        | RawVideoFormat::I420p12
-        | RawVideoFormat::I422
-        | RawVideoFormat::I422p10
-        | RawVideoFormat::I422p12
-        | RawVideoFormat::I444
-        | RawVideoFormat::I444p10
-        | RawVideoFormat::I444p12 => {
-            unreachable!("videoflip: format is not negotiated")
         }
     }
 }
@@ -619,5 +620,42 @@ mod tests {
         // packed RGBA at any dims is accepted.
         let mut f = VideoFlip::new(FlipMethod::Rotate180);
         assert!(f.configure_pipeline(&rgba_caps(5, 3)).is_ok());
+    }
+
+    fn planar_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
+        Caps::RawVideo { format, width: Dim::Fixed(w), height: Dim::Fixed(h), framerate: Rate::Any }
+    }
+
+    #[test]
+    fn flips_high_bit_depth_4_4_4() {
+        // 2x2 I444p10: three full-res LE-u16 planes. Horizontal mirror swaps columns.
+        let mk = |base: u16| -> Vec<u8> {
+            (0..4u16).flat_map(|s| (base + s).to_le_bytes()).collect()
+        };
+        let mut src = mk(0);
+        src.extend(mk(100));
+        src.extend(mk(200));
+        let out = flip(&src, RawVideoFormat::I444p10, (2, 2), FlipMethod::HorizontalMirror);
+        assert_eq!(out.len(), 3 * 2 * 2 * 2);
+        let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
+        // Y row0 was [0,1] -> mirrored [1,0]; U row0 [100,101] -> [101,100].
+        assert_eq!((rd(0), rd(2)), (1, 0));
+        assert_eq!((rd(8), rd(10)), (101, 100));
+    }
+
+    #[test]
+    fn rotate90_rejects_4_2_2_but_accepts_4_4_4() {
+        // A 90-degree rotation transposes chroma subsampling: invalid for 4:2:2
+        // (not a representable I422), fine for symmetric 4:4:4 / 4:2:0.
+        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        assert_eq!(
+            f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4)).expect_err("4:2:2 transpose"),
+            G2gError::CapsMismatch
+        );
+        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        assert!(f.configure_pipeline(&planar_caps(RawVideoFormat::I444p10, 4, 4)).is_ok());
+        // A non-swapping method accepts 4:2:2 fine.
+        let mut f = VideoFlip::new(FlipMethod::HorizontalMirror);
+        assert!(f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4)).is_ok());
     }
 }

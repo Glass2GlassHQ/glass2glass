@@ -19,7 +19,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{frame_byte_size, is_yuv420};
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -28,11 +28,19 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-const FORMATS: [RawVideoFormat; 4] = [
+const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
 ];
 
 #[derive(Debug)]
@@ -85,31 +93,32 @@ impl VideoCrop {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(*format) && (*w % 2 != 0 || *h % 2 != 0) {
+        let (ew, eh) = even_dims_required(*format);
+        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *w, *h, framerate.clone()))
     }
 
     /// The insets must leave a non-empty frame (`left + right < in_w`,
-    /// `top + bottom < in_h`) and be even on all four edges when the format is
-    /// 4:2:0 (so the derived crop origin and size stay even).
+    /// `top + bottom < in_h`) and be even on each axis the format subsamples (so
+    /// the derived crop origin and size stay on chroma-sample boundaries): both
+    /// axes for 4:2:0, horizontal only for 4:2:2, neither for 4:4:4 / RGBA.
     fn validate_insets(&self, format: RawVideoFormat, in_w: u32, in_h: u32) -> Result<(), G2gError> {
         if self.left + self.right >= in_w || self.top + self.bottom >= in_h {
             return Err(G2gError::CapsMismatch);
         }
-        if is_yuv420(format) && !self.even_insets() {
+        if !self.even_insets_ok(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok(())
     }
 
-    fn even_insets(&self) -> bool {
-        self.top % 2 == 0 && self.bottom % 2 == 0 && self.left % 2 == 0 && self.right % 2 == 0
-    }
-
     fn even_insets_ok(&self, format: RawVideoFormat) -> bool {
-        !is_yuv420(format) || self.even_insets()
+        let (ew, eh) = even_dims_required(format);
+        let horiz_ok = !ew || (self.left % 2 == 0 && self.right % 2 == 0);
+        let vert_ok = !eh || (self.top % 2 == 0 && self.bottom % 2 == 0);
+        horiz_ok && vert_ok
     }
 
     /// The crop rectangle `(x, y, w, h)` the insets describe on an `in_w x in_h`
@@ -380,45 +389,31 @@ fn crop(
             out.extend_from_slice(&chroma);
             out.into_boxed_slice()
         }
-        RawVideoFormat::I420 => {
-            let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2);
-            let mut out = crop_plane(src, in_w, x, y, w, h, 1);
-            let u = crop_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
-                x / 2,
-                y / 2,
-                w / 2,
-                h / 2,
-                1,
-            );
-            let v = crop_plane(
-                &src[luma_in + chroma_in..luma_in + 2 * chroma_in],
-                in_w / 2,
-                x / 2,
-                y / 2,
-                w / 2,
-                h / 2,
-                1,
-            );
-            out.extend_from_slice(&u);
-            out.extend_from_slice(&v);
+        // YUYV is input-only / not produced here; negotiation never admits it.
+        RawVideoFormat::Yuyv => unreachable!("videocrop: YUYV is not negotiated"),
+        // The fully-planar family (I420 / I422 / I444 at 8 / 10 / 12-bit): crop
+        // each of the three planes at its subsampled rect, treating a sample as an
+        // opaque `bytes_per_sample`-wide unit (a crop moves samples, never blends,
+        // so it is depth-agnostic). The chroma rect is the luma rect shifted down
+        // by the format's `chroma_shift`.
+        f => {
+            let (hs, vs) = f.chroma_shift().expect("planar format");
+            let bps = f.bytes_per_sample();
+            let planes = planar_planes(f, in_w, in_h);
+            let mut out = crop_plane(src, in_w, x, y, w, h, bps);
+            for (off, pw, ph) in [planes[1], planes[2]] {
+                let plane = crop_plane(
+                    &src[off..off + pw * ph * bps],
+                    pw,
+                    x >> hs,
+                    y >> vs,
+                    w >> hs,
+                    h >> vs,
+                    bps,
+                );
+                out.extend_from_slice(&plane);
+            }
             out.into_boxed_slice()
-        }
-        // YUYV and the high-bit-depth / 4:2:2 / 4:4:4 planar formats are absent
-        // from SUPPORTED, so negotiation never admits them here; convert to a
-        // supported format upstream before cropping.
-        RawVideoFormat::Yuyv
-        | RawVideoFormat::I420p10
-        | RawVideoFormat::I420p12
-        | RawVideoFormat::I422
-        | RawVideoFormat::I422p10
-        | RawVideoFormat::I422p12
-        | RawVideoFormat::I444
-        | RawVideoFormat::I444p10
-        | RawVideoFormat::I444p12 => {
-            unreachable!("videocrop: format is not negotiated")
         }
     }
 }
@@ -489,6 +484,28 @@ mod tests {
         assert_eq!(out.len(), 2 * 2 + (1 * 1 * 2));
         // luma row 0 of the crop starts at src[(2*4)+2] = src[10].
         assert_eq!(&out[0..2], &[10, 11]);
+    }
+
+    #[test]
+    fn crops_high_bit_depth_4_4_4() {
+        // 4x4 I444p10: three full-res planes of LE u16. Crop 2x2 at (1,1). Each
+        // plane is independent and full-resolution (4:4:4), so the same rect applies.
+        let (w, h) = (4usize, 4usize);
+        let plane: Vec<u8> = (0..(w * h) as u16).flat_map(|s| s.to_le_bytes()).collect();
+        // Y = s, U = s+100, V = s+200 so a mis-indexed plane is caught.
+        let mut src = plane.clone();
+        src.extend((0..(w * h) as u16).flat_map(|s| (s + 100).to_le_bytes()));
+        src.extend((0..(w * h) as u16).flat_map(|s| (s + 200).to_le_bytes()));
+        let out = crop(&src, RawVideoFormat::I444p10, (w, h), (1, 1, 2, 2));
+        // 3 planes x 2x2 samples x 2 bytes.
+        assert_eq!(out.len(), 3 * 2 * 2 * 2);
+        let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
+        // Y crop top-left = source sample at (1,1) = row 1 col 1 = 4*1 + 1 = 5.
+        assert_eq!(rd(0), 5);
+        // U plane starts at byte 2*2*2 = 8; its top-left is 5 + 100 = 105.
+        assert_eq!(rd(8), 105);
+        // V plane at byte 16; top-left 5 + 200 = 205.
+        assert_eq!(rd(16), 205);
     }
 
     #[test]
