@@ -31,13 +31,15 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList,
-    VideoCodec,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
+    TagList, VideoCodec,
 };
 
+use crate::demuxseek::{Admit, DemuxSeek};
 use crate::matroska::{MatroskaDemuxer, MkvCodec};
 
 /// Which elementary stream a [`MkvDemux`] instance forwards. One output pad
@@ -68,6 +70,9 @@ pub struct MkvDemux {
     /// Count of tags already posted, so newly parsed tags (the `Tags` element
     /// can trail the `Info` `Title`) post once each.
     tags_posted: usize,
+    /// Seek support (M362): app time seeks drive an upstream byte-seek and a
+    /// re-sync. Inert unless `with_seek` wired the controllers.
+    seek: DemuxSeek,
 }
 
 impl Default for MkvDemux {
@@ -86,7 +91,25 @@ impl MkvDemux {
             last_caps: None,
             bus: None,
             tags_posted: 0,
+            seek: DemuxSeek::default(),
         }
+    }
+
+    /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
+    /// is the byte source's ([`FileSrc`](crate::filesrc)) byte-seek controller.
+    /// On a time seek the demuxer rewinds the source and re-syncs from the
+    /// keyframe at/after the target.
+    pub fn with_seek(mut self, app: SeekController, upstream: SeekController) -> Self {
+        self.seek.with(app, upstream);
+        self
+    }
+
+    /// Reset the parser for a discontinuity (a `Flush` / seek): drop the
+    /// demuxer's EBML/Cluster state, which the re-read stream re-establishes from
+    /// its EBML header. The codec / caps and posted tags are unchanged (same
+    /// file), so `last_caps` / `tags_posted` are kept (no redundant re-emit).
+    fn reset_parser(&mut self) {
+        self.demux = MatroskaDemuxer::new();
     }
 
     /// Select which elementary stream to forward (default [`MkvStream::Vp9`]).
@@ -209,6 +232,16 @@ impl MkvDemux {
             if f.codec != want {
                 continue; // a stream other than the selected one
             }
+            // M362 seek: drop frames until the keyframe at/after the target (the
+            // Matroska block keyframe flag); the resuming frame emits a segment.
+            match self.seek.admit(f.pts_ns, f.keyframe) {
+                Admit::Drop => continue,
+                Admit::Resume(start) => {
+                    let seg = Segment::for_flush_seek(&Seek::flush_to(start), None);
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                Admit::Emit => {}
+            }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
                 FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..FrameTiming::default() },
@@ -260,13 +293,26 @@ impl AsyncElement for MkvDemux {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            // M362: a pending app seek triggers an upstream byte-seek; until its
+            // `Flush` returns, drop input so no stale pre-seek frames are emitted.
+            self.seek.poll_request();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.seek.dropping_input() {
+                        return Ok(());
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.demux.push_data(slice.as_slice());
                     self.emit_ready(out).await?;
+                }
+                // The upstream byte-seek's flush: reset the parser, then re-sync
+                // from the re-read stream. Forward it downstream.
+                PipelinePacket::Flush => {
+                    self.seek.on_flush();
+                    self.reset_parser();
+                    out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Eos => {
                     // Emit any final frames; the runner's transform arm forwards EOS.
