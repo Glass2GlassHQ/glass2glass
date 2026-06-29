@@ -17,7 +17,7 @@ use g2g_core::{
 
 use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssrc::{variant_streams, HlsStreamInfo};
-use g2g_plugins::uridecodebin::build_hls_ts_fanout;
+use g2g_plugins::uridecodebin::{build_hls_fmp4_fanout, build_hls_ts_fanout};
 
 fn h264_any() -> Caps {
     Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
@@ -131,4 +131,85 @@ fn ignores_separate_audio_renditions_for_the_ts_demuxer() {
     ];
     let graph = build_hls_ts_fanout(&reg, "https://example.com/v.m3u8", &streams).unwrap();
     assert!(graph.is_none(), "separate-rendition audio is not fanned through TsDemuxN");
+}
+
+/// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered from
+/// the `#EXT-X-MAP` init segment (here a two-track A/V file's ftyp+moov, built by
+/// `Mp4MuxN`). The network-free assembly (`build_hls_fmp4_fanout`) is what the
+/// hook calls after fetching the init.
+#[test]
+fn fmp4_variant_fans_out_via_mp4demuxn() {
+    use core::future::Future;
+    use g2g_core::frame::{Frame, FrameTiming};
+    use g2g_core::memory::{MemoryDomain, SystemSlice};
+    use g2g_core::runtime::block_on;
+    use g2g_core::{MultiInputElement, PipelinePacket, PushOutcome};
+    use g2g_plugins::mp4muxn::Mp4MuxN;
+
+    #[derive(Default)]
+    struct ByteCapture {
+        bytes: Vec<u8>,
+    }
+    impl OutputSink for ByteCapture {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    if let MemoryDomain::System(s) = &f.domain {
+                        self.bytes.extend_from_slice(s.as_slice());
+                    }
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+    fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+            0,
+        ))
+    }
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for n in nals {
+            v.extend_from_slice(&[0, 0, 0, 1]);
+            v.extend_from_slice(n);
+        }
+        v
+    }
+    fn adts(payload: &[u8]) -> Vec<u8> {
+        let len = payload.len() + 7;
+        let mut au = vec![
+            0xFF, 0xF1, (1 << 6) | (3 << 2), ((2 & 3) << 6) | ((len >> 11) & 3) as u8,
+            ((len >> 3) & 0xFF) as u8, (((len & 7) << 5) as u8) | 0x1F, 0xFC,
+        ];
+        au.extend_from_slice(payload);
+        au
+    }
+
+    // Mux a two-track (H.264 + AAC) fragmented MP4; its ftyp+moov is the init.
+    let init = block_on(async {
+        let mut mux = Mp4MuxN::new(2);
+        mux.configure_pipeline(0, &h264_any()).unwrap();
+        mux.configure_pipeline(1, &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }).unwrap();
+        let mut sink = ByteCapture::default();
+        let sps = [0x67u8, 0x42, 0, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        mux.process(0, frame(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
+        mux.process(1, frame(adts(&[0xA1, 0xA2]), 0), &mut sink).await.unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+        sink.bytes
+    });
+
+    let reg = registry();
+    let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &init)
+        .expect("fmp4 fan-out builds")
+        .expect("two tracks fan out");
+    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two auto sinks");
+    assert_eq!(graph.edges().len(), 5);
 }

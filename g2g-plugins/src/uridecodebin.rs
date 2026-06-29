@@ -75,8 +75,8 @@ pub fn file_handler() -> UriSourceFactory {
 /// HLS playback. The `hls` scheme maps to an `https` origin for fetching; the
 /// declared media type is `ByteStream{MpegTs}` (the dominant HLS packaging), so
 /// the registry auto-plugs `tsdemux -> decode`. This is the fallback the
-/// [`hls_playbin`] fan-out hook defers to (a media-only playlist, an fMP4 variant,
-/// or a network failure during the master probe).
+/// [`hls_playbin`] fan-out hook defers to (a media-only playlist, a single-stream
+/// variant, or a network failure during the master probe).
 #[cfg(feature = "hls")]
 pub fn hls_handler() -> UriSourceFactory {
     UriSourceFactory::new("hls", |uri: &Uri| {
@@ -299,6 +299,15 @@ fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
     rt.block_on(crate::fetch::get_text(&client, url, crate::fetch::MAX_MANIFEST_BYTES)).ok()
 }
 
+/// Fetch a binary resource synchronously (the fMP4 `#EXT-X-MAP` init segment),
+/// the byte sibling of [`blocking_get_text`]. `None` on any failure.
+#[cfg(feature = "hls")]
+fn blocking_get_bytes(url: &str) -> Option<Vec<u8>> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let client = reqwest::Client::new();
+    rt.block_on(crate::fetch::get_bytes(&client, url, crate::fetch::MAX_SEGMENT_BYTES)).ok()
+}
+
 /// The MPEG-TS elementary-stream selector for an HLS discovered stream, or `None`
 /// for a codec `TsDemuxN` cannot route (only H.264 / H.265 video + AAC audio).
 #[cfg(feature = "hls")]
@@ -348,16 +357,54 @@ pub fn build_hls_ts_fanout(
     .map_err(|e| map_playbin_err(source_url, e))
 }
 
-/// The `playbin uri=X` auto-fan-out hook for HLS (M395): probe a `hls://` master
-/// playlist, discover its selected variant's renditions, and assemble `HlsSrc ->
-/// TsDemuxN -> {decode -> auto sink}`, one branch per muxed elementary stream, the
-/// HLS sibling of [`mkv_playbin`] / [`ts_playbin`] / [`mp4_playbin`]. The `hls`
-/// scheme maps to an `https` origin.
+/// Assemble the `HlsSrc -> Mp4DemuxN -> {decode -> auto sink}` fan-out for an
+/// fMP4 / CMAF HLS variant (M396), discovering its tracks from the `#EXT-X-MAP`
+/// init segment's `moov` ([`mp4demuxn::forwardable_streams`]). The network-free
+/// core of the fMP4 branch of [`hls_playbin`], unit-testable on an init segment.
+/// `Ok(None)` (decline) when the init carries no forwardable track.
+///
+/// Note: `Mp4DemuxN` buffers the whole byte stream and parses on EOS, so this
+/// fans out a VOD playlist after it ends rather than progressively, the batch
+/// limitation of the file-shaped demuxer applied to the segment stream.
+#[cfg(feature = "hls")]
+pub fn build_hls_fmp4_fanout(
+    reg: &Registry,
+    source_url: &str,
+    init: &[u8],
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let infos = crate::mp4demuxn::forwardable_streams(init);
+    if infos.is_empty() {
+        return Ok(None); // init segment carries no A/V track
+    }
+    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let demux_ports: Vec<_> = infos
+        .iter()
+        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .collect();
+    let source = crate::hlssrc::HlsSrc::new(source_url);
+    reg.build_playbin_graph_with_source(
+        Box::new(source),
+        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        ports,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map(Some)
+    .map_err(|e| map_playbin_err(source_url, e))
+}
+
+/// The `playbin uri=X` auto-fan-out hook for HLS (M395 TS, M396 fMP4): probe a
+/// `hls://` master playlist, discover its selected variant's renditions, and
+/// assemble `HlsSrc -> {TsDemuxN | Mp4DemuxN} -> {decode -> auto sink}`, one branch
+/// per elementary stream, the HLS sibling of [`mkv_playbin`] / [`ts_playbin`] /
+/// [`mp4_playbin`]. The variant's media playlist picks the demuxer: an
+/// `#EXT-X-MAP` init segment is fMP4 (Mp4DemuxN, tracks from the init's moov),
+/// otherwise muxed MPEG-TS (TsDemuxN, ports from CODECS). The `hls` scheme maps to
+/// an `https` origin.
 ///
 /// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a
-/// non-`hls` URI, a master-probe network failure, a media-only playlist, an fMP4
-/// (non-TS) variant, or a variant without at least two routable muxed streams.
-/// Network-coupled: the probe is validated against a live server, not in CI.
+/// non-`hls` URI, a master-probe network failure, a media-only playlist, or a TS
+/// variant without at least two routable muxed streams. Network-coupled: the probe
+/// is validated against a live server, not in CI.
 #[cfg(feature = "hls")]
 pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let Some(parsed) = Uri::parse(uri) else { return Ok(None) };
@@ -371,13 +418,19 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         return Ok(None); // a media playlist or parse error: single-stream handles it
     };
     let Some(variant) = master.select(None) else { return Ok(None) };
-    // The variant's media playlist tells the container; only muxed TS fans out
-    // here (an fMP4 init segment's track ids are not known without fetching it).
+    // The variant's media playlist tells the container: an `#EXT-X-MAP` init
+    // segment means fMP4 / CMAF (fan out via Mp4DemuxN, tracks from the init's
+    // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from CODECS).
     let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
     let Some(media_text) = blocking_get_text(&media_url) else { return Ok(None) };
-    match crate::hls::parse(&media_text) {
-        Ok(crate::hls::Playlist::Media(m)) if m.map_uri.is_none() => {}
-        _ => return Ok(None), // fMP4 (EXT-X-MAP) or unexpected: decline
+    let media = match crate::hls::parse(&media_text) {
+        Ok(crate::hls::Playlist::Media(m)) => m,
+        _ => return Ok(None), // a master pointing at a master, or a parse error
+    };
+    if let Some(map) = &media.map_uri {
+        let init_url = crate::fetch::resolve_url(&media_url, map);
+        let Some(init) = blocking_get_bytes(&init_url) else { return Ok(None) };
+        return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
     build_hls_ts_fanout(reg, &source_url, &streams)
