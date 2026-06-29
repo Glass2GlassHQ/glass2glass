@@ -709,6 +709,85 @@ pub fn build_hls_subtitle_overlay(
     Ok(Some(graph))
 }
 
+/// Assemble the *three-source* HLS subtitle-overlay graph (M420): a variant that
+/// carries video in its own TS segments but pairs it with BOTH a separate audio
+/// rendition and a SUBTITLES rendition. The video rides the variant's (video-only)
+/// MPEG-TS segments through a `TsDemuxN` into a
+/// [`TextOverlayN`](crate::textoverlay::TextOverlayN); the audio is a distinct
+/// `#EXT-X-MEDIA` rendition (`HlsSrc -> TsDemuxN -> decode -> auto audio sink`); the
+/// subtitle is another distinct WebVTT rendition (`HlsSrc(text) -> SubParse ->
+/// overlay text pad`). Three independent sources in one graph, the union of
+/// [`build_hls_separate_fanout`] (separate audio) and [`build_hls_subtitle_overlay`]
+/// (cross-source text join). `streams` supplies the muxed video stream; `audio_url`
+/// / `subtitle_url` are the resolved rendition playlists. `Ok(None)` (decline) when
+/// there is no routable muxed video to overlay onto.
+#[cfg(feature = "hls")]
+pub fn build_hls_separate_subtitle_overlay(
+    reg: &Registry,
+    master_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+    audio_url: &str,
+    subtitle_url: &str,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    use crate::tsdemux::{TsDemuxN, TsStream};
+
+    // The variant's own (video-only) TS stream feeds the overlay's video pad.
+    let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
+        return Ok(None); // no routable muxed video to overlay onto
+    };
+    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
+    let demux = graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(Vec::from([vts]))), 1);
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+
+    // A video-only variant: one A/V entry, the video, at index 0.
+    let av = [(video.caps.clone(), true)];
+    let overlay = wire_overlay_av(reg, &mut graph, demux, &av, 0)?;
+
+    // The separate audio rendition: its own source -> demux -> decode -> auto sink.
+    let audio_src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(audio_url)));
+    let audio_demux =
+        graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(Vec::from([TsStream::Aac]))), 1);
+    graph.link(audio_src, audio_demux.input()).map_err(ParseError::Graph)?;
+    let asink = reg
+        .make_element("autoaudiosink")
+        .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
+    let asnk = graph.add_sink(GraphNodeRef::Element(asink));
+    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    reg.decodebin(&mut graph, audio_demux.out(0), asnk, &audio_caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
+        .map_err(|e| map_decode_err(&audio_caps, e))?;
+
+    // The separate subtitle rendition: WebVTT text -> SubParse -> overlay text pad.
+    let sub_src =
+        graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(subtitle_url).with_text()));
+    link_text_into_overlay(
+        &mut graph,
+        overlay,
+        sub_src.into(),
+        &Caps::Text { format: g2g_core::TextFormat::WebVtt },
+    )?;
+    Ok(Some(graph))
+}
+
+/// Resolve the playlist URL of the chosen `#EXT-X-MEDIA` rendition in `group`
+/// (M418 language pick: `language` -> DEFAULT -> first), absolute against
+/// `base_url`. `None` when there is no group, no matching rendition, or the chosen
+/// rendition has no `URI` (a track muxed into the variant rather than its own
+/// playlist).
+#[cfg(feature = "hls")]
+fn resolve_rendition(
+    master: &crate::hls::MasterPlaylist,
+    base_url: &str,
+    group: Option<&str>,
+    media_type: crate::hls::MediaType,
+    language: Option<&str>,
+) -> Option<alloc::string::String> {
+    let r = master.pick_rendition(media_type, group?, language)?;
+    Some(crate::fetch::resolve_url(base_url, r.uri.as_ref()?))
+}
+
 /// Parse the `playbin uri=hls://...` rendition-language hints from the URI fragment
 /// (M418): `#audio-lang=fr&subtitle-lang=en`. Returns the playlist `rest` with the
 /// fragment stripped, plus the requested audio and subtitle languages (`None` when
@@ -763,34 +842,45 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
-    // A SUBTITLES rendition with muxed A/V (no separate audio group): overlay the
-    // chosen subtitle rendition onto the video (M419, the cross-source join). The
-    // separate-audio + subtitle 3-source combo is a follow-up, so this is gated on
-    // muxed audio; pick the rendition the `#subtitle-lang=` hint asks for.
-    if variant.audio_group.is_none() {
-        if let Some(group) = &variant.subtitles_group {
-            if let Some(sub) =
-                master.pick_rendition(crate::hls::MediaType::Subtitles, group, subtitle_lang.as_deref())
-            {
-                if let Some(sub_uri) = &sub.uri {
-                    let sub_url = crate::fetch::resolve_url(&source_url, sub_uri);
-                    if let Some(g) = build_hls_subtitle_overlay(reg, &source_url, &streams, &sub_url)? {
-                        return Ok(Some(g));
-                    }
-                }
+    // Resolve the chosen renditions (M418 language pick): a SUBTITLES WebVTT
+    // rendition and/or a separate audio rendition, each absolute and `None` when the
+    // variant binds no such group (or the rendition is muxed-in, no own `URI`). The
+    // pair decides the graph shape below.
+    let subtitle_url = resolve_rendition(
+        &master,
+        &source_url,
+        variant.subtitles_group.as_deref(),
+        crate::hls::MediaType::Subtitles,
+        subtitle_lang.as_deref(),
+    );
+    let audio_url = resolve_rendition(
+        &master,
+        &source_url,
+        variant.audio_group.as_deref(),
+        crate::hls::MediaType::Audio,
+        audio_lang.as_deref(),
+    );
+
+    // Separate audio + SUBTITLES renditions: the three-source overlay, video from
+    // the variant's TS, audio + subtitle each its own rendition source (M420).
+    if let (Some(a), Some(s)) = (&audio_url, &subtitle_url) {
+        if let Some(g) = build_hls_separate_subtitle_overlay(reg, &source_url, &streams, a, s)? {
+            return Ok(Some(g));
+        }
+    }
+    // A SUBTITLES rendition with muxed A/V (no separate audio): overlay the chosen
+    // rendition onto the video (M419, the cross-source join).
+    if audio_url.is_none() {
+        if let Some(s) = &subtitle_url {
+            if let Some(g) = build_hls_subtitle_overlay(reg, &source_url, &streams, s)? {
+                return Ok(Some(g));
             }
         }
     }
-    // A separate audio rendition (its own playlist) means a multi-source graph: the
-    // variant carries video, the audio is a distinct rendition. Pick the rendition
-    // the `#audio-lang=` hint asks for (else DEFAULT, else the first), M418.
-    if let Some(group) = &variant.audio_group {
-        if let Some(audio) = master.pick_rendition(crate::hls::MediaType::Audio, group, audio_lang.as_deref()) {
-            if let Some(audio_uri) = &audio.uri {
-                let audio_url = crate::fetch::resolve_url(&source_url, audio_uri);
-                return build_hls_separate_fanout(reg, &source_url, &streams, &audio_url);
-            }
-        }
+    // A separate audio rendition (no subtitle): the two-source A/V fan-out, the
+    // variant carries video, the audio is a distinct rendition (M397).
+    if let Some(a) = &audio_url {
+        return build_hls_separate_fanout(reg, &source_url, &streams, a);
     }
     build_hls_ts_fanout(reg, &source_url, &streams)
 }

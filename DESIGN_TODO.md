@@ -290,10 +290,12 @@ leverage first:
   common case (M419: `HlsSrc::with_text` emits `Caps::Text { WebVtt }` from a raw
   `.vtt` rendition, `build_hls_subtitle_overlay` joins it through `SubParse` into the
   video's `TextOverlayN` across sources, wired by `hls_playbin` for a muxed-A/V TS
-  variant + `SUBTITLES` rendition). Follow-ups: the separate-audio + subtitle
-  3-source combo (today subtitles are gated on muxed audio), the fMP4 `wvtt`
-  subtitle rendition (`IsoBmff` + `Mp4DemuxN`, reuses M416), and the `X-TIMESTAMP-MAP`
-  offset for live (non-absolute) WebVTT timelines. The startup I420/NV12 gap on
+  variant + `SUBTITLES` rendition). The separate-audio + subtitle three-source
+  combo landed too (M420: `build_hls_separate_subtitle_overlay` pairs the variant's
+  video TS with a distinct audio rendition and a distinct WebVTT rendition, three
+  sources in one graph). Follow-ups: the fMP4 `wvtt` subtitle rendition (`IsoBmff` +
+  `Mp4DemuxN`, reuses M416) and the `X-TIMESTAMP-MAP` offset for live (non-absolute)
+  WebVTT timelines. The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`); on-screen `playbin` playback still needs live
