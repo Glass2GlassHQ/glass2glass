@@ -233,3 +233,34 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     .map(Some)
     .map_err(|e| map_playbin_err(uri, e))
 }
+
+/// The `playbin uri=X` auto-fan-out hook for fragmented MP4 / CMAF (M392): probe
+/// a `file://` ISO-BMFF container's `moov`, then assemble `FileSrc -> Mp4DemuxN ->
+/// {decode -> auto sink}` with one branch per forwardable track, the MP4 sibling
+/// of [`mkv_playbin`] / [`ts_playbin`]. Declines (`Ok(None)`) for a non-`file://`
+/// URI, an unreadable file, or a container whose `moov` is not in the probed
+/// prefix (a non-MP4, or a progressive file whose `moov` trails the data, which
+/// stays on the single-stream `file://` -> `Mp4Src` path).
+#[cfg(feature = "std")]
+pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some((path, prefix)) = open_file_prefix(uri) else { return Ok(None) };
+    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    if infos.is_empty() {
+        return Ok(None); // not MP4 (or moov not in the prefix): decline
+    }
+    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let demux_ports: Vec<_> = infos
+        .iter()
+        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .collect();
+    let source =
+        crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff });
+    reg.build_playbin_graph_with_source(
+        Box::new(source),
+        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        ports,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map(Some)
+    .map_err(|e| map_playbin_err(uri, e))
+}

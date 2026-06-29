@@ -84,6 +84,51 @@ pub(crate) fn find_path<'a>(mut data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a
     Some(data)
 }
 
+/// Extract the AudioSpecificConfig from an `esds` payload by descending the
+/// descriptor tree: ES (0x03) -> DecoderConfig (0x04) -> DecoderSpecific (0x05).
+/// Shared by the audio MP4 source and the multi-track fMP4 parser.
+pub(crate) fn parse_esds(esds: &[u8]) -> Result<Vec<u8>, G2gError> {
+    // skip the full-box version/flags (4 bytes).
+    let es = find_descriptor(esds.get(4..).ok_or(G2gError::CapsMismatch)?, 0x03)
+        .ok_or(G2gError::CapsMismatch)?;
+    // ES_Descriptor payload: ES_ID (2) + flags (1), then sub-descriptors.
+    let dcd = find_descriptor(es.get(3..).ok_or(G2gError::CapsMismatch)?, 0x04)
+        .ok_or(G2gError::CapsMismatch)?;
+    // DecoderConfigDescriptor: 13 fixed bytes, then DecoderSpecificInfo.
+    let asc = find_descriptor(dcd.get(13..).ok_or(G2gError::CapsMismatch)?, 0x05)
+        .ok_or(G2gError::CapsMismatch)?;
+    if asc.is_empty() {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(asc.to_vec())
+}
+
+/// Find the first descriptor with `tag` among the descriptors laid out at the
+/// start of `data`, returning its payload. Handles the expandable size encoding
+/// (7 bits per byte, high bit a continuation flag).
+pub(crate) fn find_descriptor(data: &[u8], tag: u8) -> Option<&[u8]> {
+    let mut i = 0usize;
+    while i < data.len() {
+        let t = data[i];
+        i += 1;
+        let mut size = 0usize;
+        loop {
+            let b = *data.get(i)?;
+            i += 1;
+            size = (size << 7) | (b & 0x7F) as usize;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        let payload = data.get(i..i + size)?;
+        if t == tag {
+            return Some(payload);
+        }
+        i += size;
+    }
+    None
+}
+
 /// iTunes-style metadata from `moov/udta/meta/ilst`, mapped to a [`TagList`]
 /// (empty when the file has none). `meta` is a FullBox (a 4-byte version/flags
 /// before its children), so its body is tried both with and without that prefix
@@ -205,6 +250,32 @@ mod tests {
         let meta = full_box(b"meta", 0, 0, &ilst);
         let udta = mp4_box(b"udta", &meta);
         mp4_box(b"moov", &udta)
+    }
+
+    #[test]
+    fn descriptor_reader_handles_single_byte_sizes() {
+        // tag 0x05 with a 2-byte payload preceded by a 0x04 wrapper.
+        let inner = [0x05u8, 2, 0xAA, 0xBB];
+        let outer = {
+            let mut v = alloc::vec![0x04u8, inner.len() as u8];
+            v.extend_from_slice(&inner);
+            v
+        };
+        let dcd = find_descriptor(&outer, 0x04).unwrap();
+        let asc = find_descriptor(dcd, 0x05).unwrap();
+        assert_eq!(asc, &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn descriptor_reader_handles_expandable_sizes() {
+        // size 130 encoded as 0x81 0x02 (continuation).
+        let mut payload = alloc::vec![0u8; 130];
+        payload[0] = 1;
+        let mut d = alloc::vec![0x03u8, 0x81, 0x02];
+        d.extend_from_slice(&payload);
+        let got = find_descriptor(&d, 0x03).unwrap();
+        assert_eq!(got.len(), 130);
+        assert_eq!(got[0], 1);
     }
 
     #[test]

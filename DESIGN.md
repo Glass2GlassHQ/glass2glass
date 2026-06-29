@@ -1475,9 +1475,19 @@ known without sniffing the byte stream.
   appends and `parse_launch` tries each in turn, so one hook per container type
   coexists — `ts_playbin` (M389) is the MPEG-TS sibling (`TsDemuxN` multi-output
   demuxer, M388), and a TS file is handled by it while an MKV file is handled by
-  `mkv_playbin`, each declining the other's container. HLS rides on this:
-  `HlsSrc` emits `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a variant's
-  streams.
+  `mkv_playbin`, each declining the other's container. `mp4_playbin` (M392) is the
+  fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer, M391), the multi-track
+  read-side analog of the single-video-track `Mp4Src`: it buffers the byte stream
+  and, on EOS, parses every `moov/trak` (`fmp4::parse_all_tracks`, M390) and routes
+  each `moof`+`mdat` fragment to the port matching its `tfhd` `track_ID`
+  (`parse_fragments_multi`). Compressed-audio port caps negotiate as `0/0` (AAC
+  caps intersect by strict equality, so the concrete channel layout / sample rate
+  is refined per port at runtime via `CapsChanged`, not advertised for the static
+  branch solve). Clear (unencrypted) fragmented multi-track files only; encryption
+  stays single-track via `parse_header` / `parse_fragments`, and a progressive
+  (non-`moof`) file stays on the single-stream `file://` → `Mp4Src` path. HLS rides
+  on this: `HlsSrc` emits `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a
+  variant's streams.
 
 - **Gapless playback** (`std`, M383). The playbin `about-to-finish` + next-`uri`
   analog: `GaplessSrc` (`g2g-plugins`) concatenates a playlist of sources into

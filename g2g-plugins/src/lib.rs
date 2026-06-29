@@ -179,6 +179,8 @@ pub mod fmp4mux;
 #[cfg(feature = "std")]
 pub mod mp4src;
 #[cfg(feature = "std")]
+pub mod mp4demuxn;
+#[cfg(feature = "std")]
 pub mod gaplesssrc;
 #[cfg(feature = "std")]
 pub mod mp4audiosink;
