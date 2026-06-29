@@ -2091,7 +2091,10 @@ once. Each cue is placed independently from its `CueSettings`: `position` (% of
 width) is the horizontal anchor and `align` (start / center / end) decides how
 the box extends from it; an explicit `line` (% of height) places the box
 vertically, while auto-`line` cues stack upward from the bottom in cue order so
-overlapping subtitles don't collide. Each cue draws over its own translucent
+overlapping subtitles don't collide. The WebVTT `vertical:rl` / `lr` writing mode
+is parsed into `CueSettings::vertical` and carried end-to-end, but the bitmap
+overlay does not yet lay text out in vertical columns (CJK vertical subtitles
+render horizontally for now). Each cue draws over its own translucent
 backing box, integer-scaled to the frame height. Cues are set programmatically (`from_srt` /
 `from_webvtt`) or, on `std`, through the `location=` property loading a `.srt` /
 `.vtt` file (format by extension, else content sniff); the element is registered

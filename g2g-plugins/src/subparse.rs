@@ -48,6 +48,22 @@ pub enum TextAlign {
     End,
 }
 
+/// Writing mode for a cue (the WebVTT `vertical:` setting). The default is
+/// horizontal (top-to-bottom lines, left-to-right text); the vertical modes are
+/// used by CJK subtitles, growing columns right-to-left (`rl`) or left-to-right
+/// (`lr`). Parsed and carried on the cue; the bitmap overlay does not yet lay
+/// text out vertically, so it renders these horizontally for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WritingMode {
+    /// Horizontal lines (no `vertical:` setting), the default.
+    #[default]
+    Horizontal,
+    /// Vertical columns growing right-to-left (`vertical:rl`).
+    VerticalRl,
+    /// Vertical columns growing left-to-right (`vertical:lr`).
+    VerticalLr,
+}
+
 /// WebVTT cue placement settings, the subset the bitmap overlay honours. `None`
 /// fields mean "auto": auto `line` stacks the cue from the bottom, auto
 /// `position` centres it. SRT cues always carry the default (no positioning).
@@ -61,6 +77,9 @@ pub struct CueSettings {
     pub line: Option<u8>,
     /// Text alignment within the box (WebVTT `align:`).
     pub align: TextAlign,
+    /// Writing mode (WebVTT `vertical:`); default horizontal. Carried for CJK
+    /// subtitles even though the bitmap overlay still lays text out horizontally.
+    pub vertical: WritingMode,
 }
 
 /// One timed subtitle cue: a half-open `[start_ns, end_ns)` running-time span, its
@@ -604,8 +623,8 @@ fn parse_timing(line: &str) -> Option<(u64, u64, CueSettings)> {
 }
 
 /// Parse the `name:value` cue-setting tokens that follow the end timestamp.
-/// Recognises `position`, `line` (percentage form), and `align`; `size`,
-/// `vertical`, and `region` are accepted but not applied by the bitmap overlay.
+/// Recognises `position`, `line` (percentage form), `align`, and `vertical`
+/// (writing mode); `size` and `region` are accepted but not applied.
 fn parse_settings<'a>(tokens: impl Iterator<Item = &'a str>) -> CueSettings {
     let mut s = CueSettings::default();
     for tok in tokens {
@@ -622,10 +641,25 @@ fn parse_settings<'a>(tokens: impl Iterator<Item = &'a str>) -> CueSettings {
                     s.align = a;
                 }
             }
+            "vertical" => {
+                if let Some(v) = parse_vertical(val) {
+                    s.vertical = v;
+                }
+            }
             _ => {}
         }
     }
     s
+}
+
+/// Parse a `vertical:` value: `rl` (right-to-left columns) or `lr`. An
+/// unrecognised value leaves the cue horizontal.
+fn parse_vertical(v: &str) -> Option<WritingMode> {
+    match v.split(',').next()?.trim() {
+        "rl" => Some(WritingMode::VerticalRl),
+        "lr" => Some(WritingMode::VerticalLr),
+        _ => None,
+    }
 }
 
 /// Parse a percentage setting value (`"50%"`, or `"50%,start"` with an extra
@@ -1028,13 +1062,46 @@ mod tests {
         assert_eq!(cues.len(), 2);
         assert_eq!(
             cues[0].settings,
-            CueSettings { position: Some(20), line: Some(80), align: TextAlign::Start }
+            CueSettings {
+                position: Some(20),
+                line: Some(80),
+                align: TextAlign::Start,
+                vertical: WritingMode::Horizontal,
+            }
         );
         // Bare `align:right` maps to End; position / line stay auto.
         assert_eq!(
             cues[1].settings,
-            CueSettings { position: None, line: None, align: TextAlign::End }
+            CueSettings {
+                position: None,
+                line: None,
+                align: TextAlign::End,
+                vertical: WritingMode::Horizontal,
+            }
         );
+    }
+
+    #[test]
+    fn webvtt_vertical_writing_mode_is_parsed() {
+        // The CJK case: `vertical:rl` columns plus placement, as in the real
+        // Japanese fixture. The token is carried even though the bitmap overlay
+        // still lays text out horizontally.
+        let input = "WEBVTT\n\n00:00:05.000 --> 00:00:10.000 position:90% align:end line:10% vertical:rl\n縦書き\n\n00:00:10.000 --> 00:00:12.000 vertical:lr\n左書き\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues.len(), 2);
+        assert_eq!(
+            cues[0].settings,
+            CueSettings {
+                position: Some(90),
+                line: Some(10),
+                align: TextAlign::End,
+                vertical: WritingMode::VerticalRl,
+            }
+        );
+        assert_eq!(cues[1].settings.vertical, WritingMode::VerticalLr);
+        // A cue with no `vertical:` token stays horizontal.
+        let plain = parse_webvtt("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nx\n");
+        assert_eq!(plain[0].settings.vertical, WritingMode::Horizontal);
     }
 
     #[test]
@@ -1409,7 +1476,12 @@ mod tests {
         let meta = frame.meta.get::<TextCueMeta>().expect("cue carries placement meta");
         assert_eq!(
             meta.settings,
-            CueSettings { position: Some(20), line: Some(80), align: TextAlign::Start }
+            CueSettings {
+                position: Some(20),
+                line: Some(80),
+                align: TextAlign::Start,
+                vertical: WritingMode::Horizontal,
+            }
         );
     }
 

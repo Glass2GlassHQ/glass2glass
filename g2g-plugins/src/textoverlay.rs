@@ -920,7 +920,12 @@ mod tests {
 
         let mut frame = text_cue_frame(0, u64::MAX / 2, "HI");
         frame.meta.attach(TextCueMeta {
-            settings: CueSettings { position: Some(0), line: Some(0), align: TextAlign::Start },
+            settings: CueSettings {
+                position: Some(0),
+                line: Some(0),
+                align: TextAlign::Start,
+                ..CueSettings::default()
+            },
         });
         let mut sink = PixelSink::default();
         ov.process(1, PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();

@@ -251,7 +251,10 @@ leverage first:
 - **`videobalance`:** hue (faithful chroma rotation needs `sin`/`cos`, a `libm`
   dep the `no_std` baseline avoids).
 - **`textoverlay`:** a mixed-case TrueType GPU backend (`cosmic-text` / `swash`
-  / `vello`); the `clockoverlay` / `timeoverlay` siblings.
+  / `vello`); the `clockoverlay` / `timeoverlay` siblings. The current 8x8
+  all-caps bitmap font only covers ASCII, so accented Latin (`você`) drops its
+  diacritics and CJK renders nothing (a real Japanese subtitle file paints zero
+  glyphs); a shaping-capable font backend with broad Unicode coverage is the fix.
 - **`audiomixer`:** sample-rate + channel-layout reconciliation; PTS-based
   alignment.
 - **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
@@ -265,7 +268,10 @@ leverage first:
   sink) in the launch registry so `gst-launch` text pipelines parse;
   subtitle-track extraction out of the MKV / TS / MP4 demuxers as `Caps::Text`
   (feeds `TextOverlayN`); parsing SSA / TTML placement into `CueSettings` (only
-  WebVTT populates it today, though all three now ride the frame-meta).
+  WebVTT populates it today, though all three now ride the frame-meta); laying
+  text out vertically for the `vertical:rl` / `lr` writing modes (the WebVTT
+  setting is now parsed into `CueSettings::vertical` and carried, but the bitmap
+  overlay still renders CJK vertical subtitles horizontally).
 - **Closed captions (CEA-608 / CEA-708).** Unlike the text-document formats,
   captions are an in-band binary command stream (carried in H.264 / H.265 SEI
   `user_data_registered_itu_t_t35`, MPEG-2 user-data, or an MP4 `c608` / `c708`
