@@ -1488,8 +1488,12 @@ known without sniffing the byte stream.
   branch solve). Demuxed AAC is re-framed to ADTS from the track's `esds`
   AudioSpecificConfig (M394), so the audio elementary stream is self-describing and
   decodes without out-of-band config, symmetric with the in-band video parameter
-  sets. Clear (unencrypted) multi-track files only; encryption stays single-track
-  via `parse_header` / `parse_fragments`. `hls_playbin` (M395) is the HLS sibling:
+  sets. Encrypted (cbcs / MPEG-CENC) multi-track files are supported under the
+  `mp4-cenc` feature (M398): `parse_all_tracks` reads `encv` / `enca` per-track
+  `cenc` defaults, `parse_fragments_multi` decrypts each track's samples (per
+  `traf` `senc`) via a callback, and `Mp4DemuxN::with_cenc_key` supplies the
+  clear-key content key (the cbcs primitive lives in a shared `cenc` module, used
+  by both this and the HLS fMP4 path). `hls_playbin` (M395) is the HLS sibling:
   it probes a `hls://` master playlist (the scheme maps to an `https` origin),
   discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
   alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group

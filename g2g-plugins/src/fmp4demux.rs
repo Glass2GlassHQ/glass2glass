@@ -131,7 +131,7 @@ impl Fmp4Demux {
             c.constant_iv.as_slice().try_into().map_err(|_| G2gError::CapsMismatch)?;
         let (crypt, skip) = (c.crypt_byte_block, c.skip_byte_block);
         let mut decrypt = move |buf: &mut [u8], subs: &[Subsample]| {
-            cbcs_decrypt_sample(buf, subs, &key, &iv, crypt, skip);
+            crate::cenc::cbcs_decrypt_sample(buf, subs, &key, &iv, crypt, skip);
         };
         parse_fragments(frag, timescale, codec, Some(c), Some(&mut decrypt))
     }
@@ -268,61 +268,6 @@ fn next_box_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
         return Err(G2gError::CapsMismatch);
     }
     Ok(Some(total))
-}
-
-/// Decrypt one cbcs sample in place: walk its `senc` subsamples, decrypting each
-/// protected range (an empty map means the whole sample is one protected range).
-#[cfg(feature = "hls")]
-fn cbcs_decrypt_sample(
-    buf: &mut [u8],
-    subsamples: &[Subsample],
-    key: &[u8; 16],
-    iv: &[u8; 16],
-    crypt: u8,
-    skip: u8,
-) {
-    if subsamples.is_empty() {
-        decrypt_protected_range(buf, key, iv, crypt, skip);
-        return;
-    }
-    let mut pos = 0usize;
-    for s in subsamples {
-        pos = (pos + s.clear as usize).min(buf.len());
-        let end = (pos + s.protected as usize).min(buf.len());
-        if pos < end {
-            decrypt_protected_range(&mut buf[pos..end], key, iv, crypt, skip);
-        }
-        pos = end;
-    }
-}
-
-/// cbcs pattern decrypt over one protected range: AES-128-CBC the encrypted
-/// 16-byte blocks (a `crypt`:`skip` block pattern, or every block when either is
-/// zero), the IV reset to the constant IV at the range start, CBC chaining across
-/// the encrypted blocks only. A trailing partial block is left clear.
-#[cfg(feature = "hls")]
-fn decrypt_protected_range(range: &mut [u8], key: &[u8; 16], iv: &[u8; 16], crypt: u8, skip: u8) {
-    use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
-    type Dec = cbc::Decryptor<aes::Aes128>;
-
-    let block_count = range.len() / 16;
-    let offsets: Vec<usize> = if crypt == 0 || skip == 0 {
-        (0..block_count).map(|b| b * 16).collect()
-    } else {
-        let span = (crypt + skip) as usize;
-        (0..block_count).filter(|b| b % span < crypt as usize).map(|b| b * 16).collect()
-    };
-    if offsets.is_empty() {
-        return;
-    }
-    let mut gathered: Vec<u8> =
-        offsets.iter().flat_map(|&o| range[o..o + 16].iter().copied()).collect();
-    Dec::new(&(*key).into(), &(*iv).into())
-        .decrypt_padded_mut::<NoPadding>(&mut gathered)
-        .expect("cbcs region is block-aligned");
-    for (i, &o) in offsets.iter().enumerate() {
-        range[o..o + 16].copy_from_slice(&gathered[i * 16..i * 16 + 16]);
-    }
 }
 
 impl AsyncElement for Fmp4Demux {

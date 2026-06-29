@@ -151,13 +151,15 @@ pub(crate) enum TrackKind {
 }
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
-/// the fragments in [`parse_fragments_multi`]), the media timescale, and the
-/// elementary-stream kind.
+/// the fragments in [`parse_fragments_multi`]), the media timescale, the
+/// elementary-stream kind, and the cbcs `cenc` defaults for an encrypted track
+/// (`None` for a clear one).
 #[derive(Debug, Clone)]
 pub(crate) struct TrackHeader {
     pub(crate) track_id: u32,
     pub(crate) timescale: u32,
     pub(crate) kind: TrackKind,
+    pub(crate) cenc: Option<CencDefaults>,
 }
 
 /// Parse every forwardable (`vide` / `soun`) track out of a `moov` into a
@@ -214,53 +216,94 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let stsd = find_path(mdia, &[b"minf", b"stbl", b"stsd"]).ok_or(G2gError::CapsMismatch)?;
     let entries = stsd.get(8..).ok_or(G2gError::CapsMismatch)?;
 
-    let kind = match handler {
+    let (kind, cenc) = match handler {
         b"vide" => parse_video_entry(entries, width, height)?,
         b"soun" => parse_audio_entry(entries, timescale)?,
         _ => return Ok(None), // text / subtitle / hint: not forwarded
     };
-    Ok(Some(TrackHeader { track_id, timescale, kind }))
+    Ok(Some(TrackHeader { track_id, timescale, kind, cenc }))
 }
 
-/// Read a clear video sample entry (`avc1` / `hvc1` / `hev1`) into a
-/// [`TrackKind::Video`]. Encrypted (`encv`) video is out of scope for the
-/// multi-track path (use the single-track [`parse_header`] / [`parse_fragments`]).
-fn parse_video_entry(entries: &[u8], width: u32, height: u32) -> Result<TrackKind, G2gError> {
-    let (codec, param_sets) = if let Some(avc1) = find_box(entries, b"avc1") {
+/// Read a video sample entry (`avc1` / `hvc1` / `hev1`, or the encrypted `encv`)
+/// into a [`TrackKind::Video`] plus the cbcs `cenc` defaults for an encrypted
+/// track. An `encv` carries the original codec config (`avcC` / `hvcC`) alongside
+/// a `sinf` (original format + `cbcs` scheme + `tenc`), the same shape
+/// [`parse_header`] reads.
+fn parse_video_entry(
+    entries: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+    let (codec, param_sets, cenc) = if let Some(avc1) = find_box(entries, b"avc1") {
         let children = avc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let (sps, pps) = parse_avcc(find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?)?;
-        (VideoCodec::H264, Vec::from([sps, pps]))
+        (VideoCodec::H264, Vec::from([sps, pps]), None)
     } else if let Some(hvc1) = find_box(entries, b"hvc1").or_else(|| find_box(entries, b"hev1")) {
         let children = hvc1.get(78..).ok_or(G2gError::CapsMismatch)?;
         let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
-        (VideoCodec::H265, parse_hvcc(hvcc)?)
+        (VideoCodec::H265, parse_hvcc(hvcc)?, None)
+    } else if let Some(encv) = find_box(entries, b"encv") {
+        let children = encv.get(78..).ok_or(G2gError::CapsMismatch)?;
+        let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+        let cenc = parse_cenc(sinf)?;
+        let frma = find_box(sinf, b"frma").ok_or(G2gError::CapsMismatch)?;
+        let (codec, param_sets) = match frma.get(0..4) {
+            Some(b"avc1") => {
+                let avcc = find_box(children, b"avcC").ok_or(G2gError::CapsMismatch)?;
+                let (sps, pps) = parse_avcc(avcc)?;
+                (VideoCodec::H264, Vec::from([sps, pps]))
+            }
+            Some(b"hvc1") | Some(b"hev1") => {
+                let hvcc = find_box(children, b"hvcC").ok_or(G2gError::CapsMismatch)?;
+                (VideoCodec::H265, parse_hvcc(hvcc)?)
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        (codec, param_sets, Some(cenc))
     } else {
         return Err(G2gError::CapsMismatch);
     };
-    Ok(TrackKind::Video { codec, width, height, param_sets })
+    Ok((TrackKind::Video { codec, width, height, param_sets }, cenc))
 }
 
-/// Read an AAC audio sample entry (`mp4a`/`esds`) into a [`TrackKind::Audio`].
-/// The sample rate is the media timescale (matching `Mp4AudioSrc`); the
-/// AudioSpecificConfig comes from the `esds` descriptor tree.
-fn parse_audio_entry(entries: &[u8], timescale: u32) -> Result<TrackKind, G2gError> {
-    let mp4a = find_box(entries, b"mp4a").ok_or(G2gError::CapsMismatch)?;
+/// Read an AAC audio sample entry (`mp4a`/`esds`, or the encrypted `enca`) into a
+/// [`TrackKind::Audio`] plus the cbcs `cenc` defaults for an encrypted track. The
+/// sample rate is the media timescale (matching `Mp4AudioSrc`).
+fn parse_audio_entry(
+    entries: &[u8],
+    timescale: u32,
+) -> Result<(TrackKind, Option<CencDefaults>), G2gError> {
+    let (entry, cenc) = match find_box(entries, b"mp4a") {
+        Some(mp4a) => (mp4a, None),
+        None => {
+            let enca = find_box(entries, b"enca").ok_or(G2gError::CapsMismatch)?;
+            let children = enca.get(28..).ok_or(G2gError::CapsMismatch)?;
+            let sinf = find_box(children, b"sinf").ok_or(G2gError::CapsMismatch)?;
+            (enca, Some(parse_cenc(sinf)?))
+        }
+    };
     // AudioSampleEntry: channelcount at offset 16, then 28 bytes before the esds.
     let channels = u16::from_be_bytes(
-        mp4a.get(16..18).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+        entry.get(16..18).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
     ) as u8;
     if channels == 0 {
         return Err(G2gError::CapsMismatch);
     }
-    let mp4a_children = mp4a.get(28..).ok_or(G2gError::CapsMismatch)?;
-    let esds = find_box(mp4a_children, b"esds").ok_or(G2gError::CapsMismatch)?;
+    let esds = find_box(entry.get(28..).ok_or(G2gError::CapsMismatch)?, b"esds")
+        .ok_or(G2gError::CapsMismatch)?;
     let asc = parse_esds(esds)?;
-    Ok(TrackKind::Audio { format: AudioFormat::Aac, channels, sample_rate: timescale, asc })
+    Ok((TrackKind::Audio { format: AudioFormat::Aac, channels, sample_rate: timescale, asc }, cenc))
 }
 
 /// The decode state carried from a `moof` to its following `mdat`: the track id,
 /// the per-sample `(size, pts_ns)`, and the per-sample `duration_ns`.
-type PendingFragment = (u32, Vec<(u32, u64)>, Vec<u64>);
+type PendingFragment = (u32, Vec<(u32, u64)>, Vec<u64>, Vec<Vec<Subsample>>);
+
+/// Per-track sample decryptor for [`parse_fragments_multi`]: given the track's
+/// cbcs `cenc` defaults, the sample bytes, and its `senc` subsample map, rewrites
+/// the protected ranges in place. The AES lives in the caller (the `mp4-cenc`
+/// [`Mp4DemuxN`](crate::mp4demuxn)); `fmp4` stays cipher-free.
+pub(crate) type MultiDecrypt<'a> = &'a mut dyn FnMut(&CencDefaults, &mut [u8], &[Subsample]);
 
 /// Walk the `moof`+`mdat` fragments of a multi-track fMP4 and split every sample
 /// out, keyed by its `track_ID`. Each `traf`'s `tfhd` names the track, so a
@@ -268,11 +311,15 @@ type PendingFragment = (u32, Vec<(u32, u64)>, Vec<u64>);
 /// de-framed AVCC->Annex-B with a keyframe scan, audio samples pass through (each
 /// is a sync sample). Fragments for an unknown `track_ID` are skipped.
 ///
-/// The multi-track analog of [`parse_fragments`] (clear tracks only); a
+/// An encrypted (cbcs) track's samples are decrypted in place via `decrypt`
+/// before de-framing, using the per-`traf` `senc` subsample map; an encrypted
+/// track with no `decrypt` supplied fails loud (`CapsMismatch`), so a keyless
+/// build never emits garbage. The multi-track analog of [`parse_fragments`]; a
 /// non-conforming fragment is mis-split, not rejected, the same caveat as there.
 pub(crate) fn parse_fragments_multi(
     data: &[u8],
     tracks: &[TrackHeader],
+    mut decrypt: Option<MultiDecrypt<'_>>,
 ) -> Result<Vec<(u32, Sample)>, G2gError> {
     let mut out = Vec::new();
     let mut pending: Option<PendingFragment> = None;
@@ -287,7 +334,7 @@ pub(crate) fn parse_fragments_multi(
                 let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
                     // A fragment for a track we don't forward: hold the id so the
                     // following mdat is skipped, not mis-split into another track.
-                    pending = Some((track_id, Vec::new(), Vec::new()));
+                    pending = Some((track_id, Vec::new(), Vec::new(), Vec::new()));
                     continue;
                 };
                 let timescale = track.timescale;
@@ -299,6 +346,14 @@ pub(crate) fn parse_fragments_multi(
                 };
                 let trun = find_box(traf, b"trun").ok_or(G2gError::CapsMismatch)?;
                 let (sizes, durs) = parse_trun(trun)?;
+                // An encrypted track carries a `senc` (per-sample subsample maps).
+                let subs = match &track.cenc {
+                    Some(c) => match find_box(traf, b"senc") {
+                        Some(senc) => parse_senc(senc, c.per_sample_iv_size)?,
+                        None => Vec::new(),
+                    },
+                    None => Vec::new(),
+                };
                 let mut t = base_time;
                 let mut tagged = Vec::with_capacity(sizes.len());
                 let mut durations = Vec::with_capacity(sizes.len());
@@ -308,10 +363,10 @@ pub(crate) fn parse_fragments_multi(
                     // base_time / durations are untrusted; saturate, never overflow.
                     t = t.saturating_add(*dur as u64);
                 }
-                pending = Some((track_id, tagged, durations));
+                pending = Some((track_id, tagged, durations, subs));
             }
             b"mdat" => {
-                let Some((track_id, tagged, durations)) = pending.take() else {
+                let Some((track_id, tagged, durations, subs)) = pending.take() else {
                     return Err(G2gError::CapsMismatch); // mdat without moof
                 };
                 let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else {
@@ -320,20 +375,33 @@ pub(crate) fn parse_fragments_multi(
                 let mut at = 0usize;
                 for (i, (size, pts_ns)) in tagged.iter().enumerate() {
                     let raw = payload.get(at..at + *size as usize).ok_or(G2gError::CapsMismatch)?;
+                    at += *size as usize;
+                    // Decrypt an encrypted track's sample in place before de-framing.
+                    let owned;
+                    let bytes: &[u8] = match &track.cenc {
+                        Some(cenc) => {
+                            let decrypt = decrypt.as_deref_mut().ok_or(G2gError::CapsMismatch)?;
+                            let mut buf = raw.to_vec();
+                            let sub = subs.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                            decrypt(cenc, &mut buf, sub);
+                            owned = buf;
+                            &owned
+                        }
+                        None => raw,
+                    };
                     let (annexb, keyframe) = match &track.kind {
                         TrackKind::Video { codec, .. } => {
-                            let annexb = avcc_to_annexb(raw)?;
+                            let annexb = avcc_to_annexb(bytes)?;
                             let kf = contains_keyframe(&annexb, *codec);
                             (annexb, kf)
                         }
                         // Audio access units are stored verbatim; each is a sync point.
-                        TrackKind::Audio { .. } => (raw.to_vec(), true),
+                        TrackKind::Audio { .. } => (bytes.to_vec(), true),
                     };
                     out.push((
                         track_id,
                         Sample { annexb, pts_ns: *pts_ns, duration_ns: durations[i], keyframe },
                     ));
-                    at += *size as usize;
                 }
             }
             _ => {}
@@ -1173,7 +1241,7 @@ mod tests {
         }
 
         // --- assert: fragments route to their track and de-frame correctly -
-        let samples = parse_fragments_multi(&file, &tracks).expect("fragment routing");
+        let samples = parse_fragments_multi(&file, &tracks, None).expect("fragment routing");
         assert_eq!(samples.len(), 2);
         let (vid_id, vid) = &samples[0];
         assert_eq!(*vid_id, 1);

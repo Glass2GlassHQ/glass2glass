@@ -33,7 +33,7 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set,
+    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set, Sample,
     TrackHeader, TrackKind,
 };
 use crate::mp4box::find_box;
@@ -171,6 +171,11 @@ pub struct Mp4DemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
     collection_posted: bool,
+    /// Clear-key cbcs decryption key (M398), supplied by the app for an encrypted
+    /// file; the constant IV + crypt/skip pattern come from each track's `tenc`.
+    /// Without it an encrypted track fails loud.
+    #[cfg(feature = "mp4-cenc")]
+    cenc_key: Option<[u8; 16]>,
     emitted: u64,
 }
 
@@ -180,7 +185,25 @@ impl Mp4DemuxN {
     pub fn new(ports: Vec<Mp4Port>) -> Self {
         assert!(!ports.is_empty(), "Mp4DemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
-        Self { buf: Vec::new(), ports, announced, bus: None, collection_posted: false, emitted: 0 }
+        Self {
+            buf: Vec::new(),
+            ports,
+            announced,
+            bus: None,
+            collection_posted: false,
+            #[cfg(feature = "mp4-cenc")]
+            cenc_key: None,
+            emitted: 0,
+        }
+    }
+
+    /// Supply the clear-key cbcs decryption key (M398) for an encrypted file. The
+    /// constant IV and crypt/skip pattern come from each track's `tenc`; this is
+    /// the 16-byte content key. Without it an encrypted track fails loud.
+    #[cfg(feature = "mp4-cenc")]
+    pub fn with_cenc_key(mut self, key: [u8; 16]) -> Self {
+        self.cenc_key = Some(key);
+        self
     }
 
     /// Attach the pipeline bus so the file's tracks post as a `StreamCollection`
@@ -228,6 +251,26 @@ impl Mp4DemuxN {
         }
     }
 
+    /// Parse the fragmented file's samples, decrypting an encrypted track in place
+    /// with the supplied cbcs key (M398). Without the `mp4-cenc` feature (or a
+    /// key), an encrypted track fails loud inside `parse_fragments_multi`.
+    fn parse_fragments(&self, tracks: &[TrackHeader]) -> Result<Vec<(u32, Sample)>, G2gError> {
+        #[cfg(feature = "mp4-cenc")]
+        if let Some(key) = self.cenc_key {
+            let mut decrypt = move |cenc: &crate::fmp4::CencDefaults, buf: &mut [u8], subs: &[crate::fmp4::Subsample]| {
+                // cbcs constant IV (per-sample IV size 0); a malformed IV leaves
+                // the sample untouched rather than panicking on the slice convert.
+                if let Ok(iv) = <[u8; 16]>::try_from(cenc.constant_iv.as_slice()) {
+                    crate::cenc::cbcs_decrypt_sample(
+                        buf, subs, &key, &iv, cenc.crypt_byte_block, cenc.skip_byte_block,
+                    );
+                }
+            };
+            return parse_fragments_multi(&self.buf, tracks, Some(&mut decrypt));
+        }
+        parse_fragments_multi(&self.buf, tracks, None)
+    }
+
     /// Parse the buffered file and route every sample to its track's port, each
     /// port's opening `CapsChanged` first. Video samples that lack in-band
     /// parameter sets get the `moov`'s sets prepended to their first frame, so a
@@ -240,7 +283,7 @@ impl Mp4DemuxN {
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
         let samples = if find_box(&self.buf, b"moof").is_some() {
-            parse_fragments_multi(&self.buf, &tracks)?
+            self.parse_fragments(&tracks)?
         } else {
             parse_progressive_multi(&self.buf, &tracks)?
         };
@@ -644,5 +687,166 @@ mod tests {
             Some(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }),
             "AacParse recovers the real channel layout / sample rate from the wired-in ASC"
         );
+    }
+
+    /// An encrypted (cbcs) H.264 track fans out and decrypts: a hand-built `encv`
+    /// fragment whose sample is AES-128-CBC encrypted under a known key + constant
+    /// IV is routed through `Mp4DemuxN::with_cenc_key`, and the demuxed Annex-B must
+    /// match the original clear access unit. Without the key the encrypted track
+    /// fails loud. Proves the per-track cbcs path the multi-track demuxer adds.
+    #[cfg(feature = "mp4-cenc")]
+    #[test]
+    fn encrypted_track_decrypts_with_the_cenc_key() {
+        use crate::mp4box::{full_box, mp4_box};
+
+        let key = [0x11u8; 16];
+        let iv = [0x22u8; 16];
+        let (crypt, skip) = (1u8, 9u8);
+
+        // The clear AVCC sample: a 4-byte length prefix + a 12-byte IDR NAL, 16
+        // bytes total so the whole sample is one cbcs block (no clear remainder).
+        let nal: [u8; 12] = [0x65, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let mut clear = alloc::vec![0u8, 0, 0, 12];
+        clear.extend_from_slice(&nal);
+        assert_eq!(clear.len(), 16);
+        let cipher = cbc_encrypt_block(&clear, &key, &iv);
+
+        // --- box builders --------------------------------------------------
+        let tkhd = |track_id: u32, w: u32, h: u32| {
+            let mut c = alloc::vec![0u8; 80];
+            c[8..12].copy_from_slice(&track_id.to_be_bytes());
+            c[72..76].copy_from_slice(&(w << 16).to_be_bytes());
+            c[76..80].copy_from_slice(&(h << 16).to_be_bytes());
+            full_box(b"tkhd", 0, 0, &c)
+        };
+        let mdhd = |ts: u32| {
+            let mut c = alloc::vec![0u8; 16];
+            c[8..12].copy_from_slice(&ts.to_be_bytes());
+            full_box(b"mdhd", 0, 0, &c)
+        };
+        let hdlr = |h: &[u8; 4]| {
+            let mut c = alloc::vec![0u8; 20];
+            c[4..8].copy_from_slice(h);
+            full_box(b"hdlr", 0, 0, &c)
+        };
+        let avcc = {
+            let sps: &[u8] = &[0x67, 0x42, 0x00, 0x1e];
+            let pps: &[u8] = &[0x68, 0xce];
+            let mut p = alloc::vec![0u8; 5];
+            p.push(0xE1);
+            p.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+            p.extend_from_slice(sps);
+            p.push(1);
+            p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+            p.extend_from_slice(pps);
+            mp4_box(b"avcC", &p)
+        };
+        // sinf: frma=avc1 + schm=cbcs + schi[tenc v1: pattern + constant IV].
+        let tenc = {
+            // [reserved, packed pattern, isProtected, per_sample_IV_size]
+            let mut c = alloc::vec![0u8, (crypt << 4) | skip, 1, 0];
+            c.extend_from_slice(&[0u8; 16]); // default_KID
+            c.push(16); // default_constant_IV_size
+            c.extend_from_slice(&iv); // constant IV
+            full_box(b"tenc", 1, 0, &c)
+        };
+        let schm = {
+            let mut c = Vec::new();
+            c.extend_from_slice(b"cbcs"); // scheme_type (schm[4..8])
+            c.extend_from_slice(&0u32.to_be_bytes()); // scheme_version
+            full_box(b"schm", 0, 0, &c)
+        };
+        let sinf = mp4_box(
+            b"sinf",
+            &[mp4_box(b"frma", b"avc1"), schm, mp4_box(b"schi", &tenc)].concat(),
+        );
+        let encv = {
+            let mut p = alloc::vec![0u8; 78];
+            p.extend_from_slice(&avcc);
+            p.extend_from_slice(&sinf);
+            mp4_box(b"encv", &p)
+        };
+        let stsd = {
+            let mut p = 1u32.to_be_bytes().to_vec();
+            p.extend_from_slice(&encv);
+            full_box(b"stsd", 0, 0, &p)
+        };
+        let trak = {
+            let minf = mp4_box(b"minf", &mp4_box(b"stbl", &stsd));
+            let mdia = mp4_box(b"mdia", &[mdhd(90_000), hdlr(b"vide"), minf].concat());
+            mp4_box(b"trak", &[tkhd(1, 320, 240), mdia].concat())
+        };
+        let moov = mp4_box(b"moov", &trak);
+
+        // moof: tfhd(track 1) + tfdt(0) + trun(1 sample) + senc(1 sample, whole-AU).
+        let tfhd = full_box(b"tfhd", 0, 0, &1u32.to_be_bytes());
+        let tfdt = full_box(b"tfdt", 1, 0, &0u64.to_be_bytes());
+        let trun = {
+            let mut p = 1u32.to_be_bytes().to_vec(); // sample count
+            p.extend_from_slice(&0u32.to_be_bytes()); // data offset
+            p.extend_from_slice(&3000u32.to_be_bytes()); // duration
+            p.extend_from_slice(&(cipher.len() as u32).to_be_bytes()); // size
+            full_box(b"trun", 0, 0x000301, &p)
+        };
+        // senc with a subsample map (flags 0x2): one sample, one subsample with no
+        // clear bytes so the whole 16-byte AU is the protected range.
+        let senc = {
+            let mut c = 1u32.to_be_bytes().to_vec(); // sample count
+            c.extend_from_slice(&1u16.to_be_bytes()); // subsample count
+            c.extend_from_slice(&0u16.to_be_bytes()); // clear bytes
+            c.extend_from_slice(&(clear.len() as u32).to_be_bytes()); // protected bytes
+            full_box(b"senc", 0, 0x2, &c)
+        };
+        let moof = mp4_box(b"moof", &mp4_box(b"traf", &[tfhd, tfdt, trun, senc].concat()));
+
+        let mut file = Vec::new();
+        file.extend_from_slice(&moov);
+        file.extend_from_slice(&moof);
+        file.extend_from_slice(&mp4_box(b"mdat", &cipher));
+
+        // forwardable_streams discovers the (encrypted) video track.
+        let streams = forwardable_streams(&file);
+        assert_eq!(streams.len(), 1, "the encrypted video track is discovered");
+        let ports: Vec<Mp4Port> =
+            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+
+        // With the key the sample decrypts back to the original Annex-B.
+        let mut demux = Mp4DemuxN::new(ports.clone()).with_cenc_key(key);
+        let mut out = PortCapture::new(1);
+        block_on(async {
+            demux.process(vframe(file.clone(), 0), &mut out).await.unwrap();
+            demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        });
+        assert_eq!(out.frames[0].len(), 1, "one video access unit");
+        let frame = &out.frames[0][0];
+        // The decrypted IDR rides at the tail (the parameter sets are prepended);
+        // its bytes matching the clear NAL is the proof decryption succeeded.
+        let mut idr = alloc::vec![0u8, 0, 0, 1];
+        idr.extend_from_slice(&nal);
+        assert!(frame.ends_with(&idr), "decrypted to the clear Annex-B IDR");
+        assert!(starts_with_param_set(frame, VideoCodec::H264), "param sets prepended");
+
+        // Without a key, the encrypted track fails loud rather than emitting garbage.
+        let mut keyless = Mp4DemuxN::new(ports);
+        let mut out2 = PortCapture::new(1);
+        let result = block_on(async {
+            keyless.process(vframe(file, 0), &mut out2).await?;
+            keyless.process(PipelinePacket::Eos, &mut out2).await
+        });
+        assert!(result.is_err(), "an encrypted track without a key fails loud");
+    }
+
+    /// AES-128-CBC encrypt one 16-byte block (the fixture side of the cbcs
+    /// decrypt), so the test data round-trips through the demuxer's decryptor.
+    #[cfg(feature = "mp4-cenc")]
+    fn cbc_encrypt_block(clear: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+        use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
+        type Enc = cbc::Encryptor<aes::Aes128>;
+        let mut buf = clear.to_vec();
+        let len = buf.len();
+        let ct = Enc::new(&(*key).into(), &(*iv).into())
+            .encrypt_padded_mut::<NoPadding>(&mut buf, len)
+            .expect("block-aligned");
+        ct.to_vec()
     }
 }

@@ -392,6 +392,9 @@ pub mod dashsrc;
 mod fmp4;
 #[cfg(feature = "std")]
 pub mod fmp4demux;
+// Shared cbcs (MPEG-CENC) sample decryption for the HLS fMP4 and MP4 demux paths.
+#[cfg(any(feature = "hls", feature = "mp4-cenc"))]
+mod cenc;
 
 // Worker-readiness latch shared by the platform display sinks below.
 #[cfg(any(

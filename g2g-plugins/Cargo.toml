@@ -339,6 +339,10 @@ http-src = ["std", "dep:reqwest"]
 # pure no_std and always compiled; only the fetching element needs this feature.
 # aes/cbc decrypt AES-128 `#EXT-X-KEY` segments.
 hls = ["http-src", "dep:aes", "dep:cbc"]
+# MPEG-CENC (cbcs) decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
+# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cbcs
+# primitive with `hls`; standalone so a plain MP4 build need not pull HLS.
+mp4-cenc = ["std", "dep:aes", "dep:cbc"]
 # DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
 # Representation (simple ABR), and streams its fMP4 init + media segments as a
 # `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
