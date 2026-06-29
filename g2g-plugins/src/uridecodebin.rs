@@ -207,6 +207,14 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     if infos.is_empty() {
         return Ok(None); // not Matroska (or no forwardable track): decline
     }
+    // A subtitle track + a video track: overlay the subtitles onto the video (the
+    // MP4 M412 sibling, M415).
+    let subs = crate::mkvdemux::subtitle_streams(&demux);
+    if infos.iter().any(|i| i.video) {
+        if let Some(text) = subs.first() {
+            return build_mkv_subtitle_overlay(reg, &path, &infos, text).map(Some);
+        }
+    }
     let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
     let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
     // The file:// URI handler self-demuxes MP4, so build the matching Matroska
@@ -270,17 +278,81 @@ fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
     }
 }
 
-/// Assemble the subtitle-overlay MP4 graph (M412): the video track decodes,
-/// converts to RGBA8, and feeds a [`TextOverlayN`](crate::textoverlay::TextOverlayN)
-/// whose text pad is fed by the subtitle track (`Caps::Text`, via `SubParse` when
-/// the cue payload is a structured format); the overlay output converts back to
-/// NV12 for the auto video sink. Other A/V tracks (audio) fan out to their own auto
-/// sinks as usual. The decoder is auto-plugged (codec-agnostic), but the
+/// Splice the subtitle-overlay subgraph onto a built demux, shared by every
+/// container's `playbin` hook (MP4 M412, MKV / TS M415). Given a `demux` whose
+/// leading ports are the A/V tracks `av` (`(elementary caps, is_video)` in port
+/// order, video at `video_idx`) and whose trailing `text_port` carries the chosen
+/// subtitle track (caps `text_caps`): the video track decodes, converts to RGBA8,
+/// and feeds a [`TextOverlayN`](crate::textoverlay::TextOverlayN) whose text pad is
+/// fed by the subtitle track (linked straight in for a plain-UTF8 cue stream, via
+/// `SubParse` for a structured cue format); the overlay output converts back to
+/// NV12 for the auto video sink, and the other A/V tracks (audio) fan out to their
+/// own auto sinks. The decoder is auto-plugged (codec-agnostic), but the
 /// `videoconvert`s around the overlay are wired explicitly: they are caps-driven
-/// `register_launch` elements, not in the auto-plug search pool, and the overlay
-/// requires RGBA8 in / out while the display sink requires NV12. `av` carries the
-/// A/V tracks (in `moov` order, the demux's leading ports) and `text` the chosen
-/// subtitle track (the trailing port); `av` must contain a video track.
+/// `register_launch` elements outside the auto-plug pool, and the overlay requires
+/// RGBA8 in / out while the display sink requires NV12.
+#[cfg(feature = "std")]
+fn wire_subtitle_overlay(
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    demux: g2g_core::graph::Demux,
+    av: &[(Caps, bool)],
+    video_idx: usize,
+    text_port: u8,
+    text_caps: &Caps,
+) -> Result<(), ParseError> {
+    use g2g_core::RawVideoFormat;
+
+    // The overlay and the RGBA8 / NV12 converts bracketing it.
+    let overlay = graph.add_muxer(GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()), 2);
+    let to_rgba =
+        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8)));
+    let to_nv12 =
+        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12)));
+    graph.link(to_rgba, overlay.input(0)).map_err(ParseError::Graph)?;
+    graph.link(overlay.output(), to_nv12).map_err(ParseError::Graph)?;
+    let vsink = reg
+        .make_element("autovideosink")
+        .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
+    let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
+    graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
+
+    // The subtitle track feeds the overlay's text pad. A plain-UTF8 cue stream
+    // (MP4 `tx3g`, MKV `S_TEXT/UTF8`) links straight in; a structured format
+    // (SRT / WebVTT / SSA / TTML) parses to timed UTF-8 cues via SubParse first.
+    let text_in: g2g_core::graph::PadId = match text_caps {
+        Caps::Text { format: g2g_core::TextFormat::Utf8 } => overlay.input(1),
+        _ => {
+            let sub = graph.add_transform(GraphNodeRef::element(crate::subparse::SubParse::new()));
+            graph.link(sub, overlay.input(1)).map_err(ParseError::Graph)?;
+            sub.into()
+        }
+    };
+    graph.link(demux.out(text_port), text_in).map_err(ParseError::Graph)?;
+
+    // Each A/V track: the video one decodes into the overlay's RGBA8 convert, the
+    // rest fan out to their own auto sinks.
+    for (i, (caps, _video)) in av.iter().enumerate() {
+        if i == video_idx {
+            reg.decodebin(graph, demux.out(i as u8), to_rgba, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
+                .map_err(|e| map_decode_err(caps, e))?;
+        } else {
+            let sink = reg
+                .make_element("autoaudiosink")
+                .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
+            let snk = graph.add_sink(GraphNodeRef::Element(sink));
+            reg.decodebin(graph, demux.out(i as u8), snk, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
+                .map_err(|e| map_decode_err(caps, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Assemble the subtitle-overlay MP4 graph (M412): `FileSrc -> Mp4DemuxN -> {video:
+/// decode -> overlay; text: -> overlay} -> sink`. `av` carries the A/V tracks (in
+/// `moov` order, the demux's leading ports) and `text` the chosen subtitle track
+/// (the trailing port); `av` must contain a video track. The overlay wiring is the
+/// shared [`wire_subtitle_overlay`].
 #[cfg(feature = "std")]
 fn build_mp4_subtitle_overlay(
     reg: &Registry,
@@ -289,7 +361,6 @@ fn build_mp4_subtitle_overlay(
     text: &crate::mp4demuxn::Mp4StreamInfo,
 ) -> Result<Graph<GraphNode>, ParseError> {
     use crate::mp4demuxn::{Mp4DemuxN, Mp4Port};
-    use g2g_core::RawVideoFormat;
 
     let video_idx = av.iter().position(|i| i.video).ok_or_else(|| {
         ParseError::NoDecodeChain("subtitle overlay needs a video track".into())
@@ -309,47 +380,44 @@ fn build_mp4_subtitle_overlay(
     let demux = graph.add_demux(GraphNodeRef::demux(Mp4DemuxN::new(demux_ports)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
-    // The overlay and the RGBA8 / NV12 converts bracketing it.
-    let overlay = graph.add_muxer(GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()), 2);
-    let to_rgba =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8)));
-    let to_nv12 =
-        graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Nv12)));
-    graph.link(to_rgba, overlay.input(0)).map_err(ParseError::Graph)?;
-    graph.link(overlay.output(), to_nv12).map_err(ParseError::Graph)?;
-    let vsink = reg
-        .make_element("autovideosink")
-        .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
-    let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
-    graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
+    let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    wire_subtitle_overlay(reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps)?;
+    Ok(graph)
+}
 
-    // The subtitle track feeds the overlay's text pad. A plain-UTF8 cue stream
-    // (MP4 `tx3g`) links straight in; a structured format would parse via SubParse.
-    let text_in: g2g_core::graph::PadId = match &text.caps {
-        Caps::Text { format: g2g_core::TextFormat::Utf8 } => overlay.input(1),
-        _ => {
-            let sub = graph.add_transform(GraphNodeRef::element(crate::subparse::SubParse::new()));
-            graph.link(sub, overlay.input(1)).map_err(ParseError::Graph)?;
-            sub.into()
-        }
-    };
-    graph.link(demux.out(text_port), text_in).map_err(ParseError::Graph)?;
+/// Assemble the subtitle-overlay Matroska graph (M415): the MKV sibling of
+/// [`build_mp4_subtitle_overlay`]. `FileSrc -> MkvDemuxN -> {video: decode ->
+/// overlay; text: -> overlay} -> sink`, with one trailing demux port for the chosen
+/// subtitle track. `av` must contain a video track. Shares [`wire_subtitle_overlay`].
+#[cfg(feature = "std")]
+fn build_mkv_subtitle_overlay(
+    reg: &Registry,
+    path: &str,
+    av: &[crate::mkvdemux::MkvStreamInfo],
+    text: &crate::mkvdemux::MkvStreamInfo,
+) -> Result<Graph<GraphNode>, ParseError> {
+    use crate::mkvdemux::MkvDemuxN;
 
-    // Each A/V track: the video one decodes into the overlay's RGBA8 convert, the
-    // rest fan out to their own auto sinks.
-    for (i, info) in av.iter().enumerate() {
-        if i == video_idx {
-            reg.decodebin(&mut graph, demux.out(i as u8), to_rgba, &info.caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(&info.caps, e))?;
-        } else {
-            let sink = reg
-                .make_element("autoaudiosink")
-                .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
-            let snk = graph.add_sink(GraphNodeRef::Element(sink));
-            reg.decodebin(&mut graph, demux.out(i as u8), snk, &info.caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(&info.caps, e))?;
-        }
-    }
+    let video_idx = av.iter().position(|i| i.video).ok_or_else(|| {
+        ParseError::NoDecodeChain("subtitle overlay needs a video track".into())
+    })?;
+
+    // Demux ports (selected streams): every A/V stream (in track order) then the
+    // subtitle stream.
+    let mut stream_ports: Vec<_> = av.iter().map(|i| i.stream).collect();
+    stream_ports.push(text.stream);
+    let text_port = (stream_ports.len() - 1) as u8;
+    let outputs = stream_ports.len() as u8;
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let source =
+        crate::filesrc::FileSrc::new(path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
+    let src = graph.add_source(GraphNodeRef::source(source));
+    let demux = graph.add_demux(GraphNodeRef::demux(MkvDemuxN::new(stream_ports)), outputs);
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+
+    let av_caps: Vec<(Caps, bool)> = av.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    wire_subtitle_overlay(reg, &mut graph, demux, &av_caps, video_idx, text_port, &text.caps)?;
     Ok(graph)
 }
 

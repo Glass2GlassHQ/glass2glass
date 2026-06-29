@@ -85,7 +85,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
         }
         // A timed-text track plugs as its cue format directly (the container
         // carries the timing); not video, so the fan-out flag is false.
-        TrackKind::Text { format } => (Caps::Text { format: *format }, false),
+        TrackKind::Text { format, .. } => (Caps::Text { format: *format }, false),
     }
 }
 
@@ -823,7 +823,7 @@ mod tests {
         let tracks = parse_all_tracks(&file).expect("text track parses");
         assert_eq!(tracks.len(), 1, "the subtitle track is discovered");
         assert!(
-            matches!(tracks[0].kind, TrackKind::Text { format: TextFormat::Utf8 }),
+            matches!(tracks[0].kind, TrackKind::Text { format: TextFormat::Utf8, .. }),
             "tx3g maps to Caps::Text {{ Utf8 }}"
         );
 

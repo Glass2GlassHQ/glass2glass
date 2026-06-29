@@ -518,6 +518,43 @@ fn strip_ass_markup(raw: &str) -> String {
     out
 }
 
+/// De-frame one Matroska subtitle block payload to plain display text (M415). The
+/// block carries a single cue and its timing rides the Matroska block (timestamp +
+/// `BlockDuration`), so only the text is extracted, by the track's source format:
+/// - [`TextFormat::Utf8`] (`S_TEXT/UTF8`): the payload is the text already.
+/// - [`TextFormat::Ssa`] (`S_TEXT/ASS`): the block is the comma-separated fields
+///   `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`; the `Text`
+///   field (everything after the 8th comma) is taken and its `{...}` override tags
+///   / `\N` line breaks resolved (via [`strip_ass_markup`]).
+/// - [`TextFormat::WebVtt`] (`S_TEXT/WEBVTT`): the payload is the cue text with
+///   inline `<...>` tags, which are stripped.
+///
+/// Any other format returns the payload unchanged. The Matroska ASS framing omits
+/// `Dialogue:` and the timing fields (the block carries those), so it cannot be fed
+/// to the document `SubParse`; de-framing to plain UTF-8 here matches how the MP4
+/// `tx3g` / `wvtt` paths forward container-timed text.
+pub fn deframe_subtitle_block(payload: &str, format: TextFormat) -> String {
+    match format {
+        TextFormat::Ssa => {
+            // Skip the 8 leading fields (ReadOrder..Effect) to the Text field, which
+            // may itself contain commas, so split into at most 9 parts.
+            let text = payload.splitn(9, ',').nth(8).unwrap_or("");
+            strip_ass_markup(text)
+        }
+        TextFormat::WebVtt => {
+            let mut out = String::new();
+            for (i, line) in payload.lines().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                push_stripped(line, &mut out);
+            }
+            out
+        }
+        _ => String::from(payload),
+    }
+}
+
 /// Parse TTML / DFXP (W3C Timed Text, also SMPTE-TT / EBU-TT / IMSC) into cues.
 /// TTML is XML; rather than a full parser this scans for `<p>` paragraph elements
 /// (any namespace prefix), reading their `begin` / `end` time attributes and text
@@ -1245,6 +1282,25 @@ impl PadTemplates for SubParse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deframe_subtitle_block_per_source_format() {
+        // S_TEXT/UTF8: the block is the text already.
+        assert_eq!(deframe_subtitle_block("Hello\nworld", TextFormat::Utf8), "Hello\nworld");
+
+        // S_TEXT/ASS: take the Text field (after 8 commas), strip {...} and \N.
+        let ass = "0,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\Nworld";
+        assert_eq!(deframe_subtitle_block(ass, TextFormat::Ssa), "Hello\nworld");
+        // A Text field that itself contains commas survives (split into 9 parts).
+        let ass_commas = "1,0,Default,,0,0,0,,one, two, three";
+        assert_eq!(deframe_subtitle_block(ass_commas, TextFormat::Ssa), "one, two, three");
+
+        // S_TEXT/WEBVTT: the block is cue text with inline tags, which are stripped.
+        assert_eq!(
+            deframe_subtitle_block("<c.yellow>Hi</c> there", TextFormat::WebVtt),
+            "Hi there"
+        );
+    }
 
     #[test]
     fn timestamp_srt_and_webvtt_forms() {

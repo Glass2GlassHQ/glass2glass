@@ -237,7 +237,10 @@ impl MkvDemux {
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
             MkvStream::Aac => Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
             MkvStream::Opus => Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 },
-            MkvStream::Subtitle(format) => Caps::Text { format },
+            // Every subtitle stream is de-framed to plain UTF-8 cue text at emit
+            // (the source syntax, `S_TEXT/UTF8` / `ASS` / `WEBVTT`, only selects the
+            // de-framing), so the forwarded caps is always `Text { Utf8 }`.
+            MkvStream::Subtitle(_) => Caps::Text { format: TextFormat::Utf8 },
         }
     }
 
@@ -360,7 +363,8 @@ impl MkvDemux {
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
-            MkvCodec::Subtitle(format) => (StreamType::Text, Caps::Text { format }),
+            // Forwarded as plain UTF-8 text (de-framed at emit), whatever the source.
+            MkvCodec::Subtitle(_) => (StreamType::Text, Caps::Text { format: TextFormat::Utf8 }),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -427,7 +431,7 @@ impl MkvDemux {
                 Admit::Emit => {}
             }
             let frame = Frame::new(
-                MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
+                MemoryDomain::System(SystemSlice::from_boxed(deframe_block(f.codec, f.data).into_boxed_slice())),
                 FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
                 self.emitted,
             );
@@ -589,6 +593,21 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
     }
 }
 
+/// De-frame a demuxed frame's bytes for forwarding: a subtitle block is reduced to
+/// its plain UTF-8 cue text (the source-format framing stripped, see
+/// [`crate::subparse::deframe_subtitle_block`]) so every subtitle stream forwards
+/// as `Text { Utf8 }`; every other codec passes through unchanged. The cue timing
+/// rides the frame (block PTS + `BlockDuration`), so only the text is extracted.
+fn deframe_block(codec: MkvCodec, data: Vec<u8>) -> Vec<u8> {
+    match codec {
+        MkvCodec::Subtitle(format) => {
+            let text = alloc::string::String::from_utf8_lossy(&data);
+            crate::subparse::deframe_subtitle_block(&text, format).into_bytes()
+        }
+        _ => data,
+    }
+}
+
 /// One forwardable elementary stream discovered in a parsed Matroska container
 /// (M382): which [`MkvStream`] a demux port would carry, the elementary [`Caps`]
 /// a decode branch plugs from (the demux's per-port output caps), and whether it
@@ -628,6 +647,26 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                 MkvStream::H264 | MkvStream::H265 | MkvStream::Vp8 | MkvStream::Vp9 | MkvStream::Av1
             );
             Some(MkvStreamInfo { stream, caps: MkvDemux::output_caps(stream), video })
+        })
+        .collect()
+}
+
+/// The subtitle (text) tracks a parsed Matroska container carries, in track order
+/// (M415): one [`MkvStreamInfo`] per track whose codec maps to an
+/// [`MkvStream::Subtitle`]. The read-side complement of [`forwardable_streams`]
+/// (which is A/V-only): the subtitle-overlay `playbin` builder pairs these with the
+/// A/V streams to plug a `TextOverlayN` onto the video branch (the MKV sibling of
+/// `mp4demuxn::subtitle_streams`). `video` is always `false` for a text track.
+pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
+    demux
+        .tracks()
+        .iter()
+        .filter_map(|t| {
+            let stream = codec_to_stream(t.codec)?;
+            if !matches!(stream, MkvStream::Subtitle(_)) {
+                return None;
+            }
+            Some(MkvStreamInfo { stream, caps: MkvDemux::output_caps(stream), video: false })
         })
         .collect()
 }
@@ -869,7 +908,7 @@ impl MultiOutputElement for MkvDemuxN {
                             self.announced[port] = true;
                         }
                         let out_frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
+                            MemoryDomain::System(SystemSlice::from_boxed(deframe_block(f.codec, f.data).into_boxed_slice())),
                             FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
                             self.emitted,
                         );
@@ -1129,5 +1168,43 @@ mod tests {
         d.set_property("stream", PropValue::Str("opus".into())).unwrap();
         assert_eq!(d.stream(), MkvStream::Opus);
         assert_eq!(d.set_property("stream", PropValue::Str("theora".into())), Err(PropError::Value));
+    }
+
+    fn subtitle_track(num: u64, codec: &[u8]) -> Vec<u8> {
+        // TrackNumber, TrackType(subtitle=0x11), CodecID.
+        let body =
+            [elem(&[0xD7], &uint_body(num)), elem(&[0x83], &uint_body(0x11)), elem(&[0x86], codec)].concat();
+        elem(&[0xAE], &body)
+    }
+
+    fn mkv_subtitle(codec: &[u8], payload: &[u8]) -> Vec<u8> {
+        let tracks = elem(&[0x16, 0x54, 0xAE, 0x6B], &subtitle_track(1, codec));
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(0)), elem(&[0xA3], &block(1, 0, payload))].concat(),
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
+    }
+
+    #[tokio::test]
+    async fn s_text_ass_deframes_to_plain_utf8() {
+        // A Matroska ASS block is `ReadOrder,Layer,Style,Name,MarginL,MarginR,
+        // MarginV,Effect,Text`; the demuxer extracts the Text field (tags / `\N`
+        // resolved) and forwards it as `Text { Utf8 }`.
+        let bytes = mkv_subtitle(b"S_TEXT/ASS", b"0,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\Nthere");
+        let mut sink = CaptureSink::default();
+        run(MkvStream::Subtitle(TextFormat::Ssa), &bytes, &mut sink).await;
+        assert_eq!(sink.caps, alloc::vec![Caps::Text { format: TextFormat::Utf8 }]);
+        assert_eq!(sink.frames, alloc::vec![b"Hello\nthere".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn s_text_webvtt_strips_inline_tags() {
+        let bytes = mkv_subtitle(b"S_TEXT/WEBVTT", b"<c.yellow>Hi</c> there");
+        let mut sink = CaptureSink::default();
+        run(MkvStream::Subtitle(TextFormat::WebVtt), &bytes, &mut sink).await;
+        assert_eq!(sink.caps, alloc::vec![Caps::Text { format: TextFormat::Utf8 }]);
+        assert_eq!(sink.frames, alloc::vec![b"Hi there".to_vec()]);
     }
 }

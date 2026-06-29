@@ -150,9 +150,25 @@ pub(crate) enum TrackKind {
     Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
     Audio { format: AudioFormat, channels: u8, sample_rate: u32, asc: Vec<u8> },
     /// A timed-text subtitle track. The container carries the per-cue timing
-    /// (sample PTS + duration); `format` names the cue payload's syntax (today
-    /// always [`TextFormat::Utf8`] from a `tx3g` 3GPP-timed-text sample entry).
-    Text { format: TextFormat },
+    /// (sample PTS + duration); `format` names the elementary cue payload's syntax
+    /// downstream, and `sample` the on-disk sample-entry framing (which selects
+    /// de-framing): `tx3g` / `wvtt` cues are plain UTF-8 ([`TextFormat::Utf8`]),
+    /// `stpp` samples are TTML documents ([`TextFormat::Ttml`]).
+    Text { format: TextFormat, sample: TextSampleFormat },
+}
+
+/// The on-disk timed-text sample format an MP4 text `trak` stores. Distinct from
+/// the elementary [`TextFormat`] the de-framed cue carries: both `tx3g` and `wvtt`
+/// de-frame to plain UTF-8, but by different framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextSampleFormat {
+    /// 3GPP / QuickTime timed text: 2-byte length prefix + UTF-8 cue + style boxes.
+    Tx3g,
+    /// WebVTT-in-MP4 (ISO 14496-30): per-sample `vttc` / `vtte` boxes; the `payl`
+    /// payloads concatenate to the cue's UTF-8 text.
+    Wvtt,
+    /// TTML-in-MP4 (`stpp`): each sample is a complete XML document, passed through.
+    Stpp,
 }
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
@@ -170,9 +186,10 @@ pub(crate) struct TrackHeader {
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
 /// into a [`TrackHeader`]. The single-track [`parse_header`] reads only the first
 /// `trak`; this walks them all (what an A/V `.mp4` carries). Tracks with an
-/// unrecognized handler (or a text handler whose sample entry we do not de-frame,
-/// e.g. `wvtt` / `stpp`) are skipped, not errors; a malformed video / audio track
-/// fails the parse. Errors if no track is forwardable.
+/// unrecognized handler (or a text handler whose sample entry is not one we
+/// de-frame: `tx3g` / `wvtt` / `stpp` are read, others decline) are skipped, not
+/// errors; a malformed video / audio track fails the parse. Errors if no track is
+/// forwardable.
 pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
     let mut tracks = Vec::new();
@@ -309,13 +326,16 @@ fn parse_audio_entry(
 }
 
 /// Recognize a timed-text sample entry and map it to the [`TrackKind::Text`] the
-/// cue payload carries. Only 3GPP timed text (`tx3g`, plain UTF-8 cues) is
-/// de-framed today, so it alone is forwarded; the `wvtt` (WebVTT-in-MP4) and
-/// `stpp` (TTML) sample formats carry their own per-sample box structure and are
-/// not yet read, so they decline here (the track is skipped, not an error).
+/// cue payload carries: `tx3g` (3GPP timed text) and `wvtt` (WebVTT-in-MP4) cues
+/// de-frame to plain UTF-8, and `stpp` (TTML-in-MP4) samples are TTML documents.
+/// An unrecognized text codec declines (the track is skipped, not an error).
 fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
     if find_box(entries, b"tx3g").is_some() {
-        Some(TrackKind::Text { format: TextFormat::Utf8 })
+        Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Tx3g })
+    } else if find_box(entries, b"wvtt").is_some() {
+        Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Wvtt })
+    } else if find_box(entries, b"stpp").is_some() {
+        Some(TrackKind::Text { format: TextFormat::Ttml, sample: TextSampleFormat::Stpp })
     } else {
         None
     }
@@ -331,6 +351,36 @@ fn deframe_tx3g(raw: &[u8]) -> Vec<u8> {
         return Vec::new();
     };
     raw.get(2..2usize.saturating_add(len)).map(<[u8]>::to_vec).unwrap_or_default()
+}
+
+/// Strip a WebVTT-in-MP4 (`wvtt`) sample to its UTF-8 cue text (ISO 14496-30). A
+/// sample is a sequence of boxes: each `vttc` (cue) carries a `payl` sub-box with
+/// the UTF-8 payload, and a `vtte` (empty cue) carries nothing. The `payl`
+/// payloads of every `vttc` in the sample concatenate (newline-separated) to the
+/// text shown for the sample's time window; an empty / `vtte`-only sample forwards
+/// as an empty string so a downstream overlay clears. Box sizes are untrusted: a
+/// size below the 8-byte header or past the sample end stops the scan rather than
+/// panicking. `sttg` cue settings (placement) are ignored for now.
+fn deframe_wvtt(raw: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut off = 0usize;
+    while off.saturating_add(8) <= raw.len() {
+        let size = u32::from_be_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]) as usize;
+        if size < 8 || off.saturating_add(size) > raw.len() {
+            break;
+        }
+        let body = &raw[off + 8..off + size];
+        if &raw[off + 4..off + 8] == b"vttc" {
+            if let Some(payl) = find_box(body, b"payl") {
+                if !out.is_empty() {
+                    out.push(b'\n');
+                }
+                out.extend_from_slice(payl);
+            }
+        }
+        off += size;
+    }
+    out
 }
 
 /// The decode state carried from a `moof` to its following `mdat`: the track id,
@@ -435,8 +485,16 @@ pub(crate) fn parse_fragments_multi(
                         }
                         // Audio access units are stored verbatim; each is a sync point.
                         TrackKind::Audio { .. } => (bytes.to_vec(), true),
-                        // A timed-text cue is independent; strip the tx3g framing.
-                        TrackKind::Text { .. } => (deframe_tx3g(bytes), true),
+                        // A timed-text cue is independent; strip its sample framing
+                        // (tx3g / wvtt) or pass the whole TTML document (stpp).
+                        TrackKind::Text { sample, .. } => {
+                            let cue = match SampleFraming::of_text(*sample) {
+                                SampleFraming::WvttText => deframe_wvtt(bytes),
+                                SampleFraming::PassThrough => bytes.to_vec(),
+                                _ => deframe_tx3g(bytes),
+                            };
+                            (cue, true)
+                        }
                     };
                     out.push((
                         track_id,
@@ -694,6 +752,7 @@ enum SampleFraming {
     Video,
     PassThrough,
     Tx3gText,
+    WvttText,
 }
 
 impl SampleFraming {
@@ -702,7 +761,17 @@ impl SampleFraming {
         match kind {
             TrackKind::Video { .. } => SampleFraming::Video,
             TrackKind::Audio { .. } => SampleFraming::PassThrough,
-            TrackKind::Text { .. } => SampleFraming::Tx3gText,
+            TrackKind::Text { sample, .. } => Self::of_text(*sample),
+        }
+    }
+
+    /// The de-framing a timed-text sample format selects: a `stpp` sample is the
+    /// whole TTML document (pass through), `tx3g` / `wvtt` strip their framing.
+    fn of_text(sample: TextSampleFormat) -> Self {
+        match sample {
+            TextSampleFormat::Tx3g => SampleFraming::Tx3gText,
+            TextSampleFormat::Wvtt => SampleFraming::WvttText,
+            TextSampleFormat::Stpp => SampleFraming::PassThrough,
         }
     }
 }
@@ -847,6 +916,7 @@ fn parse_progressive_track(
             SampleFraming::Video => avcc_to_annexb(raw)?,
             SampleFraming::PassThrough => raw.to_vec(),
             SampleFraming::Tx3gText => deframe_tx3g(raw),
+            SampleFraming::WvttText => deframe_wvtt(raw),
         };
         samples.push(Sample {
             annexb,
@@ -1475,5 +1545,53 @@ mod tests {
         assert_eq!(audio[0].1.annexb, audio_samples[0]);
         assert_eq!(audio[1].1.annexb, audio_samples[1]);
         assert!(audio[0].1.keyframe && audio[1].1.keyframe);
+    }
+
+    #[test]
+    fn parse_text_entry_recognizes_tx3g_wvtt_stpp() {
+        use crate::mp4box::mp4_box;
+        // tx3g + wvtt -> plain UTF-8; stpp -> TTML document. The parser only needs
+        // the sample-entry box to be present in the stsd entries.
+        let tx3g = mp4_box(b"tx3g", &[0u8; 8]);
+        assert!(matches!(
+            parse_text_entry(&tx3g),
+            Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Tx3g })
+        ));
+        let wvtt = mp4_box(b"wvtt", &mp4_box(b"vttC", b"WEBVTT"));
+        assert!(matches!(
+            parse_text_entry(&wvtt),
+            Some(TrackKind::Text { format: TextFormat::Utf8, sample: TextSampleFormat::Wvtt })
+        ));
+        let stpp = mp4_box(b"stpp", &[0u8; 8]);
+        assert!(matches!(
+            parse_text_entry(&stpp),
+            Some(TrackKind::Text { format: TextFormat::Ttml, sample: TextSampleFormat::Stpp })
+        ));
+        // An unrecognized text codec declines (the track is skipped).
+        assert!(parse_text_entry(&mp4_box(b"c608", &[0u8; 8])).is_none());
+    }
+
+    #[test]
+    fn deframe_wvtt_extracts_payl_payloads() {
+        use crate::mp4box::mp4_box;
+        // A vttc cue carries a payl payload; multiple cues in one sample join with
+        // a newline. A vtte (empty cue) and unknown boxes contribute nothing.
+        let cue = |id: &[u8], payl: &str| {
+            let mut body = mp4_box(b"iden", id);
+            body.extend_from_slice(&mp4_box(b"sttg", b"align:center"));
+            body.extend_from_slice(&mp4_box(b"payl", payl.as_bytes()));
+            mp4_box(b"vttc", &body)
+        };
+        let mut sample = cue(b"1", "Hello");
+        sample.extend_from_slice(&cue(b"2", "World"));
+        assert_eq!(deframe_wvtt(&sample), b"Hello\nWorld");
+
+        // A pure empty-cue sample yields an empty string (clears the overlay).
+        let empty = mp4_box(b"vtte", &[]);
+        assert!(deframe_wvtt(&empty).is_empty());
+
+        // A truncated box (size past the end) stops the scan, no panic.
+        let truncated = [0, 0, 0, 0xFF, b'v', b't', b't', b'c'];
+        assert!(deframe_wvtt(&truncated).is_empty());
     }
 }

@@ -272,11 +272,20 @@ leverage first:
   `TextOverlayN`) is started: MP4 `tx3g` timed text fans out of `Mp4DemuxN` as
   `Caps::Text{Utf8}` (M411) and `mp4_playbin` auto-plugs it through a
   `TextOverlayN` on the video branch (M412); MKV `S_TEXT/UTF8` likewise fans out of
-  `MkvDemuxN` as `Caps::Text{Utf8}` with the `BlockDuration` cue window (M413).
-  Still open are MP4 `wvtt` / `stpp` sample formats, the MKV `S_TEXT/ASS` /
-  `S_TEXT/WEBVTT` codec IDs (their per-block payload needs the `CodecPrivate`
-  header), the MPEG-TS DVB / teletext streams, and the `playbin` text-branch
-  overlay wiring for MKV / TS (MP4 has it). The startup I420/NV12 gap on
+  `MkvDemuxN` as `Caps::Text{Utf8}` with the `BlockDuration` cue window (M413), and
+  `mkv_playbin` auto-plugs it through the same shared overlay builder
+  (`wire_subtitle_overlay`, M415). MP4 `wvtt` / `stpp` are read too (M416: `wvtt`
+  de-frames its `vttc`/`payl` boxes to `Text{Utf8}`, `stpp` passes the TTML document
+  as `Text{Ttml}` through `SubParse`), as are MKV `S_TEXT/ASS` / `S_TEXT/WEBVTT`
+  (M417: the block is de-framed to plain `Text{Utf8}` cue text, the source syntax
+  only selecting the de-framing). Still open: the **MPEG-TS** subtitle path, which
+  is a separate, larger effort, not a sibling of the MP4 / MKV text wiring: TS
+  carries DVB subtitles (bitmap RLE, a `Caps::SubPicture` track, see below) and
+  teletext (a page/magazine decoder), neither a text format `TextOverlayN`
+  consumes, so there is no TS text stream to overlay until one of those lands.
+  HLS subtitle renditions (separate `.vtt` segments) now have everything they need
+  on the demux side (the overlay builder + `Caps::Text`), pending the HLS
+  rendition-selection plumbing. The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`); on-screen `playbin` playback still needs live

@@ -105,10 +105,13 @@ pub enum MkvCodec {
     Av1,
     Aac,
     Opus,
-    /// A timed-text subtitle track (`S_TEXT/*`); `format` names the cue payload's
-    /// syntax. Only `S_TEXT/UTF8` (plain UTF-8 cues -> [`TextFormat::Utf8`]) is
-    /// mapped today; `S_TEXT/ASS` / `S_TEXT/WEBVTT` (whose per-block payload needs
-    /// the track's `CodecPrivate` header to reconstruct) stay [`MkvCodec::Other`].
+    /// A timed-text subtitle track (`S_TEXT/*`); `format` names the on-disk block
+    /// payload's syntax, which the demuxer de-frames to plain UTF-8 cue text:
+    /// `S_TEXT/UTF8` -> [`TextFormat::Utf8`] (verbatim), `S_TEXT/ASS` / `S_TEXT/SSA`
+    /// -> [`TextFormat::Ssa`] (the `Text` field of the comma-separated block, tags
+    /// stripped), `S_TEXT/WEBVTT` -> [`TextFormat::WebVtt`] (cue text, inline tags
+    /// stripped). Bitmap subtitle codecs (`S_DVBSUB` / `S_HDMV/PGS`) stay
+    /// [`MkvCodec::Other`] (a `SubPicture` track, not text).
     Subtitle(TextFormat),
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
@@ -134,6 +137,10 @@ impl MkvCodec {
             MkvCodec::Opus
         } else if id == b"S_TEXT/UTF8" {
             MkvCodec::Subtitle(TextFormat::Utf8)
+        } else if id == b"S_TEXT/ASS" || id == b"S_TEXT/SSA" {
+            MkvCodec::Subtitle(TextFormat::Ssa)
+        } else if id == b"S_TEXT/WEBVTT" {
+            MkvCodec::Subtitle(TextFormat::WebVtt)
         } else {
             MkvCodec::Other
         }
