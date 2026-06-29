@@ -125,33 +125,63 @@ pub fn parse_auto(input: &str) -> Vec<Cue> {
 /// like the SRT / WebVTT tag handling. Malformed dialogue lines are skipped.
 pub fn parse_ssa(input: &str) -> Vec<Cue> {
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut state = SsaState::default();
     let mut cues = Vec::new();
-    let mut in_events = false;
-    // V4+ default column order, used until an explicit `Format:` line overrides
-    // it: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text.
-    let (mut i_start, mut i_end, mut i_text) = (1usize, 2usize, 9usize);
     for line in input.lines() {
-        let line = line.trim();
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            in_events = name.eq_ignore_ascii_case("Events");
-            continue;
-        }
-        if !in_events {
-            continue;
-        }
-        if let Some(rest) = strip_prefix_ci(line, "Format:") {
-            let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
-            i_start = col_index(&cols, "Start").unwrap_or(i_start);
-            i_end = col_index(&cols, "End").unwrap_or(i_end);
-            // Text is the last column by spec; fall back to that if unnamed.
-            i_text = col_index(&cols, "Text").unwrap_or(cols.len().saturating_sub(1));
-        } else if let Some(rest) = strip_prefix_ci(line, "Dialogue:") {
-            if let Some(cue) = parse_ass_dialogue(rest, i_start, i_end, i_text) {
-                cues.push(cue);
-            }
+        if let Some(cue) = state.feed_line(line) {
+            cues.push(cue);
         }
     }
     cues
+}
+
+/// Per-line SSA parse state, shared by the whole-document [`parse_ssa`] and the
+/// streaming `SubParse` element: whether the scan is inside the `[Events]`
+/// section and the resolved Start / End / Text column indices. Held across
+/// chunks so a `Dialogue:` line in a later chunk parses with the column order
+/// declared by an earlier one.
+#[derive(Debug, Clone)]
+struct SsaState {
+    in_events: bool,
+    i_start: usize,
+    i_end: usize,
+    i_text: usize,
+}
+
+impl Default for SsaState {
+    fn default() -> Self {
+        // V4+ default column order, used until an explicit `Format:` line
+        // overrides it: Layer, Start, End, Style, Name, MarginL, MarginR,
+        // MarginV, Effect, Text.
+        Self { in_events: false, i_start: 1, i_end: 2, i_text: 9 }
+    }
+}
+
+impl SsaState {
+    /// Feed one SSA line, returning a cue if it is a `Dialogue:` line in the
+    /// `[Events]` section. Section headers and `Format:` lines update the state.
+    fn feed_line(&mut self, line: &str) -> Option<Cue> {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            self.in_events = name.eq_ignore_ascii_case("Events");
+            return None;
+        }
+        if !self.in_events {
+            return None;
+        }
+        if let Some(rest) = strip_prefix_ci(line, "Format:") {
+            let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
+            self.i_start = col_index(&cols, "Start").unwrap_or(self.i_start);
+            self.i_end = col_index(&cols, "End").unwrap_or(self.i_end);
+            // Text is the last column by spec; fall back to that if unnamed.
+            self.i_text = col_index(&cols, "Text").unwrap_or(cols.len().saturating_sub(1));
+            None
+        } else if let Some(rest) = strip_prefix_ci(line, "Dialogue:") {
+            parse_ass_dialogue(rest, self.i_start, self.i_end, self.i_text)
+        } else {
+            None
+        }
+    }
 }
 
 /// Case-insensitive `name -> column index` lookup in a `Format:` column list.
@@ -444,6 +474,33 @@ fn frac_of_unit_ns(frac: &str, unit_ns: u64) -> u64 {
     ((unit_ns as u128 * frac_int as u128) / denom) as u64
 }
 
+/// Length of the longest valid-UTF8 prefix of `buf`. A multi-byte char may be
+/// split across a chunk boundary; only this prefix is safe to parse, and the
+/// trailing partial-char bytes wait in the buffer for the next chunk.
+fn utf8_prefix_len(buf: &[u8]) -> usize {
+    match core::str::from_utf8(buf) {
+        Ok(s) => s.len(),
+        Err(e) => e.valid_up_to(),
+    }
+}
+
+/// Byte offset just past the last blank-line separator in `s` (a line empty
+/// after trimming), i.e. the end of the last fully terminated block. `None` if
+/// no blank line has arrived yet, so no block is known complete.
+fn last_block_boundary(s: &str) -> Option<usize> {
+    let mut boundary = None;
+    let mut line_start = 0;
+    for (i, &b) in s.as_bytes().iter().enumerate() {
+        if b == b'\n' {
+            if s[line_start..i].trim().is_empty() {
+                boundary = Some(i + 1);
+            }
+            line_start = i + 1;
+        }
+    }
+    boundary
+}
+
 /// Walk blank-line-separated blocks, turning each cue block into a [`Cue`].
 /// `webvtt` enables the WebVTT-only block skips. `str::lines` already strips a
 /// trailing `\r`, so CRLF input is handled without extra work.
@@ -637,17 +694,25 @@ fn push_stripped(line: &str, out: &mut String) {
 /// media type from a structured subtitle format to plain UTF-8 via the same
 /// [`CapsConstraint::DerivedOutput`] negotiation.
 ///
-/// Scope (v1): a `.srt` / `.vtt` is a small whole document, so this buffers the
-/// sink bytes and emits every cue at `Eos` (batch, like `Mp4DemuxN`); incremental
-/// cue-by-cue streaming is a follow-up. WebVTT cue positioning ([`CueSettings`])
-/// is parsed but not carried on the frame yet (no text frame-meta); the payload
+/// Streaming (M405): SRT / WebVTT / SSA are line based, so complete cues are
+/// emitted as the bytes arrive. Each `process` call drains the blocks (or SSA
+/// `Dialogue:` lines) that are fully terminated, retains the trailing partial
+/// block in the buffer, and flushes the remainder at `Eos`. This unblocks a
+/// downstream overlay, which no longer has to buffer video until the subtitle
+/// stream ends. TTML is XML with no blank-line block boundary, so it stays
+/// batch: its cues are parsed at `Eos`. WebVTT cue positioning ([`CueSettings`])
+/// is parsed but not yet carried on the frame (no text frame-meta); the payload
 /// is the plain cue text.
 #[derive(Debug, Default)]
 pub struct SubParse {
     /// Input subtitle format, fixed at `configure_pipeline`.
     format: Option<TextFormat>,
-    /// Accumulated sink bytes, parsed at `Eos`.
+    /// Sink bytes not yet forming a complete cue, carried to the next chunk.
     buf: Vec<u8>,
+    /// SSA `[Events]` / column-order state, persisted across chunks.
+    ssa: SsaState,
+    /// Whether a leading UTF-8 BOM has been resolved (consumed or ruled out).
+    bom_stripped: bool,
     /// Whether the output `Caps::Text{Utf8}` has been announced downstream.
     caps_emitted: bool,
     sequence: u64,
@@ -672,16 +737,90 @@ impl SubParse {
         Caps::Text { format: TextFormat::Utf8 }
     }
 
-    /// Parse the buffered document with the parser for the configured format.
-    fn parse_buffered(&self) -> Vec<Cue> {
-        let doc = String::from_utf8_lossy(&self.buf);
-        match self.format {
-            Some(TextFormat::WebVtt) => parse_webvtt(&doc),
-            Some(TextFormat::Ssa) => parse_ssa(&doc),
-            Some(TextFormat::Ttml) => parse_ttml(&doc),
-            // SubRip is the default; the constraint admits only the parsed formats.
-            _ => parse_srt(&doc),
+    /// Consume a leading UTF-8 BOM from the buffer the first time enough bytes
+    /// (3) have arrived to recognise it; mark it resolved either way.
+    fn strip_bom(&mut self) {
+        if self.bom_stripped {
+            return;
         }
+        if self.buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            self.buf.drain(..3);
+            self.bom_stripped = true;
+        } else if self.buf.len() >= 3 {
+            // Three bytes in and not a BOM, so there is none to strip.
+            self.bom_stripped = true;
+        }
+    }
+
+    /// Drain the cues now known complete, leaving any partial trailing block in
+    /// the buffer. At `final_flush` (`Eos`) the whole remainder is parsed and the
+    /// buffer cleared. TTML is XML (no blank-line boundary) and only parses at
+    /// the flush; the line-based formats stream incrementally.
+    fn drain_cues(&mut self, final_flush: bool) -> Vec<Cue> {
+        match self.format {
+            Some(TextFormat::Ttml) => {
+                if !final_flush {
+                    return Vec::new();
+                }
+                let doc = String::from_utf8_lossy(&self.buf);
+                let cues = parse_ttml(&doc);
+                self.buf.clear();
+                cues
+            }
+            Some(TextFormat::Ssa) => self.drain_ssa(final_flush),
+            Some(TextFormat::WebVtt) => self.drain_blocks(true, final_flush),
+            // SubRip is the default; the constraint admits only the four formats.
+            _ => self.drain_blocks(false, final_flush),
+        }
+    }
+
+    /// Drain complete blank-line-separated blocks (SRT / WebVTT). On `final_flush`
+    /// the whole buffer is one last parse; otherwise only blocks terminated by a
+    /// blank line are taken and the partial tail is retained.
+    fn drain_blocks(&mut self, webvtt: bool, final_flush: bool) -> Vec<Cue> {
+        if final_flush {
+            let doc = String::from_utf8_lossy(&self.buf);
+            let cues = parse_blocks(&doc, webvtt);
+            self.buf.clear();
+            return cues;
+        }
+        let valid = utf8_prefix_len(&self.buf);
+        let s = core::str::from_utf8(&self.buf[..valid]).expect("valid_up_to is a char boundary");
+        let Some(boundary) = last_block_boundary(s) else {
+            return Vec::new();
+        };
+        let cues = parse_blocks(&s[..boundary], webvtt);
+        self.buf.drain(..boundary);
+        cues
+    }
+
+    /// Drain complete SSA lines (newline-terminated), keeping the column-order
+    /// state across chunks. On `final_flush` the partial tail line is parsed too
+    /// (end of input terminates it).
+    fn drain_ssa(&mut self, final_flush: bool) -> Vec<Cue> {
+        let mut cues = Vec::new();
+        if final_flush {
+            let doc = String::from_utf8_lossy(&self.buf);
+            for line in doc.lines() {
+                if let Some(cue) = self.ssa.feed_line(line) {
+                    cues.push(cue);
+                }
+            }
+            self.buf.clear();
+            return cues;
+        }
+        let valid = utf8_prefix_len(&self.buf);
+        let s = core::str::from_utf8(&self.buf[..valid]).expect("valid_up_to is a char boundary");
+        let Some(nl) = s.rfind('\n') else {
+            return Vec::new();
+        };
+        for line in s[..=nl].lines() {
+            if let Some(cue) = self.ssa.feed_line(line) {
+                cues.push(cue);
+            }
+        }
+        self.buf.drain(..=nl);
+        cues
     }
 }
 
@@ -747,47 +886,53 @@ impl AsyncElement for SubParse {
             if self.format.is_none() {
                 return Err(G2gError::NotConfigured);
             }
-            match packet {
+            // Drain whatever cues are now complete; emit them below. A DataFrame
+            // streams the just-terminated cues, Eos flushes the trailing block.
+            let cues = match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let MemoryDomain::System(slice) = &frame.domain {
                         // The parsers handle CRLF / BOM, so accumulate raw bytes.
                         self.buf.extend_from_slice(slice.as_slice());
                     }
+                    self.strip_bom();
+                    self.drain_cues(false)
                 }
                 // Output caps are negotiated up front (DerivedOutput) and announced
                 // at the first cue; an inbound caps change on the SRT side is absorbed.
-                PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::CapsChanged(_) => Vec::new(),
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
+                    Vec::new()
                 }
                 PipelinePacket::Flush => {
                     self.buf.clear();
+                    self.ssa = SsaState::default();
+                    self.bom_stripped = false;
                     out.push(PipelinePacket::Flush).await?;
+                    Vec::new()
                 }
-                // Batch parse: the whole document is buffered by now. Emit one timed
-                // UTF-8 frame per cue (the runner arm forwards the trailing Eos).
-                PipelinePacket::Eos => {
-                    for cue in self.parse_buffered() {
-                        if !self.caps_emitted {
-                            out.push(PipelinePacket::CapsChanged(Self::output_caps())).await?;
-                            self.caps_emitted = true;
-                        }
-                        let timing = FrameTiming {
-                            pts_ns: cue.start_ns,
-                            duration_ns: cue.end_ns.saturating_sub(cue.start_ns),
-                            ..Default::default()
-                        };
-                        let payload = cue.text.into_bytes().into_boxed_slice();
-                        let frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(payload)),
-                            timing,
-                            self.sequence,
-                        );
-                        self.sequence += 1;
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
-                    }
-                    self.buf.clear();
+                // The trailing partial block is parsed now; the runner arm forwards
+                // the trailing Eos.
+                PipelinePacket::Eos => self.drain_cues(true),
+            };
+            for cue in cues {
+                if !self.caps_emitted {
+                    out.push(PipelinePacket::CapsChanged(Self::output_caps())).await?;
+                    self.caps_emitted = true;
                 }
+                let timing = FrameTiming {
+                    pts_ns: cue.start_ns,
+                    duration_ns: cue.end_ns.saturating_sub(cue.start_ns),
+                    ..Default::default()
+                };
+                let payload = cue.text.into_bytes().into_boxed_slice();
+                let frame = Frame::new(
+                    MemoryDomain::System(SystemSlice::from_boxed(payload)),
+                    timing,
+                    self.sequence,
+                );
+                self.sequence += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
             }
             Ok(())
         })
@@ -1144,6 +1289,67 @@ mod tests {
             panic!("cue payload must be a system buffer");
         }
         assert_eq!(frames[1].timing.pts_ns, 62_500_000_000);
+    }
+
+    #[tokio::test]
+    async fn element_streams_terminated_cue_before_eos() {
+        // A complete first cue (terminated by a blank line) then a dangling
+        // second cue arrive in one chunk; the complete one streams out at once.
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).unwrap();
+        let mut sink = RecordingSink::default();
+
+        el.process(
+            srt_bytes_frame(b"1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n2\n00:00:03,000 -->"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        let count = |sink: &RecordingSink| {
+            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count()
+        };
+        assert_eq!(count(&sink), 1, "the terminated cue is emitted before Eos");
+
+        // Eos cannot complete the dangling second cue (no end timestamp/text).
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(count(&sink), 1);
+    }
+
+    #[tokio::test]
+    async fn element_streams_across_utf8_char_split() {
+        // A multi-byte char split across the chunk boundary must not corrupt the
+        // cue, and the earlier complete cue must still stream immediately.
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let mut chunk1 = Vec::from(
+            &b"1\n00:00:01,000 --> 00:00:02,000\nokay\n\n2\n00:00:03,000 --> 00:00:04,000\ncaf"[..],
+        );
+        chunk1.push(0xC3); // first byte of 'e-acute', completed in the next chunk
+        el.process(srt_bytes_frame(&chunk1), &mut sink).await.unwrap();
+        let after_chunk1 =
+            sink.packets.iter().filter(|p| matches!(p, PipelinePacket::DataFrame(_))).count();
+        assert_eq!(after_chunk1, 1, "the terminated cue streams before the rest arrives");
+
+        el.process(srt_bytes_frame(&[0xA9, b'\n', b'\n']), &mut sink).await.unwrap();
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 2);
+        if let MemoryDomain::System(s) = &frames[1].domain {
+            assert_eq!(core::str::from_utf8(s.as_slice()).unwrap(), "café");
+        } else {
+            panic!("cue payload must be a system buffer");
+        }
     }
 
     #[test]

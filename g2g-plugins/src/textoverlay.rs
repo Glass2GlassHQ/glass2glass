@@ -451,9 +451,9 @@ impl AsyncElement for TextOverlay {
 /// A [`MultiInputElement`] (video + text in, video out) that opts into
 /// `input_pts_ordered`, so the runner merges the two pads by PTS: every cue
 /// (PTS = its start time) is delivered before the video frame it first covers,
-/// giving correct A/V-text alignment. Because [`SubParse`] batch-emits its cues
-/// at end of the (small, fast) subtitle stream, the merge buffers video only
-/// until that stream ends; incremental cue streaming is a follow-up. The
+/// giving correct A/V-text alignment. [`SubParse`] streams each cue as soon as it
+/// is fully parsed (M405), so the merge only buffers video up to the next cue's
+/// start, not to the end of the subtitle stream. The
 /// rendering is reused wholesale from [`TextOverlay`] (composition); the text pad
 /// only feeds it cues. Cue positioning is the renderer default (bottom-centre):
 /// `SubParse` emits plain text, so WebVTT / SSA placement does not survive the
