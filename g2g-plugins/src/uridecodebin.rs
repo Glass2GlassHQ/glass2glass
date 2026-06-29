@@ -624,13 +624,39 @@ pub fn build_hls_separate_fanout(
 /// non-`hls` URI, a master-probe network failure, a media-only playlist, or a TS
 /// variant without at least two routable muxed streams. Network-coupled: the probe
 /// is validated against a live server, not in CI.
+/// Parse the `playbin uri=hls://...` rendition-language hints from the URI fragment
+/// (M418): `#audio-lang=fr&subtitle-lang=en`. Returns the playlist `rest` with the
+/// fragment stripped, plus the requested audio and subtitle languages (`None` when
+/// absent). `subtitle-lang` / `text-lang` are accepted aliases. An HLS URL has no
+/// other place to carry a preference, so the fragment (never sent to the server)
+/// holds it.
+#[cfg(feature = "hls")]
+fn hls_lang_hints(rest: &str) -> (&str, Option<alloc::string::String>, Option<alloc::string::String>) {
+    let (url, frag) = rest.split_once('#').unwrap_or((rest, ""));
+    let (mut audio, mut subtitle) = (None, None);
+    for kv in frag.split('&').filter(|s| !s.is_empty()) {
+        if let Some((k, v)) = kv.split_once('=') {
+            match k {
+                "audio-lang" => audio = Some(v.to_string()),
+                "subtitle-lang" | "text-lang" => subtitle = Some(v.to_string()),
+                _ => {}
+            }
+        }
+    }
+    (url, audio, subtitle)
+}
+
 #[cfg(feature = "hls")]
 pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let Some(parsed) = Uri::parse(uri) else { return Ok(None) };
     if parsed.scheme != "hls" || parsed.rest.is_empty() {
         return Ok(None);
     }
-    let source_url = alloc::format!("https://{}", parsed.rest);
+    // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
+    // language preference (HLS URIs have no other place for it); strip it off the
+    // playlist URL (M418).
+    let (url_rest, audio_lang, _subtitle_lang) = hls_lang_hints(parsed.rest);
+    let source_url = alloc::format!("https://{url_rest}");
     // Fetch + parse the master; decline (single-stream fallback) on any failure.
     let Some(master_text) = blocking_get_text(&source_url) else { return Ok(None) };
     let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
@@ -652,12 +678,40 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
-    // A separate audio rendition (its own playlist) means a multi-source graph:
-    // the variant carries video, the audio is a distinct rendition. Use the first
-    // (declaration-order, typically DEFAULT) audio rendition.
-    if let Some(audio) = streams.iter().find(|s| !s.video && s.uri.is_some()) {
-        let audio_url = crate::fetch::resolve_url(&source_url, audio.uri.as_deref().unwrap_or(""));
-        return build_hls_separate_fanout(reg, &source_url, &streams, &audio_url);
+    // A separate audio rendition (its own playlist) means a multi-source graph: the
+    // variant carries video, the audio is a distinct rendition. Pick the rendition
+    // the `#audio-lang=` hint asks for (else DEFAULT, else the first), M418.
+    if let Some(group) = &variant.audio_group {
+        if let Some(audio) = master.pick_rendition(crate::hls::MediaType::Audio, group, audio_lang.as_deref()) {
+            if let Some(audio_uri) = &audio.uri {
+                let audio_url = crate::fetch::resolve_url(&source_url, audio_uri);
+                return build_hls_separate_fanout(reg, &source_url, &streams, &audio_url);
+            }
+        }
     }
     build_hls_ts_fanout(reg, &source_url, &streams)
+}
+
+#[cfg(all(test, feature = "hls"))]
+mod hls_hint_tests {
+    use super::hls_lang_hints;
+
+    #[test]
+    fn parses_language_hints_from_the_uri_fragment() {
+        // Both hints present: the URL is returned fragment-free.
+        let (url, a, s) = hls_lang_hints("host/master.m3u8#audio-lang=fr&subtitle-lang=en");
+        assert_eq!(url, "host/master.m3u8");
+        assert_eq!(a.as_deref(), Some("fr"));
+        assert_eq!(s.as_deref(), Some("en"));
+
+        // `text-lang` is an accepted alias for the subtitle hint; order-independent.
+        let (_, a, s) = hls_lang_hints("h/x.m3u8#text-lang=de");
+        assert_eq!(a, None);
+        assert_eq!(s.as_deref(), Some("de"));
+
+        // No fragment: no preferences, URL unchanged.
+        let (url, a, s) = hls_lang_hints("h/x.m3u8");
+        assert_eq!(url, "h/x.m3u8");
+        assert!(a.is_none() && s.is_none());
+    }
 }

@@ -172,6 +172,38 @@ impl MasterPlaylist {
             .max_by_key(|v| v.bandwidth)
             .or_else(|| self.variants.iter().min_by_key(|v| v.bandwidth))
     }
+
+    /// Pick a rendition from `group_id` of `media_type` by `language` preference
+    /// (M418): a `LANGUAGE` match wins (exact case-insensitive, then a primary-tag
+    /// prefix so `en` matches `en-US`); absent a match or a preference, the
+    /// `DEFAULT=YES` rendition, else the first in declaration order. `None` for an
+    /// empty group. The `playbin` HLS fan-out uses this to honour a
+    /// `#audio-lang=` / `#subtitle-lang=` URI hint when choosing the alternate
+    /// audio / subtitle rendition.
+    pub fn pick_rendition(&self, media_type: MediaType, group_id: &str, language: Option<&str>) -> Option<&Rendition> {
+        let group = self.renditions_in(media_type, group_id);
+        if let Some(pref) = language.map(str::trim).filter(|p| !p.is_empty()) {
+            if let Some(r) =
+                group.iter().find(|r| r.language.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(pref)))
+            {
+                return Some(r);
+            }
+            if let Some(r) =
+                group.iter().find(|r| r.language.as_deref().is_some_and(|l| lang_prefix_match(l, pref)))
+            {
+                return Some(r);
+            }
+        }
+        group.iter().find(|r| r.default).or_else(|| group.first()).copied()
+    }
+}
+
+/// True when `lang` is a regional refinement of the primary subtag `pref`, e.g.
+/// `lang_prefix_match("en-US", "en")`. A bare equal is handled by the caller's
+/// case-insensitive exact check, so this only matches the `pref-` prefix form.
+fn lang_prefix_match(lang: &str, pref: &str) -> bool {
+    let (lb, pb) = (lang.as_bytes(), pref.as_bytes());
+    lb.len() > pb.len() && lb[pb.len()] == b'-' && lb[..pb.len()].eq_ignore_ascii_case(pb)
 }
 
 /// Parse a `.m3u8` playlist. Returns master or media form.
@@ -566,6 +598,26 @@ mod tests {
         let subs = master.renditions_in(MediaType::Subtitles, "subs");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].uri.as_deref(), Some("subs/en.m3u8"));
+    }
+
+    #[test]
+    fn pick_rendition_honours_language_then_default() {
+        let text = "#EXTM3U\n\
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n\
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Français\",LANGUAGE=\"fr-FR\",URI=\"a/fr.m3u8\"\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv.m3u8\n";
+        let Playlist::Master(m) = parse(text).unwrap() else { panic!("master") };
+
+        // Exact language (case-insensitive).
+        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("FR-fr")).unwrap().name, "Français");
+        // Primary-subtag prefix: `fr` matches `fr-FR`.
+        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("fr")).unwrap().name, "Français");
+        // No preference -> the DEFAULT=YES rendition.
+        assert_eq!(m.pick_rendition(MediaType::Audio, "a", None).unwrap().name, "English");
+        // An unknown language falls back to DEFAULT, not nothing.
+        assert_eq!(m.pick_rendition(MediaType::Audio, "a", Some("de")).unwrap().name, "English");
+        // An empty group yields None.
+        assert!(m.pick_rendition(MediaType::Audio, "nope", Some("en")).is_none());
     }
 
     #[test]

@@ -283,9 +283,15 @@ leverage first:
   carries DVB subtitles (bitmap RLE, a `Caps::SubPicture` track, see below) and
   teletext (a page/magazine decoder), neither a text format `TextOverlayN`
   consumes, so there is no TS text stream to overlay until one of those lands.
-  HLS subtitle renditions (separate `.vtt` segments) now have everything they need
-  on the demux side (the overlay builder + `Caps::Text`), pending the HLS
-  rendition-selection plumbing. The startup I420/NV12 gap on
+  HLS subtitle renditions: discovery + language selection landed (M418 -
+  `variant_streams` surfaces `SUBTITLES` renditions as `Caps::Text`,
+  `MasterPlaylist::pick_rendition` selects by `#audio-lang=` / `#subtitle-lang=`
+  URI hint, audio fan-out honours it). Remaining is the subtitle *playback*
+  fan-out (the chosen text rendition wired into the overlay), which is
+  network-coupled: an `HlsSrc` text mode + segmented-WebVTT (`X-TIMESTAMP-MAP`)
+  handling for raw `.vtt` segments, or the fMP4 `wvtt` path (reuses M416) plus a
+  cross-source overlay join (the text rides a separate `HlsSrc` from the video).
+  The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`); on-screen `playbin` playback still needs live

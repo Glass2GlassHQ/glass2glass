@@ -40,7 +40,7 @@ use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, Seek, Segment, StreamType, VideoCodec,
+    PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
 };
 
 use crate::fetch::{
@@ -100,8 +100,8 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
 /// the alternate audio renditions its `AUDIO` group offers (each a separate
 /// `#EXT-X-MEDIA` playlist). When the variant binds an `AUDIO` group its audio is
 /// not muxed, so the muxed audio codec is dropped in favour of the group's
-/// renditions. Subtitles (no decode path / `Caps`) are discoverable via
-/// [`MasterPlaylist::renditions_in`] but not returned here.
+/// renditions, plus the alternate subtitle renditions its `SUBTITLES` group offers
+/// (M418: each a separate WebVTT playlist, surfaced as `Caps::Text { WebVtt }`).
 pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStreamInfo> {
     let mut out = Vec::new();
     let has_audio_group = variant.audio_group.is_some();
@@ -130,6 +130,23 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
             out.push(HlsStreamInfo {
                 stream_type: StreamType::Audio,
                 caps: Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+                video: false,
+                uri: Some(uri.clone()),
+                name: r.name.clone(),
+                language: r.language.clone(),
+            });
+        }
+    }
+    // Alternate subtitle renditions (separate WebVTT playlists) from the variant's
+    // SUBTITLES group. A subtitle rendition is always a separate playlist (a
+    // URI-less one is skipped). The segments are WebVTT (raw `.vtt` or fMP4 `wvtt`),
+    // parsed at run; the branch's negotiation target is `Caps::Text { WebVtt }`.
+    if let Some(group) = &variant.subtitles_group {
+        for r in master.renditions_in(MediaType::Subtitles, group) {
+            let Some(uri) = &r.uri else { continue };
+            out.push(HlsStreamInfo {
+                stream_type: StreamType::Text,
+                caps: Caps::Text { format: TextFormat::WebVtt },
                 video: false,
                 uri: Some(uri.clone()),
                 name: r.name.clone(),
@@ -685,5 +702,28 @@ mod tests {
         assert_eq!(streams[1].language.as_deref(), Some("en"));
         assert_eq!(streams[2].uri.as_deref(), Some("a/fr.m3u8"));
         assert!(streams[1..].iter().all(|s| !s.video));
+    }
+
+    #[test]
+    fn variant_streams_discovers_subtitle_renditions() {
+        // A SUBTITLES group: each rendition is a separate WebVTT playlist, surfaced
+        // as a Caps::Text stream alongside the muxed A/V (M418).
+        let m = master(
+            "#EXTM3U\n\
+             #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"s/en.m3u8\"\n\
+             #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"French\",LANGUAGE=\"fr\",URI=\"s/fr.m3u8\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.4d401e,mp4a.40.2\",SUBTITLES=\"subs\"\n\
+             v.m3u8\n",
+        );
+        let streams = variant_streams(&m, &m.variants[0]);
+        // muxed video + muxed audio (no AUDIO group) + two subtitle renditions.
+        let subs: Vec<_> = streams.iter().filter(|s| matches!(s.caps, Caps::Text { .. })).collect();
+        assert_eq!(subs.len(), 2, "two subtitle renditions discovered");
+        assert_eq!(subs[0].stream_type, StreamType::Text);
+        assert_eq!(subs[0].caps, Caps::Text { format: TextFormat::WebVtt });
+        assert_eq!(subs[0].uri.as_deref(), Some("s/en.m3u8"));
+        assert_eq!(subs[0].language.as_deref(), Some("en"));
+        assert_eq!(subs[1].uri.as_deref(), Some("s/fr.m3u8"));
+        assert!(subs.iter().all(|s| !s.video));
     }
 }
