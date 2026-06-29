@@ -83,6 +83,9 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
         TrackKind::Audio { format, .. } => {
             (Caps::Audio { format: *format, channels: 0, sample_rate: 0 }, false)
         }
+        // A timed-text track plugs as its cue format directly (the container
+        // carries the timing); not video, so the fan-out flag is false.
+        TrackKind::Text { format } => (Caps::Text { format: *format }, false),
     }
 }
 
@@ -91,7 +94,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
 /// For video this equals [`nego_caps`] (geometry is already concrete).
 fn real_caps(kind: &TrackKind) -> Caps {
     match kind {
-        TrackKind::Video { .. } => nego_caps(kind).0,
+        TrackKind::Video { .. } | TrackKind::Text { .. } => nego_caps(kind).0,
         TrackKind::Audio { format, channels, sample_rate, .. } => {
             Caps::Audio { format: *format, channels: *channels, sample_rate: *sample_rate }
         }
@@ -144,11 +147,16 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .map(|tracks| {
             tracks
                 .iter()
+                // Text tracks are discovered and forwardable by an explicit
+                // [`Mp4Port`], but `playbin` has no text-branch auto-plug yet, so
+                // omit them from the fan-out (an unplumbed `Caps::Text` branch
+                // would fail negotiation). Wired when the text auto-plug lands.
+                .filter(|t| !matches!(t.kind, TrackKind::Text { .. }))
                 .map(|t| {
                     let (caps, video) = nego_caps(&t.kind);
                     let asc = match &t.kind {
                         TrackKind::Audio { asc, .. } => asc.clone(),
-                        TrackKind::Video { .. } => Vec::new(),
+                        TrackKind::Video { .. } | TrackKind::Text { .. } => Vec::new(),
                     };
                     Mp4StreamInfo { track_id: t.track_id, caps, video, asc }
                 })
@@ -236,8 +244,11 @@ impl Mp4DemuxN {
         let streams: Vec<Stream> = tracks
             .iter()
             .map(|t| {
-                let video = matches!(t.kind, TrackKind::Video { .. });
-                let ty = if video { StreamType::Video } else { StreamType::Audio };
+                let ty = match t.kind {
+                    TrackKind::Video { .. } => StreamType::Video,
+                    TrackKind::Audio { .. } => StreamType::Audio,
+                    TrackKind::Text { .. } => StreamType::Text,
+                };
                 let name = alloc::format!("mp4-track-{}", t.track_id);
                 Stream::new(name, ty, real_caps(&t.kind))
             })
@@ -326,7 +337,9 @@ impl Mp4DemuxN {
                         data = framed;
                     }
                 }
-                None => {}
+                // Text cues arrive already de-framed (the tx3g length prefix is
+                // stripped in the sample parse); forward the UTF-8 payload as is.
+                Some(TrackKind::Text { .. }) | None => {}
             }
             need_sets[port] = false;
 
@@ -451,10 +464,15 @@ mod tests {
     struct PortCapture {
         caps: Vec<Option<Caps>>,
         frames: Vec<Vec<Vec<u8>>>,
+        ptss: Vec<Vec<u64>>,
     }
     impl PortCapture {
         fn new(ports: usize) -> Self {
-            Self { caps: alloc::vec![None; ports], frames: alloc::vec![Vec::new(); ports] }
+            Self {
+                caps: alloc::vec![None; ports],
+                frames: alloc::vec![Vec::new(); ports],
+                ptss: alloc::vec![Vec::new(); ports],
+            }
         }
     }
     impl MultiOutputSink for PortCapture {
@@ -471,6 +489,7 @@ mod tests {
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps[port] = Some(c),
                     PipelinePacket::DataFrame(f) => {
+                        self.ptss[port].push(f.timing.pts_ns);
                         if let MemoryDomain::System(s) = &f.domain {
                             self.frames[port].push(s.as_slice().to_vec());
                         }
@@ -687,6 +706,123 @@ mod tests {
             Some(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }),
             "AacParse recovers the real channel layout / sample rate from the wired-in ASC"
         );
+    }
+
+    /// A progressive MP4 carrying a `tx3g` 3GPP-timed-text subtitle track fans its
+    /// cues out as a `Caps::Text { Utf8 }` port: each cue's UTF-8 payload (the
+    /// 2-byte length prefix stripped) lands on the text port with the container's
+    /// per-cue PTS. Proves subtitle-track extraction end to end. The text track is
+    /// also kept out of `forwardable_streams` (no playbin text-branch auto-plug
+    /// yet), so existing A/V auto-plug is unaffected.
+    #[test]
+    fn extracts_a_tx3g_subtitle_track() {
+        use crate::fmp4::parse_all_tracks;
+        use crate::mp4box::{full_box, mp4_box};
+        use g2g_core::TextFormat;
+
+        // --- box builders (same offsets the parser reads) -----------------
+        let tkhd = |track_id: u32| {
+            let mut c = alloc::vec![0u8; 80];
+            c[8..12].copy_from_slice(&track_id.to_be_bytes());
+            full_box(b"tkhd", 0, 0, &c)
+        };
+        let mdhd = |timescale: u32| {
+            let mut c = alloc::vec![0u8; 16];
+            c[8..12].copy_from_slice(&timescale.to_be_bytes());
+            full_box(b"mdhd", 0, 0, &c)
+        };
+        let hdlr = |handler: &[u8; 4]| {
+            let mut c = alloc::vec![0u8; 20];
+            c[4..8].copy_from_slice(handler);
+            full_box(b"hdlr", 0, 0, &c)
+        };
+        let stsd = |entry: &[u8]| {
+            let mut p = 1u32.to_be_bytes().to_vec();
+            p.extend_from_slice(entry);
+            full_box(b"stsd", 0, 0, &p)
+        };
+        let stsz = |sizes: &[u32]| {
+            let mut b = alloc::vec![0u8; 8]; // default_size 0, then count
+            b[4..8].copy_from_slice(&(sizes.len() as u32).to_be_bytes());
+            for s in sizes {
+                b.extend_from_slice(&s.to_be_bytes());
+            }
+            full_box(b"stsz", 0, 0, &b)
+        };
+        let stts = |count: u32, delta: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&count.to_be_bytes());
+            b.extend_from_slice(&delta.to_be_bytes());
+            full_box(b"stts", 0, 0, &b)
+        };
+        let stsc = |spc: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
+            b.extend_from_slice(&spc.to_be_bytes()); // samples_per_chunk
+            b.extend_from_slice(&1u32.to_be_bytes()); // sample_desc_index
+            full_box(b"stsc", 0, 0, &b)
+        };
+        let stco = |offset: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&offset.to_be_bytes());
+            full_box(b"stco", 0, 0, &b)
+        };
+
+        // A tx3g sample = 2-byte big-endian text length + that many UTF-8 bytes.
+        let cue = |text: &str| {
+            let mut s = (text.len() as u16).to_be_bytes().to_vec();
+            s.extend_from_slice(text.as_bytes());
+            s
+        };
+        let c0 = cue("Hello");
+        let c1 = cue("World");
+        let sizes = [c0.len() as u32, c1.len() as u32];
+
+        // Minimal tx3g sample entry: the 8-byte SampleEntry header is all the
+        // parser inspects (it only needs the `tx3g` box to be present).
+        let tx3g = mp4_box(b"tx3g", &[0u8; 8]);
+
+        // mdat first, so the chunk offset is the constant 8 (after the box header)
+        // and the moov needs no placeholder rebuild.
+        let mut mdat_body = c0.clone();
+        mdat_body.extend_from_slice(&c1);
+        let mdat = mp4_box(b"mdat", &mdat_body);
+
+        // timescale 1000 (ms): cue 0 at t=0, cue 1 at t=1000 (1 s), each 1 s long.
+        let stbl = [stsd(&tx3g), stsz(&sizes), stts(2, 1000), stsc(2), stco(8)].concat();
+        let minf = mp4_box(b"minf", &mp4_box(b"stbl", &stbl));
+        let mdia = mp4_box(b"mdia", &[mdhd(1000), hdlr(b"text"), minf].concat());
+        let trak = mp4_box(b"trak", &[tkhd(1), mdia].concat());
+        let moov = mp4_box(b"moov", &trak);
+
+        let mut file = mdat;
+        file.extend_from_slice(&moov);
+
+        // --- parse: one Utf8 text track --------------------------------------
+        let tracks = parse_all_tracks(&file).expect("text track parses");
+        assert_eq!(tracks.len(), 1, "the subtitle track is discovered");
+        assert!(
+            matches!(tracks[0].kind, TrackKind::Text { format: TextFormat::Utf8 }),
+            "tx3g maps to Caps::Text {{ Utf8 }}"
+        );
+
+        // The playbin fan-out omits text (no text-branch auto-plug yet).
+        assert!(forwardable_streams(&file).is_empty(), "text excluded from auto-plug");
+
+        // --- fan out: the cues land on the text port -------------------------
+        let ports = alloc::vec![Mp4Port { track_id: 1, caps: real_caps(&tracks[0].kind) }];
+        let mut demux = Mp4DemuxN::new(ports);
+        let mut out = PortCapture::new(1);
+        block_on(async {
+            demux.process(vframe(file, 0), &mut out).await.unwrap();
+            demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        });
+
+        assert_eq!(out.caps[0], Some(Caps::Text { format: TextFormat::Utf8 }));
+        assert_eq!(out.frames[0].len(), 2, "two cues");
+        assert_eq!(out.frames[0][0], b"Hello", "tx3g length prefix stripped to the cue");
+        assert_eq!(out.frames[0][1], b"World");
+        assert_eq!(out.ptss[0], alloc::vec![0, 1_000_000_000], "per-cue PTS from the container");
     }
 
     /// An encrypted (cbcs) H.264 track fans out and decrypts: a hand-built `encv`

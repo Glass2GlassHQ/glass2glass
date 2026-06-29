@@ -1517,7 +1517,15 @@ known without sniffing the byte stream.
   `cenc` defaults, `parse_fragments_multi` decrypts each track's samples (per
   `traf` `senc`) via a callback, and `Mp4DemuxN::with_cenc_key` supplies the
   clear-key content key (the cbcs primitive lives in a shared `cenc` module, used
-  by both this and the HLS fMP4 path). `hls_playbin` (M395) is the HLS sibling:
+  by both this and the HLS fMP4 path). A timed-text `trak` (handler `text` / `sbtl`
+  / `subt`) carrying a `tx3g` 3GPP-timed-text sample entry is read as a
+  `TrackKind::Text` and fans out as a `Caps::Text { Utf8 }` port (M411): the
+  container supplies the per-cue timing (the sample table's PTS + duration), and a
+  sample's 2-byte length prefix is stripped to the UTF-8 cue, so an embedded
+  subtitle track feeds `SubParse` / `TextOverlayN` like a sidecar file would. Text
+  tracks are not yet in the `playbin` auto-plug fan-out (`forwardable_streams`
+  omits them until a text-branch auto-plug lands); `wvtt` / `stpp` sample formats
+  are recognized-but-declined. `hls_playbin` (M395) is the HLS sibling:
   it probes a `hls://` master playlist (the scheme maps to an `https` origin),
   discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
   alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group

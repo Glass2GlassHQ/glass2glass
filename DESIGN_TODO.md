@@ -268,8 +268,13 @@ leverage first:
   cue positioning carried as `TextCueMeta` frame-meta (M406). Remaining
   text-document work: register `SubParse` / `TextOverlayN` (and a text source /
   sink) in the launch registry so `gst-launch` text pipelines parse;
-  subtitle-track extraction out of the MKV / TS / MP4 demuxers as `Caps::Text`
-  (feeds `TextOverlayN`); parsing SSA / TTML placement into `CueSettings` (only
+  subtitle-track extraction out of the demuxers as `Caps::Text` (feeds
+  `TextOverlayN`) is started: MP4 `tx3g` timed text fans out of `Mp4DemuxN` as
+  `Caps::Text{Utf8}` (M411); still open are MP4 `wvtt` / `stpp` sample formats,
+  the MKV `S_TEXT/{UTF8,ASS,WEBVTT}` codec IDs, the MPEG-TS DVB / teletext
+  streams, and a `playbin` text-branch auto-plug that consumes them (the demuxer
+  exposes the track but `forwardable_streams` still omits it); parsing SSA / TTML
+  placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
   above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied

@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, G2gError, VideoCodec};
+use g2g_core::{AudioFormat, G2gError, TextFormat, VideoCodec};
 
 use crate::mp4box::{be32, be64, boxes, find_box, find_path, parse_esds};
 
@@ -141,13 +141,18 @@ pub(crate) fn parse_header(data: &[u8]) -> Result<Header, G2gError> {
 }
 
 /// What one track carries: a video elementary stream (codec + geometry +
-/// parameter sets) or an audio elementary stream (format + channel layout +
-/// AudioSpecificConfig). The multi-track read-side analog of `TrackInit` in the
-/// muxer; clear tracks only (encryption stays single-track via [`parse_header`]).
+/// parameter sets), an audio elementary stream (format + channel layout +
+/// AudioSpecificConfig), or a timed-text stream (subtitle format). The
+/// multi-track read-side analog of `TrackInit` in the muxer; clear tracks only
+/// (encryption stays single-track via [`parse_header`]).
 #[derive(Debug, Clone)]
 pub(crate) enum TrackKind {
     Video { codec: VideoCodec, width: u32, height: u32, param_sets: Vec<Vec<u8>> },
     Audio { format: AudioFormat, channels: u8, sample_rate: u32, asc: Vec<u8> },
+    /// A timed-text subtitle track. The container carries the per-cue timing
+    /// (sample PTS + duration); `format` names the cue payload's syntax (today
+    /// always [`TextFormat::Utf8`] from a `tx3g` 3GPP-timed-text sample entry).
+    Text { format: TextFormat },
 }
 
 /// One track's init data parsed from a `moov/trak`: the `track_ID` (which keys
@@ -162,11 +167,12 @@ pub(crate) struct TrackHeader {
     pub(crate) cenc: Option<CencDefaults>,
 }
 
-/// Parse every forwardable (`vide` / `soun`) track out of a `moov` into a
-/// [`TrackHeader`]. The single-track [`parse_header`] reads only the first
+/// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
+/// into a [`TrackHeader`]. The single-track [`parse_header`] reads only the first
 /// `trak`; this walks them all (what an A/V `.mp4` carries). Tracks with an
-/// unrecognized handler (text, subtitles) are skipped, not errors; a malformed
-/// video / audio track fails the parse. Errors if no track is forwardable.
+/// unrecognized handler (or a text handler whose sample entry we do not de-frame,
+/// e.g. `wvtt` / `stpp`) are skipped, not errors; a malformed video / audio track
+/// fails the parse. Errors if no track is forwardable.
 pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError> {
     let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
     let mut tracks = Vec::new();
@@ -184,8 +190,8 @@ pub(crate) fn parse_all_tracks(data: &[u8]) -> Result<Vec<TrackHeader>, G2gError
     Ok(tracks)
 }
 
-/// Parse one `trak`. Returns `None` for a non-A/V handler (skip it), `Err` for a
-/// malformed video / audio track.
+/// Parse one `trak`. Returns `None` for a handler we do not forward (skip it),
+/// `Err` for a malformed video / audio track.
 fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     // tkhd v0: track_ID at payload offset 12 (4 version/flags + 8 times), then
     // width/height as 16.16 at 76/80.
@@ -219,7 +225,14 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
     let (kind, cenc) = match handler {
         b"vide" => parse_video_entry(entries, width, height)?,
         b"soun" => parse_audio_entry(entries, timescale)?,
-        _ => return Ok(None), // text / subtitle / hint: not forwarded
+        // A subtitle / timed-text handler (`text` = 3GPP/QuickTime timed text,
+        // `sbtl` / `subt` = MP4 / ISO subtitle). Forwarded only when its sample
+        // entry is one we de-frame (`tx3g`); an unrecognized text codec is skipped.
+        b"text" | b"sbtl" | b"subt" => match parse_text_entry(entries) {
+            Some(kind) => (kind, None),
+            None => return Ok(None),
+        },
+        _ => return Ok(None), // hint / metadata / unknown handler: not forwarded
     };
     Ok(Some(TrackHeader { track_id, timescale, kind, cenc }))
 }
@@ -293,6 +306,31 @@ fn parse_audio_entry(
         .ok_or(G2gError::CapsMismatch)?;
     let asc = parse_esds(esds)?;
     Ok((TrackKind::Audio { format: AudioFormat::Aac, channels, sample_rate: timescale, asc }, cenc))
+}
+
+/// Recognize a timed-text sample entry and map it to the [`TrackKind::Text`] the
+/// cue payload carries. Only 3GPP timed text (`tx3g`, plain UTF-8 cues) is
+/// de-framed today, so it alone is forwarded; the `wvtt` (WebVTT-in-MP4) and
+/// `stpp` (TTML) sample formats carry their own per-sample box structure and are
+/// not yet read, so they decline here (the track is skipped, not an error).
+fn parse_text_entry(entries: &[u8]) -> Option<TrackKind> {
+    if find_box(entries, b"tx3g").is_some() {
+        Some(TrackKind::Text { format: TextFormat::Utf8 })
+    } else {
+        None
+    }
+}
+
+/// Strip a 3GPP timed-text (`tx3g`) sample to its UTF-8 cue bytes: a 2-byte
+/// big-endian text length, that many UTF-8 bytes, then optional style / modifier
+/// boxes (ignored). A zero-length sample is the gap between cues and forwards as
+/// an empty string, so a downstream overlay clears. The length is untrusted: a
+/// prefix longer than the sample yields an empty cue rather than panicking.
+fn deframe_tx3g(raw: &[u8]) -> Vec<u8> {
+    let Some(len) = raw.get(0..2).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize) else {
+        return Vec::new();
+    };
+    raw.get(2..2usize.saturating_add(len)).map(<[u8]>::to_vec).unwrap_or_default()
 }
 
 /// The decode state carried from a `moof` to its following `mdat`: the track id,
@@ -397,6 +435,8 @@ pub(crate) fn parse_fragments_multi(
                         }
                         // Audio access units are stored verbatim; each is a sync point.
                         TrackKind::Audio { .. } => (bytes.to_vec(), true),
+                        // A timed-text cue is independent; strip the tx3g framing.
+                        TrackKind::Text { .. } => (deframe_tx3g(bytes), true),
                     };
                     out.push((
                         track_id,
@@ -642,19 +682,42 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
     let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
     // Single video track: de-frame AVCC -> Annex-B.
-    parse_progressive_track(data, stbl, timescale, true)
+    parse_progressive_track(data, stbl, timescale, SampleFraming::Video)
+}
+
+/// How a progressive track's stored samples map to the elementary bytes the
+/// pipeline carries: video de-frames AVCC -> Annex-B, audio passes through
+/// verbatim (each is a sync sample), and a `tx3g` timed-text sample strips its
+/// 2-byte length prefix to the UTF-8 cue.
+#[derive(Debug, Clone, Copy)]
+enum SampleFraming {
+    Video,
+    PassThrough,
+    Tx3gText,
+}
+
+impl SampleFraming {
+    /// The de-framing a track's [`TrackKind`] selects.
+    fn of(kind: &TrackKind) -> Self {
+        match kind {
+            TrackKind::Video { .. } => SampleFraming::Video,
+            TrackKind::Audio { .. } => SampleFraming::PassThrough,
+            TrackKind::Text { .. } => SampleFraming::Tx3gText,
+        }
+    }
 }
 
 /// Parse the samples of one progressive track from its `stbl` sample tables,
 /// addressing the elementary data in `data` by the absolute chunk offsets. The
 /// per-track core shared by [`parse_progressive`] (single video track) and
-/// [`parse_progressive_multi`] (every A/V track). `video` selects AVCC->Annex-B
-/// de-framing; an audio track passes its samples through verbatim.
+/// [`parse_progressive_multi`] (every A/V / text track). `framing` selects how a
+/// stored sample maps to the elementary bytes (AVCC->Annex-B, pass-through, or
+/// tx3g text de-framing).
 fn parse_progressive_track(
     data: &[u8],
     stbl: &[u8],
     timescale: u32,
-    video: bool,
+    framing: SampleFraming,
 ) -> Result<Vec<Sample>, G2gError> {
     // stsz: per-sample sizes. A non-zero `default_size` means every sample is
     // that size (no table); otherwise a `sample_count`-long table follows.
@@ -780,7 +843,11 @@ fn parse_progressive_track(
             Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
             None => true,
         };
-        let annexb = if video { avcc_to_annexb(raw)? } else { raw.to_vec() };
+        let annexb = match framing {
+            SampleFraming::Video => avcc_to_annexb(raw)?,
+            SampleFraming::PassThrough => raw.to_vec(),
+            SampleFraming::Tx3gText => deframe_tx3g(raw),
+        };
         samples.push(Sample {
             annexb,
             pts_ns: timescale_to_ns(pts, timescale),
@@ -792,8 +859,8 @@ fn parse_progressive_track(
     Ok(samples)
 }
 
-/// Parse a progressive (`moov`+`mdat`, no `moof`) multi-track file: every A/V
-/// track's samples, keyed by `track_ID`, in track order. The progressive analog
+/// Parse a progressive (`moov`+`mdat`, no `moof`) multi-track file: every A/V /
+/// text track's samples, keyed by `track_ID`, in track order. The progressive analog
 /// of [`parse_fragments_multi`] (and the multi-track form of [`parse_progressive`]),
 /// for files that carry several tracks in classic sample-table layout rather than
 /// fragments. Each track's `stbl` is walked independently against its own
@@ -810,8 +877,8 @@ pub(crate) fn parse_progressive_multi(
         };
         let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
         let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
-        let video = matches!(track.kind, TrackKind::Video { .. });
-        for s in parse_progressive_track(data, stbl, track.timescale, video)? {
+        let framing = SampleFraming::of(&track.kind);
+        for s in parse_progressive_track(data, stbl, track.timescale, framing)? {
             out.push((track.track_id, s));
         }
     }
