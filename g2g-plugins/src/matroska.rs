@@ -26,7 +26,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{Tag, TagList};
+use g2g_core::{Tag, TagList, TextFormat};
 
 /// EBML / Matroska element IDs (kept whole, length marker included). The demuxer
 /// skips the EBML header by its size and ignores TrackType (the CodecID pins the
@@ -59,6 +59,7 @@ const ID_TIMESTAMP: u32 = 0x00E7;
 const ID_SIMPLE_BLOCK: u32 = 0x00A3;
 const ID_BLOCK_GROUP: u32 = 0x00A0;
 const ID_BLOCK: u32 = 0x00A1;
+const ID_BLOCK_DURATION: u32 = 0x009B;
 const ID_SEEK_HEAD: u32 = 0x114D_9B74;
 const ID_SEEK: u32 = 0x4DBB;
 const ID_SEEK_ID: u32 = 0x53AB;
@@ -104,6 +105,11 @@ pub enum MkvCodec {
     Av1,
     Aac,
     Opus,
+    /// A timed-text subtitle track (`S_TEXT/*`); `format` names the cue payload's
+    /// syntax. Only `S_TEXT/UTF8` (plain UTF-8 cues -> [`TextFormat::Utf8`]) is
+    /// mapped today; `S_TEXT/ASS` / `S_TEXT/WEBVTT` (whose per-block payload needs
+    /// the track's `CodecPrivate` header to reconstruct) stay [`MkvCodec::Other`].
+    Subtitle(TextFormat),
     /// A `CodecID` this demuxer does not map to a g2g caps type.
     Other,
 }
@@ -126,6 +132,8 @@ impl MkvCodec {
             MkvCodec::Aac
         } else if id == b"A_OPUS" {
             MkvCodec::Opus
+        } else if id == b"S_TEXT/UTF8" {
+            MkvCodec::Subtitle(TextFormat::Utf8)
         } else {
             MkvCodec::Other
         }
@@ -142,7 +150,8 @@ impl MkvCodec {
             MkvCodec::Av1 => b"V_AV1",
             MkvCodec::Aac => b"A_AAC",
             MkvCodec::Opus => b"A_OPUS",
-            MkvCodec::Other => return None,
+            MkvCodec::Subtitle(TextFormat::Utf8) => b"S_TEXT/UTF8",
+            MkvCodec::Subtitle(_) | MkvCodec::Other => return None,
         })
     }
 
@@ -151,10 +160,11 @@ impl MkvCodec {
         matches!(self, MkvCodec::Vp8 | MkvCodec::Vp9 | MkvCodec::Av1 | MkvCodec::Opus)
     }
 
-    /// `1` for video, `2` for audio (the Matroska `TrackType`).
+    /// `1` for video, `2` for audio, `0x11` for subtitle (the Matroska `TrackType`).
     fn track_type(self) -> u8 {
         match self {
             MkvCodec::Aac | MkvCodec::Opus => 2,
+            MkvCodec::Subtitle(_) => 0x11,
             _ => 1,
         }
     }
@@ -197,6 +207,10 @@ pub struct MkvFrame {
     pub codec: MkvCodec,
     /// Presentation timestamp in nanoseconds (cluster + block, scaled).
     pub pts_ns: u64,
+    /// The cue's display duration in nanoseconds, from the `BlockGroup`'s
+    /// `BlockDuration` (scaled). `0` when the block carries none, e.g. a
+    /// `SimpleBlock` (so video / audio, paced by PTS deltas, leave it `0`).
+    pub duration_ns: u64,
     pub keyframe: bool,
     pub data: Vec<u8>,
 }
@@ -657,18 +671,40 @@ fn parse_cluster(body: &[u8], tracks: &[MkvTrack], scale: u64) -> Vec<MkvFrame> 
     for (id, data) in children(body) {
         match id {
             ID_TIMESTAMP => cluster_ts = read_uint(data),
-            ID_SIMPLE_BLOCK => parse_block(data, cluster_ts, scale, tracks, &mut frames),
-            ID_BLOCK_GROUP => {
-                for (bid, bdata) in children(data) {
-                    if bid == ID_BLOCK {
-                        parse_block(bdata, cluster_ts, scale, tracks, &mut frames);
-                    }
-                }
-            }
+            ID_SIMPLE_BLOCK => parse_block(data, cluster_ts, scale, tracks, 0, &mut frames),
+            ID_BLOCK_GROUP => parse_block_group(data, cluster_ts, scale, tracks, &mut frames),
             _ => {}
         }
     }
     frames
+}
+
+/// Parse a `BlockGroup`'s frames, carrying its `BlockDuration` (the cue display
+/// window, essential for a subtitle track) onto them. Scans the children for the
+/// `Block` and the optional `BlockDuration` (either order), then de-frames the
+/// block with the scaled duration. The block-element analog used by both Cluster
+/// paths (definite- and unknown-size).
+fn parse_block_group(
+    group: &[u8],
+    cluster_ts: u64,
+    scale: u64,
+    tracks: &[MkvTrack],
+    out: &mut Vec<MkvFrame>,
+) {
+    let mut block: Option<&[u8]> = None;
+    let mut duration_raw = 0u64;
+    for (bid, bdata) in children(group) {
+        match bid {
+            ID_BLOCK => block = Some(bdata),
+            ID_BLOCK_DURATION => duration_raw = read_uint(bdata),
+            _ => {}
+        }
+    }
+    if let Some(b) = block {
+        // BlockDuration is in TimestampScale ticks, like the block timestamp.
+        let duration_ns = duration_raw.saturating_mul(scale);
+        parse_block(b, cluster_ts, scale, tracks, duration_ns, out);
+    }
 }
 
 /// Parse a single Cluster child block element (a `SimpleBlock` or `BlockGroup`)
@@ -683,14 +719,8 @@ fn parse_block_element(
 ) -> Vec<MkvFrame> {
     let mut frames = Vec::new();
     match id {
-        ID_SIMPLE_BLOCK => parse_block(body, cluster_ts, scale, tracks, &mut frames),
-        ID_BLOCK_GROUP => {
-            for (bid, bdata) in children(body) {
-                if bid == ID_BLOCK {
-                    parse_block(bdata, cluster_ts, scale, tracks, &mut frames);
-                }
-            }
-        }
+        ID_SIMPLE_BLOCK => parse_block(body, cluster_ts, scale, tracks, 0, &mut frames),
+        ID_BLOCK_GROUP => parse_block_group(body, cluster_ts, scale, tracks, &mut frames),
         _ => {}
     }
     frames
@@ -706,6 +736,7 @@ fn parse_block(
     cluster_ts: u64,
     scale: u64,
     tracks: &[MkvTrack],
+    duration_ns: u64,
     out: &mut Vec<MkvFrame>,
 ) {
     let Some((track, tn_len, _)) = read_size(block, 0) else { return };
@@ -744,7 +775,7 @@ fn parse_block(
         // default_duration_ns is untrusted; saturate the spacing multiply too,
         // not just the add.
         let frame_pts = pts_ns.saturating_add((i as u64).saturating_mul(default_duration_ns));
-        out.push(MkvFrame { track, codec, pts_ns: frame_pts, keyframe, data: data.to_vec() });
+        out.push(MkvFrame { track, codec, pts_ns: frame_pts, duration_ns, keyframe, data: data.to_vec() });
     }
 }
 
@@ -1326,6 +1357,42 @@ mod tests {
         [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
     }
 
+    /// A Matroska `S_TEXT/UTF8` subtitle track is recognized as
+    /// `MkvCodec::Subtitle(Utf8)` and its `BlockGroup` cue is demuxed with the
+    /// UTF-8 text, the cluster+block PTS, and the `BlockDuration` (scaled) as the
+    /// display window, so a subtitle track flows like a timed-text stream.
+    #[test]
+    fn extracts_a_subtitle_track_with_block_duration() {
+        let tracks =
+            elem(&[0x16, 0x54, 0xAE, 0x6B], &track_entry(1, b"S_TEXT/UTF8", None, None));
+        // A BlockGroup: Block (track 1, rel 0, "Hello") + BlockDuration 2000 ticks.
+        let block = elem(&[0xA1], &block_body(1, 0, true, b"Hello"));
+        let duration = elem(&[0x9B], &uint_body(2000));
+        let group = elem(&[0xA0], &[block, duration].concat());
+        let cluster = elem(
+            &[0x1F, 0x43, 0xB6, 0x75],
+            &[elem(&[0xE7], &uint_body(1000)), group].concat(), // cluster timestamp 1000
+        );
+        let segment = elem(&[0x18, 0x53, 0x80, 0x67], &[tracks, cluster].concat());
+        let file = [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat();
+
+        let mut d = MatroskaDemuxer::new();
+        d.push_data(&file);
+        assert_eq!(
+            d.tracks()[0].codec,
+            MkvCodec::Subtitle(TextFormat::Utf8),
+            "S_TEXT/UTF8 maps to a Utf8 subtitle track"
+        );
+        let frames = d.take_frames();
+        assert_eq!(frames.len(), 1, "the cue is demuxed");
+        let f = &frames[0];
+        assert_eq!(f.codec, MkvCodec::Subtitle(TextFormat::Utf8));
+        assert_eq!(f.data, b"Hello", "the block payload is the cue text");
+        // Default TimestampScale is 1_000_000 ns/tick (no Info element overrides it).
+        assert_eq!(f.pts_ns, 1000 * 1_000_000, "cluster+block timestamp, scaled");
+        assert_eq!(f.duration_ns, 2000 * 1_000_000, "BlockDuration, scaled");
+    }
+
     #[test]
     fn vint_round_trips_through_read_size() {
         for v in [0u64, 1, 100, 127, 128, 16_383, 16_384, 1_000_000] {
@@ -1362,7 +1429,7 @@ mod tests {
         let frames = d.take_frames();
         assert_eq!(frames.len(), 3, "two video + one audio");
         // Cluster ts 1000 * default scale 1_000_000 ns = 1 ms.
-        assert_eq!(frames[0], MkvFrame { track: 1, codec: MkvCodec::Vp9, pts_ns: 1_000 * 1_000_000, keyframe: true, data: vec![0xDE, 0xAD] });
+        assert_eq!(frames[0], MkvFrame { track: 1, codec: MkvCodec::Vp9, pts_ns: 1_000 * 1_000_000, duration_ns: 0, keyframe: true, data: vec![0xDE, 0xAD] });
         assert_eq!(frames[1].codec, MkvCodec::Opus);
         assert_eq!(frames[1].data, vec![0xBE, 0xEF]);
         // rel +33 -> (1000+33) * scale.

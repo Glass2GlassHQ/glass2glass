@@ -44,7 +44,7 @@ use g2g_core::{
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
     MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, TagList,
-    VideoCodec,
+    TextFormat, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -64,6 +64,8 @@ pub enum MkvStream {
     Av1,
     Aac,
     Opus,
+    /// A timed-text subtitle stream (`S_TEXT/UTF8` -> `Caps::Text { format }`).
+    Subtitle(TextFormat),
 }
 
 /// A Matroska `Cues` prefetch in flight (M374): an end-of-file `Cues` index
@@ -235,6 +237,7 @@ impl MkvDemux {
             MkvStream::Av1 => Self::compressed_video(VideoCodec::Av1),
             MkvStream::Aac => Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
             MkvStream::Opus => Caps::Audio { format: AudioFormat::Opus, channels: 0, sample_rate: 0 },
+            MkvStream::Subtitle(format) => Caps::Text { format },
         }
     }
 
@@ -257,6 +260,7 @@ impl MkvDemux {
             MkvStream::Av1 => MkvCodec::Av1,
             MkvStream::Aac => MkvCodec::Aac,
             MkvStream::Opus => MkvCodec::Opus,
+            MkvStream::Subtitle(format) => MkvCodec::Subtitle(format),
         }
     }
 
@@ -287,6 +291,8 @@ impl MkvDemux {
                 channels: track.channels.max(1),
                 sample_rate: track.sample_rate,
             }),
+            // A text track carries no geometry / rate to refine; its caps is final.
+            text @ Caps::Text { .. } => Some(text),
             _ => None,
         }
     }
@@ -354,6 +360,7 @@ impl MkvDemux {
             MkvCodec::Av1 => (StreamType::Video, video(VideoCodec::Av1)),
             MkvCodec::Aac => (StreamType::Audio, audio(AudioFormat::Aac)),
             MkvCodec::Opus => (StreamType::Audio, audio(AudioFormat::Opus)),
+            MkvCodec::Subtitle(format) => (StreamType::Text, Caps::Text { format }),
             MkvCodec::Other => return None,
         };
         Some(Stream::new(id, stream_type, caps))
@@ -421,7 +428,7 @@ impl MkvDemux {
             }
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
-                FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..FrameTiming::default() },
+                FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
                 self.emitted,
             );
             self.emitted += 1;
@@ -577,6 +584,7 @@ fn codec_to_stream(codec: MkvCodec) -> Option<MkvStream> {
         MkvCodec::Av1 => Some(MkvStream::Av1),
         MkvCodec::Aac => Some(MkvStream::Aac),
         MkvCodec::Opus => Some(MkvStream::Opus),
+        MkvCodec::Subtitle(format) => Some(MkvStream::Subtitle(format)),
         MkvCodec::Other => None,
     }
 }
@@ -609,6 +617,12 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
         .iter()
         .filter_map(|t| {
             let stream = codec_to_stream(t.codec)?;
+            // Subtitle tracks are discovered (and forwardable by an explicit
+            // MkvDemuxN port) but not yet auto-plugged by playbin (no MKV
+            // text-branch overlay wiring), so omit them from the A/V fan-out.
+            if matches!(stream, MkvStream::Subtitle(_)) {
+                return None;
+            }
             let video = matches!(
                 stream,
                 MkvStream::H264 | MkvStream::H265 | MkvStream::Vp8 | MkvStream::Vp9 | MkvStream::Av1
@@ -649,6 +663,7 @@ fn mkv_stream_to_str(stream: MkvStream) -> &'static str {
         MkvStream::Av1 => "av1",
         MkvStream::Aac => "aac",
         MkvStream::Opus => "opus",
+        MkvStream::Subtitle(_) => "text",
     }
 }
 
@@ -664,6 +679,7 @@ impl PadTemplates for MkvDemux {
             Self::output_caps(MkvStream::Av1),
             Self::output_caps(MkvStream::Aac),
             Self::output_caps(MkvStream::Opus),
+            Self::output_caps(MkvStream::Subtitle(TextFormat::Utf8)),
         ]));
         Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
     }
@@ -854,7 +870,7 @@ impl MultiOutputElement for MkvDemuxN {
                         }
                         let out_frame = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(f.data.into_boxed_slice())),
-                            FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, ..FrameTiming::default() },
+                            FrameTiming { pts_ns: f.pts_ns, dts_ns: f.pts_ns, duration_ns: f.duration_ns, ..FrameTiming::default() },
                             self.emitted,
                         );
                         self.emitted += 1;

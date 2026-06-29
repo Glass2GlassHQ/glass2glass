@@ -1973,10 +1973,17 @@ a pure EBML parser (variable-length element IDs / sizes, descend into the Segmen
 read Tracks for the elementary streams and `Info` TimestampScale, parse each
 Cluster's SimpleBlock / Block frames with scaled timestamps), and `MkvDemux` wraps
 it with the same per-codec `MkvStream` selection (H.264 / H.265 / VP8 / VP9 / AV1
-video, AAC / Opus audio, default VP9). Unlike `TsDemux`, Matroska's Tracks element
-carries concrete geometry and audio parameters, so the demuxer refines the output
-caps itself via `CapsChanged` once Tracks is parsed, without a downstream bitstream
-parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
+video, AAC / Opus audio, default VP9). A `S_TEXT/UTF8` subtitle track is also read
+(M413): it maps to `MkvCodec::Subtitle(Utf8)` and fans out of `MkvDemuxN` as a
+`Caps::Text { Utf8 }` port (`MkvStream::Subtitle`), with the cue's display window
+carried on the frame, the `BlockGroup`'s `BlockDuration` scaled onto
+`MkvFrame.duration_ns` (a `SimpleBlock` leaves it `0`). Like the MP4 path, subtitle
+tracks stay out of the `playbin` A/V fan-out for now (no MKV text-branch overlay
+wiring yet), and `S_TEXT/ASS` / `S_TEXT/WEBVTT` (whose per-block payload needs the
+`CodecPrivate` header to reconstruct) are not yet read. Unlike `TsDemux`,
+Matroska's Tracks element carries concrete geometry and audio parameters, so the
+demuxer refines the output caps itself via `CapsChanged` once Tracks is parsed,
+without a downstream bitstream parser. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
 lacing (Xiph / EBML / fixed) is split (M113), so multi-frame audio blocks demux.
 The `Cues` index is parsed into a time -> Cluster-byte-position map
 (`cue_seek_offset`, M373), and `MkvDemux` seeks through it in three tiers

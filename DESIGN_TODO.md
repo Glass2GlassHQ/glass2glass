@@ -271,9 +271,12 @@ leverage first:
   subtitle-track extraction out of the demuxers as `Caps::Text` (feeds
   `TextOverlayN`) is started: MP4 `tx3g` timed text fans out of `Mp4DemuxN` as
   `Caps::Text{Utf8}` (M411) and `mp4_playbin` auto-plugs it through a
-  `TextOverlayN` on the video branch (M412); still open are MP4 `wvtt` / `stpp`
-  sample formats, the MKV `S_TEXT/{UTF8,ASS,WEBVTT}` codec IDs, and the MPEG-TS
-  DVB / teletext streams (each with its own `playbin` overlay wiring). The
+  `TextOverlayN` on the video branch (M412); MKV `S_TEXT/UTF8` likewise fans out of
+  `MkvDemuxN` as `Caps::Text{Utf8}` with the `BlockDuration` cue window (M413).
+  Still open are MP4 `wvtt` / `stpp` sample formats, the MKV `S_TEXT/ASS` /
+  `S_TEXT/WEBVTT` codec IDs (their per-block payload needs the `CodecPrivate`
+  header), the MPEG-TS DVB / teletext streams, and the `playbin` text-branch
+  overlay wiring for MKV / TS (MP4 has it). The
   `playbin` -> display-sink path has a pre-existing mid-stream-reconfigure gap on
   the `videoconvert` -> strict-NV12-sink leg (also breaks plain A/V
   `playbin` -> `waylandsink`), so on-screen subtitle playback through `playbin`
