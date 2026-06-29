@@ -1303,6 +1303,25 @@ mod tests {
     }
 
     #[test]
+    fn segmented_webvtt_skips_repeated_headers() {
+        // Two concatenated HLS WebVTT segments (M419): each opens with a
+        // `WEBVTT` + `X-TIMESTAMP-MAP` header block. Those blocks have no `-->`
+        // timing line, so they parse as non-cues and are skipped; both cues survive.
+        let segmented = "WEBVTT\n\
+            X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n\
+            00:00:01.000 --> 00:00:02.000\nHello\n\n\
+            WEBVTT\n\
+            X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n\
+            00:00:03.000 --> 00:00:04.000\nWorld\n";
+        let cues = parse_webvtt(segmented);
+        assert_eq!(cues.len(), 2, "both cues parse across the segment boundary");
+        assert_eq!(cues[0].text, "Hello");
+        assert_eq!(cues[0].start_ns, 1_000_000_000);
+        assert_eq!(cues[1].text, "World");
+        assert_eq!(cues[1].start_ns, 3_000_000_000);
+    }
+
+    #[test]
     fn timestamp_srt_and_webvtt_forms() {
         // SRT comma, full clock.
         assert_eq!(parse_timestamp("00:00:01,000"), Some(1_000_000_000));

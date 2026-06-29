@@ -286,12 +286,14 @@ leverage first:
   HLS subtitle renditions: discovery + language selection landed (M418 -
   `variant_streams` surfaces `SUBTITLES` renditions as `Caps::Text`,
   `MasterPlaylist::pick_rendition` selects by `#audio-lang=` / `#subtitle-lang=`
-  URI hint, audio fan-out honours it). Remaining is the subtitle *playback*
-  fan-out (the chosen text rendition wired into the overlay), which is
-  network-coupled: an `HlsSrc` text mode + segmented-WebVTT (`X-TIMESTAMP-MAP`)
-  handling for raw `.vtt` segments, or the fMP4 `wvtt` path (reuses M416) plus a
-  cross-source overlay join (the text rides a separate `HlsSrc` from the video).
-  The startup I420/NV12 gap on
+  URI hint, audio fan-out honours it). Subtitle *playback* fan-out landed for the
+  common case (M419: `HlsSrc::with_text` emits `Caps::Text { WebVtt }` from a raw
+  `.vtt` rendition, `build_hls_subtitle_overlay` joins it through `SubParse` into the
+  video's `TextOverlayN` across sources, wired by `hls_playbin` for a muxed-A/V TS
+  variant + `SUBTITLES` rendition). Follow-ups: the separate-audio + subtitle
+  3-source combo (today subtitles are gated on muxed audio), the fMP4 `wvtt`
+  subtitle rendition (`IsoBmff` + `Mp4DemuxN`, reuses M416), and the `X-TIMESTAMP-MAP`
+  offset for live (non-absolute) WebVTT timelines. The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`); on-screen `playbin` playback still needs live

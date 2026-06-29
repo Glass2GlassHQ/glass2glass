@@ -301,9 +301,30 @@ fn wire_subtitle_overlay(
     text_port: u8,
     text_caps: &Caps,
 ) -> Result<(), ParseError> {
+    let overlay = wire_overlay_av(reg, graph, demux, av, video_idx)?;
+    // The text pad is fed from a port of the *same* demux (single-container case).
+    link_text_into_overlay(graph, overlay, demux.out(text_port), text_caps)
+}
+
+/// Build the video half of a subtitle overlay onto `demux`'s A/V ports and return
+/// the [`TextOverlayN`] muxer (its `input(1)` is the still-open text pad). The
+/// video track (`av[video_idx]`) decodes and converts to RGBA8 into `overlay.video`;
+/// the overlay output converts back to NV12 for the auto video sink; the other A/V
+/// tracks fan out to their own auto sinks. The decoder is auto-plugged; the
+/// `videoconvert`s are wired explicitly (caps-driven `register_launch` elements
+/// outside the auto-plug pool, RGBA8 in/out vs the display sink's NV12). Shared by
+/// the single-container [`wire_subtitle_overlay`] and the multi-source HLS builder,
+/// which differ only in where the text pad is fed from.
+#[cfg(feature = "std")]
+fn wire_overlay_av(
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    demux: g2g_core::graph::Demux,
+    av: &[(Caps, bool)],
+    video_idx: usize,
+) -> Result<g2g_core::graph::Muxer, ParseError> {
     use g2g_core::RawVideoFormat;
 
-    // The overlay and the RGBA8 / NV12 converts bracketing it.
     let overlay = graph.add_muxer(GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()), 2);
     let to_rgba =
         graph.add_transform(GraphNodeRef::element(crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8)));
@@ -316,19 +337,6 @@ fn wire_subtitle_overlay(
         .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
     let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
     graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
-
-    // The subtitle track feeds the overlay's text pad. A plain-UTF8 cue stream
-    // (MP4 `tx3g`, MKV `S_TEXT/UTF8`) links straight in; a structured format
-    // (SRT / WebVTT / SSA / TTML) parses to timed UTF-8 cues via SubParse first.
-    let text_in: g2g_core::graph::PadId = match text_caps {
-        Caps::Text { format: g2g_core::TextFormat::Utf8 } => overlay.input(1),
-        _ => {
-            let sub = graph.add_transform(GraphNodeRef::element(crate::subparse::SubParse::new()));
-            graph.link(sub, overlay.input(1)).map_err(ParseError::Graph)?;
-            sub.into()
-        }
-    };
-    graph.link(demux.out(text_port), text_in).map_err(ParseError::Graph)?;
 
     // Each A/V track: the video one decodes into the overlay's RGBA8 convert, the
     // rest fan out to their own auto sinks.
@@ -345,6 +353,30 @@ fn wire_subtitle_overlay(
                 .map_err(|e| map_decode_err(caps, e))?;
         }
     }
+    Ok(overlay)
+}
+
+/// Feed a subtitle stream into the overlay's text pad (`overlay.input(1)`). A
+/// plain-UTF8 cue stream (MP4 `tx3g`, MKV `S_TEXT/UTF8`) links straight in; a
+/// structured format (SRT / WebVTT / SSA / TTML, e.g. an HLS WebVTT rendition)
+/// parses to timed UTF-8 cues via `SubParse` first. `text_src` is the pad producing
+/// `text_caps` (a demux port, or an HLS subtitle source's output).
+#[cfg(feature = "std")]
+fn link_text_into_overlay(
+    graph: &mut Graph<GraphNode>,
+    overlay: g2g_core::graph::Muxer,
+    text_src: g2g_core::graph::PadId,
+    text_caps: &Caps,
+) -> Result<(), ParseError> {
+    let text_in: g2g_core::graph::PadId = match text_caps {
+        Caps::Text { format: g2g_core::TextFormat::Utf8 } => overlay.input(1),
+        _ => {
+            let sub = graph.add_transform(GraphNodeRef::element(crate::subparse::SubParse::new()));
+            graph.link(sub, overlay.input(1)).map_err(ParseError::Graph)?;
+            sub.into()
+        }
+    };
+    graph.link(text_src, text_in).map_err(ParseError::Graph)?;
     Ok(())
 }
 
@@ -624,6 +656,59 @@ pub fn build_hls_separate_fanout(
 /// non-`hls` URI, a master-probe network failure, a media-only playlist, or a TS
 /// variant without at least two routable muxed streams. Network-coupled: the probe
 /// is validated against a live server, not in CI.
+/// Assemble the HLS subtitle-overlay graph (M419): the video (and any muxed audio)
+/// rides the variant's own MPEG-TS segments through a `TsDemuxN`, the video branch
+/// feeding a [`TextOverlayN`](crate::textoverlay::TextOverlayN); the subtitle is a
+/// *separate* `#EXT-X-MEDIA:TYPE=SUBTITLES` WebVTT rendition, its own
+/// `HlsSrc(text) -> SubParse` source chain in the same graph, linked into the
+/// overlay's text pad (the cross-source join, vs the single-demuxer MP4 / MKV
+/// overlay). `streams` carries the variant's muxed streams (video required);
+/// `subtitle_url` is the resolved rendition playlist. `Ok(None)` (decline) when
+/// there is no routable muxed video. Raw `.vtt` segment renditions only; an fMP4
+/// `wvtt` subtitle rendition (the `IsoBmff` + `Mp4DemuxN` path) is a follow-up.
+#[cfg(feature = "hls")]
+pub fn build_hls_subtitle_overlay(
+    reg: &Registry,
+    master_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+    subtitle_url: &str,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    use crate::tsdemux::TsDemuxN;
+
+    // The variant's muxed A/V streams (video + any muxed audio), in order.
+    let mut ts_streams = Vec::new();
+    let mut av: Vec<(Caps, bool)> = Vec::new();
+    for s in streams.iter().filter(|s| s.uri.is_none()) {
+        if let Some(ts) = hls_ts_stream(s) {
+            ts_streams.push(ts);
+            av.push((s.caps.clone(), s.video));
+        }
+    }
+    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+        return Ok(None); // no routable muxed video to overlay onto
+    };
+    let outputs = ts_streams.len() as u8;
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
+    let demux = graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(ts_streams)), outputs);
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+
+    let overlay = wire_overlay_av(reg, &mut graph, demux, &av, video_idx)?;
+
+    // The subtitle rendition is a separate source: its WebVTT text flows through
+    // SubParse into the overlay's text pad.
+    let sub_src =
+        graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(subtitle_url).with_text()));
+    link_text_into_overlay(
+        &mut graph,
+        overlay,
+        sub_src.into(),
+        &Caps::Text { format: g2g_core::TextFormat::WebVtt },
+    )?;
+    Ok(Some(graph))
+}
+
 /// Parse the `playbin uri=hls://...` rendition-language hints from the URI fragment
 /// (M418): `#audio-lang=fr&subtitle-lang=en`. Returns the playlist `rest` with the
 /// fragment stripped, plus the requested audio and subtitle languages (`None` when
@@ -655,7 +740,7 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
     // language preference (HLS URIs have no other place for it); strip it off the
     // playlist URL (M418).
-    let (url_rest, audio_lang, _subtitle_lang) = hls_lang_hints(parsed.rest);
+    let (url_rest, audio_lang, subtitle_lang) = hls_lang_hints(parsed.rest);
     let source_url = alloc::format!("https://{url_rest}");
     // Fetch + parse the master; decline (single-stream fallback) on any failure.
     let Some(master_text) = blocking_get_text(&source_url) else { return Ok(None) };
@@ -678,6 +763,24 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
+    // A SUBTITLES rendition with muxed A/V (no separate audio group): overlay the
+    // chosen subtitle rendition onto the video (M419, the cross-source join). The
+    // separate-audio + subtitle 3-source combo is a follow-up, so this is gated on
+    // muxed audio; pick the rendition the `#subtitle-lang=` hint asks for.
+    if variant.audio_group.is_none() {
+        if let Some(group) = &variant.subtitles_group {
+            if let Some(sub) =
+                master.pick_rendition(crate::hls::MediaType::Subtitles, group, subtitle_lang.as_deref())
+            {
+                if let Some(sub_uri) = &sub.uri {
+                    let sub_url = crate::fetch::resolve_url(&source_url, sub_uri);
+                    if let Some(g) = build_hls_subtitle_overlay(reg, &source_url, &streams, &sub_url)? {
+                        return Ok(Some(g));
+                    }
+                }
+            }
+        }
+    }
     // A separate audio rendition (its own playlist) means a multi-source graph: the
     // variant carries video, the audio is a distinct rendition. Pick the rendition
     // the `#audio-lang=` hint asks for (else DEFAULT, else the first), M418.

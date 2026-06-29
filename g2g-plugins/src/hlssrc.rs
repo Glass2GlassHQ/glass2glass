@@ -189,6 +189,12 @@ pub struct HlsSrc {
     /// switching the active media playlist and re-emitting the init on a change.
     /// Off by default, so a plain run picks one variant up front and keeps it.
     abr: bool,
+    /// Text (subtitle) mode (M419): the playlist is a WebVTT subtitle rendition,
+    /// not an A/V variant. The source advertises `Caps::Text { WebVtt }` instead of
+    /// a `ByteStream` container and forwards each `.vtt` segment's text (blank-line
+    /// separated so a downstream `SubParse` sees each segment's `WEBVTT` /
+    /// `X-TIMESTAMP-MAP` header as its own non-cue block). Off by default.
+    text: bool,
     configured: bool,
 }
 
@@ -203,8 +209,20 @@ impl HlsSrc {
             sample_aes_key: None,
             seek: None,
             abr: false,
+            text: false,
             configured: false,
         }
+    }
+
+    /// Treat the playlist as a WebVTT subtitle rendition (M419): advertise
+    /// `Caps::Text { WebVtt }` and forward each `.vtt` segment's text (for a
+    /// `SubParse` -> overlay branch), rather than a TS / fMP4 byte stream for a
+    /// demuxer. Used by the `playbin` HLS subtitle fan-out for a separate
+    /// `#EXT-X-MEDIA:TYPE=SUBTITLES` rendition. Raw `.vtt` segments only; an fMP4
+    /// `wvtt` subtitle rendition uses the normal `IsoBmff` path + `Mp4DemuxN`.
+    pub fn with_text(mut self) -> Self {
+        self.text = true;
+        self
     }
 
     /// Enable throughput-driven ABR (M371): measure each segment's download and
@@ -387,8 +405,14 @@ impl SourceLoop for HlsSrc {
     /// (TS vs fMP4), the way `RtspSrc` does its DESCRIBE. The probe is memoized.
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         Box::pin(async move {
+            // Probe regardless (it memoizes the media playlist for `run`); a text
+            // subtitle rendition advertises `Text { WebVtt }`, not its container.
             let encoding = self.probe().await?;
-            Ok(Caps::ByteStream { encoding })
+            if self.text {
+                Ok(Caps::Text { format: TextFormat::WebVtt })
+            } else {
+                Ok(Caps::ByteStream { encoding })
+            }
         })
     }
 
@@ -407,6 +431,10 @@ impl SourceLoop for HlsSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            // Subtitle (WebVTT) mode: forward each segment's text with a trailing
+            // blank line so the next segment's `WEBVTT` / `X-TIMESTAMP-MAP` header
+            // starts a fresh (non-cue) block downstream.
+            let text_mode = self.text;
             let client = reqwest::Client::new();
             // ABR keeps the master playlist so the run loop can re-select a variant
             // per segment; `current_variant` tracks the loaded one to detect a
@@ -538,6 +566,13 @@ impl SourceLoop for HlsSrc {
                             }
                         };
                         if !bytes.is_empty() {
+                            let bytes = if text_mode {
+                                let mut b = bytes;
+                                b.extend_from_slice(b"\n\n");
+                                b
+                            } else {
+                                bytes
+                            };
                             out.push(PipelinePacket::DataFrame(byte_frame(bytes, sequence))).await?;
                             sequence += 1;
                         }
