@@ -9,7 +9,12 @@
 //! the subtitle file (`.srt` / `.vtt`) and rendered by PTS.
 //!
 //!   cargo run -p g2g-plugins --features "ffmpeg wayland-sink" --example subtitle_player -- \
-//!       /path/to/clip.mp4 /path/to/clip.vtt
+//!       /path/to/clip.mp4 /path/to/clip.vtt [WxH]
+//!
+//! The optional third argument scales the video (and so the window) to `WxH`,
+//! e.g. `1280x720`, so a 1080p clip fits a laptop screen. A `videoscale` is
+//! inserted right after the decoder (scaling the cheaper NV12 before the RGBA8
+//! conversion). Omit it to play at the clip's native size.
 //!
 //! Heads-up: the built-in overlay font is an 8x8 all-caps ASCII bitmap, so a
 //! Latin clip renders (uppercased, no diacritics) but CJK paints nothing (the
@@ -27,13 +32,19 @@ fn main() {
     use g2g_plugins::mp4src::Mp4Src;
     use g2g_plugins::textoverlay::TextOverlay;
     use g2g_plugins::videoconvert::VideoConvert;
+    use g2g_plugins::videoscale::VideoScale;
     use g2g_plugins::waylandsink::WaylandSink;
 
     let mut args = std::env::args().skip(1);
     let video = args
         .next()
-        .expect("usage: subtitle_player <video.mp4> <subs.srt|.vtt>");
+        .expect("usage: subtitle_player <video.mp4> <subs.srt|.vtt> [WxH]");
     let subs = args.next().expect("need a subtitle file (.srt / .vtt)");
+    // Optional WxH: scale the video (and window) to fit, e.g. 1280x720.
+    let scale_to: Option<(u32, u32)> = args.next().and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    });
 
     let sub_text = std::fs::read_to_string(&subs).expect("read subtitle file");
     let is_srt = Path::new(&subs)
@@ -47,8 +58,8 @@ fn main() {
     };
     println!("loaded {} cues from {subs}", overlay.cue_count());
 
-    // mp4src -> avdec_h264(NV12) -> videoconvert(RGBA8) -> textoverlay
-    //        -> videoconvert(NV12) -> waylandsink
+    // mp4src -> avdec_h264(NV12) -> [videoscale(NV12)] -> videoconvert(RGBA8)
+    //        -> textoverlay -> videoconvert(NV12) -> waylandsink
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(Mp4Src::new(&video)));
     let dec = g.add_transform(GraphNodeRef::element(
@@ -60,7 +71,18 @@ fn main() {
     let sink =
         g.add_sink(GraphNodeRef::element(WaylandSink::new().with_title("g2g subtitle player")));
     g.link(src, dec).expect("link mp4src->dec");
-    g.link(dec, to_rgba).expect("link dec->rgba");
+    // Insert the scaler on the NV12 path when a target size is given.
+    match scale_to {
+        Some((w, h)) => {
+            println!("scaling to {w}x{h}");
+            let scale = g.add_transform(GraphNodeRef::element(VideoScale::new(w, h)));
+            g.link(dec, scale).expect("link dec->scale");
+            g.link(scale, to_rgba).expect("link scale->rgba");
+        }
+        None => {
+            g.link(dec, to_rgba).expect("link dec->rgba");
+        }
+    }
     g.link(to_rgba, ov).expect("link rgba->overlay");
     g.link(ov, to_nv12).expect("link overlay->nv12");
     g.link(to_nv12, sink).expect("link nv12->sink");
