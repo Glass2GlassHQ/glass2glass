@@ -298,10 +298,25 @@ leverage first:
   WebVTT timelines. The startup I420/NV12 gap on
   `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
-  no inserted `videoconvert`); on-screen `playbin` playback still needs live
-  verification and a look at the separate `waylandsink` present-stall (compositor
-  backpressure observed ~1s in). The overlay graph itself runs end to end to a
-  permissive sink.
+  no inserted `videoconvert`). MPEG-TS / HLS H.264 now decodes cleanly on screen
+  (M421: an access-unit-re-framing `h264parse` is auto-inserted before the decoder,
+  validated live against Apple bipbop: 0 decode errors, matching GStreamer). The
+  overlay graph runs end to end. Remaining playback follow-ups:
+  - **Linux AAC decode.** No `FfmpegAudioDec` exists (only the Windows
+    `MfAacDecode`), so an HLS stream whose audio is muxed AAC plays video-only. The
+    full audio path needs an ffmpeg-backed AAC decoder, plus `audioconvert` /
+    `audioresample` auto-inserted to reach the audio sink's fixed PCM caps (the
+    sink templates pin `2ch/48kHz`), plus resolving the PCM-channel strict-equality
+    in `Caps::Audio::intersect` so a decoder with runtime-discovered channels can
+    link to a concrete-channel sink (today only `sample_rate` has a 0 = "any"
+    wildcard). The HLS muxed-audio routing fix (keep the muxed AAC when the bound
+    `AUDIO` group's default rendition is URI-less, e.g. bipbop) lands with that
+    decoder; surfacing it before the decoder exists would regress every such stream
+    into a hard "no decoder chain" failure.
+  - An access-unit-re-framing **`h265parse`** (the M421 sibling for HEVC; today it
+    is a caps-refinement pass-through, so TS / HLS HEVC has the same mis-framing).
+  - On-screen playback still wants a look at the separate `waylandsink`
+    present-stall (compositor backpressure observed ~1s in).
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature

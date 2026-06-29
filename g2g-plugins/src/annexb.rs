@@ -220,7 +220,6 @@ pub(crate) fn to_avcc<F: Fn(&[u8]) -> bool>(au: &[u8], keep: F) -> Vec<u8> {
 /// way out. Each NAL gets a 4-byte start code (`00 00 00 01`); the parameter sets
 /// are prepended separately on keyframes (they live in the format description,
 /// not the sample).
-#[cfg(any(all(target_os = "macos", feature = "vtencode"), test))]
 pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(avcc.len() + 16);
     for nal in avcc_nal_units(avcc) {

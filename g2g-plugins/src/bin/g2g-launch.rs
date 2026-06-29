@@ -201,8 +201,10 @@ fn main() {
         // caps; on a negotiation failure fall back to a topology-only dump
         // (re-parsing, since negotiation consumed the graph). Each node is
         // labelled with its element's log category; a tee falls back to its kind.
+        // `enable_all`: negotiation probes source caps, and a network source's
+        // probe opens sockets (see the run path below).
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .expect("build tokio runtime");
         match rt.block_on(g2g_core::runtime::negotiate_graph(graph)) {
@@ -250,8 +252,13 @@ fn main() {
         }
     }
 
+    // `enable_all` (IO + time), not just time: a network source (HlsSrc, RtspSrc,
+    // an http source) opens sockets from the runner task on this ambient runtime,
+    // which panics ("IO disabled") under a time-only runtime. Time alone suffices
+    // for purely local pipelines, but enabling IO costs nothing and is required the
+    // moment a `uri=` resolves to the network.
     let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .expect("build tokio runtime");
 

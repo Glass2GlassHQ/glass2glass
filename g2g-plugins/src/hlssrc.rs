@@ -102,6 +102,14 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
 /// not muxed, so the muxed audio codec is dropped in favour of the group's
 /// renditions, plus the alternate subtitle renditions its `SUBTITLES` group offers
 /// (M418: each a separate WebVTT playlist, surfaced as `Caps::Text { WebVtt }`).
+///
+/// Note (M421): when the bound group's chosen rendition is itself URI-less (the
+/// muxed track is the default audio, e.g. Apple's bipbop), this drops the audio
+/// entirely, which is why such a stream currently plays silent. Surfacing that
+/// muxed audio needs a Linux AAC decoder (plus `audioconvert` / `audioresample`
+/// to reach the sink's fixed PCM caps), which does not exist yet; the routing fix
+/// lands with that decoder so it does not regress every muxed-AAC stream into a
+/// hard "no decoder chain" failure in the meantime.
 pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStreamInfo> {
     let mut out = Vec::new();
     let has_audio_group = variant.audio_group.is_some();

@@ -765,6 +765,18 @@ mod factory {
         /// does not parse, so one hook per container type coexists (MKV, TS, ...).
         /// Empty (the default) leaves `playbin` as the M196 single-stream pipeline.
         playbin: Vec<PlaybinHook>,
+        /// Optional parser injector (M421): given a decode-chain input caps,
+        /// returns a parser element to splice in just before the decoder (e.g. an
+        /// access-unit-re-framing `h264parse` for `CompressedVideo { H264, .. }`),
+        /// or `None` to decode the input directly. A decoder fed un-aligned units
+        /// (one MPEG-TS PES that is not one access unit) mis-parses; this is how
+        /// the registry mirrors GStreamer's `decodebin` always inserting a parser.
+        /// A bare function pointer so the registry stays `Debug` + `Default`;
+        /// [`default_registry`](crate) sets it. `None` (the default) decodes
+        /// directly, preserving the prior behaviour for registries that do not set
+        /// it.
+        #[allow(clippy::type_complexity)]
+        parser_provider: Option<fn(&Caps) -> Option<Box<dyn DynAsyncElement>>>,
     }
 
     impl Registry {
@@ -824,6 +836,35 @@ mod factory {
         pub fn register_playbin(&mut self, hook: PlaybinHook) -> &mut Self {
             self.playbin.push(hook);
             self
+        }
+
+        /// Set the parser injector consulted by [`decodebin`](Self::decodebin) and
+        /// [`decodebin_preferring`](Self::decodebin_preferring) (M421): before a
+        /// decode chain is spliced, `provider(input)` may return a parser element
+        /// (e.g. an access-unit-re-framing `h264parse`) to prepend ahead of the
+        /// decoder, so the decoder is fed one access unit per packet. Returns
+        /// `&mut self` to chain calls.
+        #[allow(clippy::type_complexity)]
+        pub fn set_parser_provider(
+            &mut self,
+            provider: fn(&Caps) -> Option<Box<dyn DynAsyncElement>>,
+        ) -> &mut Self {
+            self.parser_provider = Some(provider);
+            self
+        }
+
+        /// Prepend the [`parser_provider`](Self::set_parser_provider)'s parser to a
+        /// just-autoplugged decode chain, when one is configured and the chain is a
+        /// real decode (non-empty: an already-satisfied input needs no parser).
+        fn maybe_prepend_parser(&self, input: &Caps, elements: &mut Vec<Box<dyn DynAsyncElement>>) {
+            if elements.is_empty() {
+                return;
+            }
+            if let Some(provider) = self.parser_provider {
+                if let Some(parser) = provider(input) {
+                    elements.insert(0, parser);
+                }
+            }
         }
 
         /// The registered [`PlaybinHook`]s, in registration order (empty if none,
@@ -1081,7 +1122,8 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Vec<NodeId>, DecodebinError> {
-            let elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            let mut elements = self.autoplug(input, target, max_depth).ok_or(DecodebinError::NoChain)?;
+            self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
         }
 
@@ -1186,9 +1228,10 @@ mod factory {
             max_depth: usize,
             preferred: MemoryDomainKind,
         ) -> Result<Vec<NodeId>, DecodebinError> {
-            let elements = self
+            let mut elements = self
                 .autoplug_preferring(input, target, max_depth, preferred)
                 .ok_or(DecodebinError::NoChain)?;
+            self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
         }
 
@@ -1544,5 +1587,81 @@ mod tests {
     fn uri_parse_rejects_malformed() {
         assert!(Uri::parse("notauri").is_none(), "no scheme separator");
         assert!(Uri::parse("://nohost").is_none(), "empty scheme");
+    }
+
+    /// A trivial element for graph-shape tests: accepts any caps, never runs. The
+    /// registered factory's pad-template descriptor (not this body) drives autoplug.
+    #[cfg(feature = "std")]
+    #[derive(Debug, Default)]
+    struct Dummy;
+    #[cfg(feature = "std")]
+    impl crate::PadTemplates for Dummy {
+        fn pad_templates() -> Vec<PadTemplate> {
+            Vec::new()
+        }
+    }
+    #[cfg(feature = "std")]
+    impl crate::AsyncElement for Dummy {
+        type ProcessFuture<'a> = core::pin::Pin<
+            alloc::boxed::Box<dyn core::future::Future<Output = Result<(), crate::G2gError>> + 'a>,
+        >;
+        fn intercept_caps(&self, c: &Caps) -> Result<Caps, crate::G2gError> {
+            Ok(c.clone())
+        }
+        fn configure_pipeline(
+            &mut self,
+            _c: &Caps,
+        ) -> Result<crate::ConfigureOutcome, crate::G2gError> {
+            Ok(crate::ConfigureOutcome::Accepted)
+        }
+        fn process<'a>(
+            &'a mut self,
+            _p: crate::PipelinePacket,
+            _o: &'a mut dyn crate::OutputSink,
+        ) -> Self::ProcessFuture<'a> {
+            alloc::boxed::Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// M421: a configured `parser_provider` prepends its parser to every auto-plugged
+    /// decode chain (so a decoder is fed access-unit-aligned input), and only then.
+    #[cfg(feature = "std")]
+    #[test]
+    fn decodebin_inserts_the_parser_provider_before_the_decoder() {
+        use crate::runtime::{GraphNode, GraphNodeRef};
+        use crate::Graph;
+
+        // An H.264 -> raw "decoder" factory; the element body is irrelevant to the
+        // graph shape, so a Dummy stands in.
+        fn dec_factory() -> ElementFactory {
+            ElementFactory::new(
+                "h264dec",
+                Vec::from([
+                    PadTemplate::sink(CapsSet::one(h264(Dim::Any))),
+                    PadTemplate::source(CapsSet::one(raw(RawVideoFormat::Nv12))),
+                ]),
+                |_| alloc::boxed::Box::new(Dummy),
+            )
+        }
+        let build = |provider: bool| -> usize {
+            let mut reg = Registry::new();
+            reg.register(dec_factory());
+            if provider {
+                reg.set_parser_provider(|caps| match caps {
+                    Caps::CompressedVideo { codec: VideoCodec::H264, .. } => {
+                        Some(alloc::boxed::Box::new(Dummy))
+                    }
+                    _ => None,
+                });
+            }
+            let mut g: Graph<GraphNode> = Graph::new();
+            let head = g.add_transform(GraphNodeRef::element(Dummy));
+            let tail = g.add_sink(GraphNodeRef::element(Dummy));
+            reg.decodebin(&mut g, head, tail, &h264(Dim::Any), &is_raw_video, 4)
+                .expect("h264 -> raw chain")
+                .len()
+        };
+        assert_eq!(build(false), 1, "no provider: the decode chain is just the decoder");
+        assert_eq!(build(true), 2, "provider: a parser is spliced in ahead of the decoder");
     }
 }

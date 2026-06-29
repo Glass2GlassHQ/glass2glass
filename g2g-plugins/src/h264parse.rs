@@ -21,23 +21,66 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
-use crate::annexb::{strip_emulation_prevention, BitReader};
+use crate::annexb::{next_start_code, strip_emulation_prevention, BitReader};
+
+/// Upper bound on bytes buffered while waiting for an access-unit boundary in
+/// re-framing mode. A real H.264 stream emits start codes frequently, so this is
+/// only a guard against an unbounded accumulator on pathological / non-conforming
+/// input: past it, the pending bytes are flushed as one access unit rather than
+/// grown without limit. A single intra access unit at 4K stays well under it.
+const MAX_REFRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct H264Parse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     sps_emitted: u64,
+    /// Re-framing mode (M421): when set, the element re-chunks its input into
+    /// access-unit-aligned Annex-B buffers (one coded picture per `DataFrame`)
+    /// rather than passing buffers through unchanged. A decoder fed un-aligned
+    /// units (e.g. one MPEG-TS PES that is not one access unit) mis-parses slice
+    /// boundaries; auto-plugged decode chains insert the parser in this mode so
+    /// the decoder always sees one access unit per packet, matching what
+    /// GStreamer's `decodebin` does with `h264parse`. Off in the default
+    /// (caps-refinement-only) construction, so existing explicit / RTSP uses keep
+    /// their pass-through framing.
+    reframe: bool,
+    /// Re-framing accumulator: Annex-B bytes received but not yet emitted as a
+    /// complete access unit (the trailing, possibly-incomplete AU is held until
+    /// the next AU's start code arrives). Empty outside re-framing mode.
+    accum: Vec<u8>,
+    /// Timing to stamp the access unit currently at the head of `accum` (captured
+    /// when that AU's first byte arrived). Re-framing only.
+    au_timing: FrameTiming,
+    /// Monotonic sequence number for emitted re-framed access units.
+    seq: u64,
+    /// Input framing, latched from the first frame (`Some(true)` = Annex-B start
+    /// codes, `Some(false)` = AVCC length prefixes). The framing is fixed for a
+    /// stream, so it must be decided once: a per-frame guess misclassifies an
+    /// Annex-B continuation buffer (one MPEG-TS PES carrying the tail of an access
+    /// unit, which does not start with a start code) as AVCC and mangles it.
+    /// Re-framing only.
+    input_is_annexb: Option<bool>,
 }
 
 impl H264Parse {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct the parser in access-unit re-framing mode (M421): it accumulates
+    /// the input bitstream and emits one access-unit-aligned Annex-B `DataFrame`
+    /// per coded picture. Auto-plugged decode chains use this so the decoder is
+    /// fed one access unit per packet (see [`reframe`](Self::reframe)).
+    pub fn reframing() -> Self {
+        Self { reframe: true, ..Self::default() }
     }
 
     /// Count of `CapsChanged` packets this element has pushed downstream.
@@ -116,6 +159,9 @@ impl AsyncElement for H264Parse {
             }
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
+                    if self.reframe {
+                        return self.reframe_frame(frame, out).await;
+                    }
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
                         // Surface the keyframe flag for trick-mode / keyframe seek
                         // (the parser is the producer that can detect it).
@@ -142,7 +188,10 @@ impl AsyncElement for H264Parse {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
-                    // Reset SPS tracking so caps re-emit after the seek.
+                    // A seek discontinuity: drop the partial AU rather than splice
+                    // pre-seek bytes onto the post-seek stream. Reset SPS tracking
+                    // so caps re-emit after the seek.
+                    self.accum.clear();
                     self.last_emitted_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -150,11 +199,158 @@ impl AsyncElement for H264Parse {
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    // Flush the final buffered access unit at end of stream, else
+                    // the last coded picture would never reach the decoder.
+                    if self.reframe && !self.accum.is_empty() {
+                        let au = core::mem::take(&mut self.accum);
+                        let timing = self.au_timing;
+                        self.emit_au(au, timing, out).await?;
+                    }
+                }
             }
             Ok(())
         })
     }
+}
+
+impl H264Parse {
+    /// Re-framing path for one input `DataFrame` (M421): normalize to Annex-B,
+    /// accumulate, and emit every access unit whose end is now known (its
+    /// successor's start code has arrived). The trailing, possibly-incomplete AU
+    /// stays buffered until the next call or `Eos`. Non-`System` domains pass
+    /// through unchanged (the byte re-framer only applies to host memory).
+    async fn reframe_frame(
+        &mut self,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let MemoryDomain::System(slice) = &frame.domain else {
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+            return Ok(());
+        };
+        // Normalize to Annex-B: a length-prefixed (AVCC) stream is converted, an
+        // Annex-B one is appended as-is. The framing is latched from the first
+        // frame, since a mid-AU Annex-B continuation buffer (no leading start
+        // code) would otherwise be misread as AVCC.
+        let bytes = slice.as_slice();
+        let is_annexb = *self.input_is_annexb.get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
+        if self.accum.is_empty() {
+            self.au_timing = frame.timing;
+        }
+        if is_annexb {
+            self.accum.extend_from_slice(bytes);
+        } else {
+            self.accum.extend_from_slice(&crate::annexb::avcc_to_annexb(bytes));
+        }
+
+        // Guard against unbounded growth on non-conforming input: flush what we
+        // have as one AU rather than buffering forever.
+        if self.accum.len() > MAX_REFRAME_BYTES {
+            let au = core::mem::take(&mut self.accum);
+            let timing = self.au_timing;
+            self.emit_au(au, timing, out).await?;
+            return Ok(());
+        }
+
+        // Access-unit start offsets in the accumulator. Emit each complete AU
+        // (everything before the last start), then retain the trailing AU.
+        let starts = h264_au_starts(&self.accum);
+        if starts.len() < 2 {
+            return Ok(()); // at most one (still-open) AU buffered so far
+        }
+        let frame_timing = frame.timing;
+        let tail = starts[starts.len() - 1];
+        // Split off the still-open tail, leaving the complete AUs in `done`.
+        let done = self.accum[..tail].to_vec();
+        self.accum.drain(..tail);
+        for w in starts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            // The head AU carries the timing captured when it began; AUs that both
+            // begin and end inside this buffer take this buffer's timing.
+            let timing = if lo == 0 { self.au_timing } else { frame_timing };
+            self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
+        }
+        // The retained tail began within this buffer (its predecessor ended here).
+        self.au_timing = frame_timing;
+        Ok(())
+    }
+
+    /// Emit one access-unit-aligned Annex-B buffer as a `DataFrame`: refine caps
+    /// from any SPS it carries (suppressing an unchanged re-emit) and stamp the
+    /// keyframe flag, mirroring the pass-through path's per-frame work.
+    async fn emit_au(
+        &mut self,
+        au: Vec<u8>,
+        mut timing: FrameTiming,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if au.is_empty() {
+            return Ok(());
+        }
+        if let Some(info) = extract_sps_info(&au) {
+            let new_caps = Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Fixed(info.width),
+                height: Dim::Fixed(info.height),
+                framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+            };
+            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
+                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                self.last_emitted_caps = Some(new_caps);
+                self.sps_emitted += 1;
+            }
+        }
+        timing.keyframe = crate::h264util::h264_au_is_keyframe(&au);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            timing,
+            self.seq,
+        );
+        self.seq += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
+    }
+}
+
+/// Start-code offsets in an Annex-B buffer at which a new H.264 access unit
+/// begins, per the ISO/IEC 14496-10 access-unit boundary rules. The first NAL
+/// always opens the first AU. Once a VCL NAL (types 1..=5) has been seen in the
+/// current AU, the next AU begins at: an access-unit delimiter (9), the parameter
+/// sets / SEI / prefix NALs that lead a picture (6, 7, 8, 14, 15, 18), or the
+/// first VCL NAL of a new coded picture (`first_mb_in_slice == 0`, i.e. the first
+/// RBSP bit is 1). Slices 2..N of one picture carry `first_mb_in_slice > 0` and
+/// stay in the same AU. This is the framing GStreamer's `h264parse` applies; a
+/// decoder needs it because it parses one packet as one coded picture.
+fn h264_au_starts(data: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut seen_vcl = false;
+    let mut i = 0;
+    while let Some((sc, begin)) = next_start_code(data, i) {
+        let nal_type = data.get(begin).map(|b| b & 0x1F).unwrap_or(0);
+        let is_vcl = (1..=5).contains(&nal_type);
+        let starts_au = if !seen_vcl {
+            // Leading NALs of the first AU: only the very first opens an AU; the
+            // rest (more parameter sets, the first VCL) join it.
+            starts.is_empty()
+        } else if is_vcl {
+            // A new picture's first slice has first_mb_in_slice == 0, encoded as a
+            // leading 1 bit in the slice RBSP (ue(v) of 0).
+            data.get(begin + 1).map(|b| b & 0x80 != 0).unwrap_or(false)
+        } else {
+            // A non-VCL that can only lead the next access unit.
+            matches!(nal_type, 6 | 7 | 8 | 9 | 14 | 15 | 18)
+        };
+        if starts_au {
+            starts.push(sc);
+            seen_vcl = false;
+        }
+        if is_vcl {
+            seen_vcl = true;
+        }
+        i = begin;
+    }
+    starts
 }
 
 impl PadTemplates for H264Parse {
@@ -827,5 +1023,93 @@ mod tests {
             }
             _ => panic!("expected Identity"),
         }
+    }
+
+    // ---- M421 access-unit re-framing ----
+
+    /// An Annex-B VCL slice NAL (type 1). `first` picks `first_mb_in_slice == 0`
+    /// (a new picture's first slice: leading RBSP bit 1) vs a continuation slice
+    /// (leading bit 0). `tag` makes the payload distinguishable; the payload bytes
+    /// avoid `00 00` so they never look like a start code.
+    fn annexb_vcl(first: bool, tag: u8) -> Vec<u8> {
+        let mut v = vec![0, 0, 0, 1, 0x41]; // start code + NAL header (type 1, ref)
+        v.push(if first { 0x80 } else { 0x40 }); // first RBSP byte: MSB = first_mb==0
+        v.extend_from_slice(&[0xAA, 0xBB, tag, 0x11]);
+        v
+    }
+
+    /// Pull the `DataFrame` byte payloads out of a sink, in order.
+    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+        sink.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => match &f.domain {
+                    MemoryDomain::System(s) => Some(s.as_slice().to_vec()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn au_starts_groups_slices_into_one_picture() {
+        // Picture A: two slices (first_mb==0 then a continuation). Picture B: one
+        // slice. Two access units, not three.
+        let mut stream = annexb_vcl(true, 1);
+        stream.extend_from_slice(&annexb_vcl(false, 2)); // same picture (continuation)
+        let b_off = stream.len();
+        stream.extend_from_slice(&annexb_vcl(true, 3)); // new picture
+        let starts = h264_au_starts(&stream);
+        assert_eq!(starts, vec![0, b_off], "two access units: A(2 slices) then B");
+    }
+
+    #[tokio::test]
+    async fn reframing_splits_two_access_units_in_one_buffer() {
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        // One input buffer carrying two complete pictures back to back.
+        let au0 = annexb_vcl(true, 1);
+        let au1 = annexb_vcl(true, 2);
+        let mut buf = au0.clone();
+        buf.extend_from_slice(&au1);
+        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, buf)), &mut sink).await.unwrap();
+        // The first AU is emitted once the second AU's start is seen; the second
+        // stays buffered until end of stream.
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let payloads = data_payloads(&sink);
+        assert_eq!(payloads.len(), 2, "two pictures -> two access-unit DataFrames");
+        assert_eq!(payloads[0], au0, "first AU emitted whole");
+        assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
+    }
+
+    #[tokio::test]
+    async fn reframing_reassembles_an_au_split_across_buffers() {
+        // The regression that made HLS video garbage: one Annex-B access unit
+        // delivered as two buffers (one MPEG-TS PES carrying the tail), the second
+        // with no leading start code. A per-buffer framing guess would misread the
+        // tail as AVCC and corrupt it; latching the framing keeps it Annex-B.
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let au = annexb_vcl(true, 7);
+        let split = 6; // mid-NAL: after the start code + header + first RBSP byte
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())), &mut sink)
+            .await
+            .unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())), &mut sink)
+            .await
+            .unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let payloads = data_payloads(&sink);
+        assert_eq!(payloads.len(), 1, "the split access unit reassembles into one");
+        assert_eq!(payloads[0], au, "reassembled bytes are bit-for-bit the original AU");
     }
 }

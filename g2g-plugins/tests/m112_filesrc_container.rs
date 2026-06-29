@@ -92,7 +92,11 @@ fn synthetic_ts() -> Vec<u8> {
         ],
     ));
     for n in 0..3u8 {
-        s.extend_from_slice(&ts_packet(es_pid, true, &h264_pes(&[0, 0, 0, 1, 0x65, n])));
+        // Each PES is one IDR access unit: start code, NAL header (type 5), then a
+        // slice header whose first byte has the top bit set (`first_mb_in_slice ==
+        // 0`, the mark of a new picture's first slice) so the access-unit-aligning
+        // h264parse counts three distinct pictures; `n` keeps them distinguishable.
+        s.extend_from_slice(&ts_packet(es_pid, true, &h264_pes(&[0, 0, 0, 1, 0x65, 0x88, n])));
     }
     s
 }

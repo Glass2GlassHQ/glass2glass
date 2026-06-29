@@ -149,8 +149,27 @@ use crate::camera2src::Camera2Src;
 /// videotestsrc num-buffers=10 ! videoconvert format=nv12 ! videoscale width=320 height=240 ! fakesink
 /// audiotestsrc num-buffers=5 freq=440 ! audioconvert channels=1 ! audioresample samplerate=16000 ! fakesink
 /// ```
+/// The decode-chain parser injector (M421): an auto-plugged decoder is fed one
+/// access unit per packet by splicing an access-unit-re-framing `h264parse` ahead
+/// of it, the way GStreamer's `decodebin` always inserts a parser. Returns `None`
+/// for codecs without a re-framing parser (the input decodes directly). H.265 and
+/// audio still decode directly; an H.265 re-framer is a follow-up (`H265Parse` is
+/// a caps-refinement pass-through today, like `H264Parse` was).
+fn video_parser_provider(input: &Caps) -> Option<Box<dyn g2g_core::element::DynAsyncElement>> {
+    match input {
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => {
+            Some(Box::new(crate::h264parse::H264Parse::reframing()))
+        }
+        _ => None,
+    }
+}
+
 pub fn default_registry() -> Registry {
     let mut reg = Registry::new();
+    // Auto-plugged decode chains splice a re-framing parser before the decoder
+    // (M421), so a decoder fed un-access-unit-aligned input (e.g. one MPEG-TS PES
+    // that is not one coded picture) does not mis-parse.
+    reg.set_parser_provider(video_parser_provider);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
@@ -279,7 +298,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || Box::new(Fmp4Demux::new())));
     reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
     reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || Box::new(FlvMux::new())));
-    reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::new())));
+    // Re-framing mode (M421): a `gst-launch` `h264parse` access-unit-aligns its
+    // output (one coded picture per buffer), matching GStreamer's `h264parse`, so
+    // `... ! tsdemux ! h264parse ! <decoder> ! ...` feeds the decoder correctly.
+    reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::reframing())));
     reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || Box::new(OpusParse::new())));
