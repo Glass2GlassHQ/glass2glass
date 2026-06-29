@@ -31,7 +31,7 @@ use g2g_core::{
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::blend_px;
-use crate::subparse::{parse_srt, parse_webvtt, Cue, TextAlign};
+use crate::subparse::{parse_srt, parse_ssa, parse_webvtt, Cue, TextAlign};
 // Only the std `load_location` path sniffs the format; gate the import to match.
 #[cfg(feature = "std")]
 use crate::subparse::parse_auto;
@@ -92,6 +92,11 @@ impl TextOverlay {
     /// Parse WebVTT (`.vtt`) text into the cue list.
     pub fn from_webvtt(text: &str) -> Self {
         Self::new().with_cues(parse_webvtt(text))
+    }
+
+    /// Parse SubStation Alpha / ASS (`.ssa` / `.ass`) text into the cue list.
+    pub fn from_ssa(text: &str) -> Self {
+        Self::new().with_cues(parse_ssa(text))
     }
 
     /// Set the opaque text colour (alpha forced opaque).
@@ -255,8 +260,8 @@ impl TextOverlay {
     }
 
     /// Load and parse a subtitle file, replacing the cue list. The format is
-    /// chosen by extension (`.vtt` / `.srt`), else sniffed from the content.
-    /// `std`-only: file I/O needs the OS.
+    /// chosen by extension (`.vtt` / `.srt` / `.ass` / `.ssa`), else sniffed from
+    /// the content. `std`-only: file I/O needs the OS.
     #[cfg(feature = "std")]
     fn load_location(&mut self, path: &str) -> Result<(), PropError> {
         let data = std::fs::read_to_string(path).map_err(|_| PropError::Value)?;
@@ -264,6 +269,8 @@ impl TextOverlay {
             parse_webvtt(&data)
         } else if path.ends_with(".srt") {
             parse_srt(&data)
+        } else if path.ends_with(".ass") || path.ends_with(".ssa") {
+            parse_ssa(&data)
         } else {
             parse_auto(&data)
         };

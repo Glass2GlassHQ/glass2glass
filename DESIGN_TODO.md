@@ -256,14 +256,31 @@ leverage first:
   alignment.
 - **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
-  `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt}` ->
-  `Text{Utf8}`), the SRT/WebVTT parsers (M171), and the `TextOverlay` renderer
-  (M171). Remaining: register `SubParse` (and a text source / sink) in the launch
-  registry so `gst-launch` text pipelines parse; a `TextOverlay` sink pad that
-  consumes a `Caps::Text` *stream* (it loads cues out-of-band from a file today);
-  subtitle-track extraction out of the MKV / TS / MP4 demuxers as `Caps::Text`;
-  incremental (non-batch) cue streaming in `SubParse`; carrying WebVTT cue
-  positioning (`CueSettings`) as text frame-meta; SSA/ASS + TTML parsers.
+  `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa}` ->
+  `Text{Utf8}`), the SRT / WebVTT / SSA-ASS parsers (M171 / M401), and the
+  `TextOverlay` renderer (M171). Remaining text-document work: register `SubParse`
+  (and a text source / sink) in the launch registry so `gst-launch` text
+  pipelines parse; a `TextOverlay` sink pad that consumes a `Caps::Text` *stream*
+  (it loads cues out-of-band from a file today); subtitle-track extraction out of
+  the MKV / TS / MP4 demuxers as `Caps::Text`; incremental (non-batch) cue
+  streaming in `SubParse`; carrying WebVTT / SSA cue positioning (`CueSettings`)
+  as text frame-meta; a TTML parser (`TextFormat::Ttml`, needs XML).
+- **Closed captions (CEA-608 / CEA-708).** Unlike the text-document formats,
+  captions are an in-band binary command stream (carried in H.264 / H.265 SEI
+  `user_data_registered_itu_t_t35`, MPEG-2 user-data, or an MP4 `c608` / `c708`
+  track), so this is a track, not a parser drop-in. Three pieces: (1) a caps kind
+  for the raw caption stream (the GStreamer `closedcaption/x-cea-608` /
+  `-cea-708` analog, e.g. `Caps::ClosedCaption { format }`, the one place a new
+  variant past `Text` is justified, like a bitmap-subtitle `SubPicture` variant);
+  (2) extraction, surfacing the caption bytes from `h264parse` / `h265parse` SEI
+  or the MP4 caption track (side output or frame-meta); (3) the decoder itself
+  (CEA-608 is a modest 2-byte/field state machine, CEA-708 a windowed DTVCC
+  presentation state machine), emitting `Caps::Text{Utf8 | PangoMarkup}`. Start
+  with 608 to prove the pipeline shape, then 708.
+- **Bitmap / picture subtitles (DVD / PGS / DVB).** RLE-image subtitles, not
+  text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
+  `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;
+  deferred until a concrete need.
 - **Controllers (animated properties):** a `gst-controller`-equivalent for
   animating properties over time.
 - **Tensor substrate orientation descriptor (M181).** A deferred

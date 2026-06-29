@@ -99,14 +99,116 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
 }
 
 /// Auto-detect the format from the content and parse: a leading `WEBVTT`
-/// signature (after an optional BOM) selects WebVTT, otherwise SRT.
+/// signature selects WebVTT, a leading `[` section header selects SSA/ASS,
+/// otherwise SRT (all after an optional BOM).
 pub fn parse_auto(input: &str) -> Vec<Cue> {
     let trimmed = input.strip_prefix('\u{feff}').unwrap_or(input).trim_start();
     if trimmed.starts_with("WEBVTT") {
         parse_webvtt(input)
+    } else if trimmed.starts_with('[') {
+        // SSA/ASS always opens with a section header (`[Script Info]`); SRT /
+        // WebVTT never start with `[`.
+        parse_ssa(input)
     } else {
         parse_srt(input)
     }
+}
+
+/// Parse SubStation Alpha / Advanced SSA (`.ssa` / `.ass`) into cues, in file
+/// order. Only the `[Events]` section is read: its `Format:` line gives the
+/// column order, and each `Dialogue:` line is split accordingly (the `Text`
+/// column is last and may itself contain commas). Inline override blocks
+/// (`{\i1}`...) are stripped and `\N` / `\n` line breaks become real newlines,
+/// like the SRT / WebVTT tag handling. Malformed dialogue lines are skipped.
+pub fn parse_ssa(input: &str) -> Vec<Cue> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut cues = Vec::new();
+    let mut in_events = false;
+    // V4+ default column order, used until an explicit `Format:` line overrides
+    // it: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text.
+    let (mut i_start, mut i_end, mut i_text) = (1usize, 2usize, 9usize);
+    for line in input.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            in_events = name.eq_ignore_ascii_case("Events");
+            continue;
+        }
+        if !in_events {
+            continue;
+        }
+        if let Some(rest) = strip_prefix_ci(line, "Format:") {
+            let cols: Vec<&str> = rest.split(',').map(str::trim).collect();
+            i_start = col_index(&cols, "Start").unwrap_or(i_start);
+            i_end = col_index(&cols, "End").unwrap_or(i_end);
+            // Text is the last column by spec; fall back to that if unnamed.
+            i_text = col_index(&cols, "Text").unwrap_or(cols.len().saturating_sub(1));
+        } else if let Some(rest) = strip_prefix_ci(line, "Dialogue:") {
+            if let Some(cue) = parse_ass_dialogue(rest, i_start, i_end, i_text) {
+                cues.push(cue);
+            }
+        }
+    }
+    cues
+}
+
+/// Case-insensitive `name -> column index` lookup in a `Format:` column list.
+fn col_index(cols: &[&str], name: &str) -> Option<usize> {
+    cols.iter().position(|c| c.eq_ignore_ascii_case(name))
+}
+
+/// Case-insensitively strip an ASCII keyword prefix (`"Dialogue:"`), returning
+/// the remainder. `str::get` keeps the byte-slice on a char boundary so a line
+/// opening with a multi-byte char never panics.
+fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = line.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &line[prefix.len()..])
+}
+
+/// Parse one `Dialogue:` body into a cue using the resolved column indices. The
+/// `Text` column is last, so we split on only the leading commas and keep its
+/// remainder (commas and all) intact.
+fn parse_ass_dialogue(body: &str, i_start: usize, i_end: usize, i_text: usize) -> Option<Cue> {
+    // splitn keeps everything after the i_text-th comma as the final field.
+    let fields: Vec<&str> = body.splitn(i_text + 1, ',').collect();
+    if fields.len() <= i_text {
+        return None;
+    }
+    let start_ns = parse_timestamp(fields.get(i_start)?.trim())?;
+    let end_ns = parse_timestamp(fields.get(i_end)?.trim())?;
+    let text = strip_ass_markup(fields[i_text]);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(Cue { start_ns, end_ns, text, settings: CueSettings::default() })
+}
+
+/// Strip ASS override blocks (`{...}`) and turn the `\N` / `\n` line breaks and
+/// `\h` hard space into plain text, the SSA analog of [`push_stripped`].
+fn strip_ass_markup(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    let mut in_brace = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => in_brace = true,
+            '}' => in_brace = false,
+            _ if in_brace => {}
+            '\\' => match chars.peek() {
+                // `\N` hard break and `\n` soft break both render as a newline.
+                Some('N') | Some('n') => {
+                    out.push('\n');
+                    chars.next();
+                }
+                Some('h') => {
+                    out.push(' ');
+                    chars.next();
+                }
+                _ => out.push('\\'),
+            },
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Walk blank-line-separated blocks, turning each cue block into a [`Cue`].
@@ -328,6 +430,7 @@ impl SubParse {
         CapsSet::from_alternatives(Vec::from([
             Caps::Text { format: TextFormat::Srt },
             Caps::Text { format: TextFormat::WebVtt },
+            Caps::Text { format: TextFormat::Ssa },
         ]))
     }
 
@@ -340,7 +443,8 @@ impl SubParse {
         let doc = String::from_utf8_lossy(&self.buf);
         match self.format {
             Some(TextFormat::WebVtt) => parse_webvtt(&doc),
-            // SubRip is the default; the constraint admits only Srt / WebVtt.
+            Some(TextFormat::Ssa) => parse_ssa(&doc),
+            // SubRip is the default; the constraint admits only Srt / WebVtt / Ssa.
             _ => parse_srt(&doc),
         }
     }
@@ -354,7 +458,9 @@ impl AsyncElement for SubParse {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt } => Ok(upstream_caps.clone()),
+            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa } => {
+                Ok(upstream_caps.clone())
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -362,10 +468,10 @@ impl AsyncElement for SubParse {
     /// Decoder-style: the output media type is derived from the input. A
     /// structured subtitle format in, plain UTF-8 out, so the solver negotiates
     /// `Text{Utf8}` onto the downstream link while the sink pad takes the SRT /
-    /// WebVTT document.
+    /// WebVTT / SSA document.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt } => {
+            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa } => {
                 CapsSet::one(Self::output_caps())
             }
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -374,7 +480,7 @@ impl AsyncElement for SubParse {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Text { format: format @ (TextFormat::Srt | TextFormat::WebVtt) } => {
+            Caps::Text { format: format @ (TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa) } => {
                 self.format = Some(*format);
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -533,6 +639,64 @@ mod tests {
     fn auto_detects_format() {
         assert_eq!(parse_auto("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n").len(), 1);
         assert_eq!(parse_auto("1\n00:00:01,000 --> 00:00:02,000\nhi\n").len(), 1);
+        assert_eq!(
+            parse_auto("[Script Info]\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,hi\n").len(),
+            1,
+            "a leading [ section header selects SSA",
+        );
+    }
+
+    const ASS: &str = "[Script Info]\n\
+        Title: demo\n\
+        \n\
+        [V4+ Styles]\n\
+        Format: Name, Fontname\n\
+        Style: Default,Arial\n\
+        \n\
+        [Events]\n\
+        Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
+        Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,{\\i1}Hello{\\i0}, world\n\
+        Dialogue: 0,0:01:02.50,0:01:05.00,Default,Bob,0,0,0,,Line one\\NLine two\n";
+
+    #[test]
+    fn ssa_reads_events_format_and_dialogue() {
+        let cues = parse_ssa(ASS);
+        assert_eq!(cues.len(), 2);
+        // Centisecond fraction (.00) -> 0 ms; override tags stripped; the comma
+        // inside the Text field is preserved (Text is the last column).
+        assert_eq!(
+            cues[0],
+            Cue {
+                start_ns: 1_000_000_000,
+                end_ns: 4_000_000_000,
+                text: "Hello, world".into(),
+                settings: CueSettings::default(),
+            }
+        );
+        // `\N` becomes a real line break; .50 centiseconds -> 500 ms.
+        assert_eq!(cues[1].start_ns, 62_500_000_000);
+        assert_eq!(cues[1].text, "Line one\nLine two");
+    }
+
+    #[test]
+    fn ssa_honors_reordered_format_columns() {
+        // Text not last in name order? It still must be the final column per spec;
+        // here Start/End sit at non-default indices and are looked up by name.
+        let doc = "[Events]\n\
+            Format: Start, End, Text\n\
+            Dialogue: 0:00:00.00,0:00:01.00,hi there\n";
+        let cues = parse_ssa(doc);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].end_ns, 1_000_000_000);
+        assert_eq!(cues[0].text, "hi there");
+    }
+
+    #[test]
+    fn ssa_ignores_lines_outside_events() {
+        // A `Format:` outside [Events] (the styles block) must not be mistaken
+        // for the dialogue column order, and there are no dialogue lines.
+        let doc = "[V4+ Styles]\nFormat: Name, Fontname\nStyle: Default,Arial\n";
+        assert!(parse_ssa(doc).is_empty());
     }
 
     #[test]
@@ -585,6 +749,37 @@ mod tests {
         };
         let out = derive(&Caps::Text { format: TextFormat::WebVtt });
         assert_eq!(out.alternatives(), &[Caps::Text { format: TextFormat::Utf8 }]);
+        // SSA negotiates the same way (also -> Utf8).
+        assert_eq!(
+            el.intercept_caps(&Caps::Text { format: TextFormat::Ssa }).unwrap(),
+            Caps::Text { format: TextFormat::Ssa }
+        );
+    }
+
+    #[tokio::test]
+    async fn element_parses_ssa_to_timed_utf8() {
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::Ssa }).expect("accepts SSA");
+
+        let mut sink = RecordingSink::default();
+        el.process(srt_bytes_frame(ASS.as_bytes()), &mut sink).await.unwrap();
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
+        if let MemoryDomain::System(s) = &frames[0].domain {
+            assert_eq!(s.as_slice(), b"Hello, world");
+        } else {
+            panic!("cue payload must be a system buffer");
+        }
     }
 
     #[tokio::test]
