@@ -32,9 +32,9 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
-    Stream, StreamCollection, StreamType, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
+    MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection, StreamType, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -434,6 +434,215 @@ impl PadTemplates for TsDemux {
             Self::output_caps(TsStream::Aac),
         ]));
         Vec::from([PadTemplate::sink(CapsSet::one(Self::input_caps())), PadTemplate::source(source)])
+    }
+}
+
+/// Multi-output MPEG-TS demuxer (M388): one TS byte stream in, N elementary
+/// streams out, one selected [`TsStream`] per output port. The MPEG-TS sibling of
+/// [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN), and the multi-output counterpart of
+/// [`TsDemux`] (which forwards a single selected stream).
+///
+/// A [`MultiOutputElement`] driven by
+/// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses the
+/// transport stream once and routes each PES access unit to the port whose
+/// selected codec matches the unit's PMT `stream_type`, so one demuxer feeds
+/// several decode branches in one pipeline (audio + video together). Port `i`
+/// emits its elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its
+/// first frame (the branch retypes from the byte-stream input caps); a parsed
+/// stream no port carries is dropped, and a port whose stream the multiplex lacks
+/// stays dark. With a bus, announces the same `StreamCollection` (M386) as
+/// [`TsDemux`]. The `playbin uri=*.ts` fan-out (M389) builds this.
+#[derive(Debug)]
+pub struct TsDemuxN {
+    demux: TsDemuxer,
+    /// Bytes not yet consumed as whole TS packets (realignment across frames).
+    buf: Vec<u8>,
+    /// Port `i` emits this elementary stream (one selected stream per output pad).
+    ports: Vec<TsStream>,
+    /// Whether port `i` has emitted its opening `CapsChanged` yet.
+    announced: Vec<bool>,
+    bus: Option<BusHandle>,
+    /// Set once the `StreamCollection` has been announced (M386), so it posts once.
+    collection_posted: bool,
+    emitted: u64,
+}
+
+impl TsDemuxN {
+    /// A demuxer with one output port per entry of `ports` (the selected streams),
+    /// in port order. Panics if `ports` is empty (a fan-out needs a port).
+    pub fn new(ports: Vec<TsStream>) -> Self {
+        assert!(!ports.is_empty(), "TsDemuxN needs at least one output port");
+        let announced = alloc::vec![false; ports.len()];
+        Self {
+            demux: TsDemuxer::new(),
+            buf: Vec::new(),
+            ports,
+            announced,
+            bus: None,
+            collection_posted: false,
+            emitted: 0,
+        }
+    }
+
+    /// Attach the pipeline bus so the program's `StreamCollection` (M386) posts
+    /// once the PMT is parsed, the way [`TsDemux::with_bus`] does.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Number of output ports (the selected-stream count).
+    pub fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+
+    /// Count of frames forwarded across all ports.
+    pub fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// The port carrying the elementary stream of PMT `stream_type`, or `None` if
+    /// no selected port carries it. The first matching port wins.
+    fn port_for_stream_type(&self, stream_type: u8) -> Option<usize> {
+        self.ports.iter().position(|&s| TsDemux::selected_stream_type(s) == stream_type)
+    }
+
+    /// Consume whole 188-byte TS packets from `buf`, resyncing to the sync byte,
+    /// feeding each to the demuxer. Leaves any trailing partial packet in `buf`.
+    /// (The realignment is identical to [`TsDemux::drain_packets`].)
+    fn drain_packets(&mut self) {
+        loop {
+            if self.buf.first() != Some(&TS_SYNC) {
+                match self.buf.iter().position(|&b| b == TS_SYNC) {
+                    Some(pos) => {
+                        self.buf.drain(..pos);
+                    }
+                    None => {
+                        self.buf.clear();
+                        return;
+                    }
+                }
+            }
+            if self.buf.len() < TS_PACKET_LEN {
+                return;
+            }
+            let mut pkt = [0u8; TS_PACKET_LEN];
+            pkt.copy_from_slice(&self.buf[..TS_PACKET_LEN]);
+            self.demux.push_packet(&pkt);
+            self.buf.drain(..TS_PACKET_LEN);
+        }
+    }
+
+    /// Announce every PMT elementary stream as a `StreamCollection` (M386), once.
+    /// Reuses [`TsDemux::es_to_stream`]. A no-op without a bus, before the PMT, or
+    /// once posted.
+    fn post_stream_collection(&mut self) {
+        if self.collection_posted {
+            return;
+        }
+        let streams: Vec<Stream> =
+            self.demux.streams().iter().filter_map(TsDemux::es_to_stream).collect();
+        if streams.is_empty() {
+            return;
+        }
+        self.collection_posted = true;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("mpegts-0", streams)));
+        }
+    }
+
+    /// Route each completed access unit to the port carrying its `stream_type`,
+    /// emitting that port's opening `CapsChanged` before its first frame.
+    async fn route_units(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        for u in self.demux.take_units() {
+            let Some(port) = self.port_for_stream_type(u.stream_type) else {
+                continue; // a stream no selected port carries
+            };
+            if !self.announced[port] {
+                out.push_to(port, PipelinePacket::CapsChanged(TsDemux::output_caps(self.ports[port])))
+                    .await?;
+                self.announced[port] = true;
+            }
+            let pts_ns = u
+                .pts_90khz
+                .map(|p| (p as u128 * 1_000_000_000 / 90_000) as u64)
+                .unwrap_or(0);
+            let frame = Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(u.data.into_boxed_slice())),
+                FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
+                self.emitted,
+            );
+            self.emitted += 1;
+            out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
+        }
+        Ok(())
+    }
+}
+
+impl MultiOutputElement for TsDemuxN {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        upstream_caps.intersect(&TsDemux::input_caps())
+    }
+
+    /// Declare each port's elementary-stream caps (M380), so the solver negotiates
+    /// each branch against its codec at startup. `None` for an out-of-range port.
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.ports.get(port).map(|&stream| TsDemux::output_caps(stream))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        absolute_caps.intersect(&TsDemux::input_caps()).map(|_| ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    self.buf.extend_from_slice(slice.as_slice());
+                    self.drain_packets();
+                    if self.bus.is_some() {
+                        self.post_stream_collection();
+                    }
+                    self.route_units(out).await?;
+                }
+                // A flush resets the parser; the re-read stream re-establishes
+                // PAT/PMT/PES. Broadcast it to every branch.
+                PipelinePacket::Flush => {
+                    self.buf.clear();
+                    self.demux = TsDemuxer::new();
+                    for port in 0..self.ports.len() {
+                        out.push_to(port, PipelinePacket::Flush).await?;
+                    }
+                }
+                PipelinePacket::Segment(seg) => {
+                    for port in 0..self.ports.len() {
+                        out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                    }
+                }
+                PipelinePacket::Eos => {
+                    // Flush the final in-flight PES, route it; the runner
+                    // broadcasts the merged Eos to every port.
+                    self.demux.flush();
+                    self.route_units(out).await?;
+                }
+                // The input's (byte-stream) CapsChanged is consumed: each port
+                // defines its own caps, announced per port above.
+                PipelinePacket::CapsChanged(_) => {}
+            }
+            Ok(())
+        })
     }
 }
 
