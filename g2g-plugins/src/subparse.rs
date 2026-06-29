@@ -109,6 +109,9 @@ pub fn parse_auto(input: &str) -> Vec<Cue> {
         // SSA/ASS always opens with a section header (`[Script Info]`); SRT /
         // WebVTT never start with `[`.
         parse_ssa(input)
+    } else if trimmed.starts_with('<') {
+        // TTML / DFXP is XML, opening with `<?xml ...` or the `<tt>` root.
+        parse_ttml(input)
     } else {
         parse_srt(input)
     }
@@ -209,6 +212,236 @@ fn strip_ass_markup(raw: &str) -> String {
         }
     }
     out
+}
+
+/// Parse TTML / DFXP (W3C Timed Text, also SMPTE-TT / EBU-TT / IMSC) into cues.
+/// TTML is XML; rather than a full parser this scans for `<p>` paragraph elements
+/// (any namespace prefix), reading their `begin` / `end` time attributes and text
+/// content. Inline markup (`<span>`...) is stripped, `<br/>` becomes a newline,
+/// XML entities (`&amp;` / `&#10;`...) are decoded, and insignificant XML
+/// whitespace is collapsed (TTML default `xml:space`). Times accept clock-time
+/// (`HH:MM:SS.fff`) and offset-time (`5s` / `1.5s` / `400ms` / `2m` / `1h`);
+/// frame / tick offsets (need a frame / tick rate) are not supported. Malformed
+/// paragraphs are skipped, and the scan never indexes off a char boundary, so
+/// untrusted markup fails safe rather than panicking.
+pub fn parse_ttml(input: &str) -> Vec<Cue> {
+    let mut cues = Vec::new();
+    let mut rest = input;
+    // Walk `<p ...> ... </p>` spans. `<p>` does not nest in TTML, so the next
+    // close tag terminates the current paragraph.
+    while let Some((attrs, body, after)) = next_paragraph(rest) {
+        rest = after;
+        let (Some(begin), Some(end)) = (xml_attr(attrs, "begin"), xml_attr(attrs, "end")) else {
+            continue;
+        };
+        let (Some(start_ns), Some(end_ns)) = (parse_ttml_time(begin), parse_ttml_time(end)) else {
+            continue;
+        };
+        let text = ttml_text(body);
+        if !text.trim().is_empty() {
+            cues.push(Cue { start_ns, end_ns, text, settings: CueSettings::default() });
+        }
+    }
+    cues
+}
+
+/// Find the next `<p ...>` paragraph: returns its attribute string, its inner
+/// content (up to the matching `</p>`), and the remainder after the close tag.
+/// Matches the `p` local name under any namespace prefix; skips self-closing
+/// `<p/>` (no content) and any non-`p` tag.
+fn next_paragraph(input: &str) -> Option<(&str, &str, &str)> {
+    let mut scan = input;
+    loop {
+        let lt = scan.find('<')?;
+        let after_lt = &scan[lt + 1..];
+        let gt = after_lt.find('>')?;
+        let tag = &after_lt[..gt]; // between '<' and '>'
+        let after_tag = &after_lt[gt + 1..];
+        // Tag name is up to the first whitespace / '/' ; strip a namespace prefix.
+        let name = tag.trim_start_matches('/');
+        let name = name.split([' ', '\t', '\r', '\n', '/']).next().unwrap_or("");
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if local.eq_ignore_ascii_case("p") && !tag.starts_with('/') {
+            // Open <p ...>. Self-closing (`<p/>`) has no body.
+            if tag.ends_with('/') {
+                scan = after_tag;
+                continue;
+            }
+            let attrs = &tag[name.len()..];
+            let close = find_paragraph_close(after_tag)?;
+            let body = &after_tag[..close.0];
+            return Some((attrs, body, &after_tag[close.1..]));
+        }
+        scan = after_tag;
+    }
+}
+
+/// Find the next `</p>` close tag (any namespace prefix) in `s`; returns
+/// `(content_end, after_close)` byte offsets into `s`.
+fn find_paragraph_close(s: &str) -> Option<(usize, usize)> {
+    let mut from = 0;
+    loop {
+        let lt = s[from..].find("</")? + from;
+        let after = &s[lt + 2..];
+        let gt = after.find('>')?;
+        let name = after[..gt].trim();
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if local.eq_ignore_ascii_case("p") {
+            return Some((lt, lt + 2 + gt + 1));
+        }
+        from = lt + 2;
+    }
+}
+
+/// Read an XML attribute value (`name="..."` or `name='...'`) from a tag's
+/// attribute string. `None` if the attribute is absent or unquoted.
+fn xml_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let mut from = 0;
+    while let Some(pos) = attrs[from..].find(name) {
+        let at = from + pos;
+        let before_ok = at == 0
+            || attrs[..at].chars().next_back().map(|c| c.is_whitespace()).unwrap_or(true);
+        let after = attrs[at + name.len()..].trim_start();
+        if before_ok {
+            if let Some(rest) = after.strip_prefix('=') {
+                let rest = rest.trim_start();
+                let quote = rest.chars().next()?;
+                if quote == '"' || quote == '\'' {
+                    let val = &rest[1..];
+                    let end = val.find(quote)?;
+                    return Some(&val[..end]);
+                }
+            }
+        }
+        from = at + name.len();
+    }
+    None
+}
+
+/// Extract the plain text of a TTML paragraph body: strip inline tags, map
+/// `<br/>` to a newline, decode entities, and collapse insignificant whitespace.
+fn ttml_text(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(lt) = rest.find('<') {
+        push_collapsed(&mut out, &decode_entities(&rest[..lt]));
+        let after = &rest[lt + 1..];
+        let Some(gt) = after.find('>') else { break };
+        let tag = &after[..gt];
+        let name = tag.trim_start_matches('/');
+        let name = name.split([' ', '\t', '\r', '\n', '/']).next().unwrap_or("");
+        let local = name.rsplit(':').next().unwrap_or(name);
+        if local.eq_ignore_ascii_case("br") {
+            // A hard line break: drop a trailing collapse-space first.
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+        }
+        rest = &after[gt + 1..];
+    }
+    push_collapsed(&mut out, &decode_entities(rest));
+    out.trim().into()
+}
+
+/// Append `text` to `out` collapsing every run of XML whitespace (spaces, tabs,
+/// and the newlines / indentation of pretty-printed markup) to a single space.
+/// A `\n` already in `out` (from a `<br/>`) suppresses the leading space.
+fn push_collapsed(out: &mut String, text: &str) {
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !out.is_empty() && !out.ends_with(' ') && !out.ends_with('\n') {
+                out.push(' ');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+/// Decode the XML predefined entities and numeric character references. An
+/// unrecognised `&...;` is left verbatim (a lone `&` is common in dirty input).
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.into();
+    }
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        match after.find(';') {
+            Some(semi) => {
+                let ent = &after[..semi];
+                let decoded = match ent {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                        u32::from_str_radix(&ent[2..], 16).ok().and_then(char::from_u32)
+                    }
+                    _ if ent.starts_with('#') => {
+                        ent[1..].parse::<u32>().ok().and_then(char::from_u32)
+                    }
+                    _ => None,
+                };
+                match decoded {
+                    Some(c) => {
+                        out.push(c);
+                        rest = &after[semi + 1..];
+                    }
+                    None => {
+                        out.push('&');
+                        rest = after;
+                    }
+                }
+            }
+            None => {
+                out.push('&');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Parse a TTML time expression to nanoseconds: clock-time (`HH:MM:SS.fff`, via
+/// the shared [`parse_timestamp`]) or offset-time (`<value><metric>` with metric
+/// `h` / `m` / `s` / `ms`). Frame (`f`) and tick (`t`) metrics need a rate and
+/// are unsupported (`None`). Untrusted: folded with checked / `u128` arithmetic.
+fn parse_ttml_time(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.contains(':') {
+        return parse_timestamp(s);
+    }
+    let metric_at = s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, metric) = s.split_at(metric_at);
+    let unit_ns: u64 = match metric {
+        "h" => 3_600_000_000_000,
+        "m" => 60_000_000_000,
+        "s" => 1_000_000_000,
+        "ms" => 1_000_000,
+        _ => return None,
+    };
+    let (int_part, frac_part) = num.split_once('.').unwrap_or((num, ""));
+    let whole = int_part.parse::<u64>().ok()?.checked_mul(unit_ns)?;
+    let frac_ns = frac_of_unit_ns(frac_part, unit_ns);
+    whole.checked_add(frac_ns)
+}
+
+/// Fractional part of an offset-time as nanoseconds: `0.frac * unit_ns`, computed
+/// in `u128` to avoid overflow, with the fraction capped at 9 digits.
+fn frac_of_unit_ns(frac: &str, unit_ns: u64) -> u64 {
+    let frac: alloc::string::String = frac.chars().take_while(|c| c.is_ascii_digit()).take(9).collect();
+    if frac.is_empty() {
+        return 0;
+    }
+    let Ok(frac_int) = frac.parse::<u64>() else { return 0 };
+    let denom = 10u128.pow(frac.len() as u32);
+    ((unit_ns as u128 * frac_int as u128) / denom) as u64
 }
 
 /// Walk blank-line-separated blocks, turning each cue block into a [`Cue`].
@@ -431,6 +664,7 @@ impl SubParse {
             Caps::Text { format: TextFormat::Srt },
             Caps::Text { format: TextFormat::WebVtt },
             Caps::Text { format: TextFormat::Ssa },
+            Caps::Text { format: TextFormat::Ttml },
         ]))
     }
 
@@ -444,7 +678,8 @@ impl SubParse {
         match self.format {
             Some(TextFormat::WebVtt) => parse_webvtt(&doc),
             Some(TextFormat::Ssa) => parse_ssa(&doc),
-            // SubRip is the default; the constraint admits only Srt / WebVtt / Ssa.
+            Some(TextFormat::Ttml) => parse_ttml(&doc),
+            // SubRip is the default; the constraint admits only the parsed formats.
             _ => parse_srt(&doc),
         }
     }
@@ -458,9 +693,9 @@ impl AsyncElement for SubParse {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match upstream_caps {
-            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa } => {
-                Ok(upstream_caps.clone())
-            }
+            Caps::Text {
+                format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa | TextFormat::Ttml,
+            } => Ok(upstream_caps.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -471,16 +706,22 @@ impl AsyncElement for SubParse {
     /// WebVTT / SSA document.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa } => {
-                CapsSet::one(Self::output_caps())
-            }
+            Caps::Text {
+                format: TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa | TextFormat::Ttml,
+            } => CapsSet::one(Self::output_caps()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::Text { format: format @ (TextFormat::Srt | TextFormat::WebVtt | TextFormat::Ssa) } => {
+            Caps::Text {
+                format:
+                    format @ (TextFormat::Srt
+                    | TextFormat::WebVtt
+                    | TextFormat::Ssa
+                    | TextFormat::Ttml),
+            } => {
                 self.format = Some(*format);
                 Ok(ConfigureOutcome::Accepted)
             }
@@ -699,6 +940,62 @@ mod tests {
         assert!(parse_ssa(doc).is_empty());
     }
 
+    const TTML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xml:lang="en">
+  <body>
+    <div>
+      <p begin="00:00:01.000" end="00:00:04.000">Hello &amp; <span>world</span></p>
+      <p begin="00:01:02.500" end="00:01:05.000">Line one<br/>Line two</p>
+      <p begin="5s" end="7.5s">offset time</p>
+    </div>
+  </body>
+</tt>"#;
+
+    #[test]
+    fn ttml_reads_paragraph_cues() {
+        let cues = parse_ttml(TTML);
+        assert_eq!(cues.len(), 3);
+        // Entity decoded, inline <span> stripped, XML whitespace collapsed.
+        assert_eq!(
+            cues[0],
+            Cue {
+                start_ns: 1_000_000_000,
+                end_ns: 4_000_000_000,
+                text: "Hello & world".into(),
+                settings: CueSettings::default(),
+            }
+        );
+        // <br/> -> newline.
+        assert_eq!(cues[1].start_ns, 62_500_000_000);
+        assert_eq!(cues[1].text, "Line one\nLine two");
+    }
+
+    #[test]
+    fn ttml_offset_time() {
+        // The third cue uses offset-time (5s .. 7.5s).
+        let cues = parse_ttml(TTML);
+        assert_eq!(cues[2].start_ns, 5_000_000_000);
+        assert_eq!(cues[2].end_ns, 7_500_000_000);
+        assert_eq!(cues[2].text, "offset time");
+    }
+
+    #[test]
+    fn ttml_namespace_prefixed_tags() {
+        // A `tt:` prefix on the paragraph + break must still match (local name).
+        let doc = r#"<tt:tt><tt:body><tt:p begin="0s" end="1s">hi<tt:br/>there</tt:p></tt:body></tt:tt>"#;
+        let cues = parse_ttml(doc);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "hi\nthere");
+    }
+
+    #[test]
+    fn ttml_skips_paragraph_with_bad_time() {
+        let doc = r#"<p begin="nope" end="1s">x</p><p begin="0s" end="1s">ok</p>"#;
+        let cues = parse_ttml(doc);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "ok");
+    }
+
     #[test]
     fn covers_is_half_open() {
         let cue = Cue { start_ns: 1000, end_ns: 2000, text: "x".into(), settings: CueSettings::default() };
@@ -749,11 +1046,41 @@ mod tests {
         };
         let out = derive(&Caps::Text { format: TextFormat::WebVtt });
         assert_eq!(out.alternatives(), &[Caps::Text { format: TextFormat::Utf8 }]);
-        // SSA negotiates the same way (also -> Utf8).
+        // SSA and TTML negotiate the same way (also -> Utf8).
         assert_eq!(
             el.intercept_caps(&Caps::Text { format: TextFormat::Ssa }).unwrap(),
             Caps::Text { format: TextFormat::Ssa }
         );
+        assert_eq!(
+            el.intercept_caps(&Caps::Text { format: TextFormat::Ttml }).unwrap(),
+            Caps::Text { format: TextFormat::Ttml }
+        );
+    }
+
+    #[tokio::test]
+    async fn element_parses_ttml_to_timed_utf8() {
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::Ttml }).expect("accepts TTML");
+
+        let mut sink = RecordingSink::default();
+        el.process(srt_bytes_frame(TTML.as_bytes()), &mut sink).await.unwrap();
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
+        if let MemoryDomain::System(s) = &frames[0].domain {
+            assert_eq!(s.as_slice(), b"Hello & world");
+        } else {
+            panic!("cue payload must be a system buffer");
+        }
     }
 
     #[tokio::test]

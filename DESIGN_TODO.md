@@ -256,15 +256,15 @@ leverage first:
   alignment.
 - **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
-  `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa}` ->
-  `Text{Utf8}`), the SRT / WebVTT / SSA-ASS parsers (M171 / M401), and the
-  `TextOverlay` renderer (M171). Remaining text-document work: register `SubParse`
-  (and a text source / sink) in the launch registry so `gst-launch` text
-  pipelines parse; a `TextOverlay` sink pad that consumes a `Caps::Text` *stream*
-  (it loads cues out-of-band from a file today); subtitle-track extraction out of
-  the MKV / TS / MP4 demuxers as `Caps::Text`; incremental (non-batch) cue
-  streaming in `SubParse`; carrying WebVTT / SSA cue positioning (`CueSettings`)
-  as text frame-meta; a TTML parser (`TextFormat::Ttml`, needs XML).
+  `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
+  `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
+  and the `TextOverlay` renderer (M171). Remaining text-document work: register
+  `SubParse` (and a text source / sink) in the launch registry so `gst-launch`
+  text pipelines parse; a `TextOverlay` sink pad that consumes a `Caps::Text`
+  *stream* (it loads cues out-of-band from a file today); subtitle-track
+  extraction out of the MKV / TS / MP4 demuxers as `Caps::Text`; incremental
+  (non-batch) cue streaming in `SubParse`; carrying WebVTT / SSA cue positioning
+  (`CueSettings`) as text frame-meta.
 - **Closed captions (CEA-608 / CEA-708).** Unlike the text-document formats,
   captions are an in-band binary command stream (carried in H.264 / H.265 SEI
   `user_data_registered_itu_t_t35`, MPEG-2 user-data, or an MP4 `c608` / `c708`
