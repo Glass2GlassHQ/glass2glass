@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, RawVideoFormat, Rate,
+    MemoryDomain, MultiInputElement, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, TextFormat,
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
@@ -82,6 +82,17 @@ impl TextOverlay {
     pub fn with_cues(mut self, cues: Vec<Cue>) -> Self {
         self.cues = cues;
         self
+    }
+
+    /// Append one cue to the live list (used by [`TextOverlayN`] as cues arrive on
+    /// its text pad). Cues accumulate; selection stays a PTS-covering scan.
+    pub fn push_cue(&mut self, cue: Cue) {
+        self.cues.push(cue);
+    }
+
+    /// Drop all cues (a flush / seek on the text stream).
+    pub fn clear_cues(&mut self) {
+        self.cues.clear();
     }
 
     /// Parse SubRip (`.srt`) text into the cue list.
@@ -430,6 +441,168 @@ impl AsyncElement for TextOverlay {
     }
 }
 
+/// Two-input text overlay (M403): a video pad (`RawVideo{Rgba8}`) and a *text
+/// stream* pad (`Caps::Text{Utf8}`), painting cues that arrive as a stream onto
+/// the video, the `N`-pad sibling of [`TextOverlay`] (which loads cues from a
+/// file). The `subtitleoverlay` analog: pair it with [`SubParse`](crate::subparse)
+/// to overlay a demuxed / network subtitle track, e.g.
+/// `file ! subparse ! textoverlayn.text  videosrc ! textoverlayn.video ! sink`.
+///
+/// A [`MultiInputElement`] (video + text in, video out) that opts into
+/// `input_pts_ordered`, so the runner merges the two pads by PTS: every cue
+/// (PTS = its start time) is delivered before the video frame it first covers,
+/// giving correct A/V-text alignment. Because [`SubParse`] batch-emits its cues
+/// at end of the (small, fast) subtitle stream, the merge buffers video only
+/// until that stream ends; incremental cue streaming is a follow-up. The
+/// rendering is reused wholesale from [`TextOverlay`] (composition); the text pad
+/// only feeds it cues. Cue positioning is the renderer default (bottom-centre):
+/// `SubParse` emits plain text, so WebVTT / SSA placement does not survive the
+/// `Text{Utf8}` stream (carrying it as text frame-meta is a follow-up).
+#[derive(Debug)]
+pub struct TextOverlayN {
+    /// Owns the cue list + geometry + rendering.
+    inner: TextOverlay,
+    /// The output (= video) caps, RGBA8 at fixed geometry, given at construction
+    /// like [`InterleaveMux::new`](crate::mux::InterleaveMux) and the compositor:
+    /// a muxer's merged output must be known up front (the solver does not derive
+    /// it from an input pad), and the video pad is constrained to match it.
+    output: Caps,
+}
+
+impl TextOverlayN {
+    /// Input pad indices: video on 0, the text stream on 1.
+    const VIDEO: usize = 0;
+    const TEXT: usize = 1;
+
+    /// A streamed-subtitle overlay whose video pad and output carry `output`
+    /// (must be `RawVideo{Rgba8}` at fixed geometry, the format the renderer
+    /// draws on; the caller pins it like any g2g muxer's output).
+    pub fn new(output: Caps) -> Self {
+        Self { inner: TextOverlay::new(), output }
+    }
+
+    /// Number of cues received on the text pad so far.
+    pub fn cue_count(&self) -> usize {
+        self.inner.cue_count()
+    }
+
+    /// Count of video frames processed.
+    pub fn drawn_count(&self) -> u64 {
+        self.inner.drawn_count()
+    }
+}
+
+impl MultiInputElement for TextOverlayN {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize {
+        2
+    }
+
+    /// Merge the video and text pads by PTS, so a cue lands before the first
+    /// video frame it covers (correct subtitle timing).
+    fn input_pts_ordered(&self) -> bool {
+        true
+    }
+
+    fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        match input {
+            Self::VIDEO if TextOverlay::accepts(upstream_caps) => Ok(upstream_caps.clone()),
+            Self::TEXT if matches!(upstream_caps, Caps::Text { format: TextFormat::Utf8 }) => {
+                Ok(upstream_caps.clone())
+            }
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    /// Video pad is pinned to the declared output (so the painted frames match
+    /// the output caps); the text pad accepts plain UTF-8. `Accepts` both, so the
+    /// solver narrows each input edge (unlike a wildcard interleave).
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        match input {
+            Self::TEXT => {
+                CapsConstraint::Accepts(CapsSet::one(Caps::Text { format: TextFormat::Utf8 }))
+            }
+            // VIDEO (and any out-of-range pad, defensively) takes the output caps.
+            _ => CapsConstraint::Accepts(CapsSet::one(self.output.clone())),
+        }
+    }
+
+    /// The merged output is fixed at construction (the video stream).
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        Ok(CapsConstraint::Produces(CapsSet::one(self.output.clone())))
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        match input {
+            Self::VIDEO => {
+                // Reuse the single-input overlay's geometry configuration.
+                self.inner.configure_pipeline(absolute_caps)?;
+                Ok(ConfigureOutcome::Accepted)
+            }
+            Self::TEXT => match absolute_caps {
+                Caps::Text { format: TextFormat::Utf8 } => Ok(ConfigureOutcome::Accepted),
+                _ => Err(G2gError::CapsMismatch),
+            },
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    /// The merged output is the video stream (RGBA8 at the declared geometry).
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        Ok(self.output.clone())
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match input {
+                // Video pad: render the active cues + forward, exactly the
+                // single-input overlay's behaviour (it swallows Eos; the runner
+                // emits the merged one).
+                Self::VIDEO => self.inner.process(packet, out).await,
+                // Text pad: turn each timed cue frame into a stored cue. Control
+                // packets carry no cue; the text segment / caps don't govern the
+                // video output, so they are not forwarded (the video pad's do).
+                Self::TEXT => {
+                    match packet {
+                        PipelinePacket::DataFrame(frame) => {
+                            if let MemoryDomain::System(slice) = &frame.domain {
+                                let text =
+                                    String::from_utf8_lossy(slice.as_slice()).into_owned();
+                                let start = frame.timing.pts_ns;
+                                let end = start.saturating_add(frame.timing.duration_ns);
+                                self.inner.push_cue(Cue {
+                                    start_ns: start,
+                                    end_ns: end,
+                                    text,
+                                    settings: crate::subparse::CueSettings::default(),
+                                });
+                            }
+                        }
+                        // A flush / seek on the text stream drops pending cues.
+                        PipelinePacket::Flush => self.inner.clear_cues(),
+                        _ => {}
+                    }
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        })
+    }
+}
+
 /// `TextOverlay`'s settable properties (M171).
 static TEXTOVERLAY_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "location",
@@ -656,5 +829,75 @@ mod tests {
         };
         assert!(ov.intercept_caps(&nv12).is_err());
         assert!(ov.intercept_caps(&rgba_caps(16, 16)).is_ok());
+    }
+
+    // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
+
+    fn text_cue_frame(pts_ns: u64, duration_ns: u64, text: &str) -> Frame {
+        Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(text.as_bytes().to_vec().into_boxed_slice())),
+            FrameTiming { pts_ns, duration_ns, ..FrameTiming::default() },
+            0,
+        )
+    }
+
+    #[test]
+    fn overlayn_negotiates_video_and_text_pads() {
+        use g2g_core::TextFormat;
+        let ov = TextOverlayN::new(rgba_caps(160, 64));
+        // Pad 0 = video (RGBA8), pad 1 = text (Utf8); each rejects the other's caps.
+        assert!(ov.intercept_caps(0, &rgba_caps(16, 16)).is_ok());
+        assert!(ov.intercept_caps(0, &Caps::Text { format: TextFormat::Utf8 }).is_err());
+        assert!(ov.intercept_caps(1, &Caps::Text { format: TextFormat::Utf8 }).is_ok());
+        assert!(ov.intercept_caps(1, &rgba_caps(16, 16)).is_err());
+    }
+
+    #[tokio::test]
+    async fn overlayn_paints_streamed_cue_onto_video() {
+        use g2g_core::TextFormat;
+        let mut ov = TextOverlayN::new(rgba_caps(160, 64));
+        ov.configure_pipeline(0, &rgba_caps(160, 64)).expect("video pad");
+        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).expect("text pad");
+        // Merged output is the video caps.
+        assert_eq!(ov.output_caps().unwrap(), rgba_caps(160, 64));
+
+        let mut sink = PixelSink::default();
+        // A cue arrives on the text pad first (PTS-merged: it precedes its video).
+        ov.process(1, PipelinePacket::DataFrame(text_cue_frame(1_000_000_000, 2_000_000_000, "HELLO")), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(ov.cue_count(), 1, "cue stored from the text stream");
+
+        // Video frame before the cue window: untouched.
+        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 0)), &mut sink).await.unwrap();
+        assert!(!any_nonblack(&sink.last.take().unwrap(), 160, 64), "no text before the cue");
+
+        // Video frame inside the window: the streamed cue is painted.
+        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 1_500_000_000)), &mut sink)
+            .await
+            .unwrap();
+        assert!(any_nonblack(&sink.last.take().unwrap(), 160, 64), "streamed cue painted on video");
+
+        // Video frame after the window: untouched again.
+        ov.process(0, PipelinePacket::DataFrame(frame_at(160, 64, 4_000_000_000)), &mut sink)
+            .await
+            .unwrap();
+        assert!(!any_nonblack(&sink.last.take().unwrap(), 160, 64), "no text after the cue");
+        assert_eq!(ov.drawn_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn overlayn_text_flush_drops_pending_cues() {
+        use g2g_core::TextFormat;
+        let mut ov = TextOverlayN::new(rgba_caps(32, 32));
+        ov.configure_pipeline(0, &rgba_caps(32, 32)).unwrap();
+        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        let mut sink = PixelSink::default();
+        ov.process(1, PipelinePacket::DataFrame(text_cue_frame(0, 1_000_000_000, "X")), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(ov.cue_count(), 1);
+        ov.process(1, PipelinePacket::Flush, &mut sink).await.unwrap();
+        assert_eq!(ov.cue_count(), 0, "flush clears pending cues");
     }
 }
