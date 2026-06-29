@@ -17,7 +17,7 @@ use g2g_core::{
 
 use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssrc::{variant_streams, HlsStreamInfo};
-use g2g_plugins::uridecodebin::{build_hls_fmp4_fanout, build_hls_ts_fanout};
+use g2g_plugins::uridecodebin::{build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout};
 
 fn h264_any() -> Caps {
     Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Any, height: Dim::Any, framerate: Rate::Any }
@@ -131,6 +131,38 @@ fn ignores_separate_audio_renditions_for_the_ts_demuxer() {
     ];
     let graph = build_hls_ts_fanout(&reg, "https://example.com/v.m3u8", &streams).unwrap();
     assert!(graph.is_none(), "separate-rendition audio is not fanned through TsDemuxN");
+}
+
+/// A variant with a separate audio rendition fans out as two independent sources
+/// merged into one graph: the video variant (own TS) and the audio rendition
+/// playlist, each `HlsSrc -> TsDemuxN -> decode -> sink`.
+#[test]
+fn separate_audio_rendition_builds_two_source_chains() {
+    let master_text = "#EXTM3U\n\
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aud\"\n\
+        v.m3u8\n";
+    let Playlist::Master(master) = parse(master_text).unwrap() else {
+        panic!("expected master");
+    };
+    let streams = variant_streams(&master, &master.variants[0]);
+    // One muxed video + one separate-rendition audio (its own playlist URI).
+    assert_eq!(streams.len(), 2);
+    assert!(streams[0].video && streams[0].uri.is_none());
+    assert_eq!(streams[1].uri.as_deref(), Some("a/en.m3u8"));
+
+    let reg = registry();
+    let graph = build_hls_separate_fanout(
+        &reg,
+        "https://example.com/master.m3u8",
+        &streams,
+        "https://example.com/a/en.m3u8",
+    )
+    .expect("separate fan-out builds")
+    .expect("video + audio chains");
+    // Two chains: each HlsSrc -> TsDemuxN -> decoder -> sink (4 nodes, 3 edges).
+    assert_eq!(graph.node_count(), 8, "two independent source->sink chains");
+    assert_eq!(graph.edges().len(), 6);
 }
 
 /// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered from

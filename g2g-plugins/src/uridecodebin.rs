@@ -392,6 +392,51 @@ pub fn build_hls_fmp4_fanout(
     .map_err(|e| map_playbin_err(source_url, e))
 }
 
+/// Assemble a *multi-source* HLS fan-out for a variant with a separate audio
+/// rendition (M397): the video rides the variant's own (video-only) TS segments
+/// while the audio is a distinct `#EXT-X-MEDIA` rendition playlist, so two
+/// independent `HlsSrc -> TsDemuxN -> decode -> sink` chains are built and merged
+/// into one graph (each rendition is its own source, unlike the single-demuxer
+/// muxed fan-out). `streams` supplies the muxed video stream; `audio_url` is the
+/// resolved rendition playlist. `Ok(None)` (decline) when there is no routable
+/// muxed video stream. Network-free assembly (the two sources probe at run).
+#[cfg(feature = "hls")]
+pub fn build_hls_separate_fanout(
+    reg: &Registry,
+    master_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+    audio_url: &str,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    use crate::tsdemux::{TsDemuxN, TsStream};
+    // The variant's own (video-only) TS stream.
+    let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
+        return Ok(None);
+    };
+    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+    let video_ports = playbin_ports(reg, core::iter::once((video.caps.clone(), true)))?;
+    let mut graph = reg
+        .build_playbin_graph_with_source(
+            Box::new(crate::hlssrc::HlsSrc::new(master_url)),
+            TsDemuxN::new(Vec::from([vts])),
+            video_ports,
+            PLAYBIN_MAX_DEPTH,
+        )
+        .map_err(|e| map_playbin_err(master_url, e))?;
+    // The separate audio rendition playlist, its own source -> demux -> sink chain.
+    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    let audio_ports = playbin_ports(reg, core::iter::once((audio_caps, false)))?;
+    let audio_graph = reg
+        .build_playbin_graph_with_source(
+            Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
+            TsDemuxN::new(Vec::from([TsStream::Aac])),
+            audio_ports,
+            PLAYBIN_MAX_DEPTH,
+        )
+        .map_err(|e| map_playbin_err(audio_url, e))?;
+    graph.merge(audio_graph);
+    Ok(Some(graph))
+}
+
 /// The `playbin uri=X` auto-fan-out hook for HLS (M395 TS, M396 fMP4): probe a
 /// `hls://` master playlist, discover its selected variant's renditions, and
 /// assemble `HlsSrc -> {TsDemuxN | Mp4DemuxN} -> {decode -> auto sink}`, one branch
@@ -433,5 +478,12 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
+    // A separate audio rendition (its own playlist) means a multi-source graph:
+    // the variant carries video, the audio is a distinct rendition. Use the first
+    // (declaration-order, typically DEFAULT) audio rendition.
+    if let Some(audio) = streams.iter().find(|s| !s.video && s.uri.is_some()) {
+        let audio_url = crate::fetch::resolve_url(&source_url, audio.uri.as_deref().unwrap_or(""));
+        return build_hls_separate_fanout(reg, &source_url, &streams, &audio_url);
+    }
     build_hls_ts_fanout(reg, &source_url, &streams)
 }
