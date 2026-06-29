@@ -300,6 +300,18 @@ pub trait MultiInputElement: ElementBound {
     /// The merged-output caps, valid once every input has been configured.
     fn output_caps(&self) -> Result<Caps, G2gError>;
 
+    /// If `Some(pad)`, the merged output's caps are the negotiated caps of input
+    /// pad `pad` (an identity-passthrough mux: an overlay / watermark / alpha
+    /// mixer that decorates a primary stream with a sidecar one). The solver then
+    /// derives the output edge from that input edge instead of from
+    /// [`caps_constraint_for_output`](Self::caps_constraint_for_output), so the
+    /// element need not know the output caps up front. Default `None`: the output
+    /// is independent (a container interleave, a fixed-size compositor), declared
+    /// by `caps_constraint_for_output`.
+    fn output_follows_input(&self) -> Option<usize> {
+        None
+    }
+
     /// Combine one packet from `input` into the merged output.
     ///
     /// M22: a per-input `Eos` is delivered here when that input ends, so a

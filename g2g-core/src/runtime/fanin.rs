@@ -302,6 +302,9 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::input_pts_ordered`]: whether the
     /// runner delivers inputs in global PTS order rather than arrival order.
     fn input_pts_ordered(&self) -> bool;
+    /// Dyn-safe mirror of [`MultiInputElement::output_follows_input`]: the input
+    /// pad whose caps the merged output follows (identity-passthrough mux), if any.
+    fn output_follows_input(&self) -> Option<usize>;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
@@ -331,6 +334,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn input_pts_ordered(&self) -> bool {
         MultiInputElement::input_pts_ordered(self)
+    }
+
+    fn output_follows_input(&self) -> Option<usize> {
+        MultiInputElement::output_follows_input(self)
     }
 
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
@@ -390,6 +397,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn input_pts_ordered(&self) -> bool {
         (**self).input_pts_ordered()
+    }
+
+    fn output_follows_input(&self) -> Option<usize> {
+        (**self).output_follows_input()
     }
 
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {

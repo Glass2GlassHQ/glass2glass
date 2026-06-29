@@ -1263,6 +1263,16 @@ function of an input change. `MultiInputElement` exposes
 `caps_constraint_as_input(idx)` and `caps_constraint_for_output()` for the
 solver to consult per-input.
 
+A muxer whose merged output *is* one of its inputs (an identity-passthrough
+mix: a `TextOverlayN` painting a subtitle stream onto video, a watermark, an
+alpha mixer) returns `output_follows_input() = Some(pad)` instead of declaring
+output caps. The solver then derives the output edge by coupling it to that
+input pad's edge (`NodeConstraint::Muxer { follows }`), so the element negotiates
+without knowing its output geometry up front; the fixpoint solve makes the
+coupling order-independent. The default `None` is the independent-output case (a
+container interleave, a fixed-size compositor) declared by
+`caps_constraint_for_output`.
+
 A fan-in muxer interleaves its inputs by **presentation timestamp** (M204), not
 arrival order: `InterleaveMux` buffers frames per input in an `InputAggregator`
 and releases the globally earliest-PTS frame only once every still-contributing

@@ -807,7 +807,16 @@ pub enum NodeConstraint<'a> {
     /// constraint. This is the per-pad shape real muxer elements expose
     /// (`MultiInputElement::caps_constraint_as_input` / `_for_output`), so the
     /// DAG runner builds it straight from the element.
-    Muxer { inputs: Vec<CapsConstraint<'a>>, output: CapsConstraint<'a> },
+    /// `follows` is `Some(pad)` for an identity-passthrough mux (an overlay /
+    /// watermark) whose output caps are that input pad's negotiated caps: the
+    /// solver derives the output edge from that input edge and `output` is unused
+    /// (a placeholder). `None` is the usual independent output declared by
+    /// `output` (a container interleave, a fixed compositor).
+    Muxer {
+        inputs: Vec<CapsConstraint<'a>>,
+        output: CapsConstraint<'a>,
+        follows: Option<usize>,
+    },
     /// Fan-out demux (M380): `input` is the byte-stream input constraint (the
     /// container the demux consumes), and `ports[i]` is output port `i`'s
     /// `Produces` constraint (its distinct elementary stream). Unlike a broadcast
@@ -1116,9 +1125,10 @@ fn fmt_set_opt(slot: &Option<CapsSet>) -> String {
 fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
     match nc {
         NodeConstraint::Element(c) => fmt_caps_constraint(c),
-        NodeConstraint::Muxer { inputs, output } => {
-            alloc::format!("mux {} inputs -> {}", inputs.len(), fmt_caps_constraint(output))
-        }
+        NodeConstraint::Muxer { inputs, output, follows } => match follows {
+            Some(pad) => alloc::format!("mux {} inputs -> follows input {pad}", inputs.len()),
+            None => alloc::format!("mux {} inputs -> {}", inputs.len(), fmt_caps_constraint(output)),
+        },
         NodeConstraint::Demux { ports, .. } => alloc::format!("demux -> {} ports", ports.len()),
     }
 }
@@ -1277,8 +1287,8 @@ fn apply_node<E>(
             _ => apply_tee_node(graph, in_e[0], out_e, edges),
         },
         NodeKind::Muxer(_) => match nc {
-            NodeConstraint::Muxer { inputs, output } => {
-                apply_muxer_node(graph, node, inputs, output, edges)
+            NodeConstraint::Muxer { inputs, output, follows } => {
+                apply_muxer_node(graph, node, inputs, output, *follows, edges)
             }
             _ => Err(shape_err),
         },
@@ -1646,6 +1656,7 @@ fn apply_muxer_node<E>(
     node: NodeId,
     inputs: &[CapsConstraint<'_>],
     output: &CapsConstraint<'_>,
+    follows: Option<usize>,
     edges: &mut [Option<CapsSet>],
 ) -> Result<(), NegotiationFailure> {
     let idx = node.0 as usize;
@@ -1661,6 +1672,19 @@ fn apply_muxer_node<E>(
         }
     }
     let out_edge = graph.out_edges(node)[0];
+    // Identity-passthrough mux: the output edge is the followed input pad's caps.
+    // The solver iterates to a fixpoint, so if that input edge is not yet solved
+    // this pass narrows nothing and a later pass (once the source has cascaded
+    // forward) couples them; coupling keeps the two edges equal thereafter.
+    if let Some(pad) = follows {
+        let in_edge = graph
+            .in_edges(node)
+            .iter()
+            .copied()
+            .find(|&e| graph.edge(e).dst.index as usize == pad)
+            .ok_or(shape_err)?;
+        return couple_edges(graph, edges, in_edge, out_edge);
+    }
     match output {
         CapsConstraint::Produces(set) => narrow_edge(graph, edges, out_edge, set),
         // A legacy muxer output carries one fixated merged caps.
@@ -2313,6 +2337,7 @@ mod tests {
                     CapsConstraint::Accepts(CapsSet::from_alternatives(vec![b.clone(), d.clone()])),
                 ],
                 output: CapsConstraint::Produces(CapsSet::one(muxed)),
+                follows: None,
             },
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
@@ -2368,6 +2393,7 @@ mod tests {
                     CapsConstraint::Accepts(CapsSet::one(h265_any)),
                 ],
                 output: CapsConstraint::Produces(CapsSet::one(muxed.clone())),
+                follows: None,
             },
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
@@ -2387,6 +2413,46 @@ mod tests {
     }
 
     #[test]
+    fn solve_graph_muxer_follows_input_derives_output() {
+        // An identity-passthrough mux (overlay): a video pad 0, a sidecar pad 1,
+        // output follows pad 0. The output edge must equal the video source's caps
+        // even though no output caps were declared (`output` is a placeholder).
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 320, 240, 30);
+        let rgba_any = video(RawVideoFormat::Rgba8, Dim::Any, Dim::Any, Rate::Any);
+        let text = Caps::Text { format: crate::caps::TextFormat::Utf8 };
+
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba.clone()))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(text.clone()))),
+            NodeConstraint::Muxer {
+                inputs: vec![
+                    CapsConstraint::Accepts(CapsSet::one(rgba_any)),
+                    CapsConstraint::Accepts(CapsSet::one(text.clone())),
+                ],
+                // Placeholder: ignored because `follows` is set.
+                output: CapsConstraint::AcceptsAny,
+                follows: Some(0),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let video_src = g.add_source(());
+        let text_src = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let sink = g.add_sink(());
+        g.link(video_src, mux.input(0)).unwrap();
+        g.link(text_src, mux.input(1)).unwrap();
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("follows-input muxer solves");
+        // edges: 0 video->in0, 1 text->in1, 2 mux.out->sink.
+        assert_eq!(sol[2], rgba, "output edge follows the video pad's negotiated caps");
+        assert_eq!(sol[0], rgba, "video pad edge unchanged");
+        assert_eq!(sol[1], text, "text pad edge unchanged");
+    }
+
+    #[test]
     fn solve_graph_muxer_wildcard_inputs_forward_source_caps() {
         // The `InterleaveMux` shape: every input pad is `AcceptsAny` (frames
         // carry their own caps), the output `Produces` a fixed merged caps. The
@@ -2402,6 +2468,7 @@ mod tests {
             NodeConstraint::Muxer {
                 inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
                 output: CapsConstraint::Produces(CapsSet::one(merged.clone())),
+                follows: None,
             },
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];
@@ -2433,6 +2500,7 @@ mod tests {
             NodeConstraint::Muxer {
                 inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
                 output: CapsConstraint::Produces(CapsSet::one(h264.clone())),
+                follows: None,
             },
             NodeConstraint::Element(CapsConstraint::LegacySink(Box::new(|c: &Caps| Ok(c.clone())))),
         ];
@@ -2534,6 +2602,7 @@ mod tests {
                 output: CapsConstraint::Produces(CapsSet::one(fixed_compressed(
                     VideoCodec::H264, 64, 48, 30,
                 ))),
+                follows: None,
             },
             NodeConstraint::Element(CapsConstraint::AcceptsAny),
         ];

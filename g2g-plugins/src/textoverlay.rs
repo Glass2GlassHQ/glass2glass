@@ -458,15 +458,13 @@ impl AsyncElement for TextOverlay {
 /// only feeds it cues. Cue positioning is the renderer default (bottom-centre):
 /// `SubParse` emits plain text, so WebVTT / SSA placement does not survive the
 /// `Text{Utf8}` stream (carrying it as text frame-meta is a follow-up).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TextOverlayN {
     /// Owns the cue list + geometry + rendering.
     inner: TextOverlay,
-    /// The output (= video) caps, RGBA8 at fixed geometry, given at construction
-    /// like [`InterleaveMux::new`](crate::mux::InterleaveMux) and the compositor:
-    /// a muxer's merged output must be known up front (the solver does not derive
-    /// it from an input pad), and the video pad is constrained to match it.
-    output: Caps,
+    /// The negotiated video caps, captured at `configure(VIDEO)`; the merged
+    /// output (it `output_follows_input` the video pad).
+    video_caps: Option<Caps>,
 }
 
 impl TextOverlayN {
@@ -474,11 +472,11 @@ impl TextOverlayN {
     const VIDEO: usize = 0;
     const TEXT: usize = 1;
 
-    /// A streamed-subtitle overlay whose video pad and output carry `output`
-    /// (must be `RawVideo{Rgba8}` at fixed geometry, the format the renderer
-    /// draws on; the caller pins it like any g2g muxer's output).
-    pub fn new(output: Caps) -> Self {
-        Self { inner: TextOverlay::new(), output }
+    /// A streamed-subtitle overlay. The output caps follow the video pad
+    /// (`output_follows_input`), so no output geometry need be supplied: the
+    /// solver derives it from whatever RGBA8 the video source negotiates.
+    pub fn new() -> Self {
+        Self { inner: TextOverlay::new(), video_caps: None }
     }
 
     /// Number of cues received on the text pad so far.
@@ -508,6 +506,12 @@ impl MultiInputElement for TextOverlayN {
         true
     }
 
+    /// The merged output is the video pad's stream (identity passthrough with
+    /// text painted on), so the solver derives the output caps from pad 0.
+    fn output_follows_input(&self) -> Option<usize> {
+        Some(Self::VIDEO)
+    }
+
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match input {
             Self::VIDEO if TextOverlay::accepts(upstream_caps) => Ok(upstream_caps.clone()),
@@ -518,22 +522,22 @@ impl MultiInputElement for TextOverlayN {
         }
     }
 
-    /// Video pad is pinned to the declared output (so the painted frames match
-    /// the output caps); the text pad accepts plain UTF-8. `Accepts` both, so the
-    /// solver narrows each input edge (unlike a wildcard interleave).
+    /// Video pad accepts RGBA8 at any geometry (the output follows it); the text
+    /// pad accepts plain UTF-8. `Accepts` both, so the solver narrows each input
+    /// edge (unlike a wildcard interleave).
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
         match input {
             Self::TEXT => {
                 CapsConstraint::Accepts(CapsSet::one(Caps::Text { format: TextFormat::Utf8 }))
             }
-            // VIDEO (and any out-of-range pad, defensively) takes the output caps.
-            _ => CapsConstraint::Accepts(CapsSet::one(self.output.clone())),
+            // VIDEO (and any out-of-range pad, defensively): RGBA8, any geometry.
+            _ => CapsConstraint::Accepts(CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
         }
-    }
-
-    /// The merged output is fixed at construction (the video stream).
-    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
-        Ok(CapsConstraint::Produces(CapsSet::one(self.output.clone())))
     }
 
     fn configure_pipeline(
@@ -543,8 +547,10 @@ impl MultiInputElement for TextOverlayN {
     ) -> Result<ConfigureOutcome, G2gError> {
         match input {
             Self::VIDEO => {
-                // Reuse the single-input overlay's geometry configuration.
+                // Reuse the single-input overlay's geometry configuration; capture
+                // the caps as the merged output (it follows this pad).
                 self.inner.configure_pipeline(absolute_caps)?;
+                self.video_caps = Some(absolute_caps.clone());
                 Ok(ConfigureOutcome::Accepted)
             }
             Self::TEXT => match absolute_caps {
@@ -555,9 +561,11 @@ impl MultiInputElement for TextOverlayN {
         }
     }
 
-    /// The merged output is the video stream (RGBA8 at the declared geometry).
+    /// The merged output is the video stream (RGBA8 at the negotiated geometry).
+    /// Negotiation derives the output edge from the video pad (`output_follows_
+    /// input`); this is the runtime mirror, valid once the video pad is configured.
     fn output_caps(&self) -> Result<Caps, G2gError> {
-        Ok(self.output.clone())
+        self.video_caps.clone().ok_or(G2gError::NotConfigured)
     }
 
     fn process<'a>(
@@ -844,7 +852,7 @@ mod tests {
     #[test]
     fn overlayn_negotiates_video_and_text_pads() {
         use g2g_core::TextFormat;
-        let ov = TextOverlayN::new(rgba_caps(160, 64));
+        let ov = TextOverlayN::new();
         // Pad 0 = video (RGBA8), pad 1 = text (Utf8); each rejects the other's caps.
         assert!(ov.intercept_caps(0, &rgba_caps(16, 16)).is_ok());
         assert!(ov.intercept_caps(0, &Caps::Text { format: TextFormat::Utf8 }).is_err());
@@ -855,7 +863,7 @@ mod tests {
     #[tokio::test]
     async fn overlayn_paints_streamed_cue_onto_video() {
         use g2g_core::TextFormat;
-        let mut ov = TextOverlayN::new(rgba_caps(160, 64));
+        let mut ov = TextOverlayN::new();
         ov.configure_pipeline(0, &rgba_caps(160, 64)).expect("video pad");
         ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).expect("text pad");
         // Merged output is the video caps.
@@ -889,7 +897,7 @@ mod tests {
     #[tokio::test]
     async fn overlayn_text_flush_drops_pending_cues() {
         use g2g_core::TextFormat;
-        let mut ov = TextOverlayN::new(rgba_caps(32, 32));
+        let mut ov = TextOverlayN::new();
         ov.configure_pipeline(0, &rgba_caps(32, 32)).unwrap();
         ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
         let mut sink = PixelSink::default();

@@ -1205,9 +1205,15 @@ fn build_node_constraints<'g, 'a>(
                 let inputs: Vec<CapsConstraint<'g>> = (0..elem.input_count())
                     .map(|pad| elem.caps_constraint_as_input(pad))
                     .collect();
-                let output =
-                    elem.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?;
-                NodeConstraint::Muxer { inputs, output }
+                let follows = elem.output_follows_input();
+                // An identity-passthrough mux derives its output from a pad, so it
+                // need not (and may be unable to) declare output caps up front;
+                // only ask for them in the independent-output case.
+                let output = match follows {
+                    Some(_) => CapsConstraint::AcceptsAny,
+                    None => elem.caps_constraint_for_output().map_err(|_| G2gError::CapsMismatch)?,
+                };
+                NodeConstraint::Muxer { inputs, output, follows }
             }
         };
         constraints.push(nc);

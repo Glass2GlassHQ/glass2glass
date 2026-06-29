@@ -165,7 +165,7 @@ async fn streamed_srt_track_paints_video_in_the_cue_window() {
     }));
     let srt = g.add_source(GraphNode::source(SrtTextSrc));
     let subparse = g.add_transform(GraphNode::element(SubParse::new()));
-    let mux = g.add_muxer(GraphNode::muxer(TextOverlayN::new(rgba(W, H))), 2);
+    let mux = g.add_muxer(GraphNode::muxer(TextOverlayN::new()), 2);
     let sink = g.add_sink(GraphNode::element(RecSink { log: log.clone() }));
 
     g.link(video, mux.input(0)).unwrap();
