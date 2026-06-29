@@ -18,6 +18,56 @@ pub struct Variant {
     pub resolution: Option<(u32, u32)>,
     pub codecs: Option<String>,
     pub uri: String,
+    /// `AUDIO` group-id this variant binds (its alternate-audio renditions live in
+    /// [`MasterPlaylist::renditions`] under this group), `None` when audio is
+    /// multiplexed into the variant's own segments.
+    pub audio_group: Option<String>,
+    /// `SUBTITLES` group-id this variant binds, `None` when it carries none.
+    pub subtitles_group: Option<String>,
+    /// `VIDEO` group-id this variant binds (alternate video renditions), `None`
+    /// for the common single-video case.
+    pub video_group: Option<String>,
+}
+
+impl Variant {
+    /// The `CODECS` attribute split into individual RFC 6381 codec strings
+    /// (`avc1.4d401e`, `mp4a.40.2`, ...), empty when the attribute is absent.
+    pub fn codec_list(&self) -> Vec<&str> {
+        match &self.codecs {
+            Some(c) => c.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// The kind of an alternate rendition (`#EXT-X-MEDIA:TYPE=`). `ClosedCaptions`
+/// renditions carry no URI (they ride in the video stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaType {
+    Audio,
+    Video,
+    Subtitles,
+    ClosedCaptions,
+}
+
+/// One alternate rendition declared by `#EXT-X-MEDIA` (RFC 8216 §4.3.4.1): a
+/// named, grouped audio / video / subtitle track a variant can bind via its
+/// `AUDIO` / `VIDEO` / `SUBTITLES` attribute. The discovery unit behind HLS
+/// rendition selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendition {
+    pub media_type: MediaType,
+    pub group_id: String,
+    pub name: String,
+    /// `LANGUAGE` (RFC 5646 tag), `None` when the tag omits it.
+    pub language: Option<String>,
+    /// Rendition playlist URI; `None` for a rendition multiplexed into the
+    /// variant's segments (allowed for `AUDIO`/`VIDEO`) or for `CLOSED-CAPTIONS`.
+    pub uri: Option<String>,
+    /// `DEFAULT=YES`: play this rendition absent an explicit choice.
+    pub default: bool,
+    /// `AUTOSELECT=YES`: eligible for automatic selection (e.g. by language).
+    pub autoselect: bool,
 }
 
 /// `#EXT-X-KEY` encryption method. `SampleAes` is recognized but unsupported by
@@ -64,6 +114,21 @@ pub struct Segment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MasterPlaylist {
     pub variants: Vec<Variant>,
+    /// Alternate renditions from `#EXT-X-MEDIA` (alternate audio, subtitles, ...),
+    /// grouped by `group_id`; a variant binds a group via its `audio_group` /
+    /// `subtitles_group` / `video_group`.
+    pub renditions: Vec<Rendition>,
+}
+
+impl MasterPlaylist {
+    /// The renditions in `group_id` of the given `media_type` (e.g. the alternate
+    /// audio tracks a variant's `AUDIO` group offers), in declaration order.
+    pub fn renditions_in(&self, media_type: MediaType, group_id: &str) -> Vec<&Rendition> {
+        self.renditions
+            .iter()
+            .filter(|r| r.media_type == media_type && r.group_id == group_id)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +184,7 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     }
 
     let mut variants = Vec::new();
+    let mut renditions = Vec::new();
     let mut segments = Vec::new();
     let mut target_duration_secs = 0u32;
     let mut media_sequence = 0u64;
@@ -139,6 +205,10 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     for line in lines {
         if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
             pending_variant = Some(parse_stream_inf(attrs));
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-MEDIA:") {
+            if let Some(r) = parse_media(attrs) {
+                renditions.push(r);
+            }
         } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
             pending_segment = Some(parse_extinf_ms(rest));
         } else if let Some(rest) = line.strip_prefix("#EXT-X-BYTERANGE:") {
@@ -193,8 +263,8 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
         return Err(HlsError::DanglingTag);
     }
 
-    if !variants.is_empty() {
-        Ok(Playlist::Master(MasterPlaylist { variants }))
+    if !variants.is_empty() || !renditions.is_empty() {
+        Ok(Playlist::Master(MasterPlaylist { variants, renditions }))
     } else {
         Ok(Playlist::Media(MediaPlaylist {
             target_duration_secs,
@@ -213,15 +283,55 @@ fn parse_stream_inf(attrs: &str) -> Variant {
     let mut bandwidth = 0u64;
     let mut resolution = None;
     let mut codecs = None;
+    let mut audio_group = None;
+    let mut subtitles_group = None;
+    let mut video_group = None;
+    let unquote = |v: &str| String::from(v.trim_matches('"'));
     for (key, value) in attr_pairs(attrs) {
         match key {
             "BANDWIDTH" => bandwidth = value.parse().unwrap_or(0),
             "RESOLUTION" => resolution = parse_resolution(value),
-            "CODECS" => codecs = Some(String::from(value.trim_matches('"'))),
+            "CODECS" => codecs = Some(unquote(value)),
+            "AUDIO" => audio_group = Some(unquote(value)),
+            "SUBTITLES" => subtitles_group = Some(unquote(value)),
+            "VIDEO" => video_group = Some(unquote(value)),
             _ => {}
         }
     }
-    Variant { bandwidth, resolution, codecs, uri: String::new() }
+    Variant {
+        bandwidth,
+        resolution,
+        codecs,
+        uri: String::new(),
+        audio_group,
+        subtitles_group,
+        video_group,
+    }
+}
+
+/// Parse an `#EXT-X-MEDIA` attribute list into a [`Rendition`]. Requires `TYPE`,
+/// `GROUP-ID`, and `NAME` (RFC 8216 §4.3.4.1); an unknown / missing `TYPE` or a
+/// missing required field yields `None` (the tag is skipped, not a parse error).
+fn parse_media(attrs: &str) -> Option<Rendition> {
+    let pairs = attr_pairs(attrs);
+    let find = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let unquote = |v: &str| String::from(v.trim_matches('"'));
+    let media_type = match find("TYPE")? {
+        "AUDIO" => MediaType::Audio,
+        "VIDEO" => MediaType::Video,
+        "SUBTITLES" => MediaType::Subtitles,
+        "CLOSED-CAPTIONS" => MediaType::ClosedCaptions,
+        _ => return None,
+    };
+    Some(Rendition {
+        media_type,
+        group_id: unquote(find("GROUP-ID")?),
+        name: unquote(find("NAME")?),
+        language: find("LANGUAGE").map(unquote),
+        uri: find("URI").map(unquote),
+        default: find("DEFAULT") == Some("YES"),
+        autoselect: find("AUTOSELECT") == Some("YES"),
+    })
 }
 
 /// Parse an `#EXT-X-KEY` attribute list. `METHOD=NONE` (or a missing/unknown
@@ -422,6 +532,54 @@ mod tests {
         assert_eq!(master.select(Some(1_000_000)).unwrap().uri, "low.m3u8");
         // Cap below everything: falls back to the lowest.
         assert_eq!(master.select(Some(1)).unwrap().uri, "low.m3u8");
+    }
+
+    #[test]
+    fn parses_master_renditions_and_variant_group_links() {
+        // A master with two alternate audio renditions (an AUDIO group) and a
+        // subtitle rendition, plus a variant binding both groups.
+        let text = "#EXTM3U\n\
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/en.m3u8\"\n\
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"Français\",LANGUAGE=\"fr\",AUTOSELECT=YES,URI=\"audio/fr.m3u8\"\n\
+            #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",LANGUAGE=\"en\",URI=\"subs/en.m3u8\"\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aac\",SUBTITLES=\"subs\"\n\
+            video/720p.m3u8\n";
+        let Playlist::Master(master) = parse(text).unwrap() else {
+            panic!("expected master playlist");
+        };
+        assert_eq!(master.variants.len(), 1);
+        let v = &master.variants[0];
+        assert_eq!(v.audio_group.as_deref(), Some("aac"));
+        assert_eq!(v.subtitles_group.as_deref(), Some("subs"));
+        assert_eq!(v.codec_list(), alloc::vec!["avc1.4d401e", "mp4a.40.2"]);
+
+        // The variant's audio group offers two alternate renditions, in order.
+        let audio = master.renditions_in(MediaType::Audio, "aac");
+        assert_eq!(audio.len(), 2);
+        assert_eq!(audio[0].name, "English");
+        assert_eq!(audio[0].language.as_deref(), Some("en"));
+        assert!(audio[0].default, "first audio rendition is DEFAULT=YES");
+        assert_eq!(audio[0].uri.as_deref(), Some("audio/en.m3u8"));
+        assert_eq!(audio[1].language.as_deref(), Some("fr"));
+        assert!(!audio[1].default);
+
+        let subs = master.renditions_in(MediaType::Subtitles, "subs");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].uri.as_deref(), Some("subs/en.m3u8"));
+    }
+
+    #[test]
+    fn media_only_renditions_still_form_a_master() {
+        // A playlist with #EXT-X-MEDIA but no #EXT-X-STREAM-INF is still a master
+        // (renditions present), not mis-parsed as an empty media playlist.
+        let text = "#EXTM3U\n\
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"main\",URI=\"a.m3u8\"\n";
+        let Playlist::Master(master) = parse(text).unwrap() else {
+            panic!("expected master playlist");
+        };
+        assert!(master.variants.is_empty());
+        assert_eq!(master.renditions.len(), 1);
+        assert_eq!(master.renditions[0].media_type, MediaType::Audio);
     }
 
     #[test]

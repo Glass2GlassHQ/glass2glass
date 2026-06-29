@@ -1489,8 +1489,17 @@ known without sniffing the byte stream.
   AudioSpecificConfig (M394), so the audio elementary stream is self-describing and
   decodes without out-of-band config, symmetric with the in-band video parameter
   sets. Clear (unencrypted) multi-track files only; encryption stays single-track
-  via `parse_header` / `parse_fragments`. HLS rides on this: `HlsSrc` emits
-  `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a variant's streams.
+  via `parse_header` / `parse_fragments`. `hls_playbin` (M395) is the HLS sibling:
+  it probes a `hls://` master playlist (the scheme maps to an `https` origin),
+  discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
+  alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group
+  bindings; `hlssrc::variant_streams` maps the variant's `CODECS` + alternate audio
+  to streams), and for a muxed MPEG-TS variant assembles `HlsSrc → TsDemuxN →
+  {decode → sink}` (the network-free assembly factored into `build_hls_ts_fanout`).
+  It declines to a single-stream `hls_handler` for a media-only / fMP4 / single-
+  stream variant or a probe failure. The master probe is network-coupled
+  (validated live, not CI); separate-rendition audio (a distinct playlist) and
+  fMP4-HLS fan-out are follow-ups.
 
 - **Gapless playback** (`std`, M383). The playbin `about-to-finish` + next-`uri`
   analog: `GaplessSrc` (`g2g-plugins`) concatenates a playlist of sources into

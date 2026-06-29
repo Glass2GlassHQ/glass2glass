@@ -71,6 +71,27 @@ pub fn file_handler() -> UriSourceFactory {
     })
 }
 
+/// `hls://host/path.m3u8` -> [`HlsSrc`](crate::hlssrc::HlsSrc): single-stream
+/// HLS playback. The `hls` scheme maps to an `https` origin for fetching; the
+/// declared media type is `ByteStream{MpegTs}` (the dominant HLS packaging), so
+/// the registry auto-plugs `tsdemux -> decode`. This is the fallback the
+/// [`hls_playbin`] fan-out hook defers to (a media-only playlist, an fMP4 variant,
+/// or a network failure during the master probe).
+#[cfg(feature = "hls")]
+pub fn hls_handler() -> UriSourceFactory {
+    UriSourceFactory::new("hls", |uri: &Uri| {
+        if uri.rest.is_empty() {
+            return Err(UriError::Malformed);
+        }
+        let url = alloc::format!("https://{}", uri.rest);
+        let src = crate::hlssrc::HlsSrc::new(url);
+        Ok((
+            Box::new(src) as Box<dyn DynSourceLoop>,
+            Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs },
+        ))
+    })
+}
+
 /// `v4l2:///dev/videoN` -> [`V4l2Src`](crate::v4l2src::V4l2Src): YUYV capture.
 /// `rest` is the device path.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
@@ -111,6 +132,8 @@ use g2g_core::runtime::{
 };
 #[cfg(feature = "std")]
 use g2g_core::{ByteStreamEncoding, Graph};
+#[cfg(feature = "hls")]
+use g2g_core::AudioFormat;
 
 /// file:// probe: read a bounded prefix of the URI's file for container sniffing.
 /// `None` for a non-`file://` URI or an unreadable file (the hook then declines),
@@ -263,4 +286,99 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     )
     .map(Some)
     .map_err(|e| map_playbin_err(uri, e))
+}
+
+/// Fetch a text resource synchronously on a throwaway current-thread runtime, for
+/// the `playbin uri=hls://...` probe (M395). Returns `None` on any failure, so the
+/// hook declines to the single-stream `hls` handler. Network-coupled: validated
+/// against a live server, not in CI (like the RTSP / WHIP paths).
+#[cfg(feature = "hls")]
+fn blocking_get_text(url: &str) -> Option<alloc::string::String> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let client = reqwest::Client::new();
+    rt.block_on(crate::fetch::get_text(&client, url, crate::fetch::MAX_MANIFEST_BYTES)).ok()
+}
+
+/// The MPEG-TS elementary-stream selector for an HLS discovered stream, or `None`
+/// for a codec `TsDemuxN` cannot route (only H.264 / H.265 video + AAC audio).
+#[cfg(feature = "hls")]
+fn hls_ts_stream(info: &crate::hlssrc::HlsStreamInfo) -> Option<crate::tsdemux::TsStream> {
+    use crate::tsdemux::TsStream;
+    match &info.caps {
+        Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some(TsStream::H264),
+        Caps::CompressedVideo { codec: VideoCodec::H265, .. } => Some(TsStream::H265),
+        Caps::Audio { format: AudioFormat::Aac, .. } => Some(TsStream::Aac),
+        _ => None,
+    }
+}
+
+/// Assemble the `HlsSrc -> TsDemuxN -> {decode -> auto sink}` fan-out from a
+/// master variant's discovered streams (M395). The network-free core of
+/// [`hls_playbin`], so it is unit-testable: only the *muxed* streams (carried in
+/// the variant's own TS segments, `uri == None`) fan out through one demuxer, one
+/// `TsStream` port per routable codec. Returns `Ok(None)` (decline, the
+/// single-stream handler takes over) when fewer than two routable muxed streams
+/// remain, e.g. a single-rendition or separate-audio variant.
+#[cfg(feature = "hls")]
+pub fn build_hls_ts_fanout(
+    reg: &Registry,
+    source_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let mut ts_streams = Vec::new();
+    let mut port_infos = Vec::new();
+    for s in streams.iter().filter(|s| s.uri.is_none()) {
+        if let Some(ts) = hls_ts_stream(s) {
+            ts_streams.push(ts);
+            port_infos.push((s.caps.clone(), s.video));
+        }
+    }
+    if ts_streams.len() < 2 {
+        return Ok(None); // not a multi-stream muxed TS variant
+    }
+    let ports = playbin_ports(reg, port_infos.into_iter())?;
+    let source = crate::hlssrc::HlsSrc::new(source_url);
+    reg.build_playbin_graph_with_source(
+        Box::new(source),
+        crate::tsdemux::TsDemuxN::new(ts_streams),
+        ports,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map(Some)
+    .map_err(|e| map_playbin_err(source_url, e))
+}
+
+/// The `playbin uri=X` auto-fan-out hook for HLS (M395): probe a `hls://` master
+/// playlist, discover its selected variant's renditions, and assemble `HlsSrc ->
+/// TsDemuxN -> {decode -> auto sink}`, one branch per muxed elementary stream, the
+/// HLS sibling of [`mkv_playbin`] / [`ts_playbin`] / [`mp4_playbin`]. The `hls`
+/// scheme maps to an `https` origin.
+///
+/// Declines (`Ok(None)`, so the single-stream [`hls_handler`] takes over) for a
+/// non-`hls` URI, a master-probe network failure, a media-only playlist, an fMP4
+/// (non-TS) variant, or a variant without at least two routable muxed streams.
+/// Network-coupled: the probe is validated against a live server, not in CI.
+#[cfg(feature = "hls")]
+pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some(parsed) = Uri::parse(uri) else { return Ok(None) };
+    if parsed.scheme != "hls" || parsed.rest.is_empty() {
+        return Ok(None);
+    }
+    let source_url = alloc::format!("https://{}", parsed.rest);
+    // Fetch + parse the master; decline (single-stream fallback) on any failure.
+    let Some(master_text) = blocking_get_text(&source_url) else { return Ok(None) };
+    let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
+        return Ok(None); // a media playlist or parse error: single-stream handles it
+    };
+    let Some(variant) = master.select(None) else { return Ok(None) };
+    // The variant's media playlist tells the container; only muxed TS fans out
+    // here (an fMP4 init segment's track ids are not known without fetching it).
+    let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
+    let Some(media_text) = blocking_get_text(&media_url) else { return Ok(None) };
+    match crate::hls::parse(&media_text) {
+        Ok(crate::hls::Playlist::Media(m)) if m.map_uri.is_none() => {}
+        _ => return Ok(None), // fMP4 (EXT-X-MAP) or unexpected: decline
+    }
+    let streams = crate::hlssrc::variant_streams(&master, variant);
+    build_hls_ts_fanout(reg, &source_url, &streams)
 }

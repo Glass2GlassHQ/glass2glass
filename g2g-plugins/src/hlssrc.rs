@@ -38,8 +38,9 @@ use alloc::vec::Vec;
 
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
+    AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, Seek, Segment, StreamType, VideoCodec,
 };
 
 use crate::fetch::{
@@ -47,8 +48,97 @@ use crate::fetch::{
     MAX_SEGMENT_BYTES,
 };
 use crate::abr::BandwidthEstimator;
-use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, Playlist};
+use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
 use crate::sampleaesdecrypt::{SampleAesKey, SampleAesKeyHandle};
+
+/// One decodable stream a master playlist's variant exposes, the unit the
+/// `playbin uri=hls://...` fan-out (M395) builds a branch from. The HLS analog of
+/// `MkvStreamInfo` / `TsStreamInfo` / `Mp4StreamInfo`, plus the rendition
+/// metadata HLS carries (a separate-rendition playlist `uri`, display `name`,
+/// `language`).
+#[derive(Debug, Clone)]
+pub struct HlsStreamInfo {
+    pub stream_type: StreamType,
+    /// Discovery caps (geometry / channel layout `Any`-or-`0`, refined at runtime
+    /// by the demuxer's `CapsChanged`), the branch's negotiation target.
+    pub caps: Caps,
+    pub video: bool,
+    /// A separate alternate-rendition playlist (`#EXT-X-MEDIA:URI`), or `None`
+    /// when the stream is multiplexed into the variant's own segments.
+    pub uri: Option<String>,
+    pub name: String,
+    pub language: Option<String>,
+}
+
+/// Map an RFC 6381 `CODECS` entry to a `(StreamType, discovery caps, is_video)`.
+/// `None` for an unrecognized codec (it is dropped from the discovered streams).
+fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
+    let video = |c| {
+        (
+            StreamType::Video,
+            Caps::CompressedVideo { codec: c, width: Dim::Any, height: Dim::Any, framerate: Rate::Any },
+            true,
+        )
+    };
+    let audio = |f| (StreamType::Audio, Caps::Audio { format: f, channels: 0, sample_rate: 0 }, false);
+    Some(match codec {
+        c if c.starts_with("avc1") || c.starts_with("avc3") => video(VideoCodec::H264),
+        c if c.starts_with("hvc1") || c.starts_with("hev1") || c.starts_with("dvh") => {
+            video(VideoCodec::H265)
+        }
+        c if c.starts_with("av01") => video(VideoCodec::Av1),
+        c if c.starts_with("vp09") => video(VideoCodec::Vp9),
+        c if c.starts_with("vp08") => video(VideoCodec::Vp8),
+        c if c.starts_with("mp4a") => audio(AudioFormat::Aac),
+        c if c.starts_with("opus") || c.starts_with("Opus") => audio(AudioFormat::Opus),
+        _ => return None,
+    })
+}
+
+/// The decodable streams a master's `variant` exposes (M395 rendition discovery):
+/// the streams multiplexed in the variant's own segments (from its `CODECS`) plus
+/// the alternate audio renditions its `AUDIO` group offers (each a separate
+/// `#EXT-X-MEDIA` playlist). When the variant binds an `AUDIO` group its audio is
+/// not muxed, so the muxed audio codec is dropped in favour of the group's
+/// renditions. Subtitles (no decode path / `Caps`) are discoverable via
+/// [`MasterPlaylist::renditions_in`] but not returned here.
+pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStreamInfo> {
+    let mut out = Vec::new();
+    let has_audio_group = variant.audio_group.is_some();
+    for codec in variant.codec_list() {
+        if let Some((stream_type, caps, video)) = codec_to_stream(codec) {
+            // Audio is a separate rendition when an AUDIO group is bound; only the
+            // muxed (video, or group-less audio) codecs ride the variant segments.
+            if !video && has_audio_group {
+                continue;
+            }
+            let name = if video { "video" } else { "audio" };
+            out.push(HlsStreamInfo {
+                stream_type,
+                caps,
+                video,
+                uri: None,
+                name: String::from(name),
+                language: None,
+            });
+        }
+    }
+    // Alternate audio renditions (separate playlists) from the variant's group.
+    if let Some(group) = &variant.audio_group {
+        for r in master.renditions_in(MediaType::Audio, group) {
+            let Some(uri) = &r.uri else { continue }; // a URI-less rendition is muxed
+            out.push(HlsStreamInfo {
+                stream_type: StreamType::Audio,
+                caps: Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 },
+                video: false,
+                uri: Some(uri.clone()),
+                name: r.name.clone(),
+                language: r.language.clone(),
+            });
+        }
+    }
+    out
+}
 
 #[derive(Debug)]
 pub struct HlsSrc {
@@ -548,3 +638,52 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         "live-playlist reload interval in ms; 0 derives it from TARGETDURATION",
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hls::{parse, Playlist};
+
+    fn master(text: &str) -> MasterPlaylist {
+        match parse(text).unwrap() {
+            Playlist::Master(m) => m,
+            Playlist::Media(_) => panic!("expected master playlist"),
+        }
+    }
+
+    #[test]
+    fn variant_streams_splits_a_muxed_ts_variant() {
+        // A muxed variant (no AUDIO group): CODECS lists both, both are in-segment.
+        let m = master(
+            "#EXTM3U\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.4d401e,mp4a.40.2\"\n\
+             v.m3u8\n",
+        );
+        let streams = variant_streams(&m, &m.variants[0]);
+        assert_eq!(streams.len(), 2);
+        assert!(streams[0].video && matches!(streams[0].caps, Caps::CompressedVideo { codec: VideoCodec::H264, .. }));
+        assert!(!streams[1].video && matches!(streams[1].caps, Caps::Audio { format: AudioFormat::Aac, .. }));
+        // Muxed streams ride the variant segments: no separate rendition URI.
+        assert!(streams.iter().all(|s| s.uri.is_none()));
+    }
+
+    #[test]
+    fn variant_streams_uses_separate_audio_renditions() {
+        // An AUDIO group: the variant carries video only; audio is two separate
+        // rendition playlists (the muxed mp4a codec is dropped in their favour).
+        let m = master(
+            "#EXTM3U\n\
+             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/en.m3u8\"\n\
+             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"fr\",LANGUAGE=\"fr\",URI=\"a/fr.m3u8\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aud\"\n\
+             v.m3u8\n",
+        );
+        let streams = variant_streams(&m, &m.variants[0]);
+        assert_eq!(streams.len(), 3, "one muxed video + two separate audio renditions");
+        assert!(streams[0].video && streams[0].uri.is_none());
+        assert_eq!(streams[1].uri.as_deref(), Some("a/en.m3u8"));
+        assert_eq!(streams[1].language.as_deref(), Some("en"));
+        assert_eq!(streams[2].uri.as_deref(), Some("a/fr.m3u8"));
+        assert!(streams[1..].iter().all(|s| !s.video));
+    }
+}

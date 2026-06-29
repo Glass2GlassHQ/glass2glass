@@ -394,6 +394,13 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
+    // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
+    // streams out; the hls_handler is the single-stream fallback it declines to.
+    #[cfg(feature = "hls")]
+    {
+        reg.register_uri(crate::uridecodebin::hls_handler());
+        reg.register_playbin(crate::uridecodebin::hls_playbin);
+    }
     #[cfg(feature = "udp-ingress")]
     reg.register_uri(crate::uridecodebin::udp_handler());
     #[cfg(feature = "rtsp")]
