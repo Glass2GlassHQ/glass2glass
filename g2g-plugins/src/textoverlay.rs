@@ -455,9 +455,10 @@ impl AsyncElement for TextOverlay {
 /// is fully parsed (M405), so the merge only buffers video up to the next cue's
 /// start, not to the end of the subtitle stream. The
 /// rendering is reused wholesale from [`TextOverlay`] (composition); the text pad
-/// only feeds it cues. Cue positioning is the renderer default (bottom-centre):
-/// `SubParse` emits plain text, so WebVTT / SSA placement does not survive the
-/// `Text{Utf8}` stream (carrying it as text frame-meta is a follow-up).
+/// only feeds it cues. Cue positioning (WebVTT / SSA `position` / `line` / `align`)
+/// rides the stream as [`TextCueMeta`](crate::subparse::TextCueMeta) frame-meta
+/// under the `metadata` feature (M406), so a placed cue renders where it asks; on
+/// the ZST baseline (no meta) every cue draws at the renderer default (bottom-centre).
 #[derive(Debug, Default)]
 pub struct TextOverlayN {
     /// Owns the cue list + geometry + rendering.
@@ -591,11 +592,22 @@ impl MultiInputElement for TextOverlayN {
                                     String::from_utf8_lossy(slice.as_slice()).into_owned();
                                 let start = frame.timing.pts_ns;
                                 let end = start.saturating_add(frame.timing.duration_ns);
+                                // Recover the cue placement from frame-meta (M406)
+                                // if `SubParse` attached it; default otherwise (and
+                                // always on the ZST baseline).
+                                #[cfg(feature = "metadata")]
+                                let settings = frame
+                                    .meta
+                                    .get::<crate::subparse::TextCueMeta>()
+                                    .map(|m| m.settings)
+                                    .unwrap_or_default();
+                                #[cfg(not(feature = "metadata"))]
+                                let settings = crate::subparse::CueSettings::default();
                                 self.inner.push_cue(Cue {
                                     start_ns: start,
                                     end_ns: end,
                                     text,
-                                    settings: crate::subparse::CueSettings::default(),
+                                    settings,
                                 });
                             }
                         }
@@ -892,6 +904,33 @@ mod tests {
             .unwrap();
         assert!(!any_nonblack(&sink.last.take().unwrap(), 160, 64), "no text after the cue");
         assert_eq!(ov.drawn_count(), 3);
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn overlayn_honours_streamed_cue_positioning_meta() {
+        // A streamed cue carrying TextCueMeta (M406) must render where the meta
+        // places it, not at the bottom-centre default: top-left here.
+        use crate::subparse::{CueSettings, TextAlign, TextCueMeta};
+        use g2g_core::TextFormat;
+        let (w, h) = (200u32, 96u32);
+        let mut ov = TextOverlayN::new();
+        ov.configure_pipeline(0, &rgba_caps(w, h)).unwrap();
+        ov.configure_pipeline(1, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+
+        let mut frame = text_cue_frame(0, u64::MAX / 2, "HI");
+        frame.meta.attach(TextCueMeta {
+            settings: CueSettings { position: Some(0), line: Some(0), align: TextAlign::Start },
+        });
+        let mut sink = PixelSink::default();
+        ov.process(1, PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+
+        ov.process(0, PipelinePacket::DataFrame(frame_at(w, h, 0)), &mut sink).await.unwrap();
+        let painted = sink.last.take().expect("forwarded");
+        let (_, _, max_x, max_y) =
+            drawn_bounds(&painted, w as usize, h as usize).expect("cue painted");
+        assert!(max_x < (w / 2) as usize, "meta position placed the cue in the left half ({max_x})");
+        assert!(max_y < (h / 2) as usize, "meta line placed the cue in the top half ({max_y})");
     }
 
     #[tokio::test]

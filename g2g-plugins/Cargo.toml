@@ -264,11 +264,16 @@ web-codecs = [
     "web-sys/VideoPixelFormat",
     "web-sys/PlaneLayout",
 ]
+# Per-frame typed metadata (M406): enables g2g-core's `metadata` feature, so
+# frames carry a `FrameMetaSet`. Off by default (ZST baseline). Lets `SubParse`
+# attach `TextCueMeta` (cue placement) that `TextOverlayN` reads, and is implied
+# by `analytics` (the detection graph needs the same container).
+metadata = ["g2g-core/metadata"]
 # Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
-# onto a raw RGBA8 frame (the detector -> overlay visible end). Enables g2g-core's
-# `metadata` feature so frames carry the typed graph. CPU, no_std baseline; the
+# onto a raw RGBA8 frame (the detector -> overlay visible end). Pulls in the
+# `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
 # Vello GPU backend is the separate `vello-overlay` feature (M102).
-analytics = ["g2g-core/metadata"]
+analytics = ["metadata"]
 # Vello GPU analytics overlay (M102): VelloAnalyticsOverlay renders the
 # AnalyticsMeta detection boxes with the Vello GPU 2D renderer (wgpu) into a
 # wgpu texture, output as MemoryDomain::WgpuTexture (kept on GPU, no readback).

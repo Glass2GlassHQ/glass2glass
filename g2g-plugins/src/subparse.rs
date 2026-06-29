@@ -85,6 +85,35 @@ impl Cue {
     }
 }
 
+/// Per-frame metadata carrying a streamed cue's placement (M406): the
+/// [`CueSettings`] that `SubParse` parses but cannot put in the plain UTF-8
+/// payload, so a downstream overlay recovers WebVTT / SSA positioning instead of
+/// drawing every streamed cue bottom-centre. Gated behind the `metadata` feature
+/// (a [`FrameMeta`] needs the typed container); the baseline carries no meta.
+///
+/// [`FrameMeta`]: g2g_core::FrameMeta
+#[cfg(feature = "metadata")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextCueMeta {
+    /// The cue's placement, as parsed from the subtitle format.
+    pub settings: CueSettings,
+}
+
+#[cfg(feature = "metadata")]
+impl g2g_core::FrameMeta for TextCueMeta {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn g2g_core::FrameMeta> {
+        Box::new(*self)
+    }
+    // Placement is normalized (percent of frame width / height), so it survives
+    // a downstream scale / crop unchanged; the default `Keep` is correct.
+}
+
 /// Parse SubRip (`.srt`) text into cues, in file order. Malformed blocks (no
 /// timing line, unparseable timestamps) are skipped rather than failing the whole
 /// parse, matching how players tolerate dirty subtitle files.
@@ -926,11 +955,16 @@ impl AsyncElement for SubParse {
                     ..Default::default()
                 };
                 let payload = cue.text.into_bytes().into_boxed_slice();
-                let frame = Frame::new(
+                #[cfg_attr(not(feature = "metadata"), allow(unused_mut))]
+                let mut frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(payload)),
                     timing,
                     self.sequence,
                 );
+                // Carry the cue placement as frame-meta so an overlay can honour
+                // WebVTT / SSA positioning (no-op on the ZST baseline).
+                #[cfg(feature = "metadata")]
+                frame.meta.attach(TextCueMeta { settings: cue.settings });
                 self.sequence += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
@@ -1350,6 +1384,33 @@ mod tests {
         } else {
             panic!("cue payload must be a system buffer");
         }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn element_attaches_cue_positioning_meta() {
+        // WebVTT placement is parsed into CueSettings; the element carries it on
+        // the cue frame as TextCueMeta so an overlay recovers it (M406).
+        let doc = "WEBVTT\n\n00:00:00.000 --> 00:00:02.000 position:20% line:80% align:start\nplaced\n\n";
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::WebVtt }).unwrap();
+        let mut sink = RecordingSink::default();
+        el.process(srt_bytes_frame(doc.as_bytes()), &mut sink).await.unwrap();
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let frame = sink
+            .packets
+            .iter()
+            .find_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .expect("a cue frame");
+        let meta = frame.meta.get::<TextCueMeta>().expect("cue carries placement meta");
+        assert_eq!(
+            meta.settings,
+            CueSettings { position: Some(20), line: Some(80), align: TextAlign::Start }
+        );
     }
 
     #[test]
