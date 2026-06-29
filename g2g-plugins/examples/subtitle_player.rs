@@ -16,9 +16,13 @@
 //! inserted right after the decoder (scaling the cheaper NV12 before the RGBA8
 //! conversion). Omit it to play at the clip's native size.
 //!
-//! Heads-up: the built-in overlay font is an 8x8 all-caps ASCII bitmap, so a
-//! Latin clip renders (uppercased, no diacritics) but CJK paints nothing (the
-//! Unicode font backend is a separate, deferred piece).
+//! Fonts: without `truetype-overlay` the built-in 8x8 ASCII bitmap is used
+//! (uppercased Latin, no CJK). Add `truetype-overlay` and the overlay loads a
+//! real font (default system Noto Sans CJK, or `G2G_SUBTITLE_FONT=/path.ttf`),
+//! so Japanese / Chinese and accented Latin render, including `vertical:rl`:
+//!
+//!   cargo run -p g2g-plugins --features "ffmpeg wayland-sink truetype-overlay" \
+//!       --example subtitle_player -- clip.mp4 clip_jp.vtt 1280x720
 
 #[cfg(all(feature = "ffmpeg", feature = "wayland-sink"))]
 fn main() {
@@ -51,12 +55,43 @@ fn main() {
         .extension()
         .map(|e| e.eq_ignore_ascii_case("srt"))
         .unwrap_or(false);
-    let overlay = if is_srt {
-        TextOverlay::from_srt(&sub_text)
-    } else {
-        TextOverlay::from_webvtt(&sub_text)
+    let base = || {
+        if is_srt {
+            TextOverlay::from_srt(&sub_text)
+        } else {
+            TextOverlay::from_webvtt(&sub_text)
+        }
     };
+    #[cfg_attr(not(feature = "truetype-overlay"), allow(unused_mut))]
+    let mut overlay = base();
     println!("loaded {} cues from {subs}", overlay.cue_count());
+
+    // With the `truetype-overlay` feature, load real fonts so CJK / accented /
+    // mixed-case text renders (the bitmap baseline is ASCII-only). fontdue does no
+    // font fallback, so we build a chain: a Latin primary plus a CJK fallback, and
+    // each glyph is drawn from the first font that has it. Both must be TrueType
+    // (glyf) outlines; CFF / CFF2 (e.g. variable Noto Sans CJK) renders empty.
+    // Override the primary with G2G_SUBTITLE_FONT and the fallback with
+    // G2G_SUBTITLE_FALLBACK.
+    #[cfg(feature = "truetype-overlay")]
+    {
+        const LATIN: &str = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf";
+        const CJK: &str = "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf";
+        let primary = std::env::var("G2G_SUBTITLE_FONT").unwrap_or_else(|_| LATIN.into());
+        let fallback = std::env::var("G2G_SUBTITLE_FALLBACK").unwrap_or_else(|_| CJK.into());
+        match overlay.add_font(&primary) {
+            Ok(()) => {
+                println!("font: {primary}");
+                if overlay.add_font(&fallback).is_ok() {
+                    println!("fallback: {fallback}");
+                }
+            }
+            Err(_) => {
+                eprintln!("no usable font at {primary}; ASCII bitmap only (set G2G_SUBTITLE_FONT)")
+            }
+        }
+    }
+    let overlay = overlay;
 
     // mp4src -> avdec_h264(NV12) -> [videoscale(NV12)] -> videoconvert(RGBA8)
     //        -> textoverlay -> videoconvert(NV12) -> waylandsink

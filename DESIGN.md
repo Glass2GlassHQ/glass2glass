@@ -2112,8 +2112,21 @@ backing box, integer-scaled to the frame height. Cues are set programmatically (
 `.vtt` file (format by extension, else content sniff); the element is registered
 as `textoverlay` for the `gst-launch` text parser. This mirrors the analytics
 overlay's CPU baseline (§5): the no_std bitmap renderer is the portable path, and
-a mixed-case TrueType `vello` GPU backend (and the `clockoverlay` / `timeoverlay`
-siblings) is the planned companion.
+a `vello` GPU backend (and the `clockoverlay` / `timeoverlay` siblings) is the
+planned companion.
+
+The `truetype-overlay` feature (M409) replaces the bitmap font with a real one:
+`fontdue` parses a `.ttf` / `.ttc` and rasterizes each glyph to a coverage
+bitmap, alpha-blended onto the frame in the text colour, so CJK, accented Latin,
+and mixed-case render, laid out horizontal or vertical (`vertical:rl` / `lr`,
+from `CueSettings::vertical`) with the same `position` / `line` / `align`
+placement. Because `fontdue` does no font fallback, `TextOverlay` holds a fallback
+*chain* (`add_font` appends): each glyph is drawn from the first face whose
+`lookup_glyph_index` is non-zero, so a Latin primary plus a CJK fallback covers
+mixed text. `fontdue` rasterizes glyf (TrueType) outlines only; CFF / CFF2 (e.g.
+variable Noto Sans CJK) yields empty glyphs and is one of the reasons the richer
+`cosmic-text` backend (shaping, bidi, CFF, system fallback) is the planned
+upgrade. The no_std baseline keeps the bitmap font (no font file or rasterizer).
 
 `SubParse` feeds that renderer as a stream rather than from a file: it parses a
 structured subtitle document arriving on its sink pad and emits each cue as a

@@ -11,8 +11,13 @@
 //! `std`, set the `location=` property to a `.srt` / `.vtt` file (the
 //! `gst-launch` path). Text is drawn with the embedded 8x8 [`bitmapfont`], scaled
 //! to the frame height, over a translucent backing box for legibility; the
-//! all-caps bitmap font is the baseline, with mixed-case TrueType deferred to a
-//! `vello` GPU backend (M172).
+//! all-caps ASCII bitmap font is the `no_std` baseline.
+//!
+//! With the `truetype-overlay` feature (M409) the overlay instead rasterizes
+//! glyphs from a loaded `.ttf` / `.ttc` ([`TextOverlay::with_font`] / `font=`),
+//! so CJK, accented Latin, and mixed-case text render, horizontal and vertical
+//! (`vertical:rl` / `lr`). `fontdue` does the parsing / rasterization on the CPU;
+//! full shaping (cosmic-text) is a later upgrade.
 //!
 //! [`bitmapfont`]: crate::bitmapfont
 
@@ -32,6 +37,21 @@ use g2g_core::{
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::blend_px;
 use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
+#[cfg(feature = "truetype-overlay")]
+use crate::subparse::WritingMode;
+
+/// A parsed TrueType / OpenType face wrapped so `TextOverlay` keeps deriving
+/// `Debug` (`fontdue::Font` does not implement it). Holds the rasterizer used by
+/// the [`truetype-overlay`](crate) render path.
+#[cfg(feature = "truetype-overlay")]
+struct FontFace(fontdue::Font);
+
+#[cfg(feature = "truetype-overlay")]
+impl core::fmt::Debug for FontFace {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("FontFace(..)")
+    }
+}
 // Only the std `load_location` path sniffs the format; gate the import to match.
 #[cfg(feature = "std")]
 use crate::subparse::parse_auto;
@@ -53,6 +73,15 @@ pub struct TextOverlay {
     bg_color: [u8; 4],
     /// The `location=` path, retained for `get_property` round-trips.
     location: Option<String>,
+    /// TrueType face fallback chain (the `truetype-overlay` feature). Glyphs are
+    /// rasterized from the first face that has the character (so a Latin primary
+    /// plus a CJK fallback renders mixed text); empty means the 8x8 ASCII bitmap
+    /// font is used. `fontdue` does no fallback itself, hence the explicit chain.
+    #[cfg(feature = "truetype-overlay")]
+    fonts: Vec<FontFace>,
+    /// The primary `font=` path, retained for `get_property` round-trips.
+    #[cfg(feature = "truetype-overlay")]
+    font_path: Option<String>,
     drawn: u64,
 }
 
@@ -74,8 +103,68 @@ impl TextOverlay {
             text_color: [0xFF, 0xFF, 0xFF, 0xFF],
             bg_color: [0x00, 0x00, 0x00, 0xA0],
             location: None,
+            #[cfg(feature = "truetype-overlay")]
+            fonts: Vec::new(),
+            #[cfg(feature = "truetype-overlay")]
+            font_path: None,
             drawn: 0,
         }
+    }
+
+    /// Append a glyph font from in-memory `.ttf` / `.ttc` bytes to the fallback
+    /// chain (the `truetype-overlay` feature). `collection_index` selects a face
+    /// in a `.ttc` collection (0 for a plain `.ttf`). The first font added is the
+    /// primary; later fonts cover characters the primary lacks (e.g. a Latin
+    /// primary + a CJK fallback). Adding any font switches the render path from
+    /// the ASCII bitmap to rasterized glyphs. Note `fontdue` rasterizes TrueType
+    /// (glyf) outlines; a CFF / CFF2 font (e.g. variable Noto Sans CJK) yields
+    /// empty glyphs.
+    #[cfg(feature = "truetype-overlay")]
+    pub fn add_font_bytes(&mut self, bytes: &[u8], collection_index: u32) -> Result<(), G2gError> {
+        let settings = fontdue::FontSettings { collection_index, ..Default::default() };
+        let font = fontdue::Font::from_bytes(bytes, settings).map_err(|_| G2gError::CapsMismatch)?;
+        self.fonts.push(FontFace(font));
+        Ok(())
+    }
+
+    /// Builder form of [`add_font_bytes`](Self::add_font_bytes).
+    #[cfg(feature = "truetype-overlay")]
+    pub fn with_font_bytes(mut self, bytes: &[u8], collection_index: u32) -> Result<Self, G2gError> {
+        self.add_font_bytes(bytes, collection_index)?;
+        Ok(self)
+    }
+
+    /// Append a glyph font from a `.ttf` / `.ttc` file path to the fallback chain
+    /// (`truetype-overlay` + `std`). The first path added is recorded as the
+    /// primary `font=`. See [`add_font_bytes`](Self::add_font_bytes).
+    #[cfg(all(feature = "truetype-overlay", feature = "std"))]
+    pub fn add_font(&mut self, path: &str) -> Result<(), G2gError> {
+        let bytes = std::fs::read(path).map_err(|_| G2gError::CapsMismatch)?;
+        self.add_font_bytes(&bytes, 0)?;
+        if self.font_path.is_none() {
+            self.font_path = Some(path.into());
+        }
+        Ok(())
+    }
+
+    /// Builder form of [`add_font`](Self::add_font); chain calls to add fallbacks.
+    #[cfg(all(feature = "truetype-overlay", feature = "std"))]
+    pub fn with_font(mut self, path: impl AsRef<str>) -> Result<Self, G2gError> {
+        self.add_font(path.as_ref())?;
+        Ok(self)
+    }
+
+    /// The first font in the chain that has a glyph for `c`, else the primary
+    /// (which renders the `.notdef` box). Empty chain is unreachable here (the
+    /// TTF path only runs with at least one font).
+    #[cfg(feature = "truetype-overlay")]
+    fn glyph_font(&self, c: char) -> &fontdue::Font {
+        for f in &self.fonts {
+            if f.0.lookup_glyph_index(c) != 0 {
+                return &f.0;
+            }
+        }
+        &self.fonts[0].0
     }
 
     /// Use a preparsed cue list.
@@ -275,6 +364,162 @@ impl TextOverlay {
         }
     }
 
+    /// Subtitle glyph size in pixels for the TrueType path: ~1/20 of the frame
+    /// height, with a floor so small frames stay legible.
+    #[cfg(feature = "truetype-overlay")]
+    fn ttf_px(&self) -> f32 {
+        (self.height as f32 / 20.0).max(16.0)
+    }
+
+    /// Alpha-blend a rasterized glyph's coverage bitmap (`gw` x `gh`, one byte
+    /// per pixel) at output `(x0, y0)` in the text colour, clipped to the canvas.
+    #[cfg(feature = "truetype-overlay")]
+    fn blit_coverage(&self, buf: &mut [u8], x0: i32, y0: i32, gw: usize, gh: usize, cov: &[u8]) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        for ry in 0..gh as i32 {
+            let py = y0 + ry;
+            if py < 0 || py >= h {
+                continue;
+            }
+            for rx in 0..gw as i32 {
+                let px = x0 + rx;
+                if px < 0 || px >= w {
+                    continue;
+                }
+                let a = cov[(ry as usize) * gw + rx as usize];
+                if a != 0 {
+                    blend_px(buf, ((py * w + px) * 4) as usize, self.text_color, a);
+                }
+            }
+        }
+    }
+
+    /// TrueType render path (the `truetype-overlay` feature): rasterize each
+    /// active cue's glyphs from the loaded font. Horizontal cues lay out
+    /// left-to-right, top-to-bottom (auto-`line` cues stack from the bottom like
+    /// the bitmap path); `vertical:rl` / `lr` cues lay out as top-to-bottom
+    /// columns advancing right-to-left / left-to-right, with `align` justifying
+    /// each column vertically. Placement (`position` / `line`) mirrors the bitmap
+    /// path; metrics and advances come from the font.
+    #[cfg(feature = "truetype-overlay")]
+    fn render_active_ttf(&self, buf: &mut [u8], t_ns: u64) {
+        // Line metrics come from the primary; each glyph is rasterized from the
+        // first font in the chain that has it (see `glyph_font`).
+        let primary = &self.fonts[0].0;
+        let w = self.width as f32;
+        let h = self.height as f32;
+        let px = self.ttf_px();
+        let Some(lm) = primary.horizontal_line_metrics(px) else {
+            return;
+        };
+        let line_h = lm.new_line_size.max(px);
+        let pad = (px * 0.25).max(2.0);
+        let margin = px * 0.5;
+        let mut auto_bottom = h - margin;
+
+        for cue in self.active(t_ns) {
+            let lines: Vec<&str> = cue.text.lines().collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let s = cue.settings;
+
+            if matches!(s.vertical, WritingMode::VerticalRl | WritingMode::VerticalLr) {
+                let rl = matches!(s.vertical, WritingMode::VerticalRl);
+                let col_w = px * 1.3;
+                let cell_h = px * 1.15;
+                let n_cols = lines.len();
+                let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+                let block_w = n_cols as f32 * col_w;
+                let block_h = max_len * cell_h;
+                // `position` anchors the block centre; default hugs the leading
+                // edge (right for rl, left for lr). `line` sets the top.
+                let block_left = match s.position {
+                    Some(p) => p as f32 / 100.0 * w - block_w / 2.0,
+                    None if rl => w - block_w - margin,
+                    None => margin,
+                }
+                .clamp(0.0, (w - block_w).max(0.0));
+                let block_top = match s.line {
+                    Some(p) => (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin)),
+                    None => margin,
+                };
+                self.fill_rect(
+                    buf,
+                    (block_left - pad) as i32,
+                    (block_top - pad) as i32,
+                    (block_w + 2.0 * pad) as i32,
+                    (block_h + 2.0 * pad) as i32,
+                    self.bg_color,
+                );
+                for (ci, line) in lines.iter().enumerate() {
+                    // First logical line is the rightmost column when rl.
+                    let col = if rl { n_cols - 1 - ci } else { ci };
+                    let col_x = block_left + col as f32 * col_w;
+                    let chars: Vec<char> = line.chars().collect();
+                    let col_h = chars.len() as f32 * cell_h;
+                    let start_y = block_top
+                        + match s.align {
+                            TextAlign::Start => 0.0,
+                            TextAlign::Center => (block_h - col_h) / 2.0,
+                            TextAlign::End => block_h - col_h,
+                        };
+                    for (j, &c) in chars.iter().enumerate() {
+                        let (m, cov) = self.glyph_font(c).rasterize(c, px);
+                        let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
+                        let baseline = start_y + lm.ascent + j as f32 * cell_h;
+                        let gy = baseline - m.ymin as f32 - m.height as f32;
+                        self.blit_coverage(buf, gx as i32, gy as i32, m.width, m.height, &cov);
+                    }
+                }
+            } else {
+                let line_ws: Vec<f32> = lines
+                    .iter()
+                    .map(|l| l.chars().map(|c| self.glyph_font(c).metrics(c, px).advance_width).sum())
+                    .collect();
+                let block_w = line_ws.iter().copied().fold(0.0_f32, f32::max);
+                let block_h = lines.len() as f32 * line_h;
+                let anchor_x = s.position.map(|p| p as f32 / 100.0 * w).unwrap_or(w / 2.0);
+                let block_left =
+                    ttf_align_left(s.align, anchor_x, block_w).clamp(0.0, (w - block_w).max(0.0));
+                let block_top = match s.line {
+                    Some(p) => (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin)),
+                    None => {
+                        let t = (auto_bottom - block_h).max(margin);
+                        auto_bottom = t - pad - line_h * 0.2;
+                        t
+                    }
+                };
+                self.fill_rect(
+                    buf,
+                    (block_left - pad) as i32,
+                    (block_top - pad) as i32,
+                    (block_w + 2.0 * pad) as i32,
+                    (block_h + 2.0 * pad) as i32,
+                    self.bg_color,
+                );
+                for (row, line) in lines.iter().enumerate() {
+                    let line_w = line_ws[row];
+                    let x0 = match s.align {
+                        TextAlign::Center => block_left + (block_w - line_w) / 2.0,
+                        TextAlign::Start => block_left,
+                        TextAlign::End => block_left + (block_w - line_w),
+                    };
+                    let baseline = block_top + lm.ascent + row as f32 * line_h;
+                    let mut pen = x0;
+                    for c in line.chars() {
+                        let (m, cov) = self.glyph_font(c).rasterize(c, px);
+                        let gx = pen + m.xmin as f32;
+                        let gy = baseline - m.ymin as f32 - m.height as f32;
+                        self.blit_coverage(buf, gx as i32, gy as i32, m.width, m.height, &cov);
+                        pen += m.advance_width;
+                    }
+                }
+            }
+        }
+    }
+
     /// Load and parse a subtitle file, replacing the cue list. The format is
     /// chosen by extension (`.vtt` / `.srt` / `.ass` / `.ssa`), else sniffed from
     /// the content. `std`-only: file I/O needs the OS.
@@ -303,6 +548,22 @@ impl TextOverlay {
     fn load_location(&mut self, _path: &str) -> Result<(), PropError> {
         Err(PropError::Value)
     }
+
+    /// Load the glyph font from a file (`font=` property). Needs both the
+    /// `truetype-overlay` feature and `std`; otherwise the build has no font
+    /// backend and the call reports an unsupported value.
+    #[cfg(all(feature = "truetype-overlay", feature = "std"))]
+    fn load_font(&mut self, path: &str) -> Result<(), PropError> {
+        // The property sets a single primary font (replacing any chain).
+        self.fonts.clear();
+        self.font_path = None;
+        self.add_font(path).map_err(|_| PropError::Value)
+    }
+
+    #[cfg(not(all(feature = "truetype-overlay", feature = "std")))]
+    fn load_font(&mut self, _path: &str) -> Result<(), PropError> {
+        Err(PropError::Value)
+    }
 }
 
 /// Left edge of a `block_w`-wide box whose `align` anchor sits at `anchor`:
@@ -310,6 +571,16 @@ impl TextOverlay {
 fn align_left(align: TextAlign, anchor: i32, block_w: i32) -> i32 {
     match align {
         TextAlign::Center => anchor - block_w / 2,
+        TextAlign::Start => anchor,
+        TextAlign::End => anchor - block_w,
+    }
+}
+
+/// `f32` form of [`align_left`] for the TrueType render path.
+#[cfg(feature = "truetype-overlay")]
+fn ttf_align_left(align: TextAlign, anchor: f32, block_w: f32) -> f32 {
+    match align {
+        TextAlign::Center => anchor - block_w / 2.0,
         TextAlign::Start => anchor,
         TextAlign::End => anchor - block_w,
     }
@@ -386,6 +657,15 @@ impl AsyncElement for TextOverlay {
                         if buf.len() < need {
                             return Err(G2gError::CapsMismatch);
                         }
+                        // Rasterized font path when one is loaded; else the
+                        // ASCII bitmap baseline.
+                        #[cfg(feature = "truetype-overlay")]
+                        if self.fonts.is_empty() {
+                            self.render_active(&mut buf[..need], t_ns);
+                        } else {
+                            self.render_active_ttf(&mut buf[..need], t_ns);
+                        }
+                        #[cfg(not(feature = "truetype-overlay"))]
                         self.render_active(&mut buf[..need], t_ns);
                     }
                     self.drawn += 1;
@@ -427,6 +707,10 @@ impl AsyncElement for TextOverlay {
                 let path = value.as_str().ok_or(PropError::Type)?;
                 self.load_location(path)
             }
+            "font" => {
+                let path = value.as_str().ok_or(PropError::Type)?;
+                self.load_font(path)
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -436,6 +720,10 @@ impl AsyncElement for TextOverlay {
             "location" => {
                 Some(PropValue::Str(self.location.clone().unwrap_or_default()))
             }
+            #[cfg(feature = "truetype-overlay")]
+            "font" => Some(PropValue::Str(self.font_path.clone().unwrap_or_default())),
+            #[cfg(not(feature = "truetype-overlay"))]
+            "font" => Some(PropValue::Str(String::new())),
             _ => None,
         }
     }
@@ -624,11 +912,19 @@ impl MultiInputElement for TextOverlayN {
 }
 
 /// `TextOverlay`'s settable properties (M171).
-static TEXTOVERLAY_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "location",
-    PropKind::Str,
-    "path to an SRT (.srt) or WebVTT (.vtt) subtitle file; cues render by PTS",
-)];
+static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "location",
+        PropKind::Str,
+        "path to an SRT (.srt) or WebVTT (.vtt) subtitle file; cues render by PTS",
+    ),
+    PropertySpec::new(
+        "font",
+        PropKind::Str,
+        "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); \
+         needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
+    ),
+];
 
 #[cfg(test)]
 mod tests {
@@ -849,6 +1145,79 @@ mod tests {
         };
         assert!(ov.intercept_caps(&nv12).is_err());
         assert!(ov.intercept_caps(&rgba_caps(16, 16)).is_ok());
+    }
+
+    // -- TrueType overlay (M409): CJK / vertical rendering via fontdue. ---------
+
+    /// Read the first available CJK-capable system font, or `None` to skip (CI
+    /// without CJK fonts). These are the Fedora paths the dev host has.
+    #[cfg(feature = "truetype-overlay")]
+    fn cjk_font_bytes() -> Option<Vec<u8>> {
+        for p in [
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+            "/usr/share/fonts/google-droid-sans-fonts/DroidSansJapanese.ttf",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "truetype-overlay")]
+    fn cjk_overlay(w: u32, h: u32, text: &str, settings: crate::subparse::CueSettings) -> Option<TextOverlay> {
+        let bytes = cjk_font_bytes()?;
+        let mut ov = TextOverlay::new()
+            .with_font_bytes(&bytes, 0)
+            .expect("font parses")
+            .with_cues(vec![Cue { start_ns: 0, end_ns: u64::MAX, text: text.into(), settings }]);
+        ov.width = w;
+        ov.height = h;
+        ov.configured = true;
+        Some(ov)
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn truetype_renders_cjk_that_the_bitmap_font_cannot() {
+        use crate::subparse::CueSettings;
+        let (w, h) = (480usize, 160usize);
+        // The bitmap path paints nothing for CJK (no glyphs); the TTF path must.
+        let bitmap = TextOverlay { width: w as u32, height: h as u32, configured: true, ..TextOverlay::new() }
+            .with_cues(vec![Cue { start_ns: 0, end_ns: u64::MAX, text: "日本語".into(), settings: CueSettings::default() }]);
+        let mut bbuf = black(w, h);
+        bitmap.render_active(&mut bbuf, 0);
+        assert!(drawn_bounds(&bbuf, w, h).is_none(), "bitmap font has no CJK glyphs");
+
+        let Some(ov) = cjk_overlay(w as u32, h as u32, "日本語", CueSettings::default()) else {
+            std::eprintln!("skip: no CJK system font found");
+            return;
+        };
+        let mut buf = black(w, h);
+        ov.render_active_ttf(&mut buf, 0);
+        assert!(drawn_bounds(&buf, w, h).is_some(), "TTF font renders CJK glyphs");
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn truetype_vertical_lays_out_in_columns() {
+        use crate::subparse::{CueSettings, WritingMode};
+        let (w, h) = (320usize, 320usize);
+        // vertical:rl with two logical lines -> two columns; both must paint, and
+        // the rightmost column (first line) should sit to the right of the second.
+        let settings = CueSettings { vertical: WritingMode::VerticalRl, ..CueSettings::default() };
+        let Some(ov) = cjk_overlay(w as u32, h as u32, "縦書き\n二列目", settings) else {
+            std::eprintln!("skip: no CJK system font found");
+            return;
+        };
+        let mut buf = black(w, h);
+        ov.render_active_ttf(&mut buf, 0);
+        let bounds = drawn_bounds(&buf, w, h).expect("vertical CJK painted");
+        // Taller than one glyph (stacked vertically) and spanning two columns.
+        let (x0, y0, x1, y1) = bounds;
+        assert!(y1 - y0 > (h / 8), "glyphs stack down the column");
+        assert!(x1 - x0 > (w / 12), "two columns span horizontally");
     }
 
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
