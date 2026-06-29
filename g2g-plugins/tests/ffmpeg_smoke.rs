@@ -191,3 +191,54 @@ async fn decode_fixture_with(
     }
 }
 
+/// Regression for the playbin -> strict-NV12-sink startup gap: the auto-plug
+/// factory must build the ffmpeg decoder with the output layout the search chose,
+/// not a fixed I420. A KMS / waylandsink advertises `Accepts(NV12)`, so the search
+/// settles the decode hop on NV12 (the first source-pad-template alternative) and
+/// the runner forward-prefixes `CapsChanged(NV12)` into the decoder before the
+/// first frame. The old `|_| FfmpegH264Dec::new()` factory ignored the chosen caps
+/// and built an I420 decoder, whose run loop rejected that NV12 pre-fix with
+/// `CapsMismatch` (output layout != built layout), stalling startup negotiation.
+///
+/// Deterministic and fixture-free: the failure is in negotiation, before any data,
+/// so it needs only `libavcodec` present to open the (frameless) decoder.
+#[tokio::test]
+async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
+    // Scoped here so the blanket `impl DynAsyncElement for T: AsyncElement` does
+    // not collide with the concrete `AsyncElement` calls in the fixture tests.
+    use g2g_core::element::DynAsyncElement;
+    use g2g_plugins::registry::default_registry;
+
+    let reg = default_registry();
+    let h264 = Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+    };
+    // A strict-NV12 sink target, mirroring `CudaKmsSink` / `waylandsink`'s
+    // `Accepts(NV12)` constraint.
+    let strict_nv12 = |c: &Caps| matches!(c, Caps::RawVideo { format: RawVideoFormat::Nv12, .. });
+
+    let mut chain = reg.autoplug(&h264, &strict_nv12, 4).expect("a decode chain reaches NV12");
+    assert_eq!(chain.len(), 1, "one decoder hop to NV12, got {}", chain.len());
+    let dec = chain[0].as_mut();
+    // Fully qualified: the boxed element satisfies both `AsyncElement` and
+    // `DynAsyncElement`, so disambiguate to the dyn methods.
+    DynAsyncElement::configure_pipeline(dec, &h264).expect("libavcodec opens the H.264 decoder");
+
+    // The exact forward-caps pre-fix the runner pushes from the NV12 sink. An
+    // I420-built decoder (the bug) returns `CapsMismatch` here; an NV12-built one
+    // forwards it.
+    let nv12 = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(640),
+        height: Dim::Fixed(480),
+        framerate: Rate::Fixed(30 << 16),
+    };
+    let mut sink = Collect::default();
+    DynAsyncElement::process(dec, PipelinePacket::CapsChanged(nv12), &mut sink)
+        .await
+        .expect("the auto-plugged decoder must emit NV12 for a strict-NV12 sink");
+}
+

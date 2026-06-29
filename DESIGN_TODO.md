@@ -276,11 +276,13 @@ leverage first:
   Still open are MP4 `wvtt` / `stpp` sample formats, the MKV `S_TEXT/ASS` /
   `S_TEXT/WEBVTT` codec IDs (their per-block payload needs the `CodecPrivate`
   header), the MPEG-TS DVB / teletext streams, and the `playbin` text-branch
-  overlay wiring for MKV / TS (MP4 has it). The
-  `playbin` -> display-sink path has a pre-existing mid-stream-reconfigure gap on
-  the `videoconvert` -> strict-NV12-sink leg (also breaks plain A/V
-  `playbin` -> `waylandsink`), so on-screen subtitle playback through `playbin`
-  awaits that fix; the overlay graph itself runs end to end to a permissive sink.
+  overlay wiring for MKV / TS (MP4 has it). The startup I420/NV12 gap on
+  `playbin` -> `waylandsink` is closed (M414: the auto-plugged ffmpeg decoder now
+  honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
+  no inserted `videoconvert`); on-screen `playbin` playback still needs live
+  verification and a look at the separate `waylandsink` present-stall (compositor
+  backpressure observed ~1s in). The overlay graph itself runs end to end to a
+  permissive sink.
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature

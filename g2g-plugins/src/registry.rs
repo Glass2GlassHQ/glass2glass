@@ -415,10 +415,25 @@ fn register_uri_handlers(reg: &mut Registry) {
 /// element types already registered for the text parser via `register_launch`;
 /// here they additionally carry their pad templates into the search. Parsers
 /// bridge a byte / elementary stream to a fixed compressed codec; decoders bridge
-/// a compressed codec to raw. The build closures ignore the chosen output caps
+/// a compressed codec to raw. Most build closures ignore the chosen output caps
 /// (these elements take their format from negotiation), matching the
-/// parameterless launch constructors. Decoders mirror their feature gates, so the
-/// search only routes through a decoder when its backend is compiled in.
+/// parameterless launch constructors; the ffmpeg decoders are the exception, as
+/// they have a fixed-at-construction output layout (NV12 / I420) that must match
+/// the alternative the search settled on (see [`ffmpegdec_output_format`]).
+/// Decoders mirror their feature gates, so the search only routes through a
+/// decoder when its backend is compiled in.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
+    use crate::ffmpegdec::OutputFormat;
+    // The source pad template lists NV12 before I420, so a `is_raw_video` target
+    // settles on NV12 (the layout KMS / waylandsink want); an I420-only sink drives
+    // I420. Anything that is not raw video falls back to I420.
+    match out {
+        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        _ => OutputFormat::I420,
+    }
+}
+
 fn register_autoplug_candidates(reg: &mut Registry) {
     // Parsers (baseline): elementary-stream framing, no external deps.
     reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| Box::new(H264Parse::new())));
@@ -457,15 +472,28 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // the sole AV1 decoder on pure-Rust targets.
     #[cfg(feature = "rav1d")]
     reg.register(ElementFactory::of::<Rav1dDec>("rav1ddec", |_| Box::new(Rav1dDec::new())).rank(-10));
+    // Honor the output format the auto-plug search chose for this hop
+    // (`ChainLink::output`): the source pad template advertises both NV12 and
+    // I420, so a strict-NV12 sink (KMS / waylandsink) makes the search settle on
+    // NV12, and the decoder must be built to emit it. Ignoring `out` here built a
+    // fixed-I420 decoder under a chain promised NV12, so the runner's forward-caps
+    // pre-fix (sink's NV12 accept-set) hit the decoder's `format != output_format`
+    // arm and failed startup negotiation. Default to I420 for a loose target.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |_| Box::new(FfmpegH264Dec::new())));
+    reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
+        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
+    }));
     // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
     // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
     // to the VA display's choice (a `device=` property is a follow-up).
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(
-        ElementFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", |_| {
-            Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
+        ElementFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", |out| {
+            Box::new(
+                FfmpegH264Dec::new()
+                    .with_backend(FfmpegBackend::Vaapi)
+                    .with_output_format(ffmpegdec_output_format(out)),
+            )
         })
         .hardware(),
     );
