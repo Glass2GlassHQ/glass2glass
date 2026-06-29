@@ -30,9 +30,11 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
-use g2g_core::runtime::{select2, Either, DynSourceLoop, GaplessController, SourceLoop};
+use g2g_core::runtime::{
+    select2, DynSourceLoop, Either, GaplessController, GraphNode, Registry, SourceLoop, UriError,
+};
 use g2g_core::{
-    Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket, PushOutcome,
+    AsyncElement, Caps, ConfigureOutcome, G2gError, Graph, OutputSink, PipelinePacket, PushOutcome,
 };
 
 /// A source that plays a playlist of sources back-to-back as one gapless stream.
@@ -229,4 +231,53 @@ impl OutputSink for ShiftSink<'_> {
             }
         })
     }
+}
+
+/// Why [`gapless_playbin`] could not assemble a graph.
+#[derive(Debug)]
+pub enum GaplessPlaybinError {
+    /// The playlist was empty (a gapless source needs at least a first item).
+    EmptyPlaylist,
+    /// A URI could not be turned into a source, or its decode chain could not be
+    /// plugged (wraps the [`UriError`], whose `Decode` variant carries the chain
+    /// failure).
+    Uri(UriError),
+}
+
+impl From<UriError> for GaplessPlaybinError {
+    fn from(e: UriError) -> Self {
+        GaplessPlaybinError::Uri(e)
+    }
+}
+
+/// Build a gapless-playback graph from a playlist of URIs (M387), the convenience
+/// over hand-wiring a [`GaplessSrc`]. Constructs the first URI's source, wraps it
+/// in a `GaplessSrc`, enqueues the remaining URIs' sources on a shared
+/// [`GaplessController`], and auto-plugs one decode chain (reused across items) to
+/// `sink`. Returns the runnable `GaplessSrc -> decode -> sink` graph plus the
+/// controller, so the caller can `enqueue` more items, `switch_now` (M384), and
+/// must `finish()` the playlist when no more will be added (else the source parks
+/// after the last item rather than emitting `Eos`).
+///
+/// All `uris` must decode-compatibly (same codec): the decode chain is plugged
+/// once from the first item's caps and reused, the gapless contract (a per-item
+/// caps refinement still flows via `CapsChanged`). `target` is the usual shape
+/// predicate (`is_raw_video` / `is_raw_audio`).
+pub fn gapless_playbin<Sk: AsyncElement + 'static>(
+    reg: &Registry,
+    uris: &[&str],
+    sink: Sk,
+    target: &dyn Fn(&Caps) -> bool,
+    max_depth: usize,
+) -> Result<(Graph<GraphNode>, GaplessController), GaplessPlaybinError> {
+    let (first, rest) = uris.split_first().ok_or(GaplessPlaybinError::EmptyPlaylist)?;
+    let (first_src, caps) = reg.build_uri_source(first)?;
+    let ctl = GaplessController::new();
+    for uri in rest {
+        let (src, _caps) = reg.build_uri_source(uri)?;
+        ctl.enqueue(src);
+    }
+    let gapless = GaplessSrc::new(first_src, ctl.clone());
+    let graph = reg.build_source_decodebin(Box::new(gapless), &caps, sink, target, max_depth)?;
+    Ok((graph, ctl))
 }

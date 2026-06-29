@@ -1255,10 +1255,27 @@ mod factory {
             max_depth: usize,
         ) -> Result<Graph<GraphNode>, UriError> {
             let (source, output) = self.build_uri_source(uri)?;
+            self.build_source_decodebin(source, &output, sink, target, max_depth)
+        }
+
+        /// Auto-plug `source -> chain -> sink` from an *already constructed*
+        /// source whose output is `source_caps`, the lower half of
+        /// [`build_uridecodebin`](Self::build_uridecodebin) factored out so a
+        /// caller that built (or wrapped) its own source can still get the decode
+        /// chain auto-plugged. A gapless playlist source (`GaplessSrc`) uses this
+        /// to splice its decode chain without the URI-handler step.
+        pub fn build_source_decodebin<Sk: AsyncElement + 'static>(
+            &self,
+            source: Box<dyn DynSourceLoop>,
+            source_caps: &Caps,
+            sink: Sk,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+        ) -> Result<Graph<GraphNode>, UriError> {
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source(source));
             let snk = graph.add_sink(GraphNodeRef::element(sink));
-            self.decodebin(&mut graph, src, snk, &output, target, max_depth)?;
+            self.decodebin(&mut graph, src, snk, source_caps, target, max_depth)?;
             Ok(graph)
         }
 

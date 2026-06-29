@@ -1494,7 +1494,12 @@ known without sniffing the byte stream.
   the run future (cancelling the inner source mid-stream), pushes a `Flush`, and
   resets the timeline before playing the requested source. v1 concatenates
   same-codec items (a per-item caps refinement still flows via the inner source's
-  `CapsChanged`). An A/V offset is a separate `AvOffset` transform (M385,
+  `CapsChanged`). The `gapless_playbin` helper (M387) is the one-call builder over
+  this: from a playlist of URIs it wraps the first source in a `GaplessSrc`,
+  pre-enqueues the rest on a shared `GaplessController`, and auto-plugs one reused
+  decode chain to the sink (via the factored-out `Registry::build_source_decodebin`),
+  returning the graph + the controller for the app to drive. An A/V offset is a
+  separate `AvOffset` transform (M385,
   `avoffset`): a pass-through that shifts a branch's PTS/DTS by a signed `offset`
   ns (positive delays, negative advances, clamped at 0), the `av-offset` analog,
   placed on the audio (or video) branch of a multi-stream graph to re-align it.
