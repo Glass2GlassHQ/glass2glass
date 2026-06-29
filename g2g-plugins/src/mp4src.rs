@@ -29,7 +29,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
     BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment, Stream,
+    StreamCollection, StreamType,
 };
 
 use crate::filesink::io_err;
@@ -152,6 +153,22 @@ impl SourceLoop for Mp4Src {
                     if !tags.is_empty() {
                         bus.try_post(BusMessage::Tag(tags));
                     }
+                }
+                // Announce the (single) video track as a StreamCollection (M386),
+                // the discovery half of the multi-stream model. Mp4Src is a
+                // single-video-track source, so the collection has one stream.
+                if let Some(h) = &self.header {
+                    let caps = Caps::CompressedVideo {
+                        codec: h.codec,
+                        width: Dim::Fixed(h.width),
+                        height: Dim::Fixed(h.height),
+                        framerate: Rate::Any,
+                    };
+                    let stream = Stream::new("mp4-track-0", StreamType::Video, caps);
+                    bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                        "mp4-0",
+                        Vec::from([stream]),
+                    )));
                 }
             }
             let header = self.header.as_ref().expect("parsed above");

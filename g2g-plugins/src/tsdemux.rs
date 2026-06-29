@@ -31,9 +31,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SeekController;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, VideoCodec,
+    AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
+    CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment,
+    Stream, StreamCollection, StreamType, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -70,6 +71,11 @@ pub struct TsDemux {
     buf: Vec<u8>,
     configured: bool,
     emitted: u64,
+    /// Pipeline bus, for announcing the program's `StreamCollection` (M386).
+    /// Inert unless `with_bus` wired it.
+    bus: Option<BusHandle>,
+    /// Set once the `StreamCollection` has been announced, so it posts once.
+    collection_posted: bool,
     /// Seek support (M362): app time seeks drive an upstream byte-seek and a
     /// re-sync. Inert unless `with_seek` wired the controllers.
     seek: DemuxSeek,
@@ -89,6 +95,8 @@ impl TsDemux {
             buf: Vec::new(),
             configured: false,
             emitted: 0,
+            bus: None,
+            collection_posted: false,
             seek: DemuxSeek::default(),
         }
     }
@@ -97,6 +105,57 @@ impl TsDemux {
     pub fn with_stream(mut self, stream: TsStream) -> Self {
         self.stream = stream;
         self
+    }
+
+    /// Attach the pipeline bus so the program's `StreamCollection` (M386) is
+    /// announced once the PMT is parsed, the MPEG-TS sibling of
+    /// [`MkvDemux::with_bus`](crate::mkvdemux::MkvDemux::with_bus).
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Announce every elementary stream the PMT declares as a
+    /// [`BusMessage::StreamCollection`] (M386), once, when the PMT has parsed.
+    /// Lists all programs' streams regardless of which one this instance forwards
+    /// (the discovery half of the multi-stream model). A no-op without a bus,
+    /// before the PMT, or once already posted.
+    fn post_stream_collection(&mut self) {
+        if self.collection_posted {
+            return;
+        }
+        let streams: alloc::vec::Vec<Stream> =
+            self.demux.streams().iter().filter_map(Self::es_to_stream).collect();
+        if streams.is_empty() {
+            return;
+        }
+        self.collection_posted = true;
+        if let Some(bus) = &self.bus {
+            bus.try_post(BusMessage::StreamCollection(StreamCollection::new("mpegts-0", streams)));
+        }
+    }
+
+    /// Map one PMT elementary stream to a [`Stream`] for the collection: its kind
+    /// (video / audio) and the media-type [`Caps`] it carries (geometry is
+    /// unknown from the PMT, so `Any`, refined later by `CapsChanged`). `None` for
+    /// a `stream_type` g2g does not forward.
+    fn es_to_stream(es: &crate::mpegts::ElementaryStream) -> Option<Stream> {
+        let id = alloc::format!("mpegts-pid-{}", es.pid);
+        let video = |codec| Caps::CompressedVideo {
+            codec,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let (stream_type, caps) = match es.stream_type {
+            STREAM_TYPE_H264 => (StreamType::Video, video(VideoCodec::H264)),
+            STREAM_TYPE_H265 => (StreamType::Video, video(VideoCodec::H265)),
+            STREAM_TYPE_AAC => {
+                (StreamType::Audio, Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 })
+            }
+            _ => return None,
+        };
+        Some(Stream::new(id, stream_type, caps))
     }
 
     /// Make the demuxer seekable (M362): `app` carries app time seeks; `upstream`
@@ -288,6 +347,9 @@ impl AsyncElement for TsDemux {
                     };
                     self.buf.extend_from_slice(slice.as_slice());
                     self.drain_packets();
+                    if self.bus.is_some() {
+                        self.post_stream_collection();
+                    }
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
                 }

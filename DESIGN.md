@@ -1451,13 +1451,13 @@ known without sniffing the byte stream.
   produces (geometry resolves at negotiation), which is all the chain search
   needs to pick the right decoder.
 
-- **playbin (multi-stream front door)** (`std`, M376-M382). Where `playbin`
-  decodes one stream, `playbin` splits a container into *all* its streams and
-  decodes each to its own sink, built on the stream-collection model: a demuxer
-  announces every track as a `BusMessage::StreamCollection` (M376), the app
-  selects among them via a `StreamSelectController` (M377), and the multi-output
-  `MkvDemuxN` (a `MultiOutputElement`, M378) routes N elementary streams to N
-  ports in one parse. `Registry::build_playbin_graph` (M379) assembles
+- **playbin (multi-stream front door)** (`std`, M376-M382). Beyond the M196
+  single-stream expansion, g2g's `playbin` can split a container into *all* its
+  streams and decode each to its own sink, built on the stream-collection model:
+  a demuxer announces every track as a `BusMessage::StreamCollection` (M376 for
+  `MkvDemux`/`MkvDemuxN`, M386 for `TsDemux`/`Mp4Src`), the app selects among them
+  via a `StreamSelectController` (M377), and the multi-output `MkvDemuxN` (a
+  `MultiOutputElement`, M378) routes N elementary streams to N ports in one parse. `Registry::build_playbin_graph` (M379) assembles
   `source → demux → {decode chain → sink}` per `PlaybinPort`, with each port's
   branch statically negotiated against its codec via `port_output_caps` /
   `NodeConstraint::Demux` (M380) so a real decoder configures at startup, not
