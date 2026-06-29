@@ -1522,10 +1522,20 @@ known without sniffing the byte stream.
   `TrackKind::Text` and fans out as a `Caps::Text { Utf8 }` port (M411): the
   container supplies the per-cue timing (the sample table's PTS + duration), and a
   sample's 2-byte length prefix is stripped to the UTF-8 cue, so an embedded
-  subtitle track feeds `SubParse` / `TextOverlayN` like a sidecar file would. Text
-  tracks are not yet in the `playbin` auto-plug fan-out (`forwardable_streams`
-  omits them until a text-branch auto-plug lands); `wvtt` / `stpp` sample formats
-  are recognized-but-declined. `hls_playbin` (M395) is the HLS sibling:
+  subtitle track feeds `SubParse` / `TextOverlayN` like a sidecar file would.
+  `wvtt` / `stpp` sample formats are recognized-but-declined. When such a file also
+  carries a video track, `mp4_playbin` routes the video branch through a
+  `TextOverlayN` fed by the subtitle track (M412,
+  `uridecodebin::build_mp4_subtitle_overlay`): `Mp4DemuxN -> { video: decode ->
+  videoconvert(RGBA8) -> overlay.video ; text -> overlay.text } ->
+  videoconvert(NV12) -> autovideosink`. This is the one non-linear `playbin`
+  branch: the decoder is auto-plugged, but the `videoconvert`s bracketing the
+  overlay are wired explicitly (they are caps-driven `register_launch` elements
+  outside the auto-plug search pool, and the overlay requires RGBA8 in/out while a
+  display sink requires NV12), and the text port joins the overlay's second pad
+  (through `SubParse` when the cue payload is a structured format, straight in for
+  plain-UTF8 `tx3g`). An MP4 with no subtitle track keeps the plain per-stream
+  fan-out. `hls_playbin` (M395) is the HLS sibling:
   it probes a `hls://` master playlist (the scheme maps to an `https` origin),
   discovers the selected variant's renditions (`hls` parses `#EXT-X-MEDIA`
   alternate renditions and the variant's `AUDIO` / `SUBTITLES` / `VIDEO` group

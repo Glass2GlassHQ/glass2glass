@@ -270,11 +270,15 @@ leverage first:
   sink) in the launch registry so `gst-launch` text pipelines parse;
   subtitle-track extraction out of the demuxers as `Caps::Text` (feeds
   `TextOverlayN`) is started: MP4 `tx3g` timed text fans out of `Mp4DemuxN` as
-  `Caps::Text{Utf8}` (M411); still open are MP4 `wvtt` / `stpp` sample formats,
-  the MKV `S_TEXT/{UTF8,ASS,WEBVTT}` codec IDs, the MPEG-TS DVB / teletext
-  streams, and a `playbin` text-branch auto-plug that consumes them (the demuxer
-  exposes the track but `forwardable_streams` still omits it); parsing SSA / TTML
-  placement into `CueSettings` (only
+  `Caps::Text{Utf8}` (M411) and `mp4_playbin` auto-plugs it through a
+  `TextOverlayN` on the video branch (M412); still open are MP4 `wvtt` / `stpp`
+  sample formats, the MKV `S_TEXT/{UTF8,ASS,WEBVTT}` codec IDs, and the MPEG-TS
+  DVB / teletext streams (each with its own `playbin` overlay wiring). The
+  `playbin` -> display-sink path has a pre-existing mid-stream-reconfigure gap on
+  the `videoconvert` -> strict-NV12-sink leg (also breaks plain A/V
+  `playbin` -> `waylandsink`), so on-screen subtitle playback through `playbin`
+  awaits that fix; the overlay graph itself runs end to end to a permissive sink.
+  Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
   above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied

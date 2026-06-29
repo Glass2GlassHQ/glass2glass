@@ -165,6 +165,27 @@ pub fn forwardable_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
         .unwrap_or_default()
 }
 
+/// The subtitle (timed-text) tracks an MP4 carries (M412): one [`Mp4StreamInfo`]
+/// per text `trak`, in `moov` order. The read-side complement of
+/// [`forwardable_streams`] (which is A/V-only, because the `playbin` fan-out has no
+/// text branch): the subtitle-overlay `playbin` builder pairs these with the A/V
+/// streams to plug a `TextOverlayN` onto the video branch. `video` is always
+/// `false` and `asc` empty for a text track.
+pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
+    parse_all_tracks(data)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .filter(|t| matches!(t.kind, TrackKind::Text { .. }))
+                .map(|t| {
+                    let (caps, video) = nego_caps(&t.kind);
+                    Mp4StreamInfo { track_id: t.track_id, caps, video, asc: Vec::new() }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Multi-output fragmented-MP4 demuxer: one ISO-BMFF byte stream in, N
 /// elementary streams out, one track per port.
 #[derive(Debug)]
