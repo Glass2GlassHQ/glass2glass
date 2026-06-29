@@ -1479,15 +1479,18 @@ known without sniffing the byte stream.
   fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer, M391), the multi-track
   read-side analog of the single-video-track `Mp4Src`: it buffers the byte stream
   and, on EOS, parses every `moov/trak` (`fmp4::parse_all_tracks`, M390) and routes
-  each `moof`+`mdat` fragment to the port matching its `tfhd` `track_ID`
-  (`parse_fragments_multi`). Compressed-audio port caps negotiate as `0/0` (AAC
-  caps intersect by strict equality, so the concrete channel layout / sample rate
-  is refined per port at runtime via `CapsChanged`, not advertised for the static
-  branch solve). Clear (unencrypted) fragmented multi-track files only; encryption
-  stays single-track via `parse_header` / `parse_fragments`, and a progressive
-  (non-`moof`) file stays on the single-stream `file://` → `Mp4Src` path. HLS rides
-  on this: `HlsSrc` emits `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a
-  variant's streams.
+  each sample to the port matching its `track_ID`, picking the fragmented path
+  (`parse_fragments_multi`, by `tfhd` `track_ID`) or the progressive `moov`+`mdat`
+  path (`parse_progressive_multi`, per-track `stbl` sample tables, M393) by the
+  presence of a `moof`. Compressed-audio port caps negotiate as `0/0` (AAC caps
+  intersect by strict equality, so the concrete channel layout / sample rate is
+  refined per port at runtime via `CapsChanged`, not advertised for the static
+  branch solve). Demuxed AAC is re-framed to ADTS from the track's `esds`
+  AudioSpecificConfig (M394), so the audio elementary stream is self-describing and
+  decodes without out-of-band config, symmetric with the in-band video parameter
+  sets. Clear (unencrypted) multi-track files only; encryption stays single-track
+  via `parse_header` / `parse_fragments`. HLS rides on this: `HlsSrc` emits
+  `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a variant's streams.
 
 - **Gapless playback** (`std`, M383). The playbin `about-to-finish` + next-`uri`
   analog: `GaplessSrc` (`g2g-plugins`) concatenates a playlist of sources into

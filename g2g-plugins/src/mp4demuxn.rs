@@ -32,7 +32,11 @@ use g2g_core::{
     StreamCollection, StreamType,
 };
 
-use crate::fmp4::{parse_all_tracks, parse_fragments_multi, starts_with_param_set, TrackHeader, TrackKind};
+use crate::fmp4::{
+    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set,
+    TrackHeader, TrackKind,
+};
+use crate::mp4box::find_box;
 
 /// One output port: the `track_ID` it forwards and the elementary [`Caps`] the
 /// downstream decode branch plugs from (parsed from the file's `moov` when the
@@ -92,6 +96,42 @@ fn real_caps(kind: &TrackKind) -> Caps {
             Caps::Audio { format: *format, channels: *channels, sample_rate: *sample_rate }
         }
     }
+}
+
+/// Build an ADTS-framed AAC access unit from the track's 2-byte
+/// AudioSpecificConfig and the raw access unit: a 7-byte ADTS header (no CRC)
+/// derived from the ASC's audio-object-type, sampling-frequency index, and
+/// channel configuration, then the AU. The inverse of the muxer's de-ADTS write,
+/// so the demuxed audio is self-describing. `None` when the ASC is too short, the
+/// rate index / channel config is out of range, or the frame exceeds the 13-bit
+/// ADTS length (then the AU is forwarded raw).
+fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
+    if asc.len() < 2 {
+        return None;
+    }
+    let aot = asc[0] >> 3; // audio object type (5 bits)
+    let sr_index = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
+    let channel_config = (asc[1] >> 3) & 0x0F;
+    if sr_index > 12 || channel_config == 0 {
+        return None; // reserved/explicit rate or "config in stream": not ADTS-able
+    }
+    let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
+    let frame_len = au.len() + 7;
+    if frame_len > 0x1FFF {
+        return None; // ADTS frame_length is 13 bits
+    }
+    let mut out = Vec::with_capacity(frame_len);
+    out.extend_from_slice(&[
+        0xFF,
+        0xF1, // syncword | MPEG-4 | layer 0 | protection_absent (no CRC)
+        (profile << 6) | (sr_index << 2) | ((channel_config >> 2) & 1),
+        ((channel_config & 3) << 6) | ((frame_len >> 11) & 3) as u8,
+        ((frame_len >> 3) & 0xFF) as u8,
+        (((frame_len & 7) << 5) as u8) | 0x1F, // buffer fullness (top bits)
+        0xFC, // buffer fullness (low) | num_raw_data_blocks = 0
+    ]);
+    out.extend_from_slice(au);
+    Some(out)
 }
 
 /// The forwardable tracks an MP4 carries, in `moov` order (M392): one
@@ -197,7 +237,13 @@ impl Mp4DemuxN {
         if self.bus.is_some() {
             self.post_stream_collection(&tracks);
         }
-        let samples = parse_fragments_multi(&self.buf, &tracks)?;
+        // A `moof` marks a fragmented / CMAF file; its absence is the classic
+        // progressive `moov`+`mdat` layout, walked from the sample tables instead.
+        let samples = if find_box(&self.buf, b"moof").is_some() {
+            parse_fragments_multi(&self.buf, &tracks)?
+        } else {
+            parse_progressive_multi(&self.buf, &tracks)?
+        };
         let mut need_sets = alloc::vec![true; self.ports.len()];
 
         for (track_id, sample) in samples {
@@ -214,11 +260,11 @@ impl Mp4DemuxN {
             }
 
             let mut data = sample.annexb;
-            // Prepend out-of-band parameter sets to the first video frame if it
-            // carries none (our own muxer keeps them in-band; CMAF may not).
-            if need_sets[port] {
-                if let Some(TrackKind::Video { codec, param_sets, .. }) = kind {
-                    if !starts_with_param_set(&data, *codec) {
+            match kind {
+                // Prepend out-of-band parameter sets to the first video frame if
+                // it carries none (our own muxer keeps them in-band; CMAF may not).
+                Some(TrackKind::Video { codec, param_sets, .. }) => {
+                    if need_sets[port] && !starts_with_param_set(&data, *codec) {
                         let mut with = Vec::new();
                         for set in param_sets {
                             with.extend_from_slice(&[0, 0, 0, 1]);
@@ -228,6 +274,16 @@ impl Mp4DemuxN {
                         data = with;
                     }
                 }
+                // ADTS-frame every AAC access unit from the track's ASC, so the
+                // audio elementary stream is self-describing (carries its profile
+                // / rate / channels per frame) and a decoder can start without the
+                // out-of-band config, symmetric with the in-band video param sets.
+                Some(TrackKind::Audio { asc, .. }) => {
+                    if let Some(framed) = adts_from_asc(asc, &data) {
+                        data = framed;
+                    }
+                }
+                None => {}
             }
             need_sets[port] = false;
 
@@ -415,6 +471,55 @@ mod tests {
         ))
     }
 
+    /// Mux a minimal two-track (H.264 + AAC) fragmented MP4 via `Mp4MuxN`.
+    fn mux_av() -> Vec<u8> {
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        block_on(async {
+            let mut mux = Mp4MuxN::new(2);
+            mux.configure_pipeline(
+                0,
+                &Caps::CompressedVideo {
+                    codec: VideoCodec::H264,
+                    width: Dim::Fixed(320),
+                    height: Dim::Fixed(240),
+                    framerate: Rate::Fixed(30 << 16),
+                },
+            )
+            .unwrap();
+            mux.configure_pipeline(
+                1,
+                &Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48000 },
+            )
+            .unwrap();
+            let mut sink = ByteCapture::default();
+            mux.process(0, vframe(annexb(&[&sps, &pps, &idr]), 0), &mut sink).await.unwrap();
+            mux.process(1, vframe(adts_au(&[0x01, 0x02, 0x03]), 0), &mut sink).await.unwrap();
+            mux.process(0, vframe(annexb(&[&[0x41u8, 0x9a, 0x00]]), 33_000_000), &mut sink).await.unwrap();
+            mux.process(1, vframe(adts_au(&[0x04, 0x05]), 21_000_000), &mut sink).await.unwrap();
+            mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+            mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+            sink.bytes
+        })
+    }
+
+    #[test]
+    fn adts_from_asc_builds_a_valid_lc_header() {
+        // ASC [0x11, 0x90]: AOT 2 (LC), sr_index 3 (48 kHz), channel config 2.
+        let framed = adts_from_asc(&[0x11, 0x90], &[0xAA, 0xBB]).expect("ADTS built");
+        assert_eq!(framed[0], 0xFF);
+        assert_eq!(framed[1], 0xF1);
+        // profile = AOT-1 = 1; sr_index 3; channel high bit 0.
+        assert_eq!(framed[2], (1 << 6) | (3 << 2));
+        // channel low 2 bits (2) in the top, then frame_len (9) high bits.
+        let frame_len: u32 = 2 + 7;
+        assert_eq!(framed[3], ((2u8 & 3) << 6) | (((frame_len >> 11) & 3) as u8));
+        assert_eq!(&framed[7..], &[0xAA, 0xBB], "the AU follows the 7-byte header");
+        // A too-short ASC declines (the AU would be forwarded raw).
+        assert!(adts_from_asc(&[0x11], &[0xAA]).is_none());
+    }
+
     /// Build a two-track (H.264 + AAC) fragmented MP4 by driving `Mp4MuxN`, then
     /// fan it back out with `Mp4DemuxN`: each track's samples must land on its own
     /// port with the right caps, and the video's parameter sets must survive.
@@ -478,5 +583,66 @@ mod tests {
         assert!(matches!(out.caps[1], Some(Caps::Audio { format: AudioFormat::Aac, .. })));
         assert_eq!(out.frames[1].len(), 2, "two audio access units");
         assert_eq!(demux.emitted(), 4, "four frames forwarded across both ports");
+    }
+
+    /// The audio port emits self-describing ADTS (the ASC wired in-band), so a
+    /// real `AacParse` accepts the demuxed stream and recovers the concrete
+    /// channel layout / sample rate from the headers, the proof that audio decodes.
+    #[test]
+    fn audio_port_emits_decodable_adts() {
+        use crate::aacparse::AacParse;
+        use g2g_core::AsyncElement;
+
+        let bytes = mux_av();
+        let streams = forwardable_streams(&bytes);
+        let ports: Vec<Mp4Port> =
+            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let mut demux = Mp4DemuxN::new(ports);
+        let mut out = PortCapture::new(2);
+        block_on(async {
+            demux.process(vframe(bytes, 0), &mut out).await.unwrap();
+            demux.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        });
+
+        // Every audio frame opens with an ADTS syncword (0xFFF).
+        for au in &out.frames[1] {
+            assert!(au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0, "ADTS-framed AAC");
+        }
+
+        // A real AAC parser recovers 48 kHz / stereo from the ADTS headers.
+        #[derive(Default)]
+        struct CapsCapture {
+            last: Option<Caps>,
+        }
+        impl OutputSink for CapsCapture {
+            fn push<'a>(
+                &'a mut self,
+                packet: PipelinePacket,
+            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+                Box::pin(async move {
+                    if let PipelinePacket::CapsChanged(c) = packet {
+                        self.last = Some(c);
+                    }
+                    Ok(PushOutcome::Accepted)
+                })
+            }
+        }
+
+        let recovered = block_on(async {
+            let mut parser = AacParse::new();
+            parser
+                .configure_pipeline(&Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 })
+                .unwrap();
+            let mut sink = CapsCapture::default();
+            for au in &out.frames[1] {
+                parser.process(vframe(au.clone(), 0), &mut sink).await.unwrap();
+            }
+            sink.last
+        });
+        assert_eq!(
+            recovered,
+            Some(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 48_000 }),
+            "AacParse recovers the real channel layout / sample rate from the wired-in ASC"
+        );
     }
 }

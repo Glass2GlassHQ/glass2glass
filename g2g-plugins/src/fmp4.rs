@@ -573,7 +573,21 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
     let trak = find_box(moov, b"trak").ok_or(G2gError::CapsMismatch)?;
     let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
     let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+    // Single video track: de-frame AVCC -> Annex-B.
+    parse_progressive_track(data, stbl, timescale, true)
+}
 
+/// Parse the samples of one progressive track from its `stbl` sample tables,
+/// addressing the elementary data in `data` by the absolute chunk offsets. The
+/// per-track core shared by [`parse_progressive`] (single video track) and
+/// [`parse_progressive_multi`] (every A/V track). `video` selects AVCC->Annex-B
+/// de-framing; an audio track passes its samples through verbatim.
+fn parse_progressive_track(
+    data: &[u8],
+    stbl: &[u8],
+    timescale: u32,
+    video: bool,
+) -> Result<Vec<Sample>, G2gError> {
     // stsz: per-sample sizes. A non-zero `default_size` means every sample is
     // that size (no table); otherwise a `sample_count`-long table follows.
     let stsz = find_box(stbl, b"stsz").ok_or(G2gError::CapsMismatch)?;
@@ -698,8 +712,9 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
             Some(list) => list.binary_search(&((i + 1) as u32)).is_ok(),
             None => true,
         };
+        let annexb = if video { avcc_to_annexb(raw)? } else { raw.to_vec() };
         samples.push(Sample {
-            annexb: avcc_to_annexb(raw)?,
+            annexb,
             pts_ns: timescale_to_ns(pts, timescale),
             duration_ns: timescale_to_ns(durations[i] as u64, timescale),
             keyframe,
@@ -707,6 +722,42 @@ pub(crate) fn parse_progressive(data: &[u8], timescale: u32) -> Result<Vec<Sampl
         dts = dts.saturating_add(durations[i] as u64);
     }
     Ok(samples)
+}
+
+/// Parse a progressive (`moov`+`mdat`, no `moof`) multi-track file: every A/V
+/// track's samples, keyed by `track_ID`, in track order. The progressive analog
+/// of [`parse_fragments_multi`] (and the multi-track form of [`parse_progressive`]),
+/// for files that carry several tracks in classic sample-table layout rather than
+/// fragments. Each track's `stbl` is walked independently against its own
+/// timescale and de-framing; tracks absent from `tracks` are skipped.
+pub(crate) fn parse_progressive_multi(
+    data: &[u8],
+    tracks: &[TrackHeader],
+) -> Result<Vec<(u32, Sample)>, G2gError> {
+    let moov = find_box(data, b"moov").ok_or(G2gError::CapsMismatch)?;
+    let mut out = Vec::new();
+    for track in tracks {
+        let Some(trak) = find_trak_by_id(moov, track.track_id) else {
+            continue; // a track with no matching trak box
+        };
+        let mdia = find_box(trak, b"mdia").ok_or(G2gError::CapsMismatch)?;
+        let stbl = find_path(mdia, &[b"minf", b"stbl"]).ok_or(G2gError::CapsMismatch)?;
+        let video = matches!(track.kind, TrackKind::Video { .. });
+        for s in parse_progressive_track(data, stbl, track.timescale, video)? {
+            out.push((track.track_id, s));
+        }
+    }
+    Ok(out)
+}
+
+/// The `trak` box (payload) in `moov` whose `tkhd` carries `track_id`, or `None`.
+fn find_trak_by_id(moov: &[u8], track_id: u32) -> Option<&[u8]> {
+    boxes(moov).filter(|(k, _)| *k == b"trak").map(|(_, t)| t).find(|trak| {
+        find_box(trak, b"tkhd")
+            .filter(|tkhd| tkhd.first() == Some(&0))
+            .and_then(|tkhd| be32(tkhd, 12).ok())
+            == Some(track_id)
+    })
 }
 
 /// `trun` (v0 or v1) with explicit sample sizes; returns (sizes, durations) with
@@ -1132,5 +1183,162 @@ mod tests {
         assert_eq!(*aud_id, 2);
         assert_eq!(aud.annexb, audio_sample, "audio passes through verbatim");
         assert!(aud.keyframe, "every audio AU is a sync sample");
+    }
+
+    /// A progressive (`moov`+`mdat`, no `moof`) two-track file (an H.264 `vide`
+    /// trak + an AAC `soun` trak, each with classic `stbl` sample tables sharing a
+    /// single `mdat`) parses to two tracks and `parse_progressive_multi` routes
+    /// each track's samples by `track_ID`, de-framing video to Annex-B and passing
+    /// audio through. The progressive analog of the fragmented test above.
+    #[test]
+    fn parse_progressive_multi_routes_each_track_by_id() {
+        use crate::mp4box::{full_box, mp4_box};
+
+        // --- shared leaf box builders (same offsets the parser reads) ------
+        let tkhd = |track_id: u32, w: u32, h: u32| {
+            let mut c = alloc::vec![0u8; 80];
+            c[8..12].copy_from_slice(&track_id.to_be_bytes());
+            c[72..76].copy_from_slice(&(w << 16).to_be_bytes());
+            c[76..80].copy_from_slice(&(h << 16).to_be_bytes());
+            full_box(b"tkhd", 0, 0, &c)
+        };
+        let mdhd = |timescale: u32| {
+            let mut c = alloc::vec![0u8; 16];
+            c[8..12].copy_from_slice(&timescale.to_be_bytes());
+            full_box(b"mdhd", 0, 0, &c)
+        };
+        let hdlr = |handler: &[u8; 4]| {
+            let mut c = alloc::vec![0u8; 20];
+            c[4..8].copy_from_slice(handler);
+            full_box(b"hdlr", 0, 0, &c)
+        };
+        let descriptor = |tag: u8, body: &[u8]| {
+            let mut v = alloc::vec![tag, body.len() as u8];
+            v.extend_from_slice(body);
+            v
+        };
+        let esds = |asc: &[u8]| {
+            let dsi = descriptor(0x05, asc);
+            let mut dcd_body = alloc::vec![0u8; 13];
+            dcd_body.extend_from_slice(&dsi);
+            let dcd = descriptor(0x04, &dcd_body);
+            let mut es_body = alloc::vec![0u8; 3];
+            es_body.extend_from_slice(&dcd);
+            full_box(b"esds", 0, 0, &descriptor(0x03, &es_body))
+        };
+        let avcc = |sps: &[u8], pps: &[u8]| {
+            let mut p = alloc::vec![0u8; 5];
+            p.push(0xE1);
+            p.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+            p.extend_from_slice(sps);
+            p.push(1);
+            p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+            p.extend_from_slice(pps);
+            mp4_box(b"avcC", &p)
+        };
+        let stsd = |entry: &[u8]| {
+            let mut p = 1u32.to_be_bytes().to_vec();
+            p.extend_from_slice(entry);
+            full_box(b"stsd", 0, 0, &p)
+        };
+        // sample-table builders (one chunk holding all of a track's samples).
+        let stsz = |sizes: &[u32]| {
+            let mut b = alloc::vec![0u8; 8]; // default_size 0, then count
+            b[4..8].copy_from_slice(&(sizes.len() as u32).to_be_bytes());
+            for s in sizes {
+                b.extend_from_slice(&s.to_be_bytes());
+            }
+            full_box(b"stsz", 0, 0, &b)
+        };
+        let stts = |count: u32, delta: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&count.to_be_bytes());
+            b.extend_from_slice(&delta.to_be_bytes());
+            full_box(b"stts", 0, 0, &b)
+        };
+        let stsc = |spc: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&1u32.to_be_bytes()); // first_chunk = 1
+            b.extend_from_slice(&spc.to_be_bytes()); // samples_per_chunk
+            b.extend_from_slice(&1u32.to_be_bytes()); // sample_desc_index
+            full_box(b"stsc", 0, 0, &b)
+        };
+        let stco = |offset: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&offset.to_be_bytes());
+            full_box(b"stco", 0, 0, &b)
+        };
+        let stss = |sample_no: u32| {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&sample_no.to_be_bytes());
+            full_box(b"stss", 0, 0, &b)
+        };
+        let trak = |tkhd: &[u8], mdhd: &[u8], hdlr: &[u8], stbl: &[u8]| {
+            let minf = mp4_box(b"minf", &mp4_box(b"stbl", stbl));
+            let mdia = mp4_box(b"mdia", &[mdhd, hdlr, &minf].concat());
+            mp4_box(b"trak", &[tkhd, &mdia].concat())
+        };
+
+        let sps: &[u8] = &[0x67, 0x42, 0x00, 0x1e];
+        let pps: &[u8] = &[0x68, 0xce];
+        let asc: &[u8] = &[0x12, 0x10];
+
+        let avc1 = {
+            let mut p = alloc::vec![0u8; 78];
+            p.extend_from_slice(&avcc(sps, pps));
+            mp4_box(b"avc1", &p)
+        };
+        let mp4a = {
+            let mut p = alloc::vec![0u8; 28];
+            p[16..18].copy_from_slice(&2u16.to_be_bytes());
+            p.extend_from_slice(&esds(asc));
+            mp4_box(b"mp4a", &p)
+        };
+
+        // Two AVCC video samples + two raw AAC samples, in one mdat each track.
+        let video_samples: [&[u8]; 2] = [&[0, 0, 0, 2, 0x65, 0xAA], &[0, 0, 0, 2, 0x41, 0xBB]];
+        let audio_samples: [&[u8]; 2] = [&[0xC1, 0xC2, 0xC3], &[0xD1, 0xD2]];
+        let v_sizes: Vec<u32> = video_samples.iter().map(|s| s.len() as u32).collect();
+        let a_sizes: Vec<u32> = audio_samples.iter().map(|s| s.len() as u32).collect();
+        let v_total: u32 = v_sizes.iter().sum();
+
+        // The moov length is constant in the (u32) chunk-offset values, so a
+        // placeholder build gives the offsets to fill into the real one.
+        let build = |off_v: u32, off_a: u32| {
+            let v_stbl = [stsd(&avc1), stsz(&v_sizes), stts(2, 3000), stsc(2), stco(off_v), stss(1)].concat();
+            let a_stbl = [stsd(&mp4a), stsz(&a_sizes), stts(2, 1024), stsc(2), stco(off_a)].concat();
+            let video_trak = trak(&tkhd(1, 320, 240), &mdhd(90_000), &hdlr(b"vide"), &v_stbl);
+            let audio_trak = trak(&tkhd(2, 0, 0), &mdhd(48_000), &hdlr(b"soun"), &a_stbl);
+            mp4_box(b"moov", &[video_trak, audio_trak].concat())
+        };
+        let moov_len = build(0, 0).len();
+        let off_v = (moov_len + 8) as u32; // mdat payload starts after its header
+        let off_a = off_v + v_total;
+        let mut file = build(off_v, off_a);
+        let mut mdat_body = Vec::new();
+        for s in video_samples.iter().chain(audio_samples.iter()) {
+            mdat_body.extend_from_slice(s);
+        }
+        file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
+
+        // No moof: the multi-track progressive path must split both tracks.
+        assert!(find_box(&file, b"moof").is_none(), "fixture is progressive");
+        let tracks = parse_all_tracks(&file).expect("two tracks");
+        assert_eq!(tracks.len(), 2);
+        let samples = parse_progressive_multi(&file, &tracks).expect("progressive multi parse");
+        assert_eq!(samples.len(), 4, "two video + two audio samples");
+
+        let video: Vec<_> = samples.iter().filter(|(id, _)| *id == 1).collect();
+        let audio: Vec<_> = samples.iter().filter(|(id, _)| *id == 2).collect();
+        assert_eq!(video.len(), 2);
+        assert_eq!(audio.len(), 2);
+        // Video de-framed AVCC -> Annex-B; sample 1 (in stss) is the keyframe.
+        assert_eq!(video[0].1.annexb, alloc::vec![0, 0, 0, 1, 0x65, 0xAA]);
+        assert!(video[0].1.keyframe, "sample 1 is in stss");
+        assert!(!video[1].1.keyframe, "sample 2 is not in stss");
+        // Audio passed through verbatim; no stss means every sample is a sync point.
+        assert_eq!(audio[0].1.annexb, audio_samples[0]);
+        assert_eq!(audio[1].1.annexb, audio_samples[1]);
+        assert!(audio[0].1.keyframe && audio[1].1.keyframe);
     }
 }
