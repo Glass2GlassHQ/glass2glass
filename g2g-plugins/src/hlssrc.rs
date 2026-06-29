@@ -98,26 +98,29 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
 /// The decodable streams a master's `variant` exposes (M395 rendition discovery):
 /// the streams multiplexed in the variant's own segments (from its `CODECS`) plus
 /// the alternate audio renditions its `AUDIO` group offers (each a separate
-/// `#EXT-X-MEDIA` playlist). When the variant binds an `AUDIO` group its audio is
-/// not muxed, so the muxed audio codec is dropped in favour of the group's
-/// renditions, plus the alternate subtitle renditions its `SUBTITLES` group offers
-/// (M418: each a separate WebVTT playlist, surfaced as `Caps::Text { WebVtt }`).
-///
-/// Note (M421): when the bound group's chosen rendition is itself URI-less (the
-/// muxed track is the default audio, e.g. Apple's bipbop), this drops the audio
-/// entirely, which is why such a stream currently plays silent. Surfacing that
-/// muxed audio needs a Linux AAC decoder (plus `audioconvert` / `audioresample`
-/// to reach the sink's fixed PCM caps), which does not exist yet; the routing fix
-/// lands with that decoder so it does not regress every muxed-AAC stream into a
-/// hard "no decoder chain" failure in the meantime.
+/// `#EXT-X-MEDIA` playlist). The muxed audio codec is dropped in favour of the
+/// group's renditions only when the bound `AUDIO` group is entirely separate
+/// playlists; if it has a *URI-less* rendition, per the HLS spec the audio is
+/// carried in the variant's own segments (that rendition *is* the muxed track,
+/// e.g. the `DEFAULT=YES` entry of Apple's bipbop), so the muxed audio is kept
+/// (M422: without this, such a stream played silent, dropped as "a group is bound"
+/// yet never surfaced as a separate playlist). Plus the alternate subtitle
+/// renditions its `SUBTITLES` group offers (M418: each a separate WebVTT playlist,
+/// surfaced as `Caps::Text { WebVtt }`).
 pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStreamInfo> {
     let mut out = Vec::new();
-    let has_audio_group = variant.audio_group.is_some();
+    // The audio rides the variant's own segments (is muxed) when no AUDIO group is
+    // bound, or when the bound group has a URI-less rendition (the spec's "this
+    // media is present in the variant stream" marker).
+    let audio_is_muxed = match &variant.audio_group {
+        None => true,
+        Some(group) => master.renditions_in(MediaType::Audio, group).iter().any(|r| r.uri.is_none()),
+    };
     for codec in variant.codec_list() {
         if let Some((stream_type, caps, video)) = codec_to_stream(codec) {
-            // Audio is a separate rendition when an AUDIO group is bound; only the
-            // muxed (video, or group-less audio) codecs ride the variant segments.
-            if !video && has_audio_group {
+            // Only the muxed codecs ride the variant segments: video always, audio
+            // only when it is not exclusively a set of separate renditions.
+            if !video && !audio_is_muxed {
                 continue;
             }
             let name = if video { "video" } else { "audio" };

@@ -505,6 +505,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
         Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
     }));
+    // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
+    // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
+    // raw audio (e.g. an MPEG-TS / HLS AAC track).
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register(ElementFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>("ffmpegaudiodec", |_| {
+        Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new())
+    }));
     // ffmpeg VAAPI hwaccel backend as a distinct name (M237). Same element type
     // as ffmpegdec, constructed with `Backend::Vaapi`; the libva device defaults
     // to the VA display's choice (a `device=` property is a follow-up).
@@ -765,6 +772,11 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
         Box::new(FfmpegH264Dec::new())
     }));
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+    reg.register_launch(LaunchFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(
+        "ffmpegaudiodec",
+        || Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
+    ));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
         Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))

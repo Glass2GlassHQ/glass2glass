@@ -440,6 +440,11 @@ pub mod vaapidec;
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub mod ffmpegdec;
 
+// Audio decode via libavcodec (AAC -> interleaved PcmS16Le), the audio sibling
+// of `ffmpegdec`. Same Linux + `ffmpeg` gate.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+pub mod ffmpegaudiodec;
+
 // H.264 encode via libavcodec (NVENC / libx264), the encode-side mirror of
 // ffmpegdec (M266). Same Linux + ffmpeg gating.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]

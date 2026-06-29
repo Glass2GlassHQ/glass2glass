@@ -300,19 +300,21 @@ leverage first:
   honours the chosen output layout and emits NV12 straight to a strict-NV12 sink,
   no inserted `videoconvert`). MPEG-TS / HLS H.264 now decodes cleanly on screen
   (M421: an access-unit-re-framing `h264parse` is auto-inserted before the decoder,
-  validated live against Apple bipbop: 0 decode errors, matching GStreamer). The
-  overlay graph runs end to end. Remaining playback follow-ups:
-  - **Linux AAC decode.** No `FfmpegAudioDec` exists (only the Windows
-    `MfAacDecode`), so an HLS stream whose audio is muxed AAC plays video-only. The
-    full audio path needs an ffmpeg-backed AAC decoder, plus `audioconvert` /
-    `audioresample` auto-inserted to reach the audio sink's fixed PCM caps (the
-    sink templates pin `2ch/48kHz`), plus resolving the PCM-channel strict-equality
-    in `Caps::Audio::intersect` so a decoder with runtime-discovered channels can
-    link to a concrete-channel sink (today only `sample_rate` has a 0 = "any"
-    wildcard). The HLS muxed-audio routing fix (keep the muxed AAC when the bound
-    `AUDIO` group's default rendition is URI-less, e.g. bipbop) lands with that
-    decoder; surfacing it before the decoder exists would regress every such stream
-    into a hard "no decoder chain" failure.
+  validated live against Apple bipbop: 0 decode errors, matching GStreamer). Linux
+  AAC decode landed too (M422: `FfmpegAudioDec` + ADTS frame splitting; the playbin
+  audio branch wires `decode -> audioconvert -> audioresample -> autoaudiosink`;
+  bipbop plays clean video + audio + subtitles live, audio via `PulseSink` ->
+  pipewire-pulse). The overlay graph runs end to end. Remaining playback follow-ups:
+  - **Audio breadth.** `FfmpegAudioDec` advertises a constant stereo / 48 kHz
+    placeholder and relies on `audioconvert` (identity / mono fan-out / downmix-to-
+    mono only) + `audioresample`; **mono / multichannel** need a channels wildcard in
+    `Caps::Audio::intersect` (today only `sample_rate` has a 0 = "any" wildcard, so a
+    runtime mono/5.1 `CapsChanged` mismatches the fixated stereo edge). The converter
+    wiring is in the subtitle-overlay audio branch (`wire_audio_branch`); the **plain
+    A/V fan-out** (`build_playbin_graph`) still links a decoder straight to the sink,
+    so a non-subtitle TS/MP4 audio track needs the same chain. Other codecs (Opus,
+    etc.) beyond AAC. The audio sink needs the `pulse-sink` (or `alsa-sink`) feature
+    built in, else `autoaudiosink` falls back to `fakesink`.
   - An access-unit-re-framing **`h265parse`** (the M421 sibling for HEVC; today it
     is a caps-refinement pass-through, so TS / HLS HEVC has the same mis-framing).
   - On-screen playback still wants a look at the separate `waylandsink`

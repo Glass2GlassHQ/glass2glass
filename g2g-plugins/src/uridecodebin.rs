@@ -315,6 +315,39 @@ fn wire_subtitle_overlay(
 /// outside the auto-plug pool, RGBA8 in/out vs the display sink's NV12). Shared by
 /// the single-container [`wire_subtitle_overlay`] and the multi-source HLS builder,
 /// which differ only in where the text pad is fed from.
+/// Decode a compressed-audio demux port to an auto audio sink (M422): the audio
+/// analog of the video overlay's explicit `VideoConvert`s. The decoded PCM's
+/// channel count and sample rate are only known once a frame decodes, but the
+/// sink needs a fixed format at configure, so the branch is
+/// `decode -> audioconvert(stereo) -> audioresample(48 kHz) -> autoaudiosink`: the
+/// converters absorb the stream's real params (learned via `CapsChanged`) and
+/// always present 2ch / 48000 to the sink. The `audioconvert` / `audioresample`
+/// are `register_launch` elements outside the auto-plug pool, so they are wired
+/// explicitly (like the overlay's converters), while the decoder is auto-plugged.
+#[cfg(feature = "std")]
+fn wire_audio_branch(
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    src: impl Into<g2g_core::graph::PadId>,
+    caps: &Caps,
+) -> Result<(), ParseError> {
+    let sink = reg
+        .make_element("autoaudiosink")
+        .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
+    let snk = graph.add_sink(GraphNodeRef::Element(sink));
+    let resample =
+        graph.add_transform(GraphNodeRef::element(crate::audioresample::AudioResample::new(48_000)));
+    let convert = graph.add_transform(GraphNodeRef::element(crate::audioconvert::AudioConvert::new(
+        g2g_core::AudioFormat::PcmS16Le,
+        2,
+    )));
+    graph.link(convert, resample).map_err(ParseError::Graph)?;
+    graph.link(resample, snk).map_err(ParseError::Graph)?;
+    reg.decodebin(graph, src, convert, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
+        .map_err(|e| map_decode_err(caps, e))?;
+    Ok(())
+}
+
 #[cfg(feature = "std")]
 fn wire_overlay_av(
     reg: &Registry,
@@ -339,18 +372,13 @@ fn wire_overlay_av(
     graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
 
     // Each A/V track: the video one decodes into the overlay's RGBA8 convert, the
-    // rest fan out to their own auto sinks.
+    // rest fan out to their own auto sinks through the audio decode/convert chain.
     for (i, (caps, _video)) in av.iter().enumerate() {
         if i == video_idx {
             reg.decodebin(graph, demux.out(i as u8), to_rgba, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
                 .map_err(|e| map_decode_err(caps, e))?;
         } else {
-            let sink = reg
-                .make_element("autoaudiosink")
-                .ok_or_else(|| ParseError::UnknownElement("autoaudiosink".to_string()))?;
-            let snk = graph.add_sink(GraphNodeRef::Element(sink));
-            reg.decodebin(graph, demux.out(i as u8), snk, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
-                .map_err(|e| map_decode_err(caps, e))?;
+            wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
         }
     }
     Ok(overlay)

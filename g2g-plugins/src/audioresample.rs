@@ -124,7 +124,12 @@ impl AudioResample {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !PCM_FORMATS.contains(format) || *channels == 0 || *sample_rate == 0 {
+        // A 0 (`ANY_SAMPLE_RATE`) input rate is the negotiation placeholder a
+        // decoder advertises before it has decoded a frame; accept it deferred (the
+        // real rate arrives as a `CapsChanged`, which the runner turns into a fresh
+        // `configure_pipeline`). A `DataFrame` never precedes that `CapsChanged`, so
+        // `resample` is never asked to interpolate at rate 0 (guarded in `process`).
+        if !PCM_FORMATS.contains(format) || *channels == 0 {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
@@ -214,6 +219,12 @@ impl AsyncElement for AudioResample {
                 PipelinePacket::DataFrame(frame) => {
                     let (in_format, in_channels, in_rate) =
                         self.input.ok_or(G2gError::NotConfigured)?;
+                    // The deferred `ANY_SAMPLE_RATE` placeholder must have been
+                    // resolved by a real input `CapsChanged` before any data; if not,
+                    // fail loud rather than divide by a zero rate.
+                    if in_rate == 0 {
+                        return Err(G2gError::NotConfigured);
+                    }
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
