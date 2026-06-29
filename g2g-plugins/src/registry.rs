@@ -387,10 +387,11 @@ pub fn default_registry() -> Registry {
 fn register_uri_handlers(reg: &mut Registry) {
     // file:// -> Mp4Src (self-demuxing MP4, emits H.264). Available under std.
     reg.register_uri(crate::uridecodebin::file_handler());
-    // playbin uri=file://x.mkv auto-fan-out (M382): probe the container and build
-    // a multi-stream graph; declines (falls back to single-stream playbin) for a
-    // non-Matroska file.
+    // playbin uri=file://x auto-fan-out: each hook probes the container and builds
+    // a multi-stream graph, declining (so the next hook / single-stream playbin
+    // takes over) for a container it does not parse. MKV (M382) then MPEG-TS (M389).
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
+    reg.register_playbin(crate::uridecodebin::ts_playbin);
     #[cfg(feature = "udp-ingress")]
     reg.register_uri(crate::uridecodebin::udp_handler());
     #[cfg(feature = "rtsp")]

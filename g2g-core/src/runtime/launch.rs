@@ -868,7 +868,9 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
     // declines, e.g. a non-Matroska file), fall through to build_graph, which
     // expands `playbin` to the single-stream pipeline (M196).
     if let Some(uri) = lone_playbin_uri(&chains) {
-        if let Some(hook) = registry.playbin_hook() {
+        // Try each registered hook (one per container type) until one handles the
+        // URI; a hook returns Ok(None) to decline a container it does not parse.
+        for hook in registry.playbin_hooks() {
             if let Some(graph) = hook(registry, uri)? {
                 return Ok(graph);
             }

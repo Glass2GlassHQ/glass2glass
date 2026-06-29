@@ -424,6 +424,49 @@ fn ts_stream_to_str(stream: TsStream) -> &'static str {
     }
 }
 
+/// The [`TsStream`] a demuxer forwards for a PMT `stream_type`, or `None` for one
+/// g2g does not forward.
+fn stream_type_to_ts(stream_type: u8) -> Option<TsStream> {
+    match stream_type {
+        STREAM_TYPE_H264 => Some(TsStream::H264),
+        STREAM_TYPE_H265 => Some(TsStream::H265),
+        STREAM_TYPE_AAC => Some(TsStream::Aac),
+        _ => None,
+    }
+}
+
+/// One forwardable elementary stream discovered in a parsed transport stream
+/// (M389): which [`TsStream`] a demux port would carry, the elementary [`Caps`] a
+/// decode branch plugs from, and whether it is video (vs audio). The
+/// `playbin uri=*.ts` auto-fan-out builds one decode branch per entry. The
+/// MPEG-TS analog of [`crate::mkvdemux::MkvStreamInfo`].
+#[derive(Debug, Clone)]
+pub struct TsStreamInfo {
+    /// The stream a demux port forwards for this PMT entry.
+    pub stream: TsStream,
+    /// The elementary-stream caps the decode chain plugs from.
+    pub caps: Caps,
+    /// `true` for a video stream, `false` for audio (picks the auto sink).
+    pub video: bool,
+}
+
+/// The forwardable elementary streams a parsed transport stream carries, in PMT
+/// order (M389): one [`TsStreamInfo`] per PMT entry whose `stream_type` maps to a
+/// [`TsStream`]. `demux` must have parsed its PMT (feed a file prefix first);
+/// returns empty for a non-MPEG-TS or not-yet-parsed input, which the `playbin`
+/// hook reads as "decline, fall through".
+pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
+    demux
+        .streams()
+        .iter()
+        .filter_map(|es| {
+            let stream = stream_type_to_ts(es.stream_type)?;
+            let video = matches!(stream, TsStream::H264 | TsStream::H265);
+            Some(TsStreamInfo { stream, caps: TsDemux::output_caps(stream), video })
+        })
+        .collect()
+}
+
 impl PadTemplates for TsDemux {
     fn pad_templates() -> Vec<PadTemplate> {
         // One sink (the TS byte stream); the source pad can carry any of the

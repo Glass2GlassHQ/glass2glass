@@ -1471,7 +1471,13 @@ known without sniffing the byte stream.
   non-`file://` URI or non-Matroska container, falling back to single-stream
   `playbin`; it supplies a Matroska byte `FileSrc` via
   `build_playbin_graph_with_source` rather than the `file://` handler's
-  MP4-self-demuxing source.
+  MP4-self-demuxing source. The hook slot is a *list* (M389): `register_playbin`
+  appends and `parse_launch` tries each in turn, so one hook per container type
+  coexists — `ts_playbin` (M389) is the MPEG-TS sibling (`TsDemuxN` multi-output
+  demuxer, M388), and a TS file is handled by it while an MKV file is handled by
+  `mkv_playbin`, each declining the other's container. HLS rides on this:
+  `HlsSrc` emits `ByteStream{MpegTs}`, so `HlsSrc → TsDemuxN` fans out a variant's
+  streams.
 
 - **Gapless playback** (`std`, M383). The playbin `about-to-finish` + next-`uri`
   analog: `GaplessSrc` (`g2g-plugins`) concatenates a playlist of sources into

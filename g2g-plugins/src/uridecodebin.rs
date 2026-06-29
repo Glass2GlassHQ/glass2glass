@@ -101,89 +101,135 @@ const PLAYBIN_PROBE_BYTES: u64 = 4 * 1024 * 1024;
 #[cfg(feature = "std")]
 const PLAYBIN_MAX_DEPTH: usize = 6;
 
-/// The `playbin uri=X` auto-fan-out hook (M382): probe a `file://` Matroska
-/// container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto sink}` with
-/// one branch per forwardable stream, the multi-stream form of `playbin` (vs the
-/// M196 single-stream expansion). Register it on a [`Registry`] with
-/// [`Registry::register_playbin`] (done by [`default_registry`]).
-///
-/// Declines (returns `Ok(None)`, so the parser falls back to single-stream
-/// `playbin`) for a non-`file://` URI, an unreadable file, or a file whose
-/// `Tracks` carries no Matroska stream g2g forwards (e.g. an MP4). A probed
-/// Matroska whose per-port decode chain cannot be plugged (no decoder feature
-/// compiled in) is an error, not a decline.
-///
-/// [`default_registry`]: crate::registry::default_registry
 #[cfg(feature = "std")]
-pub fn mkv_playbin(
-    reg: &g2g_core::runtime::Registry,
-    uri: &str,
-) -> Result<Option<g2g_core::Graph<g2g_core::runtime::GraphNode>>, g2g_core::runtime::ParseError> {
+use alloc::string::ToString;
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use g2g_core::runtime::{
+    is_raw_audio, is_raw_video, GraphNode, ParseError, PlaybinGraphError, PlaybinPort, Registry,
+};
+#[cfg(feature = "std")]
+use g2g_core::{ByteStreamEncoding, Graph};
+
+/// file:// probe: read a bounded prefix of the URI's file for container sniffing.
+/// `None` for a non-`file://` URI or an unreadable file (the hook then declines),
+/// else the absolute path (for the byte source) plus the prefix bytes.
+#[cfg(feature = "std")]
+fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
     use std::io::Read;
-
-    use alloc::string::ToString;
-    use alloc::vec::Vec;
-
-    use g2g_core::runtime::{
-        is_raw_audio, is_raw_video, ParseError, PlaybinGraphError, PlaybinPort,
-    };
-    use g2g_core::{ByteStreamEncoding, Caps};
-
-    use crate::filesrc::FileSrc;
-    use crate::matroska::MatroskaDemuxer;
-    use crate::mkvdemux::{forwardable_streams, MkvDemuxN};
-
-    // Only file:// is probed; other schemes fall through to single-stream playbin.
-    let parsed = match Uri::parse(uri) {
-        Some(u) if u.scheme == "file" && !u.rest.is_empty() => u,
-        _ => return Ok(None),
-    };
-
-    // Read a bounded prefix to parse the Tracks element. An unreadable file
-    // declines (the single-stream path reports its own error).
+    let parsed = Uri::parse(uri)?;
+    if parsed.scheme != "file" || parsed.rest.is_empty() {
+        return None;
+    }
     let mut prefix = Vec::new();
-    match std::fs::File::open(parsed.rest) {
-        Ok(f) => {
-            if f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).is_err() {
-                return Ok(None);
-            }
-        }
-        Err(_) => return Ok(None),
-    }
+    let f = std::fs::File::open(parsed.rest).ok()?;
+    f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
+    Some((parsed.rest.to_string(), prefix))
+}
 
-    let mut demux = MatroskaDemuxer::new();
-    demux.push_data(&prefix);
-    let infos = forwardable_streams(&demux);
-    if infos.is_empty() {
-        // Not a Matroska container (or no forwardable track): decline so the
-        // single-stream playbin (its own scheme handler) takes over.
-        return Ok(None);
-    }
-
-    let streams = infos.iter().map(|i| i.stream).collect::<Vec<_>>();
-    let mut ports = Vec::with_capacity(infos.len());
-    for info in &infos {
-        let sink_name = if info.video { "autovideosink" } else { "autoaudiosink" };
+/// Build one [`PlaybinPort`] per `(elementary caps, is_video)`: an `autovideosink`
+/// for a video stream, an `autoaudiosink` for audio, each with the matching
+/// raw-shape `target`. Shared by every container's playbin hook.
+#[cfg(feature = "std")]
+fn playbin_ports(
+    reg: &Registry,
+    infos: impl Iterator<Item = (Caps, bool)>,
+) -> Result<Vec<PlaybinPort>, ParseError> {
+    let mut ports = Vec::new();
+    for (caps, video) in infos {
+        let sink_name = if video { "autovideosink" } else { "autoaudiosink" };
         let target: Box<dyn Fn(&Caps) -> bool> =
-            if info.video { Box::new(is_raw_video) } else { Box::new(is_raw_audio) };
+            if video { Box::new(is_raw_video) } else { Box::new(is_raw_audio) };
         let sink = reg
             .make_element(sink_name)
             .ok_or_else(|| ParseError::UnknownElement(sink_name.to_string()))?;
-        ports.push(PlaybinPort { input_caps: info.caps.clone(), target, sink });
+        ports.push(PlaybinPort { input_caps: caps, target, sink });
     }
+    Ok(ports)
+}
 
-    // The URI handler's file:// source self-demuxes MP4, so build the matching
-    // Matroska byte source directly and feed it to the multi-output demuxer.
-    let source = FileSrc::new(parsed.rest, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
-    let demux_n = MkvDemuxN::new(streams);
-    reg.build_playbin_graph_with_source(Box::new(source), demux_n, ports, PLAYBIN_MAX_DEPTH)
-        .map(Some)
-        .map_err(|e| match e {
-            PlaybinGraphError::NoPorts => {
-                ParseError::NoDecodeChain("playbin: no forwardable streams".to_string())
-            }
-            PlaybinGraphError::Uri(e) => ParseError::Uri(alloc::format!("{uri}: {e:?}")),
-            PlaybinGraphError::Graph(e) => ParseError::Graph(e),
-            PlaybinGraphError::Decode(e) => ParseError::NoDecodeChain(alloc::format!("{e:?}")),
-        })
+/// Map a multi-stream graph-build failure to the text-parser error.
+#[cfg(feature = "std")]
+fn map_playbin_err(uri: &str, e: PlaybinGraphError) -> ParseError {
+    match e {
+        PlaybinGraphError::NoPorts => {
+            ParseError::NoDecodeChain("playbin: no forwardable streams".to_string())
+        }
+        PlaybinGraphError::Uri(e) => ParseError::Uri(alloc::format!("{uri}: {e:?}")),
+        PlaybinGraphError::Graph(e) => ParseError::Graph(e),
+        PlaybinGraphError::Decode(e) => ParseError::NoDecodeChain(alloc::format!("{e:?}")),
+    }
+}
+
+/// The `playbin uri=X` auto-fan-out hook for Matroska / WebM (M382): probe a
+/// `file://` MKV container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto
+/// sink}` with one branch per forwardable stream, the multi-stream form of
+/// `playbin`. Register it with [`Registry::register_playbin`] (done by
+/// [`default_registry`]).
+///
+/// Declines (`Ok(None)`, so the parser tries the next hook / falls back to
+/// single-stream `playbin`) for a non-`file://` URI, an unreadable file, or a
+/// non-Matroska container. A probed MKV whose per-port decode chain cannot be
+/// plugged (no decoder feature compiled in) is an error, not a decline.
+///
+/// [`default_registry`]: crate::registry::default_registry
+#[cfg(feature = "std")]
+pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some((path, prefix)) = open_file_prefix(uri) else { return Ok(None) };
+    let mut demux = crate::matroska::MatroskaDemuxer::new();
+    demux.push_data(&prefix);
+    let infos = crate::mkvdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return Ok(None); // not Matroska (or no forwardable track): decline
+    }
+    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
+    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    // The file:// URI handler self-demuxes MP4, so build the matching Matroska
+    // byte source directly and feed it to the multi-output demuxer.
+    let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
+    reg.build_playbin_graph_with_source(
+        Box::new(source),
+        crate::mkvdemux::MkvDemuxN::new(streams),
+        ports,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map(Some)
+    .map_err(|e| map_playbin_err(uri, e))
+}
+
+/// The `playbin uri=X` auto-fan-out hook for MPEG-TS (M389): probe a `file://`
+/// transport stream's PMT, then assemble `FileSrc -> TsDemuxN -> {decode -> auto
+/// sink}` with one branch per forwardable stream, the MPEG-TS sibling of
+/// [`mkv_playbin`]. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
+/// file, or a non-MPEG-TS container (no PMT in the probed prefix).
+#[cfg(feature = "std")]
+pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some((path, prefix)) = open_file_prefix(uri) else { return Ok(None) };
+    // Resync to the TS sync byte and feed whole 188-byte packets to parse the PMT.
+    let mut demux = crate::mpegts::TsDemuxer::new();
+    let mut off = 0;
+    while off + 188 <= prefix.len() {
+        if prefix[off] != 0x47 {
+            off += 1;
+            continue;
+        }
+        demux.push_packet(&prefix[off..off + 188]);
+        off += 188;
+    }
+    let infos = crate::tsdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return Ok(None); // not MPEG-TS (or no PMT yet): decline
+    }
+    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
+    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+    reg.build_playbin_graph_with_source(
+        Box::new(source),
+        crate::tsdemux::TsDemuxN::new(streams),
+        ports,
+        PLAYBIN_MAX_DEPTH,
+    )
+    .map(Some)
+    .map_err(|e| map_playbin_err(uri, e))
 }

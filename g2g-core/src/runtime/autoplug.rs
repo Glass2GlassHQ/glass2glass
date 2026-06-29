@@ -759,11 +759,12 @@ mod factory {
         /// (`waylandsink`, `kmssink`, ..., `fakesink`). Resolved at `make_*` time,
         /// so an alias whose targets are all feature-gated-out simply misses.
         aliases: Vec<(&'static str, &'static [&'static str])>,
-        /// The `playbin uri=X` auto-fan-out hook (M382), if registered. A lone
-        /// `playbin` in a text pipeline calls it to probe the container and build
-        /// a multi-stream graph; `None` (the default) leaves `playbin` as the
-        /// M196 single-stream pipeline. A `fn` pointer, so `Default` still derives.
-        playbin: Option<PlaybinHook>,
+        /// The `playbin uri=X` auto-fan-out hooks (M382, multi-hook M389). A lone
+        /// `playbin` in a text pipeline tries each in registration order until one
+        /// handles the URI (`Ok(Some)`); each declines (`Ok(None)`) a container it
+        /// does not parse, so one hook per container type coexists (MKV, TS, ...).
+        /// Empty (the default) leaves `playbin` as the M196 single-stream pipeline.
+        playbin: Vec<PlaybinHook>,
     }
 
     impl Registry {
@@ -815,21 +816,21 @@ mod factory {
             self
         }
 
-        /// Register the `playbin uri=X` auto-fan-out hook (M382): a lone
-        /// `playbin` in a [`parse_launch`](crate::runtime::parse_launch) pipeline
-        /// calls it to probe the container and build a multi-stream graph. One
-        /// hook per registry (the last registered wins). Returns `&mut self` to
-        /// chain calls.
+        /// Register a `playbin uri=X` auto-fan-out hook (M382): a lone `playbin`
+        /// in a [`parse_launch`](crate::runtime::parse_launch) pipeline tries the
+        /// registered hooks in order until one handles the URI. Register one per
+        /// container type (MKV, TS, ...); each declines a container it does not
+        /// parse. Returns `&mut self` to chain calls.
         pub fn register_playbin(&mut self, hook: PlaybinHook) -> &mut Self {
-            self.playbin = Some(hook);
+            self.playbin.push(hook);
             self
         }
 
-        /// The registered [`PlaybinHook`], or `None` if no hook was registered
-        /// (so `playbin` stays the M196 single-stream pipeline). The parser
-        /// consults this for a lone `playbin uri=`.
-        pub fn playbin_hook(&self) -> Option<PlaybinHook> {
-            self.playbin
+        /// The registered [`PlaybinHook`]s, in registration order (empty if none,
+        /// so `playbin` stays the M196 single-stream pipeline). The parser tries
+        /// them in turn for a lone `playbin uri=`.
+        pub fn playbin_hooks(&self) -> &[PlaybinHook] {
+            &self.playbin
         }
 
         /// Register a gst-canonical-name alias (M192): `name` resolves, at
