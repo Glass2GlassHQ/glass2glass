@@ -272,7 +272,9 @@ leverage first:
   (feeds `TextOverlayN`); parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above; WebVTT `::cue` CSS styling (per-cue colour / font) is still not applied.
+  above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied
+  (M410); still open: `::cue(.class)` span selectors and other CSS (font-size,
+  text-shadow, etc.).
 - **Closed captions (CEA-608 / CEA-708).** Unlike the text-document formats,
   captions are an in-band binary command stream (carried in H.264 / H.265 SEI
   `user_data_registered_itu_t_t35`, MPEG-2 user-data, or an MP4 `c608` / `c708`

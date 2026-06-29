@@ -80,6 +80,12 @@ pub struct CueSettings {
     /// Writing mode (WebVTT `vertical:`); default horizontal. Carried for CJK
     /// subtitles even though the bitmap overlay still lays text out horizontally.
     pub vertical: WritingMode,
+    /// Opaque text RGBA from a WebVTT `STYLE` `::cue` `color:` rule, if any
+    /// (resolved at parse time). `None` = the overlay's default text colour.
+    pub color: Option<[u8; 4]>,
+    /// Backing-box RGBA from a `::cue` `background-color:` rule, if any. A zero
+    /// alpha (e.g. `transparent`) draws no box. `None` = the overlay's default.
+    pub background: Option<[u8; 4]>,
 }
 
 /// One timed subtitle cue: a half-open `[start_ns, end_ns)` running-time span, its
@@ -141,9 +147,229 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 }
 
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
-/// `NOTE` / `STYLE` / `REGION` blocks are skipped; inline markup is removed.
+/// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
+/// blocks are read for `::cue` / `::cue(#id)` `color` / `background-color` rules,
+/// which are resolved onto each cue's [`CueSettings`] (the subset the overlay can
+/// apply; other CSS properties and `::cue(.class)` span selectors are ignored).
 pub fn parse_webvtt(input: &str) -> Vec<Cue> {
-    parse_blocks(input, true)
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+
+    // Split into blank-line-separated blocks (kept whole for the two passes).
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            if !cur.is_empty() {
+                blocks.push(core::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(line);
+        }
+    }
+    if !cur.is_empty() {
+        blocks.push(cur);
+    }
+
+    // Pass 1: collect the CSS from every `STYLE` block.
+    let mut css = String::new();
+    for b in &blocks {
+        if b[0].trim_start().starts_with("STYLE") {
+            for line in &b[1..] {
+                css.push_str(line);
+                css.push('\n');
+            }
+        }
+    }
+    let sheet = parse_cue_styles(&css);
+
+    // Pass 2: parse the cue blocks, resolving each cue's style by its identifier.
+    let mut cues = Vec::new();
+    for b in &blocks {
+        if let Some(mut cue) = block_to_cue(b, true) {
+            if !sheet.is_empty() {
+                apply_cue_style(&sheet, block_cue_id(b), &mut cue.settings);
+            }
+            cues.push(cue);
+        }
+    }
+    cues
+}
+
+/// The WebVTT cue identifier (the line just before the timing line), if any.
+/// `None` when the timing line opens the block (no identifier).
+fn block_cue_id<'a>(block: &[&'a str]) -> Option<&'a str> {
+    let timing_idx = block.iter().position(|l| l.contains("-->"))?;
+    (timing_idx > 0).then(|| block[timing_idx - 1].trim())
+}
+
+/// A `::cue` selector we apply: all cues (`::cue`) or one identifier
+/// (`::cue(#id)`). `::cue(.class)` / element selectors are not supported.
+#[derive(Debug)]
+enum CueSelector {
+    All,
+    Id(String),
+}
+
+/// One parsed `::cue` rule: its selectors and the `color` / `background-color`
+/// it sets (the only properties the overlay can honour).
+#[derive(Debug)]
+struct CueStyleRule {
+    selectors: Vec<CueSelector>,
+    color: Option<[u8; 4]>,
+    background: Option<[u8; 4]>,
+}
+
+/// Parse the WebVTT `STYLE` CSS into the supported `::cue` rules. Comments are
+/// stripped; rules with no understood selector (a class / element rule) are
+/// dropped. Hand-rolled (no CSS dep, stays on the `no_std` baseline).
+fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
+    let css = strip_css_comments(css);
+    let mut rules = Vec::new();
+    let mut rest = css.as_str();
+    while let Some(open) = rest.find('{') {
+        let sel_str = &rest[..open];
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        let decl_str = &after[..close];
+        rest = &after[close + 1..];
+
+        let selectors: Vec<CueSelector> =
+            sel_str.split(',').filter_map(|s| parse_cue_selector(s.trim())).collect();
+        if selectors.is_empty() {
+            continue;
+        }
+        let mut color = None;
+        let mut background = None;
+        for decl in decl_str.split(';') {
+            let Some((prop, val)) = decl.split_once(':') else {
+                continue;
+            };
+            match prop.trim().to_ascii_lowercase().as_str() {
+                "color" => color = parse_css_color(val.trim()),
+                "background-color" | "background" => background = parse_css_color(val.trim()),
+                _ => {}
+            }
+        }
+        rules.push(CueStyleRule { selectors, color, background });
+    }
+    rules
+}
+
+/// A `::cue` or `::cue(#id)` selector, or `None` for anything else.
+fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
+    if sel == "::cue" {
+        return Some(CueSelector::All);
+    }
+    let inner = sel.strip_prefix("::cue(")?.strip_suffix(')')?.trim();
+    let id = inner.strip_prefix('#')?;
+    // Only a bare `#id` is supported (no compound / descendant selectors).
+    (!id.is_empty() && !id.contains(|c: char| c.is_whitespace()))
+        .then(|| CueSelector::Id(id.into()))
+}
+
+/// Resolve a cue's `color` / `background` from the sheet: global `::cue` rules
+/// first, then `::cue(#id)` so an id rule overrides the global one.
+fn apply_cue_style(sheet: &[CueStyleRule], id: Option<&str>, settings: &mut CueSettings) {
+    let apply = |rule: &CueStyleRule, s: &mut CueSettings| {
+        if rule.color.is_some() {
+            s.color = rule.color;
+        }
+        if rule.background.is_some() {
+            s.background = rule.background;
+        }
+    };
+    for rule in sheet {
+        if rule.selectors.iter().any(|sel| matches!(sel, CueSelector::All)) {
+            apply(rule, settings);
+        }
+    }
+    if let Some(id) = id {
+        for rule in sheet {
+            if rule.selectors.iter().any(|sel| matches!(sel, CueSelector::Id(rid) if rid == id)) {
+                apply(rule, settings);
+            }
+        }
+    }
+}
+
+/// Strip `/* ... */` comments from a CSS string.
+fn strip_css_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Parse a CSS colour value to opaque-or-alpha RGBA: `transparent`, `#rgb` /
+/// `#rrggbb`, `rgb(...)` / `rgba(...)`, or a small set of named colours. `None`
+/// for anything unrecognised (the cue keeps the overlay default).
+fn parse_css_color(v: &str) -> Option<[u8; 4]> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("transparent") {
+        return Some([0, 0, 0, 0]);
+    }
+    if let Some(hex) = v.strip_prefix('#') {
+        return parse_hex_color(hex);
+    }
+    if let Some(rest) = v.strip_prefix("rgba(").or_else(|| v.strip_prefix("rgb(")) {
+        let rest = rest.strip_suffix(')')?;
+        let mut it = rest.split(',');
+        let mut chan = || it.next()?.trim().parse::<u32>().ok().map(|n| n.min(255) as u8);
+        let r = chan()?;
+        let g = chan()?;
+        let b = chan()?;
+        let a = match it.next() {
+            Some(a) => (a.trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0) as u8,
+            None => 255,
+        };
+        return Some([r, g, b, a]);
+    }
+    named_css_color(v)
+}
+
+/// Parse a `#rgb` or `#rrggbb` hex colour to opaque RGBA.
+fn parse_hex_color(hex: &str) -> Option<[u8; 4]> {
+    let hex = hex.trim();
+    match hex.len() {
+        6 => Some([
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            255,
+        ]),
+        3 => {
+            let dup = |c: &str| u8::from_str_radix(c, 16).ok().map(|v| v * 16 + v);
+            Some([dup(&hex[0..1])?, dup(&hex[1..2])?, dup(&hex[2..3])?, 255])
+        }
+        _ => None,
+    }
+}
+
+/// A small set of CSS named colours (the ones subtitles realistically use).
+fn named_css_color(name: &str) -> Option<[u8; 4]> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "black" => [0, 0, 0, 255],
+        "white" => [255, 255, 255, 255],
+        "red" => [255, 0, 0, 255],
+        "lime" => [0, 255, 0, 255],
+        "green" => [0, 128, 0, 255],
+        "blue" => [0, 0, 255, 255],
+        "yellow" => [255, 255, 0, 255],
+        "cyan" | "aqua" => [0, 255, 255, 255],
+        "magenta" | "fuchsia" => [255, 0, 255, 255],
+        "gray" | "grey" => [128, 128, 128, 255],
+        _ => return None,
+    })
 }
 
 /// Auto-detect the format from the content and parse: a leading `WEBVTT`
@@ -1067,6 +1293,8 @@ mod tests {
                 line: Some(80),
                 align: TextAlign::Start,
                 vertical: WritingMode::Horizontal,
+                color: None,
+                background: None,
             }
         );
         // Bare `align:right` maps to End; position / line stay auto.
@@ -1077,8 +1305,43 @@ mod tests {
                 line: None,
                 align: TextAlign::End,
                 vertical: WritingMode::Horizontal,
+                color: None,
+                background: None,
             }
         );
+    }
+
+    #[test]
+    fn webvtt_cue_style_color_and_background() {
+        // A global `::cue` rule plus an id override (the `id_selectors` shape),
+        // with a CSS comment, hex, rgba, named, and transparent colours.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { color: black; background-color: transparent; }\n\
+            ::cue(#cue1), ::cue(#cue2) { color: white; background-color: rgba(0,0,0,1.0); }\n\
+            ::cue(#cue3) { /* gold */ color: #A28849; }\n\
+            .ignored { color: red; }\n\n\
+            cue1\n00:00:00.000 --> 00:00:01.000\nwhite on black\n\n\
+            cue3\n00:00:01.000 --> 00:00:02.000\ngold, no box\n\n\
+            cue9\n00:00:02.000 --> 00:00:03.000\nglobal black\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues.len(), 3);
+        // cue1: id override -> white text on opaque black box.
+        assert_eq!(cues[0].settings.color, Some([255, 255, 255, 255]));
+        assert_eq!(cues[0].settings.background, Some([0, 0, 0, 255]));
+        // cue3: gold text; background falls back to the global transparent.
+        assert_eq!(cues[1].settings.color, Some([0xA2, 0x88, 0x49, 255]));
+        assert_eq!(cues[1].settings.background, Some([0, 0, 0, 0]));
+        // cue9: no id rule -> the global ::cue (black on transparent).
+        assert_eq!(cues[2].settings.color, Some([0, 0, 0, 255]));
+        assert_eq!(cues[2].settings.background, Some([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn webvtt_without_style_has_no_cue_colors() {
+        let cues = parse_webvtt("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nplain\n");
+        assert_eq!(cues[0].settings.color, None);
+        assert_eq!(cues[0].settings.background, None);
     }
 
     #[test]
@@ -1096,6 +1359,8 @@ mod tests {
                 line: Some(10),
                 align: TextAlign::End,
                 vertical: WritingMode::VerticalRl,
+                color: None,
+                background: None,
             }
         );
         assert_eq!(cues[1].settings.vertical, WritingMode::VerticalLr);
@@ -1481,6 +1746,8 @@ mod tests {
                 line: Some(80),
                 align: TextAlign::Start,
                 vertical: WritingMode::Horizontal,
+                color: None,
+                background: None,
             }
         );
     }

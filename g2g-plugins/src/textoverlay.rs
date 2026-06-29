@@ -280,6 +280,9 @@ impl TextOverlay {
             let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as i32;
             let block_w = max_chars * cell_w;
             let s = cue.settings;
+            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
+            let fg = s.color.unwrap_or(self.text_color);
+            let bg = s.background.unwrap_or(self.bg_color);
 
             // Horizontal: `position` (% of width) is the anchor, default centre;
             // `align` decides how the box extends from it.
@@ -304,7 +307,7 @@ impl TextOverlay {
                 block_top - pad,
                 block_w + 2 * pad,
                 block_h + 2 * pad,
-                self.bg_color,
+                bg,
             );
 
             // Each line, aligned within the block per `align`, then glyphs.
@@ -318,7 +321,7 @@ impl TextOverlay {
                 let y0 = block_top + row as i32 * line_h;
                 let mut gx = x0;
                 for c in line.chars() {
-                    self.blit_glyph(buf, gx, y0, scale, glyph(c));
+                    self.blit_glyph(buf, gx, y0, scale, glyph(c), fg);
                     gx += cell_w;
                 }
             }
@@ -326,8 +329,8 @@ impl TextOverlay {
     }
 
     /// Blit one 8x8 glyph at output `(gx, gy)`, each set bit a `scale` x `scale`
-    /// block of the text colour, clipped to the canvas.
-    fn blit_glyph(&self, buf: &mut [u8], gx: i32, gy: i32, scale: i32, rows: [u8; 8]) {
+    /// block of `color`, clipped to the canvas.
+    fn blit_glyph(&self, buf: &mut [u8], gx: i32, gy: i32, scale: i32, rows: [u8; 8], color: [u8; 4]) {
         for (ry, bits) in rows.iter().enumerate() {
             if *bits == 0 {
                 continue;
@@ -340,7 +343,7 @@ impl TextOverlay {
                         gy + ry as i32 * scale,
                         scale,
                         scale,
-                        self.text_color,
+                        color,
                     );
                 }
             }
@@ -374,7 +377,7 @@ impl TextOverlay {
     /// Alpha-blend a rasterized glyph's coverage bitmap (`gw` x `gh`, one byte
     /// per pixel) at output `(x0, y0)` in the text colour, clipped to the canvas.
     #[cfg(feature = "truetype-overlay")]
-    fn blit_coverage(&self, buf: &mut [u8], x0: i32, y0: i32, gw: usize, gh: usize, cov: &[u8]) {
+    fn blit_coverage(&self, buf: &mut [u8], x0: i32, y0: i32, (gw, gh): (usize, usize), cov: &[u8], color: [u8; 4]) {
         let w = self.width as i32;
         let h = self.height as i32;
         for ry in 0..gh as i32 {
@@ -389,7 +392,7 @@ impl TextOverlay {
                 }
                 let a = cov[(ry as usize) * gw + rx as usize];
                 if a != 0 {
-                    blend_px(buf, ((py * w + px) * 4) as usize, self.text_color, a);
+                    blend_px(buf, ((py * w + px) * 4) as usize, color, a);
                 }
             }
         }
@@ -424,6 +427,9 @@ impl TextOverlay {
                 continue;
             }
             let s = cue.settings;
+            // Per-cue WebVTT `::cue` colours, falling back to the element defaults.
+            let fg = s.color.unwrap_or(self.text_color);
+            let bg = s.background.unwrap_or(self.bg_color);
 
             if matches!(s.vertical, WritingMode::VerticalRl | WritingMode::VerticalLr) {
                 let rl = matches!(s.vertical, WritingMode::VerticalRl);
@@ -451,7 +457,7 @@ impl TextOverlay {
                     (block_top - pad) as i32,
                     (block_w + 2.0 * pad) as i32,
                     (block_h + 2.0 * pad) as i32,
-                    self.bg_color,
+                    bg,
                 );
                 for (ci, line) in lines.iter().enumerate() {
                     // First logical line is the rightmost column when rl.
@@ -470,7 +476,7 @@ impl TextOverlay {
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
                         let baseline = start_y + lm.ascent + j as f32 * cell_h;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(buf, gx as i32, gy as i32, m.width, m.height, &cov);
+                        self.blit_coverage(buf, gx as i32, gy as i32, (m.width, m.height), &cov, fg);
                     }
                 }
             } else {
@@ -497,7 +503,7 @@ impl TextOverlay {
                     (block_top - pad) as i32,
                     (block_w + 2.0 * pad) as i32,
                     (block_h + 2.0 * pad) as i32,
-                    self.bg_color,
+                    bg,
                 );
                 for (row, line) in lines.iter().enumerate() {
                     let line_w = line_ws[row];
@@ -512,7 +518,7 @@ impl TextOverlay {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px);
                         let gx = pen + m.xmin as f32;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(buf, gx as i32, gy as i32, m.width, m.height, &cov);
+                        self.blit_coverage(buf, gx as i32, gy as i32, (m.width, m.height), &cov, fg);
                         pen += m.advance_width;
                     }
                 }
