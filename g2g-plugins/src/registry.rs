@@ -289,6 +289,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // A/V offset (M385): shifts PTS/DTS by `offset=` ns; the av-offset sync knob.
+    reg.register_launch(LaunchFactory::new("avoffset", Vec::new(), || {
+        Box::new(crate::avoffset::AvOffset::new(0))
+    }));
     // The inline caps-filter shorthand (`! video/x-raw,width=320 !`) builds this
     // by name with a `caps` property; see runtime::parse_launch.
     reg.register_launch(LaunchFactory::new("capsfilter", Vec::new(), || {

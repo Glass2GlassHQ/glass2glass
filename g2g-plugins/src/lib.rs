@@ -27,6 +27,7 @@ pub mod fakesink;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
+pub mod avoffset;
 pub mod mux;
 pub mod streamdemux;
 pub mod tsmuxn;

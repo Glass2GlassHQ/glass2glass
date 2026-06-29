@@ -1494,7 +1494,10 @@ known without sniffing the byte stream.
   the run future (cancelling the inner source mid-stream), pushes a `Flush`, and
   resets the timeline before playing the requested source. v1 concatenates
   same-codec items (a per-item caps refinement still flows via the inner source's
-  `CapsChanged`); an A/V offset is a follow-up.
+  `CapsChanged`). An A/V offset is a separate `AvOffset` transform (M385,
+  `avoffset`): a pass-through that shifts a branch's PTS/DTS by a signed `offset`
+  ns (positive delays, negative advances, clamped at 0), the `av-offset` analog,
+  placed on the audio (or video) branch of a multi-stream graph to re-align it.
 
 - **Memory-feature-aware selection** (M276). The `Caps` algebra encodes media
   type, format, and geometry but *not* the memory domain a producer emits, so a
