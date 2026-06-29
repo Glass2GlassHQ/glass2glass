@@ -255,8 +255,15 @@ leverage first:
 - **`audiomixer`:** sample-rate + channel-layout reconciliation; PTS-based
   alignment.
 - **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
-- **Subtitle support:** `Caps::Subtitle`; text/srt/webvtt demuxers; a
-  text-overlay element (rendering tied to the compositor).
+- **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
+  `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt}` ->
+  `Text{Utf8}`), the SRT/WebVTT parsers (M171), and the `TextOverlay` renderer
+  (M171). Remaining: register `SubParse` (and a text source / sink) in the launch
+  registry so `gst-launch` text pipelines parse; a `TextOverlay` sink pad that
+  consumes a `Caps::Text` *stream* (it loads cues out-of-band from a file today);
+  subtitle-track extraction out of the MKV / TS / MP4 demuxers as `Caps::Text`;
+  incremental (non-batch) cue streaming in `SubParse`; carrying WebVTT cue
+  positioning (`CueSettings`) as text frame-meta; SSA/ASS + TTML parsers.
 - **Controllers (animated properties):** a `gst-controller`-equivalent for
   animating properties over time.
 - **Tensor substrate orientation descriptor (M181).** A deferred

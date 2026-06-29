@@ -166,7 +166,9 @@ pub enum Dim { Any, Range { min: u32, max: u32 }, Fixed(u32) }
 pub enum Rate { Any, Range { min_q16: u32, max_q16: u32 }, Fixed(u32) }
 ```
 
-The `Tensor` variant is first-class because ML elements (§5) negotiate caps the same way video elements do — they don't sit outside the graph model.
+The `Tensor` variant is first-class because ML elements (§5) negotiate caps the same way video elements do — they don't sit outside the graph model. (The sketch above is conceptual; the real enum splits video into `CompressedVideo` / `RawVideo` per the M17 codec-vs-raw distinction, and adds `ByteStream` for not-yet-demuxed container links.)
+
+`Text` is likewise a first-class media kind (`Caps::Text { format: TextFormat }`), not a bolted-on subtitle path. It generalizes "subtitles": a `Text` link carries any text payload — a subtitle cue, a caption, a transcription, an OCR result, an overlay string — with `TextFormat` naming the syntax (`Utf8`, `PangoMarkup`, and the structured `Srt` / `WebVtt` / `Ssa` / `Ttml`). "Subtitle" is not a separate variant: it is just *timed* `Text`, the cue's on-screen window carried as the frame's PTS + duration, so one caps kind serves overlay rendering, captioning, and text analytics. A subtitle parser (`SubParse`) is the text-domain analog of a codec decoder, taking a structured format on its sink pad and emitting plain `Utf8` cues via the same `DerivedOutput` negotiation a decoder uses for compressed -> raw, so subtitle text flows through the graph as a typed stream rather than being loaded out-of-band.
 
 ### 4.2 The Capability Negotiation Lifecycle
 Because `g2g` enforces a Sans-IO and asynchronous execution model, capability negotiation happens in a clear, deterministic handshake before any data frame processing begins. This replaces GStreamer's complex query/event system with a simple, state-machine-driven future matrix.

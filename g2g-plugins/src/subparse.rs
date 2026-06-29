@@ -21,8 +21,19 @@
 //! - **Cue settings.** Tokens after the end timestamp on the timing line
 //!   (`position:50% align:start`) are ignored.
 
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, TextFormat,
+};
 
 /// Horizontal text alignment within a cue box (the WebVTT `align:` setting;
 /// `left`/`right` map to `Start`/`End`). The default is `Center`.
@@ -281,6 +292,170 @@ fn push_stripped(line: &str, out: &mut String) {
     }
 }
 
+/// Subtitle parser element (M400): a `Caps::Text{Srt}` / `Caps::Text{WebVtt}`
+/// byte stream in, timed `Caps::Text{Utf8}` cues out, one frame per cue with the
+/// cue window carried as PTS + duration. The pipeline-native counterpart of the
+/// `parse_srt` / `parse_webvtt` functions above (which `TextOverlay` calls
+/// directly on an out-of-band file): this lets subtitle text *flow as a stream*,
+/// so a demuxed subtitle track or a network rendition can feed an overlay / sink
+/// like any other media. The text-domain analog of a codec decoder, refining the
+/// media type from a structured subtitle format to plain UTF-8 via the same
+/// [`CapsConstraint::DerivedOutput`] negotiation.
+///
+/// Scope (v1): a `.srt` / `.vtt` is a small whole document, so this buffers the
+/// sink bytes and emits every cue at `Eos` (batch, like `Mp4DemuxN`); incremental
+/// cue-by-cue streaming is a follow-up. WebVTT cue positioning ([`CueSettings`])
+/// is parsed but not carried on the frame yet (no text frame-meta); the payload
+/// is the plain cue text.
+#[derive(Debug, Default)]
+pub struct SubParse {
+    /// Input subtitle format, fixed at `configure_pipeline`.
+    format: Option<TextFormat>,
+    /// Accumulated sink bytes, parsed at `Eos`.
+    buf: Vec<u8>,
+    /// Whether the output `Caps::Text{Utf8}` has been announced downstream.
+    caps_emitted: bool,
+    sequence: u64,
+}
+
+impl SubParse {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The structured subtitle formats this element parses (its sink pad).
+    fn input_alternatives() -> CapsSet {
+        CapsSet::from_alternatives(Vec::from([
+            Caps::Text { format: TextFormat::Srt },
+            Caps::Text { format: TextFormat::WebVtt },
+        ]))
+    }
+
+    fn output_caps() -> Caps {
+        Caps::Text { format: TextFormat::Utf8 }
+    }
+
+    /// Parse the buffered document with the parser for the configured format.
+    fn parse_buffered(&self) -> Vec<Cue> {
+        let doc = String::from_utf8_lossy(&self.buf);
+        match self.format {
+            Some(TextFormat::WebVtt) => parse_webvtt(&doc),
+            // SubRip is the default; the constraint admits only Srt / WebVtt.
+            _ => parse_srt(&doc),
+        }
+    }
+}
+
+impl AsyncElement for SubParse {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        match upstream_caps {
+            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt } => Ok(upstream_caps.clone()),
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    /// Decoder-style: the output media type is derived from the input. A
+    /// structured subtitle format in, plain UTF-8 out, so the solver negotiates
+    /// `Text{Utf8}` onto the downstream link while the sink pad takes the SRT /
+    /// WebVTT document.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::Text { format: TextFormat::Srt | TextFormat::WebVtt } => {
+                CapsSet::one(Self::output_caps())
+            }
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        match absolute_caps {
+            Caps::Text { format: format @ (TextFormat::Srt | TextFormat::WebVtt) } => {
+                self.format = Some(*format);
+                Ok(ConfigureOutcome::Accepted)
+            }
+            _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Subtitle parser",
+            "Codec/Parser/Subtitle",
+            "Parses a SubRip / WebVTT document into timed UTF-8 text cues",
+            "g2g",
+        )
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if self.format.is_none() {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    if let MemoryDomain::System(slice) = &frame.domain {
+                        // The parsers handle CRLF / BOM, so accumulate raw bytes.
+                        self.buf.extend_from_slice(slice.as_slice());
+                    }
+                }
+                // Output caps are negotiated up front (DerivedOutput) and announced
+                // at the first cue; an inbound caps change on the SRT side is absorbed.
+                PipelinePacket::CapsChanged(_) => {}
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Flush => {
+                    self.buf.clear();
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                // Batch parse: the whole document is buffered by now. Emit one timed
+                // UTF-8 frame per cue (the runner arm forwards the trailing Eos).
+                PipelinePacket::Eos => {
+                    for cue in self.parse_buffered() {
+                        if !self.caps_emitted {
+                            out.push(PipelinePacket::CapsChanged(Self::output_caps())).await?;
+                            self.caps_emitted = true;
+                        }
+                        let timing = FrameTiming {
+                            pts_ns: cue.start_ns,
+                            duration_ns: cue.end_ns.saturating_sub(cue.start_ns),
+                            ..Default::default()
+                        };
+                        let payload = cue.text.into_bytes().into_boxed_slice();
+                        let frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(payload)),
+                            timing,
+                            self.sequence,
+                        );
+                        self.sequence += 1;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                    self.buf.clear();
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl PadTemplates for SubParse {
+    fn pad_templates() -> Vec<PadTemplate> {
+        Vec::from([
+            PadTemplate::sink(Self::input_alternatives()),
+            PadTemplate::source(CapsSet::one(Self::output_caps())),
+        ])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +542,114 @@ mod tests {
         assert!(cue.covers(1000));
         assert!(cue.covers(1999));
         assert!(!cue.covers(2000));
+    }
+
+    // -- SubParse element: drive process() directly. --------------------------
+
+    use g2g_core::PushOutcome;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        packets: Vec<PipelinePacket>,
+    }
+
+    impl OutputSink for RecordingSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                self.packets.push(packet);
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+
+    fn srt_bytes_frame(bytes: &[u8]) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        ))
+    }
+
+    #[test]
+    fn element_negotiates_srt_to_utf8() {
+        let el = SubParse::new();
+        // Decoder-style: SRT/WebVTT in on the sink, UTF-8 derived on the source.
+        assert_eq!(el.intercept_caps(&Caps::Text { format: TextFormat::Srt }).unwrap(),
+            Caps::Text { format: TextFormat::Srt });
+        assert!(el.intercept_caps(&Caps::Text { format: TextFormat::Utf8 }).is_err());
+        let CapsConstraint::DerivedOutput(derive) = el.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let out = derive(&Caps::Text { format: TextFormat::WebVtt });
+        assert_eq!(out.alternatives(), &[Caps::Text { format: TextFormat::Utf8 }]);
+    }
+
+    #[tokio::test]
+    async fn element_emits_caps_then_timed_cue_frames() {
+        let doc = "1\n00:00:01,000 --> 00:00:04,000\nHello world\n\n\
+                   2\n00:01:02,500 --> 00:01:05,000\nSecond cue\nacross two lines\n";
+        let mut el = SubParse::new();
+        el.configure_pipeline(&Caps::Text { format: TextFormat::Srt }).expect("accepts SRT");
+
+        let mut sink = RecordingSink::default();
+        // Two chunks then EOS, exercising the byte buffer.
+        let (a, b) = doc.as_bytes().split_at(25);
+        el.process(srt_bytes_frame(a), &mut sink).await.unwrap();
+        el.process(srt_bytes_frame(b), &mut sink).await.unwrap();
+        el.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        assert!(matches!(
+            sink.packets.first(),
+            Some(PipelinePacket::CapsChanged(Caps::Text { format: TextFormat::Utf8 }))
+        ));
+        let frames: Vec<&Frame> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 2, "one frame per cue");
+        assert_eq!(frames[0].timing.pts_ns, 1_000_000_000);
+        assert_eq!(frames[0].timing.duration_ns, 3_000_000_000);
+        if let MemoryDomain::System(s) = &frames[0].domain {
+            assert_eq!(s.as_slice(), b"Hello world");
+        } else {
+            panic!("cue payload must be a system buffer");
+        }
+        assert_eq!(frames[1].timing.pts_ns, 62_500_000_000);
+    }
+
+    #[test]
+    fn unconfigured_element_errors() {
+        // process() before configure_pipeline must fail loud, not silently buffer.
+        let mut el = SubParse::new();
+        let mut sink = RecordingSink::default();
+        let r = futures_lite_block(el.process(PipelinePacket::Eos, &mut sink));
+        assert!(matches!(r, Err(G2gError::NotConfigured)));
+    }
+
+    /// Minimal block-on for the single-poll futures these element calls produce
+    /// (RecordingSink resolves immediately), avoiding a runtime dep in this test.
+    fn futures_lite_block<F: Future>(fut: F) -> F::Output {
+        use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        static VT: RawWakerVTable = RawWakerVTable::new(
+            |_| RawWaker::new(core::ptr::null(), &VT),
+            |_| {},
+            |_| {},
+            |_| {},
+        );
+        // SAFETY: the vtable functions are no-ops that never deref the data pointer.
+        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(fut);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("future unexpectedly pending"),
+        }
     }
 }

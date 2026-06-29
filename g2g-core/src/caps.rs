@@ -63,6 +63,15 @@ pub enum Caps {
     ByteStream {
         encoding: ByteStreamEncoding,
     },
+    /// A text stream (subtitles, captions, transcription, OCR, overlay strings).
+    /// `format` names the syntax ([`TextFormat`]); the payload is UTF-8 bytes in
+    /// the frame's system buffer, and "subtitle" is just timed `Text` (cue PTS +
+    /// duration on [`FrameTiming`](crate::frame::FrameTiming)). One kind, not a
+    /// per-use-case variant, so an overlay, a caption sink, and a text analytics
+    /// element all negotiate the same caps.
+    Text {
+        format: TextFormat,
+    },
 }
 
 impl Caps {
@@ -121,6 +130,7 @@ impl Caps {
             (Caps::ByteStream { encoding: ea }, Caps::ByteStream { encoding: eb }) if ea == eb => {
                 Ok(self.clone())
             }
+            (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -171,7 +181,10 @@ impl Caps {
             {
                 Err(G2gError::CapsMismatch)
             }
-            Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => Ok(self.clone()),
+            Caps::Audio { .. }
+            | Caps::Tensor { .. }
+            | Caps::ByteStream { .. }
+            | Caps::Text { .. } => Ok(self.clone()),
         }
     }
 
@@ -183,7 +196,10 @@ impl Caps {
         match self {
             Caps::CompressedVideo { width, height, framerate, .. }
             | Caps::RawVideo { width, height, framerate, .. } => Some((width, height, framerate)),
-            Caps::Audio { .. } | Caps::Tensor { .. } | Caps::ByteStream { .. } => None,
+            Caps::Audio { .. }
+            | Caps::Tensor { .. }
+            | Caps::ByteStream { .. }
+            | Caps::Text { .. } => None,
         }
     }
 
@@ -227,7 +243,22 @@ impl Caps {
                 format!("tensor/x-raw,dtype={dtype:?},layout={layout:?},shape={shape:?}")
             }
             Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
+            Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
         }
+    }
+}
+
+/// GStreamer media-type string for a [`TextFormat`]. Plain / markup text is
+/// `text/x-raw` (with a `format=`); the structured subtitle formats carry their
+/// own `application/x-subtitle-*` media types, mirroring GStreamer.
+fn text_format_gst_media_type(f: TextFormat) -> &'static str {
+    match f {
+        TextFormat::Utf8 => "text/x-raw,format=utf8",
+        TextFormat::PangoMarkup => "text/x-raw,format=pango-markup",
+        TextFormat::Srt => "application/x-subtitle",
+        TextFormat::WebVtt => "application/x-subtitle-vtt",
+        TextFormat::Ssa => "application/x-ssa",
+        TextFormat::Ttml => "application/ttml+xml",
     }
 }
 
@@ -1030,6 +1061,36 @@ pub enum ByteStreamEncoding {
     /// `moof`+`mdat` fragments. The modern HLS/DASH segment container, demuxed by
     /// `fmp4demux`.
     IsoBmff,
+}
+
+/// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link
+/// carries any timed-or-untimed text payload (a subtitle cue, a caption, a
+/// transcription, an OCR result, an overlay string), the format naming the
+/// on-the-wire syntax. "Subtitle" is not a separate media kind here, just timed
+/// `Text` frames (timing rides on [`FrameTiming`](crate::frame::FrameTiming)),
+/// so one variant serves overlay, captioning, and analytics text alike. A parser
+/// converts a structured format (`Srt` / `WebVtt` / `Ssa` / `Ttml`) to the plain
+/// `Utf8` cues a renderer or consumer wants, like a codec decode for text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextFormat {
+    /// Plain UTF-8 text, no markup. The decoded/common-denominator form a
+    /// subtitle parser emits and an overlay or sink consumes.
+    Utf8,
+    /// UTF-8 with Pango inline markup (`<b>`, `<i>`, `<span>`...), the styled
+    /// text an overlay renderer draws directly (GStreamer `pango-markup`).
+    PangoMarkup,
+    /// SubRip (`.srt`): blank-line-separated cues, each an index, a
+    /// `HH:MM:SS,mmm --> HH:MM:SS,mmm` time range, then the text lines.
+    Srt,
+    /// WebVTT (`.vtt`, RFC 8538): a `WEBVTT` header then `start --> end` cues with
+    /// `.`-millisecond timestamps; the HTML5 / HLS subtitle format.
+    WebVtt,
+    /// SubStation Alpha / Advanced SSA (`.ssa` / `.ass`): a sectioned INI-like
+    /// script with styled `Dialogue:` events. The fansub / Matroska text format.
+    Ssa,
+    /// Timed Text Markup Language (W3C TTML / SMPTE-TT / EBU-TT, also `DFXP`): an
+    /// XML timed-text document. The broadcast / DASH caption format.
+    Ttml,
 }
 
 /// Raw pixel layout carried in a [`Caps::RawVideo`] link. Split out of
