@@ -560,23 +560,37 @@ fn backward_feasible(
 /// Caps-α: derive the forwarded output for an interior element on a
 /// mid-stream caps change (DESIGN.md §4.13.4). `input` is
 /// the new fixated caps the element receives; `downstream_feasible` is its
-/// output link's snapshot from [`downstream_feasibility`]. Steers only when
-/// a concrete downstream set exists; otherwise defers to the element's own
-/// `process` (status quo), so pass-through and unconstrained chains keep
-/// their prior behavior.
+/// output link's snapshot from [`downstream_feasibility`]. Steers when a
+/// concrete downstream set exists; with no downstream snapshot it still
+/// forwards the element's output when that output is *unambiguous* (the
+/// constraint maps the input to exactly one fixated caps), and only defers to
+/// the element's own `process` when the output is genuinely undetermined. A
+/// format-changing transform (e.g. `videoconvert` to RGBA8) therefore announces
+/// its real output to a strict downstream rather than leaking its input format.
 pub(crate) fn resolve_forward_output(
     constraint: &CapsConstraint<'_>,
     input: &Caps,
     downstream_feasible: Option<&CapsSet>,
 ) -> ForwardResolve {
-    let Some(d) = downstream_feasible else {
-        return ForwardResolve::Defer;
-    };
     // Index 1 is a placeholder: the link position is meaningful only inside
     // a full-chain solve. Mid-stream the failure is link-local to this arm.
     let candidates = match forward_propagate(constraint, &CapsSet::one(input.clone()), 1) {
         Ok(c) => c,
         Err(_) => return ForwardResolve::Defer,
+    };
+    let Some(d) = downstream_feasible else {
+        // No downstream snapshot to steer by: forward the output only when the
+        // constraint pins it to a single producible caps (a property-driven
+        // converter, an identity passthrough). An ambiguous set (a caps-driven
+        // converter with several producible formats) still defers to `process`,
+        // since there is nothing to choose between them.
+        return match candidates.alternatives() {
+            [_one] => match candidates.fixate() {
+                Some(c) => ForwardResolve::Fixed(c),
+                None => ForwardResolve::Defer,
+            },
+            _ => ForwardResolve::Defer,
+        };
     };
     let narrowed = candidates.intersect(d);
     if narrowed.is_empty() {
@@ -2195,8 +2209,32 @@ mod tests {
             other => panic!("expected Fixed(NV12), got {other:?}"),
         }
 
-        // No concrete downstream set: defer to the element's own process.
+        // No concrete downstream set, but the output is ambiguous ({same, NV12}):
+        // defer to the element's own process.
         assert_eq!(resolve_forward_output(&conv, &i420, None), ForwardResolve::Defer);
+
+        // No downstream snapshot but an UNAMBIGUOUS output: a property-driven
+        // converter forwards its single output (RGBA8) rather than leaking the
+        // input format. This is what lets a strict downstream (a textoverlay
+        // after `mp4src ! avdec ! videoconvert`) see the converted caps on a
+        // mid-stream change instead of the decoder's NV12.
+        let to_rgba = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo { width, height, framerate, .. } => CapsSet::one(video(
+                RawVideoFormat::Rgba8,
+                width.clone(),
+                height.clone(),
+                framerate.clone(),
+            )),
+            _ => CapsSet::from_alternatives(vec![]),
+        }));
+        let nv12_in = fixed_video(RawVideoFormat::Nv12, 64, 64, 30);
+        match resolve_forward_output(&to_rgba, &nv12_in, None) {
+            ForwardResolve::Fixed(c) => assert_eq!(
+                c,
+                video(RawVideoFormat::Rgba8, Dim::Fixed(64), Dim::Fixed(64), Rate::Fixed(30 << 16))
+            ),
+            other => panic!("expected Fixed(RGBA8), got {other:?}"),
+        }
 
         // Downstream accepts only Bgra8, which the converter cannot emit: loud.
         let bgra_set = CapsSet::one(video(RawVideoFormat::Bgra8, Dim::Any, Dim::Any, Rate::Any));

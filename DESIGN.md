@@ -1110,6 +1110,18 @@ correctly downstream-aware:
    - fixate; `configure_pipeline(in)`; element-local realloc; forward
      `CapsChanged(fixated_output)`.
 
+When `downstream_feasible[i]` is `None` (no backward snapshot reached this edge,
+e.g. a strict `DerivedOutput` downstream whose input the backward sweep cannot
+invert), the arm still forwards the element's output **when the constraint pins
+it to a single producible caps** (a property-driven `videoconvert`, an identity
+passthrough); only a genuinely ambiguous output (a caps-driven converter with
+several producible formats and nothing to choose between them) defers to the
+element's own `process`. This keeps the "`c` is the output" contract below
+intact for the common `... ! avdec ! videoconvert ! textoverlay ! ...` shape:
+the decoder's mid-stream `CapsChanged` (its framerate settling from a negotiated
+`Range` to a fixed value) would otherwise make the converter forward its *input*
+(NV12) to the strict overlay, which rejects it.
+
 The **runner**, not `process(CapsChanged)`, owns the forwarded output. A
 format-changing element moves its derivation into the declared constraint
 (`Mapping` / `DerivedOutput`) as the single source of truth; the solver
