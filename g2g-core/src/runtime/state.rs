@@ -33,8 +33,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
+// `AtomicU64` from `core` does not exist on targets without native 64-bit
+// atomics (thumbv7em, riscv32); take it from `portable-atomic` like `metrics.rs`,
+// so the no_std embedded baseline builds (the `critical-section` feature supplies
+// the fallback impl there). The other atomics are natively available.
+use portable_atomic::AtomicU64;
 
 use spin::Mutex;
 
