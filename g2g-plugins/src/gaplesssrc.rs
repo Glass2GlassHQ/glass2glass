@@ -15,8 +15,10 @@
 //! Scope (v1): the concatenated items must share a codec (the decode chain is
 //! reused), the read-side analog of GStreamer reusing one decodebin across URIs.
 //! A per-item caps refinement (e.g. a resolution change) still flows downstream
-//! via the inner source's `CapsChanged`. Instant (flush) URI switching and an
-//! audio/video offset are follow-ups.
+//! via the inner source's `CapsChanged`. An instant (flushing) switch that
+//! preempts the current item is also supported (M384,
+//! [`GaplessController::switch_now`], the `instant-uri` analog); an audio/video
+//! offset is a follow-up.
 //!
 //! ```text
 //! GaplessSrc(clip1) ! h264parse ! decoder ! sink     // app enqueues clip2, clip3, ... ; then finish()
@@ -28,7 +30,7 @@ use core::pin::Pin;
 
 use alloc::boxed::Box;
 
-use g2g_core::runtime::{DynSourceLoop, GaplessController, SourceLoop};
+use g2g_core::runtime::{select2, Either, DynSourceLoop, GaplessController, SourceLoop};
 use g2g_core::{
     Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket, PushOutcome,
 };
@@ -111,22 +113,59 @@ impl SourceLoop for GaplessSrc {
                     let caps = src.intercept_caps().await?;
                     src.configure_pipeline(&caps)?;
                 }
-                // Nothing queued behind this item: signal about-to-finish now so
-                // the app has this item's whole playback to enqueue the next one
-                // (the swap is then gap-free).
-                if !self.ctl.has_next() && !self.ctl.is_finished() {
+                // Nothing queued behind this item (and no instant switch pending):
+                // signal about-to-finish now so the app has this item's whole
+                // playback to enqueue the next one (the swap is then gap-free).
+                if !self.ctl.has_next() && !self.ctl.is_finished() && !self.ctl.has_instant() {
                     self.ctl.notify_about_to_finish();
                 }
 
-                let mut adapter = ShiftSink { out: &mut *out, offset, max_end: offset };
-                total = total.saturating_add(src.run(&mut adapter).await?);
-                // Advance the offset past this item's end (max emitted PTS+duration),
-                // so the next item starts where this one stopped.
-                offset = adapter.max_end;
+                // Play the item, but let an instant switch (M384) preempt it: race
+                // its `run` against `wait_instant`. If the switch wins, `select2`
+                // drops the `run` future, cancelling the inner source mid-stream
+                // (its remaining frames are abandoned, the instant-uri contract).
+                // The adapter is scoped so its borrow on `out` ends before the
+                // flush / next-item handling below reuses `out`; `frames` and
+                // `end` are copied out (the inner's own count is lost when a
+                // preemption drops its run future mid-stream).
+                let (preempted, frames, end) = {
+                    let mut adapter = ShiftSink { out: &mut *out, offset, max_end: offset, frames: 0 };
+                    let preempted =
+                        match select2(src.run(&mut adapter), self.ctl.wait_instant()).await {
+                            Either::Left(res) => {
+                                res?; // propagate a run error
+                                false
+                            }
+                            Either::Right(()) => true,
+                        };
+                    (preempted, adapter.frames, adapter.max_end)
+                };
+                total = total.saturating_add(frames);
+                if !preempted {
+                    // Advance the offset past this item's end (max emitted
+                    // PTS+duration), so the next item starts where it stopped.
+                    offset = end;
+                }
 
-                // Pull the next item, parking (wakefully) until the app enqueues
-                // one or finishes the playlist.
+                if preempted {
+                    // Instant switch: flush the chain and reset the timeline, then
+                    // play the requested source at offset 0.
+                    out.push(PipelinePacket::Flush).await?;
+                    offset = 0;
+                    current = self.ctl.take_instant();
+                    needs_config = true;
+                    continue;
+                }
+
+                // Clean end: pick the next item. An instant switch still wins (a
+                // flush + reset), else the gapless queue, else park until the app
+                // enqueues, switches, or finishes the playlist.
+                let mut flush = false;
                 current = loop {
+                    if let Some(s) = self.ctl.take_instant() {
+                        flush = true;
+                        break Some(s);
+                    }
                     if let Some(next) = self.ctl.take_next() {
                         break Some(next);
                     }
@@ -135,6 +174,10 @@ impl SourceLoop for GaplessSrc {
                     }
                     self.ctl.wait_event().await;
                 };
+                if flush {
+                    out.push(PipelinePacket::Flush).await?;
+                    offset = 0;
+                }
                 needs_config = true;
             }
 
@@ -155,6 +198,9 @@ struct ShiftSink<'o> {
     /// Highest `pts + duration` forwarded so far (seeded with `offset`, so an
     /// empty item leaves the offset unchanged).
     max_end: u64,
+    /// `DataFrame`s forwarded for this item, so `GaplessSrc` counts frames even
+    /// when a preemption drops the inner source's run future (losing its count).
+    frames: u64,
 }
 
 impl OutputSink for ShiftSink<'_> {
@@ -171,6 +217,7 @@ impl OutputSink for ShiftSink<'_> {
                     if end > self.max_end {
                         self.max_end = end;
                     }
+                    self.frames = self.frames.saturating_add(1);
                     self.out.push(PipelinePacket::DataFrame(f)).await
                 }
                 // Swallow the inner item's EOS: only playlist-end emits a terminal

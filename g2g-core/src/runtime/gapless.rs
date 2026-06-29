@@ -53,9 +53,15 @@ struct GaplessInner {
     /// App -> source end request: no more items will be enqueued, so the source
     /// emits `Eos` once the queue drains. Latches once set.
     finished: AtomicBool,
-    /// Waker a source parked in [`GaplessController::wait_event`] registered,
-    /// woken by `enqueue` / `finish` so an idle source resumes without
-    /// busy-polling. `None` when no source is parked.
+    /// App -> source *instant* switch (M384, the `instant-uri` analog): play this
+    /// source **now**, preempting the current item (a flush + timeline reset),
+    /// rather than waiting for the current item's EOS like the gapless `queue`.
+    /// Latest-wins (a newer switch replaces an untaken one).
+    instant: Mutex<Option<Box<dyn DynSourceLoop>>>,
+    /// Waker a source parked in [`GaplessController::wait_event`] /
+    /// [`wait_instant`](GaplessController::wait_instant) registered, woken by
+    /// `enqueue` / `finish` / `switch_now` so an idle or playing source resumes
+    /// without busy-polling. `None` when no source is parked.
     waker: Mutex<Option<Waker>>,
 }
 
@@ -75,6 +81,7 @@ impl fmt::Debug for GaplessController {
             .field("queued", &self.queued())
             .field("about_to_finish_count", &self.about_to_finish_count())
             .field("finished", &self.is_finished())
+            .field("instant_pending", &self.has_instant())
             .finish()
     }
 }
@@ -151,31 +158,62 @@ impl GaplessController {
         self.inner.finished.load(Ordering::SeqCst)
     }
 
-    /// Source side: park until a source is enqueued or the playlist is finished,
-    /// then resolve. The wakeful idle between items (the poll-free analog of
-    /// pausing the source task): `enqueue` / `finish` wake the registered waker.
-    /// The caller re-checks `take_next` / `is_finished` after it resolves (a
+    /// Application side: switch to `source` **now** (M384, the `instant-uri`
+    /// analog), preempting the current item with a flush and a timeline reset
+    /// rather than waiting for its EOS (the gapless [`enqueue`](Self::enqueue)
+    /// path). Latest-wins: a newer `switch_now` replaces an untaken one. Use this
+    /// for a user-driven "play this instead", `enqueue` for seamless playlists.
+    pub fn switch_now(&self, source: Box<dyn DynSourceLoop>) {
+        *self.inner.instant.lock() = Some(source);
+        self.wake();
+    }
+
+    /// Source side: take the pending instant-switch source, or `None` if none is
+    /// pending.
+    pub fn take_instant(&self) -> Option<Box<dyn DynSourceLoop>> {
+        self.inner.instant.lock().take()
+    }
+
+    /// Whether an instant switch is pending (not yet taken).
+    pub fn has_instant(&self) -> bool {
+        self.inner.instant.lock().is_some()
+    }
+
+    /// Source side: park until a source is enqueued, an instant switch is
+    /// requested, or the playlist is finished, then resolve. The wakeful idle
+    /// between items (the poll-free analog of pausing the source task):
+    /// `enqueue` / `finish` / `switch_now` wake the registered waker. The caller
+    /// re-checks `take_instant` / `take_next` / `is_finished` after it resolves (a
     /// spurious early resolve is harmless, just a re-poll).
     pub fn wait_event(&self) -> GaplessWait<'_> {
         GaplessWait { ctl: self }
     }
 
-    /// Resolve any parked [`wait_event`](Self::wait_event).
+    /// Source side: park until an instant switch is requested, then resolve.
+    /// Used *during* an item's playback (selected against the item's `run`) so a
+    /// `switch_now` preempts it; a plain `enqueue` does not (that is gapless and
+    /// waits for EOS). `switch_now` wakes the registered waker.
+    pub fn wait_instant(&self) -> GaplessInstantWait<'_> {
+        GaplessInstantWait { ctl: self }
+    }
+
+    /// Resolve any parked [`wait_event`](Self::wait_event) /
+    /// [`wait_instant`](Self::wait_instant).
     fn wake(&self) {
         if let Some(w) = self.inner.waker.lock().take() {
             w.wake();
         }
     }
 
-    /// Whether an item is queued or the playlist is finished (the `wait_event`
-    /// ready condition).
+    /// Whether an item is queued, an instant switch is pending, or the playlist is
+    /// finished (the `wait_event` ready condition).
     fn has_event(&self) -> bool {
-        self.has_next() || self.is_finished()
+        self.has_next() || self.has_instant() || self.is_finished()
     }
 }
 
 /// Future returned by [`GaplessController::wait_event`]. Resolves when a source is
-/// enqueued or the playlist is finished.
+/// enqueued, an instant switch is requested, or the playlist is finished.
 #[derive(Debug)]
 pub struct GaplessWait<'a> {
     ctl: &'a GaplessController,
@@ -188,10 +226,34 @@ impl Future for GaplessWait<'_> {
         if self.ctl.has_event() {
             return Poll::Ready(());
         }
-        // Register before the final check so an `enqueue` / `finish` that lands in
-        // the gap still wakes us (it either sees the waker, or we see its state).
+        // Register before the final check so an `enqueue` / `finish` / `switch_now`
+        // that lands in the gap still wakes us (it either sees the waker, or we
+        // see its state).
         *self.ctl.inner.waker.lock() = Some(cx.waker().clone());
         if self.ctl.has_event() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// Future returned by [`GaplessController::wait_instant`]. Resolves when an
+/// instant switch is requested (`switch_now`), so a playing item can be preempted.
+#[derive(Debug)]
+pub struct GaplessInstantWait<'a> {
+    ctl: &'a GaplessController,
+}
+
+impl Future for GaplessInstantWait<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.ctl.has_instant() {
+            return Poll::Ready(());
+        }
+        *self.ctl.inner.waker.lock() = Some(cx.waker().clone());
+        if self.ctl.has_instant() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -258,6 +320,34 @@ mod tests {
         app.finish();
         assert!(src.is_finished());
         assert!(src.is_finished(), "latches");
+    }
+
+    #[test]
+    fn switch_now_is_latest_wins_and_taken_once() {
+        let app = GaplessController::new();
+        let src = app.clone();
+        assert!(!src.has_instant());
+        app.switch_now(Box::new(NullSrc));
+        app.switch_now(Box::new(NullSrc)); // replaces the untaken one
+        assert!(src.has_instant());
+        assert!(src.take_instant().is_some());
+        assert!(!src.has_instant(), "single pending slot");
+        assert!(src.take_instant().is_none());
+    }
+
+    #[test]
+    fn wait_instant_resolves_only_on_switch_now() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let c = GaplessController::new();
+        let mut fut = core::pin::pin!(c.wait_instant());
+        assert!(fut.as_mut().poll(&mut cx).is_pending(), "no instant yet");
+        // A plain enqueue does NOT resolve wait_instant (that is the gapless path).
+        c.enqueue(Box::new(NullSrc));
+        assert!(fut.as_mut().poll(&mut cx).is_pending(), "enqueue is not an instant switch");
+        // switch_now does.
+        c.switch_now(Box::new(NullSrc));
+        assert!(fut.as_mut().poll(&mut cx).is_ready(), "switch_now resolves wait_instant");
     }
 
     #[test]

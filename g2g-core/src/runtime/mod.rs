@@ -75,7 +75,7 @@ pub use fanin::{
 };
 
 #[cfg(feature = "std")]
-pub use gapless::{GaplessController, GaplessWait};
+pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{

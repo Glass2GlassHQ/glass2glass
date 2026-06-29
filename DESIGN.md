@@ -1487,9 +1487,14 @@ known without sniffing the byte stream.
   swallows the inner item's `Eos` — so the only terminal `Eos` is the one
   `GaplessSrc` emits when the `finish`ed playlist drains. This is the source-swap
   counterpart of the M358 segment loop (which loops *one* item via a `SEGMENT`
-  seek); both are poll-based with a wakeful idle. v1 concatenates same-codec items
-  (a per-item caps refinement still flows via the inner source's `CapsChanged`);
-  instant (flush) URI switching and an A/V offset are follow-ups.
+  seek); both are poll-based with a wakeful idle. An *instant* (flushing) switch
+  that preempts the current item is also supported (M384,
+  `GaplessController::switch_now`, the `instant-uri` analog): `GaplessSrc` races
+  the item's `run` against `wait_instant` with `select2`, so a `switch_now` drops
+  the run future (cancelling the inner source mid-stream), pushes a `Flush`, and
+  resets the timeline before playing the requested source. v1 concatenates
+  same-codec items (a per-item caps refinement still flows via the inner source's
+  `CapsChanged`); an A/V offset is a follow-up.
 
 - **Memory-feature-aware selection** (M276). The `Caps` algebra encodes media
   type, format, and geometry but *not* the memory domain a producer emits, so a
