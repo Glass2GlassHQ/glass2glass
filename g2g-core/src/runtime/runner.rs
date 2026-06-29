@@ -15,6 +15,7 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{link, SenderSink};
+use crate::runtime::instrument::ElementProbe;
 use crate::runtime::coordinator::{
     coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
     report_nego_failure, ArmDirective, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
@@ -290,7 +291,7 @@ impl From<LatencyProfile> for LinkCapacity {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RunStats {
     pub frames_emitted: u64,
     pub frames_consumed: u64,
@@ -320,6 +321,14 @@ pub struct RunStats {
     /// runners that don't yet spawn a coordinator (simple / fan-out /
     /// fan-in / muxer).
     pub coordinator_events: u64,
+    /// Measured per-element telemetry (M399): each interior element's `process()`
+    /// latency distribution (p50/p99) and input-link fill, in topological order.
+    /// Populated by `run_graph` and the two linear runners
+    /// (`run_simple_pipeline` / `run_source_transform_sink`); empty for the
+    /// fan-in / fan-out / session / muxer runners and under `no_std` (no clock to
+    /// measure with). Sources carry no `process()` so they do not appear; their
+    /// cost surfaces as the downstream element's input fill.
+    pub per_element: alloc::vec::Vec<crate::runtime::ElementLatency>,
 }
 
 impl RunStats {
@@ -358,6 +367,32 @@ impl RunStats {
                 "  alloc:   {} B x {}, {:?}, align {}\n",
                 a.size_bytes, a.min_buffers, a.domain, a.align
             ));
+        }
+        // Measured per-element process latency + input fill (M399). Only when the
+        // runner collected it (graph / linear runners under `std`); declared-only
+        // runs and `no_std` leave this empty.
+        if !self.per_element.is_empty() {
+            s.push_str("  per-element [measured]:\n");
+            for e in &self.per_element {
+                // proc.count == 0 means fill was sampled but no `process()` timing
+                // was taken (no_std, no clock); show fill alone in that case.
+                if e.proc.count > 0 {
+                    s.push_str(&format!(
+                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}), in-fill {}%/{}% avg/max\n",
+                        e.name,
+                        ms(e.proc.p50_ns),
+                        ms(e.proc.p99_ns),
+                        e.proc.count,
+                        e.fill_mean_pct,
+                        e.fill_max_pct,
+                    ));
+                } else {
+                    s.push_str(&format!(
+                        "    {:<16} in-fill {}%/{}% avg/max\n",
+                        e.name, e.fill_mean_pct, e.fill_max_pct,
+                    ));
+                }
+            }
         }
         s
     }
@@ -594,11 +629,19 @@ where
         Ok::<u64, G2gError>(emitted)
     };
 
+    // M399: measured per-element telemetry for the sink (the linear runner's one
+    // interior element with a `process()`); the source's cost surfaces as fill.
+    let sink_probe = ElementProbe::new(alloc::string::String::from(
+        crate::log::short_type_name::<Snk>(),
+    ));
+    let probe_for_sink = sink_probe.clone();
+
     let bus_for_sink = bus.cloned();
     let state_for_sink = state;
     let sink_fut = async move {
         let bus_for_sink = bus_for_sink;
         let state_for_sink = state_for_sink;
+        let probe_for_sink = probe_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         let mut prerolled_self = false;
@@ -699,7 +742,16 @@ where
                     if is_buffer {
                         consumed += 1;
                     }
+                    // M399: time the data-frame `process()` and sample input fill.
+                    let timed = is_buffer.then(|| &*probe_for_sink);
+                    if let Some(p) = timed {
+                        p.record_fill(link_rx.fill_percent());
+                    }
+                    let t0 = ElementProbe::mark();
                     sink.process(packet, &mut null).await?;
+                    if let Some(p) = timed {
+                        p.record_proc_since(t0);
+                    }
                     // M174 upstream QoS: a sink that dropped a late frame asks to
                     // shed load; forward its report onto the incoming link, where
                     // the source observes it as `PushOutcome::Qos` and skips ahead.
@@ -743,6 +795,8 @@ where
     let emitted = src_res?;
     let consumed = snk_res?;
 
+    // M399: the sink arm has joined, so its probe is settled; snapshot it.
+    let per_element = alloc::vec![sink_probe.snapshot()];
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
@@ -752,6 +806,7 @@ where
         clock_priority,
         base_time_ns,
         coordinator_events: 0,
+        per_element,
     })
 }
 
@@ -973,6 +1028,7 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
+        per_element: alloc::vec::Vec::new(),
     })
 }
 
@@ -1178,6 +1234,7 @@ where
             clock_priority: ClockPriority::SystemFallback,
             base_time_ns: 0,
             coordinator_events: 0,
+            per_element: alloc::vec::Vec::new(),
         })
     };
 
@@ -1408,6 +1465,7 @@ where
         clock_priority: ClockPriority::SystemFallback,
         base_time_ns: 0,
         coordinator_events: 0,
+        per_element: alloc::vec::Vec::new(),
     })
 }
 
@@ -1647,6 +1705,15 @@ where
     // and the transform arm's EOS-drain unblocks.
     let (coord, coord_handle, transform_ctrl_rx) = coordinator_with_recascade(link_capacity);
 
+    // M399: measured per-element telemetry for the two interior elements; each
+    // arm writes its own probe, the runner snapshots them once both have joined.
+    let transform_probe =
+        ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<Tx>()));
+    let sink_probe =
+        ElementProbe::new(alloc::string::String::from(crate::log::short_type_name::<Snk>()));
+    let probe_for_transform = transform_probe.clone();
+    let probe_for_sink = sink_probe.clone();
+
     let source_fut = async move {
         let mut adapter = SenderSink::new(link1_tx);
         // M81: unlike `run_simple_pipeline` and `run_graph`, this bespoke
@@ -1663,6 +1730,7 @@ where
     let bus_for_transform = bus.cloned();
     let transform_fut = async move {
         let ctrl_rx = transform_ctrl_rx;
+        let probe_for_transform = probe_for_transform;
         let mut adapter = SenderSink::new(link2_tx);
         // M175: relay a QoS report from the sink (seen on the transform's output
         // link) onto the transform's input link, so the source observes it as
@@ -1763,7 +1831,17 @@ where
                     }
                 }
                 Some(packet) => {
+                    // M399: time the data-frame `process()` and sample input fill.
+                    let timed = matches!(&packet, PipelinePacket::DataFrame(_))
+                        .then(|| &*probe_for_transform);
+                    if let Some(p) = timed {
+                        p.record_fill(link1_rx.fill_percent());
+                    }
+                    let t0 = ElementProbe::mark();
                     transform.process(packet, &mut adapter).await?;
+                    if let Some(p) = timed {
+                        p.record_proc_since(t0);
+                    }
                 }
                 None => return Ok(()),
             }
@@ -1774,6 +1852,7 @@ where
     let sink_fut = async move {
         let coord_handle = coord_handle;
         let bus_for_sink = bus_for_sink;
+        let probe_for_sink = probe_for_sink;
         let mut null = NullSink;
         let mut consumed: u64 = 0;
         loop {
@@ -1835,10 +1914,20 @@ where
                     }
                 }
                 Some(packet) => {
-                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                    let is_buffer = matches!(packet, PipelinePacket::DataFrame(_));
+                    if is_buffer {
                         consumed += 1;
                     }
+                    // M399: time the data-frame `process()` and sample input fill.
+                    let timed = is_buffer.then(|| &*probe_for_sink);
+                    if let Some(p) = timed {
+                        p.record_fill(link2_rx.fill_percent());
+                    }
+                    let t0 = ElementProbe::mark();
                     sink.process(packet, &mut null).await?;
+                    if let Some(p) = timed {
+                        p.record_proc_since(t0);
+                    }
                     // M175 upstream QoS: a late sink stores its report on the
                     // link feeding it; the transform's output adapter relays it
                     // one hop further upstream (see `relay_qos_to` above).
@@ -1880,6 +1969,9 @@ where
     tx_res?;
     let consumed = snk_res?;
 
+    // M399: both arms have joined; snapshot the transform and sink probes in
+    // topological order (source carries no `process()` and is omitted).
+    let per_element = alloc::vec![transform_probe.snapshot(), sink_probe.snapshot()];
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
@@ -1889,6 +1981,7 @@ where
         clock_priority,
         base_time_ns,
         coordinator_events,
+        per_element,
     })
 }
 

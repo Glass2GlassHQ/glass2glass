@@ -13,6 +13,7 @@
 mod autoplug;
 mod channel;
 mod coordinator;
+mod instrument;
 mod join;
 mod progress;
 mod runner;
@@ -41,6 +42,7 @@ pub use channel::{
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
+pub use instrument::{snapshot_all, ElementLatency, ElementProbe, Probe};
 pub use join::{join_all, select2, Either, Join2, JoinAll, Select2};
 pub use runner::{
     run_simple_pipeline, run_simple_pipeline_stateful, run_simple_pipeline_with_bus,

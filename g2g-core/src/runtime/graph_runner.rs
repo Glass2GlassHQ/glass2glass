@@ -55,6 +55,7 @@ use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
+use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
 use crate::runtime::join::{join_all, select2, Either};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{
@@ -624,6 +625,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // Done before negotiation so an element's own log lines (e.g. at
     // `configure_pipeline`) already carry the instance name. Naming runs whether
     // or not a sink is installed (it is cheap; the `g2g_info!` is threshold-gated).
+    // M399: while naming, mint a measured-latency probe for each interior element
+    // (Transform / Sink: the nodes with a `process()`), keyed by its instance name.
+    let mut probes: Vec<Probe> = (0..n).map(|_| None).collect();
     {
         let mut counts: Vec<(&'static str, u32)> = Vec::new();
         for &node in &topo {
@@ -648,6 +652,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 Some(GraphNodeRef::Source(src)) => src.set_instance_name(name.clone()),
                 Some(GraphNodeRef::Element(elem)) => elem.set_instance_name(name.clone()),
                 _ => {}
+            }
+            if matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink) {
+                probes[node.0 as usize] = Some(ElementProbe::new(name.clone()));
             }
             crate::g2g_info!(crate::log::Target::named(category, &name), "added to pipeline");
         }
@@ -1039,6 +1046,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     downstream_feasible,
                     branch_mode(&vg, node),
                     bus.cloned(),
+                    probes[node.0 as usize].clone(),
                 ))
             }
             NodeKind::Sink => {
@@ -1055,6 +1063,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     bus.cloned(),
                     state.clone(),
                     progress.cloned(),
+                    probes[node.0 as usize].clone(),
                 ))
             }
             NodeKind::Tee(_) => {
@@ -1110,6 +1119,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     }
 
     let frames_dropped = *dropped.lock();
+    // M399: every arm has joined, so its probe is no longer being written; snapshot
+    // each interior element's measured latency + fill into the report.
+    let per_element = snapshot_all(&probes);
     Ok(RunStats {
         frames_emitted: emitted,
         frames_consumed: consumed,
@@ -1119,6 +1131,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         clock_priority,
         base_time_ns,
         coordinator_events,
+        per_element,
     })
 }
 
@@ -1414,6 +1427,7 @@ async fn transform_arm<'a>(
     downstream_feasible: Option<CapsSet>,
     mode: BranchMode,
     bus: Option<BusHandle>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     // M175: relay a downstream QoS report (seen on this transform's output link)
@@ -1508,7 +1522,19 @@ async fn transform_arm<'a>(
                 }
             }
             Some(packet) => {
+                // M399: time the data-frame `process()` and sample input fill;
+                // control packets (segment/flush) are excluded so the histogram
+                // reflects real per-frame work, not cheap signalling.
+                let timed =
+                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                if let Some(p) = timed {
+                    p.record_fill(in_rx.fill_percent());
+                }
+                let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
+                if let Some(p) = timed {
+                    p.record_proc_since(t0);
+                }
             }
             None => return Ok(0),
         }
@@ -1529,6 +1555,7 @@ async fn sink_arm<'a>(
     bus: Option<BusHandle>,
     state: Option<StateController>,
     progress: Option<PipelineProgress>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -1650,7 +1677,16 @@ async fn sink_arm<'a>(
                 if is_buffer {
                     consumed += 1;
                 }
+                // M399: time the data-frame `process()` and sample input fill.
+                let timed = probe.as_deref().filter(|_| is_buffer);
+                if let Some(p) = timed {
+                    p.record_fill(in_rx.fill_percent());
+                }
+                let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
+                if let Some(p) = timed {
+                    p.record_proc_since(t0);
+                }
                 // M175 upstream QoS: a sink that dropped a late frame asks to
                 // shed load; store its report on this sink's input link, where
                 // the upstream transform relays it one hop further (or the source

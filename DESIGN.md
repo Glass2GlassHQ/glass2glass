@@ -2282,10 +2282,28 @@ fast path rather than drift).
 `RunStats::report()` formats the end-of-run telemetry the runner already gathers,
 frame counts + drop rate, the aggregated *declared* latency window (the
 per-element `latency()` fold), the elected clock, and the head allocation, which
-`g2g-launch` prints at end alongside the measured wall-clock throughput. Measured
-per-element / per-link p50 / p99 + channel fill-level needs frame-level
-instrumentation in the runner arms (the `LatencyHistogram` collector in
-`metrics.rs` wired in) and is a follow-up.
+`g2g-launch` prints at end alongside the measured wall-clock throughput.
+
+Alongside the declared fold, the runner collects *measured* per-element telemetry
+(`RunStats::per_element`, one `ElementLatency` row per interior element in
+topological order). Each transform/sink arm holds an `Arc<ElementProbe>`
+(`runtime/instrument.rs`): on every `DataFrame` it samples its input link's fill
+(`LinkReceiver::fill_percent`) and times the `process()` call wall-clock
+(`metrics::monotonic_ns` around the `await`), recording into the lock-free log2
+`LatencyHistogram` so the hot-path cost is a handful of relaxed atomics and no
+allocation. Once every arm has joined, the runner snapshots each probe into the
+report, and `report()` prints a per-element `proc p50 / p99 (n) + in-fill
+avg/max` table, the by-hand glass-to-glass analyses (the NVDEC-to-system-memory
+floor, `link_capacity` dominance) turned into a number the runner emits. The
+graph runner and the two linear runners (`run_simple_pipeline`,
+`run_source_transform_sink`) collect it; fan-in / fan-out / session / muxer
+runners leave it empty, like their declared latency. It is `std`-gated where it
+needs a clock: the histogram is `no_std`, but with no `monotonic_ns` the timing
+compiles out (the table is then empty) so the `no_std` baseline pays nothing.
+Sources have no `process()` and so do not appear, their cost surfaces as the
+downstream element's input fill. Still open: per-*link* transit (queue-residency)
+time, which needs a wall-clock stamp carried with each packet rather than the
+element-side timing collected here.
 
 ---
 
