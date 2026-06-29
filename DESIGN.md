@@ -2100,6 +2100,24 @@ overlay's CPU baseline (§5): the no_std bitmap renderer is the portable path, a
 a mixed-case TrueType `vello` GPU backend (and the `clockoverlay` / `timeoverlay`
 siblings) is the planned companion.
 
+`SubParse` feeds that renderer as a stream rather than from a file: it parses a
+structured subtitle document arriving on its sink pad and emits each cue as a
+timed `Text{Utf8}` frame (PTS + duration = the cue window). Parsing is
+*incremental* for the line-based formats (SRT / WebVTT / SSA): each `process`
+call drains only the blocks bounded by a blank-line / newline separator, retains
+the partial trailing block, and flushes the remainder at `Eos`, so a cue streams
+out as soon as it is complete instead of all cues batching at end-of-stream
+(chunk-boundary UTF-8 splits and a leading BOM are handled; TTML is XML with no
+blank-line boundary and stays batch). `TextOverlayN` pairs the two as a
+`MultiInputElement` (video pad + text-stream pad, video out): it opts into the
+runner's `input_pts_ordered` merge so each cue lands just before the first video
+frame it covers, and because `SubParse` streams, the merge buffers video only up
+to the next cue, not to the subtitle stream's end. Cue placement (`CueSettings`:
+`position` / `line` / `align`) cannot ride the plain-`Utf8` payload, so it
+travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
+attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
+ZST baseline (no meta) streamed cues draw at the renderer default.
+
 ### 4.19 Native WebRTC (`str0m`)
 
 The WebRTC elements are built on **[str0m](https://github.com/algesten/str0m)**, a
