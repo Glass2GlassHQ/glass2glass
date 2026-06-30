@@ -54,6 +54,25 @@ fn caps_driven_transform_delivers_output() {
     assert_eq!(frames, 1, "the transformed frame reached the drain");
 }
 
+/// A rescaling fragment changes the buffer size: `with_output_caps` pins the
+/// sub-graph's output, and the drained frame is the smaller output size, not the
+/// input size. (The GStreamer shell relies on this to allocate output buffers.)
+#[test]
+fn rescaling_fragment_changes_output_size() {
+    let in_caps = "video/x-raw,format=RGBA,width=8,height=8,framerate=30/1"; // 8*8*4 = 256
+    let out_caps = "video/x-raw,format=RGBA,width=4,height=4,framerate=30/1"; // 4*4*4 = 64
+    let bridge =
+        BridgeGraph::with_output_caps("videoscale", in_caps, out_caps).expect("scale sub-graph");
+    assert!(bridge.push(&[9u8; 256], 0));
+    bridge.end_of_stream();
+
+    let mut out_lens = Vec::new();
+    while let Some(frame) = bridge.pull_blocking() {
+        out_lens.push(frame_bytes(&frame).expect("system memory").len());
+    }
+    assert_eq!(out_lens, vec![64], "the downscaled frame is 4x4 RGBA, not the 8x8 input");
+}
+
 /// A fragment that names an element g2g lacks fails construction with a parse
 /// error (carrying the launch diagnostics / porting hint), not a panic or a hung
 /// thread. This is the feedback an app developer gets while porting.

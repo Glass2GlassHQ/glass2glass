@@ -266,11 +266,13 @@ g2g binary it ships — remains available and needs no ABI match.
   push/pull API; the GObject shell (`libgstglass2glass.so`, the `gstreamer`
   feature) registers a real `glass2glass` GStreamer element, so a stock
   `gst-launch` line can embed a g2g sub-graph by name:
-  `... ! glass2glass fragment="videoflip method=horizontal-flip" ! ...`. Build
-  and validate it with `tools/gst-bridge-smoke.sh` (needs host GStreamer dev
-  libs). **v1 is an in-place transform: the fragment must preserve caps and
-  buffer size** (effects, ML preprocessing that keeps the format); caps/size
-  changing fragments are future work.
+  `... ! glass2glass fragment="videoflip method=horizontal-flip" ! ...`. A
+  caps/size-preserving fragment runs in place; a rescaling / reformatting one
+  declares its result with `output-caps`, e.g.
+  `glass2glass fragment=videoscale output-caps="video/x-raw,format=RGBA,width=640,height=360,framerate=30/1"`.
+  Build and validate with `tools/gst-bridge-smoke.sh` (needs host GStreamer dev
+  libs). Remaining limitation: buffers are mapped and copied (no zero-copy
+  dma-buf import yet).
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---

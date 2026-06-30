@@ -88,7 +88,27 @@ impl BridgeGraph {
     /// embedder will [`push`](BridgeGraph::push) (e.g.
     /// `"video/x-raw,format=RGBA,width=1280,height=720,framerate=30/1"`); the
     /// GStreamer shell derives it from the upstream pad's negotiated caps.
+    ///
+    /// The sub-graph's output caps are pinned equal to its input (the
+    /// caps/size-preserving case). For a fragment that rescales or reformats, use
+    /// [`with_output_caps`](BridgeGraph::with_output_caps).
     pub fn new(fragment: &str, input_caps: &str) -> Result<Self, BridgeError> {
+        Self::with_output_caps(fragment, input_caps, input_caps)
+    }
+
+    /// Build and start an embedded sub-graph whose output caps differ from its
+    /// input (a rescaling / reformatting fragment, e.g.
+    /// `"videoscale"` with `input_caps` 1280x720 and `output_caps` 640x360).
+    ///
+    /// `output_caps` pins the sub-graph's final caps with a trailing inline
+    /// filter: it both gives a caps-driven transform a fixate target and declares
+    /// to the embedder (the GStreamer shell) the size/format of the frames the
+    /// graph will produce, so it can allocate matching output buffers.
+    pub fn with_output_caps(
+        fragment: &str,
+        input_caps: &str,
+        output_caps: &str,
+    ) -> Result<Self, BridgeError> {
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
         let in_ch = format!("__g2g_bridge_{id}_in");
         let out_ch = format!("__g2g_bridge_{id}_out");
@@ -98,15 +118,14 @@ impl BridgeGraph {
         let feed = register_appsrc(&in_ch);
         let pull = register_appsink_pull(&out_ch);
 
-        // Pin the sub-graph's output caps equal to its input with a trailing
-        // inline caps filter. A caps-driven transform (videoconvert, videoflip)
-        // cannot fixate its output when the downstream `appsink` imposes no
-        // concrete caps, so it errors and produces nothing; echoing the input
-        // caps gives it a target. This also enforces the caps/size-preserving
-        // contract the embedding relies on (a format-changing fragment fails
-        // negotiation here rather than silently producing mismatched buffers).
+        // Pin the sub-graph's output with a trailing inline caps filter. A
+        // caps-driven transform (videoconvert, videoscale, videoflip) cannot
+        // fixate its output when the downstream `appsink` imposes no concrete
+        // caps, so it errors and produces nothing; the filter gives it a target.
+        // When `output_caps == input_caps` (the default via `new`) this also
+        // enforces the caps/size-preserving contract.
         let desc = format!(
-            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! {input_caps} ! appsink channel={out_ch}"
+            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! {output_caps} ! appsink channel={out_ch}"
         );
 
         let reg = default_registry();

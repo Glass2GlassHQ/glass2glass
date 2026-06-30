@@ -183,26 +183,36 @@ fn normalize_gst_caps(s: &str) -> String {
     out
 }
 
-/// Build an embedded sub-graph for `appsrc ! <fragment> ! appsink` with the
-/// given input caps. Returns null on a null/invalid argument or a parse error
-/// (the shell logs and fails `set_caps`).
+/// Build an embedded sub-graph for `appsrc ! <fragment> ! <out_caps> ! appsink`.
+/// `in_caps` describes the pushed buffers, `out_caps` the frames the graph
+/// produces (the negotiated src-pad caps). When the two are equal the sub-graph
+/// is caps/size-preserving; when they differ the fragment rescales / reformats.
+/// Returns null on a null/invalid argument or a parse error (the shell logs and
+/// fails `set_caps`).
 ///
 /// # Safety
-/// `fragment` and `caps` must be valid NUL-terminated C strings (or null),
-/// borrowed only for this call.
+/// `fragment`, `in_caps`, `out_caps` must be valid NUL-terminated C strings (or
+/// null), borrowed only for this call.
 #[no_mangle]
 pub unsafe extern "C" fn g2g_bridge_create(
     fragment: *const c_char,
-    caps: *const c_char,
+    in_caps: *const c_char,
+    out_caps: *const c_char,
 ) -> *mut G2gBridge {
-    // SAFETY: caller contract on the two C strings.
-    let (Some(fragment), Some(caps)) =
-        (unsafe { opt_str(fragment) }, unsafe { opt_str(caps) })
+    // SAFETY: caller contract on the C strings.
+    let (Some(fragment), Some(in_caps)) =
+        (unsafe { opt_str(fragment) }, unsafe { opt_str(in_caps) })
     else {
         return ptr::null_mut();
     };
-    let caps = normalize_gst_caps(caps);
-    match BridgeGraph::new(fragment, &caps) {
+    let in_caps = normalize_gst_caps(in_caps);
+    // A null / absent out_caps means "same as input" (the preserving case).
+    // SAFETY: caller contract on `out_caps`.
+    let out_caps = match unsafe { opt_str(out_caps) } {
+        Some(s) => normalize_gst_caps(s),
+        None => in_caps.clone(),
+    };
+    match BridgeGraph::with_output_caps(fragment, &in_caps, &out_caps) {
         Ok(g) => Box::into_raw(Box::new(G2gBridge(g))),
         Err(_) => ptr::null_mut(),
     }

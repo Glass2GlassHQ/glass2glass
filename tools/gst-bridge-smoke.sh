@@ -53,4 +53,21 @@ cmp -s "$work/ident.raw" "$work/cv.raw"   && echo "  PASS videoconvert == identi
 cmp -s "$work/ident.raw" "$work/flip.raw" && { echo "FAIL flip had no effect"; fail=1; } || echo "  PASS flip != identity (frame transformed)"
 cmp -s "$work/ident.raw" "$work/flip2.raw" && echo "  PASS flip!flip == identity (byte-exact reversible)" || { echo "FAIL double-flip != identity"; fail=1; }
 
+echo "== caps/size-changing checks (output-caps property) =="
+# Downscale 64x64 -> 32x16 RGBA (2048 bytes).
+out_scale="video/x-raw,format=RGBA,width=32,height=16,framerate=1/1"
+gst-launch-1.0 videotestsrc num-buffers=1 ! "$caps" \
+  ! glass2glass fragment=videoscale output-caps="$out_scale" \
+  ! filesink location="$work/scale.raw" >/dev/null 2>&1
+sz=$(stat -c%s "$work/scale.raw" 2>/dev/null || echo 0)
+[ "$sz" = "$((32 * 16 * 4))" ] && echo "  PASS videoscale 64x64->32x16 ($sz bytes)" || { echo "FAIL downscale is $sz bytes (want 2048)"; fail=1; }
+
+# Format change RGBA -> I420 (planar, 64*64*3/2 = 6144 bytes).
+out_fmt="video/x-raw,format=I420,width=64,height=64,framerate=1/1"
+gst-launch-1.0 videotestsrc num-buffers=1 ! "$caps" \
+  ! glass2glass fragment=videoconvert output-caps="$out_fmt" \
+  ! filesink location="$work/i420.raw" >/dev/null 2>&1
+sz=$(stat -c%s "$work/i420.raw" 2>/dev/null || echo 0)
+[ "$sz" = "$((64 * 64 * 3 / 2))" ] && echo "  PASS videoconvert RGBA->I420 ($sz bytes)" || { echo "FAIL format change is $sz bytes (want 6144)"; fail=1; }
+
 [ "$fail" = 0 ] && echo "== all bridge smoke checks passed ==" || { echo "== bridge smoke FAILED =="; exit 1; }

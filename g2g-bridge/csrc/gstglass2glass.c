@@ -11,6 +11,7 @@
  */
 #include <gst/gst.h>
 #include <gst/base/gstbasetransform.h>
+#include <gst/video/video.h>
 #include <string.h>
 
 /* ---- Rust C-ABI core (src/ffi.rs) ---------------------------------------- */
@@ -22,7 +23,8 @@ typedef struct {
   void *owner;
 } G2gOut;
 
-extern G2gBridge *g2g_bridge_create(const char *fragment, const char *caps);
+extern G2gBridge *g2g_bridge_create(const char *fragment, const char *in_caps,
+                                    const char *out_caps);
 extern int g2g_bridge_push_buf(G2gBridge *b, const unsigned char *data, size_t len,
                                unsigned long long pts_ns);
 extern int g2g_bridge_pull_buf(G2gBridge *b, G2gOut *out);
@@ -35,9 +37,10 @@ G_DECLARE_FINAL_TYPE(GstGlass2Glass, gst_glass2glass, GST, GLASS2GLASS, GstBaseT
 
 struct _GstGlass2Glass {
   GstBaseTransform parent;
-  gchar *fragment;    /* the g2g sub-pipeline, e.g. "videobalance saturation=0" */
-  gchar *input_caps;  /* optional override of the serialized sink caps */
-  G2gBridge *bridge;  /* live between set_caps and stop */
+  gchar *fragment;     /* the g2g sub-pipeline, e.g. "videobalance saturation=0" */
+  gchar *input_caps;   /* optional override of the serialized sink caps */
+  gchar *output_caps;  /* if set, the sub-graph rescales/reformats to these caps */
+  G2gBridge *bridge;   /* live between set_caps and stop */
 };
 
 G_DEFINE_TYPE(GstGlass2Glass, gst_glass2glass, GST_TYPE_BASE_TRANSFORM)
@@ -45,7 +48,7 @@ G_DEFINE_TYPE(GstGlass2Glass, gst_glass2glass, GST_TYPE_BASE_TRANSFORM)
 GST_DEBUG_CATEGORY_STATIC(glass2glass_debug);
 #define GST_CAT_DEFAULT glass2glass_debug
 
-enum { PROP_0, PROP_FRAGMENT, PROP_INPUT_CAPS };
+enum { PROP_0, PROP_FRAGMENT, PROP_INPUT_CAPS, PROP_OUTPUT_CAPS };
 
 static GstStaticPadTemplate sink_template =
     GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS_ANY);
@@ -65,6 +68,10 @@ static void gst_glass2glass_set_property(GObject *object, guint prop_id, const G
       g_free(self->input_caps);
       self->input_caps = g_value_dup_string(value);
       break;
+    case PROP_OUTPUT_CAPS:
+      g_free(self->output_caps);
+      self->output_caps = g_value_dup_string(value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
   }
@@ -80,63 +87,117 @@ static void gst_glass2glass_get_property(GObject *object, guint prop_id, GValue 
     case PROP_INPUT_CAPS:
       g_value_set_string(value, self->input_caps);
       break;
+    case PROP_OUTPUT_CAPS:
+      g_value_set_string(value, self->output_caps);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
   }
 }
 
+/* ---- caps negotiation ---------------------------------------------------- */
+/* Advertise what this element can turn the given caps into. With `output-caps`
+ * set the sub-graph rescales/reformats, so the sink->src direction offers those
+ * caps; without it the element is caps-preserving (src == sink), which lets the
+ * base class run the fast in-place path. The src->sink direction cannot be
+ * inverted for an arbitrary fragment, so it offers ANY (upstream fixes the real
+ * input caps) when output-caps is set. */
+static GstCaps *gst_glass2glass_transform_caps(GstBaseTransform *base, GstPadDirection direction,
+                                               GstCaps *caps, GstCaps *filter) {
+  GstGlass2Glass *self = GST_GLASS2GLASS(base);
+  GstCaps *others;
+  if (self->output_caps) {
+    others = (direction == GST_PAD_SINK) ? gst_caps_from_string(self->output_caps)
+                                         : gst_caps_new_any();
+  } else {
+    others = gst_caps_ref(caps); /* preserving: same caps both directions */
+  }
+  if (filter) {
+    GstCaps *clipped = gst_caps_intersect_full(filter, others, GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref(others);
+    others = clipped;
+  }
+  return others;
+}
+
+/* Output buffer size for a given (raw video) caps, needed when the element is
+ * not operating in place. */
+static gboolean gst_glass2glass_get_unit_size(GstBaseTransform *base, GstCaps *caps, gsize *size) {
+  (void)base;
+  GstVideoInfo info;
+  if (!gst_video_info_from_caps(&info, caps))
+    return FALSE;
+  *size = GST_VIDEO_INFO_SIZE(&info);
+  return TRUE;
+}
+
 /* ---- transform vmethods -------------------------------------------------- */
-/* Build the sub-graph once the sink caps are fixed: those caps describe the
- * buffers the embedded appsrc will receive. */
+/* Build the sub-graph once caps are fixed. `incaps` describes the buffers the
+ * embedded appsrc receives; `outcaps` (== incaps for a preserving fragment) the
+ * frames it produces. */
 static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps,
                                          GstCaps *outcaps) {
   GstGlass2Glass *self = GST_GLASS2GLASS(base);
-  (void)outcaps;
   if (self->bridge) {
     g2g_bridge_destroy(self->bridge);
     self->bridge = NULL;
   }
-  gchar *capsstr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
+  gchar *instr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
+  gchar *outstr = gst_caps_to_string(outcaps);
   const char *frag = self->fragment ? self->fragment : "identity";
-  self->bridge = g2g_bridge_create(frag, capsstr);
+  self->bridge = g2g_bridge_create(frag, instr, outstr);
   if (!self->bridge)
-    GST_ERROR_OBJECT(self, "failed to build g2g sub-graph: fragment=\"%s\" caps=\"%s\"", frag,
-                     capsstr);
-  g_free(capsstr);
+    GST_ERROR_OBJECT(self, "failed to build g2g sub-graph: fragment=\"%s\" in=\"%s\" out=\"%s\"",
+                     frag, instr, outstr);
+  g_free(instr);
+  g_free(outstr);
   return self->bridge != NULL;
 }
 
-/* In-place: push the buffer into the sub-graph, pull the one processed frame,
- * copy it back over the same buffer (v1 preserves size). */
-static GstFlowReturn gst_glass2glass_transform_ip(GstBaseTransform *base, GstBuffer *buf) {
-  GstGlass2Glass *self = GST_GLASS2GLASS(base);
+/* Drive the sub-graph: push the input bytes, pull the one processed frame, copy
+ * it into `dst`. Shared by the in-place and out-of-place paths. */
+static GstFlowReturn gst_glass2glass_run(GstGlass2Glass *self, GstBuffer *src, GstBuffer *dst) {
   if (!self->bridge)
     return GST_FLOW_NOT_NEGOTIATED;
 
-  GstMapInfo map;
-  if (!gst_buffer_map(buf, &map, GST_MAP_READWRITE))
+  GstMapInfo in;
+  if (!gst_buffer_map(src, &in, GST_MAP_READ))
     return GST_FLOW_ERROR;
-
-  guint64 pts = GST_BUFFER_PTS_IS_VALID(buf) ? GST_BUFFER_PTS(buf) : 0;
-  if (!g2g_bridge_push_buf(self->bridge, map.data, map.size, pts)) {
-    gst_buffer_unmap(buf, &map);
+  guint64 pts = GST_BUFFER_PTS_IS_VALID(src) ? GST_BUFFER_PTS(src) : 0;
+  gboolean pushed = g2g_bridge_push_buf(self->bridge, in.data, in.size, pts);
+  gst_buffer_unmap(src, &in);
+  if (!pushed) {
     GST_ERROR_OBJECT(self, "sub-graph did not accept the buffer (stalled)");
     return GST_FLOW_ERROR;
   }
 
   G2gOut out;
   int r = g2g_bridge_pull_buf(self->bridge, &out);
-  if (r < 0) {
-    gst_buffer_unmap(buf, &map);
-    /* -1 EOS, -2 GPU-resident frame (unsupported in the v1 in-place shell). */
+  if (r < 0)
+    /* -1 EOS, -2 GPU-resident frame (unsupported in this system-memory shell). */
     return (r == -1) ? GST_FLOW_EOS : GST_FLOW_ERROR;
-  }
 
-  gsize n = MIN(map.size, out.len);
-  memcpy(map.data, out.data, n);
+  GstMapInfo dmap;
+  if (!gst_buffer_map(dst, &dmap, GST_MAP_WRITE)) {
+    g2g_bridge_out_release(&out);
+    return GST_FLOW_ERROR;
+  }
+  memcpy(dmap.data, out.data, MIN(dmap.size, out.len));
+  gst_buffer_unmap(dst, &dmap);
   g2g_bridge_out_release(&out);
-  gst_buffer_unmap(buf, &map);
   return GST_FLOW_OK;
+}
+
+/* In-place: caps/size preserving fragment, output reuses the input buffer. */
+static GstFlowReturn gst_glass2glass_transform_ip(GstBaseTransform *base, GstBuffer *buf) {
+  return gst_glass2glass_run(GST_GLASS2GLASS(base), buf, buf);
+}
+
+/* Out-of-place: caps/size changing fragment, the base class allocated `outbuf`
+ * sized to the negotiated output caps (via get_unit_size). */
+static GstFlowReturn gst_glass2glass_transform(GstBaseTransform *base, GstBuffer *inbuf,
+                                               GstBuffer *outbuf) {
+  return gst_glass2glass_run(GST_GLASS2GLASS(base), inbuf, outbuf);
 }
 
 static gboolean gst_glass2glass_stop(GstBaseTransform *base) {
@@ -155,6 +216,7 @@ static void gst_glass2glass_finalize(GObject *object) {
     g2g_bridge_destroy(self->bridge);
   g_free(self->fragment);
   g_free(self->input_caps);
+  g_free(self->output_caps);
   G_OBJECT_CLASS(gst_glass2glass_parent_class)->finalize(object);
 }
 
@@ -170,8 +232,7 @@ static void gst_glass2glass_class_init(GstGlass2GlassClass *klass) {
   g_object_class_install_property(
       gobject_class, PROP_FRAGMENT,
       g_param_spec_string("fragment", "Fragment",
-                          "g2g sub-pipeline run as appsrc ! <fragment> ! appsink "
-                          "(must preserve caps and buffer size in v1)",
+                          "g2g sub-pipeline run as appsrc ! <fragment> ! appsink",
                           "identity", G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property(
       gobject_class, PROP_INPUT_CAPS,
@@ -179,14 +240,24 @@ static void gst_glass2glass_class_init(GstGlass2GlassClass *klass) {
                           "Override the input caps handed to the sub-graph "
                           "(default: the negotiated sink caps, serialized)",
                           NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property(
+      gobject_class, PROP_OUTPUT_CAPS,
+      g_param_spec_string("output-caps", "Output caps",
+                          "Caps the sub-graph produces, when it rescales or "
+                          "reformats (e.g. a videoscale fragment). Unset means "
+                          "the fragment preserves caps and size (in-place).",
+                          NULL, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gst_element_class_set_static_metadata(
       element_class, "glass2glass bridge", "Filter/Effect",
-      "Runs an embedded glass2glass sub-graph in place", "glass2glass");
+      "Runs an embedded glass2glass sub-graph", "glass2glass");
   gst_element_class_add_static_pad_template(element_class, &sink_template);
   gst_element_class_add_static_pad_template(element_class, &src_template);
 
+  base_class->transform_caps = gst_glass2glass_transform_caps;
+  base_class->get_unit_size = gst_glass2glass_get_unit_size;
   base_class->set_caps = gst_glass2glass_set_caps;
+  base_class->transform = gst_glass2glass_transform;
   base_class->transform_ip = gst_glass2glass_transform_ip;
   base_class->stop = gst_glass2glass_stop;
 }
@@ -194,6 +265,7 @@ static void gst_glass2glass_class_init(GstGlass2GlassClass *klass) {
 static void gst_glass2glass_init(GstGlass2Glass *self) {
   self->fragment = NULL;
   self->input_caps = NULL;
+  self->output_caps = NULL;
   self->bridge = NULL;
 }
 

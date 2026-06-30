@@ -20,10 +20,14 @@ fn main() {
     let base = pkg_config::Config::new()
         .probe("gstreamer-base-1.0")
         .expect("gstreamer-base-1.0 dev package (pkg-config) is required");
+    // gstreamer-video-1.0 for gst_video_info_from_caps (output buffer sizing).
+    let video = pkg_config::Config::new()
+        .probe("gstreamer-video-1.0")
+        .expect("gstreamer-video-1.0 dev package (pkg-config) is required");
 
     let mut build = cc::Build::new();
     build.file("csrc/gstglass2glass.c");
-    for path in gst.include_paths.iter().chain(base.include_paths.iter()) {
+    for path in gst.include_paths.iter().chain(base.include_paths.iter()).chain(video.include_paths.iter()) {
         build.include(path);
     }
     build.compile("gstglass2glass");
