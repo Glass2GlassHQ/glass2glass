@@ -667,6 +667,11 @@ required-features = ["std"]
 name = "third_party_element"
 required-features = ["std"]
 
+# Turnkey closed-caption authoring: subtitle file -> embedded CEA-608 -> muxed file.
+[[example]]
+name = "cc_author"
+required-features = ["std"]
+
 # M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
 [[test]]

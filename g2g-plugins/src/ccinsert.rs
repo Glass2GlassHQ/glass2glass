@@ -17,13 +17,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::memory::SystemSlice;
+use g2g_core::g2g_warn;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, MemoryDomain,
     MultiInputElement, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
-use crate::cea::{build_cc_sei, Cc608Enc, CcTriple};
+use crate::cea::{build_cc_sei, Cc608Enc, CcTriple, CC_NULL};
 
 use core::future::Future;
 use core::pin::Pin;
@@ -42,6 +44,16 @@ pub struct CcInsert {
     /// it (and no newer cue has superseded it) an erase is queued. `None` when no
     /// caption is shown.
     erase_at: Option<u64>,
+    /// Cues received on the cue pad, and whether any caption byte was actually
+    /// written into a video access unit. If cues arrived but nothing was emitted
+    /// (the video carried no usable PTS, so the PTS merge delivered every cue after
+    /// the last frame), the captions are silently lost; a warning is logged once at
+    /// end of stream. See [`Self::warn_if_dropped`].
+    cues_received: u64,
+    caption_emitted: bool,
+    warned: bool,
+    /// Runner-assigned instance name for logging.
+    instance: Option<alloc::string::String>,
 }
 
 impl CcInsert {
@@ -51,6 +63,22 @@ impl CcInsert {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Warn once at end of stream if cues were received but no caption byte ever
+    /// reached a video access unit, the silent-drop symptom of an untimed video
+    /// source (the PTS merge delivers every cue after the last frame, so there is
+    /// nothing left to carry it). Called on each pad's `Eos`, so it fires whichever
+    /// pad ends last.
+    fn warn_if_dropped(&mut self) {
+        if !self.warned && self.cues_received > 0 && !self.caption_emitted {
+            self.warned = true;
+            g2g_warn!(
+                self,
+                "{} cue(s) received but no caption was embedded: the video source carried no usable timestamps, so the captions could not be paced against it (author from a timed source, e.g. an MP4/MKV, not a raw elementary stream)",
+                self.cues_received
+            );
+        }
     }
 
     /// The compressed-video caps the video pad accepts (its output follows it).
@@ -86,6 +114,10 @@ impl CcInsert {
         };
         // Drain this frame's caption byte pair (one per frame) and wrap it in a SEI.
         let (b0, b1) = self.enc.next_pair();
+        // A non-null pair means a real caption byte was carried (not just padding).
+        if (b0, b1) != (CC_NULL, CC_NULL) {
+            self.caption_emitted = true;
+        }
         let sei = build_cc_sei(&[CcTriple { cc_type: 0, b0, b1 }], codec);
 
         let au = slice.as_slice();
@@ -234,11 +266,17 @@ impl MultiInputElement for CcInsert {
                     }
                     // Forward stream control as-is; the runner aggregates the per-pad
                     // Eos, so the element does not forward it.
-                    PipelinePacket::Eos => Ok(()),
+                    PipelinePacket::Eos => {
+                        self.warn_if_dropped();
+                        Ok(())
+                    }
                     other => out.push(other).await.map(|_| ()),
                 },
                 // The cue pad (and any other pad, defensively, though there are two).
                 _ => {
+                    if let PipelinePacket::Eos = packet {
+                        self.warn_if_dropped();
+                    }
                     if let PipelinePacket::DataFrame(frame) = packet {
                         if let MemoryDomain::System(slice) = &frame.domain {
                             let text = String::from_utf8_lossy(slice.as_slice()).into_owned();
@@ -256,6 +294,7 @@ impl MultiInputElement for CcInsert {
                             let settings = crate::subparse::CueSettings::default();
                             let cue = crate::subparse::Cue { start_ns: start, end_ns: end, text, settings };
                             self.enc.push_cue(&cue);
+                            self.cues_received += 1;
                             // The new pop-on caption supersedes any shown one; erase
                             // when this cue's window ends.
                             self.erase_at = Some(end);
@@ -266,6 +305,15 @@ impl MultiInputElement for CcInsert {
                 }
             }
         })
+    }
+}
+
+impl LogSource for CcInsert {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.instance.as_deref()
     }
 }
 
@@ -376,5 +424,32 @@ mod tests {
         let mut sink = RecordingSink::default();
         // The video pad before configure is NotConfigured (no codec for the SEI).
         assert!(el.process(CcInsert::VIDEO, video_frame(0), &mut sink).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn untimed_video_drops_caption_and_flags_it() {
+        // The untimed-video failure: the cue arrives only after every video frame
+        // (as a pts=0 source makes the PTS merge do), so it is never carried. The
+        // output has no real captions, and the element flags the drop rather than
+        // emitting a caption-free stream silently.
+        let mut el = CcInsert::new();
+        el.configure_pipeline(CcInsert::VIDEO, &h264_caps()).unwrap();
+        el.configure_pipeline(CcInsert::CUE, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        let mut sink = RecordingSink::default();
+
+        // All video frames first (no cue yet -> null padding), then the cue, then Eos.
+        for n in 0..5u64 {
+            el.process(CcInsert::VIDEO, video_frame(n * 33_000_000), &mut sink).await.unwrap();
+        }
+        el.process(CcInsert::CUE, cue_frame("LATE", 0, 1_000_000_000), &mut sink).await.unwrap();
+        el.process(CcInsert::VIDEO, PipelinePacket::Eos, &mut sink).await.unwrap();
+        el.process(CcInsert::CUE, PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        // No caption byte reached any access unit (every SEI is a null pair).
+        for f in &sink.aus {
+            let MemoryDomain::System(s) = &f.domain else { continue };
+            assert!(extract_cc_data(s.as_slice(), VideoCodec::H264).iter().all(|t| (t.b0 & 0x7F) == 0));
+        }
+        assert!(el.warned, "the silent caption drop is flagged");
     }
 }

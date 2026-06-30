@@ -765,8 +765,10 @@ fn extended_char_2(b1: u8) -> char {
 // ---------------------------------------------------------------------------
 
 /// The CEA-608 null / padding byte (odd parity of 0x00); the decoder masks the
-/// parity bit, reading it back as 0 (padding).
-const CC_NULL: u8 = 0x80;
+/// parity bit, reading it back as 0 (padding). A `(CC_NULL, CC_NULL)` pair is an
+/// idle frame (no caption byte), the value [`Cc608Enc::next_pair`] returns when its
+/// queue is empty.
+pub const CC_NULL: u8 = 0x80;
 
 /// Set odd parity on a 7-bit CEA-608 byte (the line-21 wire format; the decoder
 /// masks the parity bit off, so it is cosmetic for our own round trip but required
