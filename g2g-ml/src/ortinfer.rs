@@ -52,9 +52,13 @@ pub struct OrtInference {
     height: u32,
     /// Static output dims (a dynamic leading batch dim coerced to 1).
     out_shape: Vec<u32>,
-    /// When set, the input pad is a preprocessed f32 NCHW `Caps::Tensor` fed
-    /// straight to the session, not RGBA normalized on the CPU.
+    /// When set, the input pad is a preprocessed NCHW `Caps::Tensor` fed straight
+    /// to the session, not RGBA normalized on the CPU.
     tensor_input: bool,
+    /// The model's input element type: `F32` (the RGBA / f32-tensor path) or `U8`
+    /// / `I8` (a quantized model, fed an integer tensor straight through, M442 the
+    /// `TensorConvert::quantize` output). RGBA mode requires `F32`.
+    input_dtype: TensorDType,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -161,7 +165,11 @@ impl OrtInference {
         let [output] = session.outputs() else {
             return Err(G2gError::CapsMismatch);
         };
-        let (input_name, in_dims) = (input.name().to_owned(), f32_tensor_dims(input.dtype())?);
+        // The input may be f32 (RGBA / f32-tensor path) or quantized u8 / i8 (a
+        // quantized model fed an integer tensor). The output is always f32 (a
+        // quantized model dequantizes before its output).
+        let (input_name, (in_dims, input_dtype)) =
+            (input.name().to_owned(), input_tensor_dims(input.dtype())?);
         let (output_name, out_dims) = (output.name().to_owned(), f32_tensor_dims(output.dtype())?);
 
         // input must be [N, 3, H, W] with static H/W; N may be dynamic.
@@ -182,6 +190,7 @@ impl OrtInference {
             height: h as u32,
             out_shape,
             tensor_input: false,
+            input_dtype,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -215,7 +224,9 @@ impl OrtInference {
     fn supported_input(&self) -> Caps {
         if self.tensor_input {
             Caps::Tensor {
-                dtype: TensorDType::F32,
+                // The model's own input dtype: f32, or u8 / i8 for a quantized
+                // model fed an already-quantized tensor (M442).
+                dtype: self.input_dtype,
                 shape: TensorShape(vec![1, 3, self.height, self.width]),
                 layout: TensorLayout::Nchw,
             }
@@ -300,6 +311,41 @@ impl OrtInference {
         }
         Ok((bytes.into_boxed_slice(), dims))
     }
+
+    /// Feed an already-quantized u8 / i8 NCHW `[1, 3, H, W]` tensor straight to the
+    /// session (the quantized-model tensor-input path, M442): one byte per element,
+    /// no normalize. The bytes are the integer tensor values (i8 reinterpreted from
+    /// the byte). Returns the (f32) output, like [`run_chw`](Self::run_chw).
+    fn infer_tensor_int(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
+        let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+        if bytes.len() < n {
+            return Err(G2gError::CapsMismatch);
+        }
+        let (iw, ih) = (self.width as i64, self.height as i64);
+        let shape = vec![1i64, 3, ih, iw];
+        let outputs = match self.input_dtype {
+            TensorDType::U8 => {
+                let t = Tensor::from_array((shape, bytes[..n].to_vec())).map_err(ort_err)?;
+                self.session.run(::ort::inputs![self.input_name.as_str() => t]).map_err(ort_err)?
+            }
+            TensorDType::I8 => {
+                let data: Vec<i8> = bytes[..n].iter().map(|&b| b as i8).collect();
+                let t = Tensor::from_array((shape, data)).map_err(ort_err)?;
+                self.session.run(::ort::inputs![self.input_name.as_str() => t]).map_err(ort_err)?
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        };
+        let value = outputs.get(self.output_name.as_str()).ok_or(G2gError::Hardware(HardwareError::Other))?;
+        let (out_shape, out_data) = value.try_extract_tensor::<f32>().map_err(ort_err)?;
+        let dims: Vec<u32> = out_shape.iter().map(|d| (*d).max(0) as u32).collect();
+        let mut out_bytes = Vec::with_capacity(out_data.len() * 4);
+        for v in out_data {
+            out_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        Ok((out_bytes.into_boxed_slice(), dims))
+    }
 }
 
 impl AsyncElement for OrtInference {
@@ -327,6 +373,11 @@ impl AsyncElement for OrtInference {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // RGBA mode normalizes to f32, so it only feeds an f32 model; a quantized
+        // (u8 / i8) model must take a pre-quantized tensor via `with_tensor_input`.
+        if !self.tensor_input && self.input_dtype != TensorDType::F32 {
+            return Err(G2gError::CapsMismatch);
+        }
         absolute_caps.intersect(&self.supported_input())?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -347,7 +398,11 @@ impl AsyncElement for OrtInference {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     let (bytes, dims) = if self.tensor_input {
-                        self.infer_tensor(slice.as_slice())?
+                        if self.input_dtype == TensorDType::F32 {
+                            self.infer_tensor(slice.as_slice())?
+                        } else {
+                            self.infer_tensor_int(slice.as_slice())?
+                        }
                     } else {
                         self.infer(slice.as_slice())?
                     };
@@ -399,6 +454,23 @@ fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
             shape,
             ..
         } => Ok(shape.to_vec()),
+        _ => Err(G2gError::CapsMismatch),
+    }
+}
+
+/// Dims and dtype of an input tensor: f32 (RGBA / f32-tensor path) or a quantized
+/// u8 / i8 (a quantized model's integer input, M442). Other value types reject.
+fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDType), G2gError> {
+    match dtype {
+        ValueType::Tensor { ty, shape, .. } => {
+            let dt = match ty {
+                TensorElementType::Float32 => TensorDType::F32,
+                TensorElementType::Uint8 => TensorDType::U8,
+                TensorElementType::Int8 => TensorDType::I8,
+                _ => return Err(G2gError::CapsMismatch),
+            };
+            Ok((shape.to_vec(), dt))
+        }
         _ => Err(G2gError::CapsMismatch),
     }
 }

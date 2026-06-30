@@ -303,3 +303,51 @@ async fn tensor_input_mode_feeds_preprocessed_tensor_directly() {
         .expect("one tensor frame");
     assert_eq!(values, input);
 }
+
+#[tokio::test]
+async fn uint8_tensor_input_runs_a_quantized_model() {
+    // M442: a quantized model has a uint8 input; OrtInference feeds the integer
+    // tensor straight through (no f32 normalize). Uses the committed uint8-input
+    // QDQ Conv->ReLU fixture; on the CPU EP here it proves the integer-input path
+    // (the Edge TPU placement is the on-device probe's job).
+    let model = include_bytes!("fixtures/qconv_relu_u8in.onnx");
+    let mut inf = OrtInference::from_memory(model).expect("uint8 model loads").with_tensor_input();
+    assert_eq!(inf.input_dims(), (4, 4));
+
+    // The input pad is a uint8 NCHW tensor; an f32 tensor (or RGBA) is rejected.
+    let u8_caps = Caps::Tensor {
+        dtype: TensorDType::U8,
+        shape: TensorShape(vec![1, 3, 4, 4]),
+        layout: TensorLayout::Nchw,
+    };
+    assert_eq!(inf.intercept_caps(&u8_caps), Ok(u8_caps.clone()));
+    let f32_caps = Caps::Tensor {
+        dtype: TensorDType::F32,
+        shape: TensorShape(vec![1, 3, 4, 4]),
+        layout: TensorLayout::Nchw,
+    };
+    assert_eq!(inf.intercept_caps(&f32_caps), Err(G2gError::CapsMismatch));
+    inf.configure_pipeline(&u8_caps).expect("configure");
+
+    // 48 uint8 elements ([1,3,4,4]), one byte each (pre-quantized pixel-like data).
+    let data: Vec<u8> = (0..48u16).map(|i| (i * 5) as u8).collect();
+    let mut sink = Collect::default();
+    inf.process(PipelinePacket::DataFrame(rgba_frame(data, 0)), &mut sink)
+        .await
+        .expect("uint8 tensor frame runs");
+
+    let out: Vec<f32> = sink
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => {
+                let MemoryDomain::System(slice) = &f.domain else { return None };
+                Some(slice.as_slice().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+            }
+            _ => None,
+        })
+        .expect("one tensor frame");
+    // Output is [1,4,4,4] = 64 floats, post-ReLU so non-negative.
+    assert_eq!(out.len(), 64);
+    assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0));
+}
