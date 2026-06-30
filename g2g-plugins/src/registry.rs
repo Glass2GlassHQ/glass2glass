@@ -256,6 +256,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
         Box::new(TextOverlay::new())
     }));
+    // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
+    // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
+    // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.
+    reg.register_launch(LaunchFactory::of::<crate::ccextract::CcExtract>("ccextract", || {
+        Box::new(crate::ccextract::CcExtract::new())
+    }));
     // Detection-box overlay (M102): draws the frame's `AnalyticsMeta` bounding
     // boxes onto the RGBA frame, so a detector's output is visible downstream
     // (e.g. `... ! analyticsoverlay ! videoconvert ! autovideosink`). No pad

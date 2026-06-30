@@ -1323,7 +1323,7 @@ mod tests {
         if data.len() % 2 == 0 {
             data.push(0x00); // pad so data_size is odd (= size_code * 2 - 1)
         }
-        let size_code = ((data.len() + 1) / 2) as u8;
+        let size_code = data.len().div_ceil(2) as u8;
         let mut pkt = vec![size_code & 0x3F]; // sequence 0
         pkt.extend_from_slice(&data);
         pkt
