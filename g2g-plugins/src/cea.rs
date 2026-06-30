@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use g2g_core::VideoCodec;
 
 use crate::annexb::{h264_nal_type, h265_nal_type, nal_units_any, strip_emulation_prevention};
-use crate::subparse::{Cue, CueSettings};
+use crate::subparse::{Cue, CueSettings, TextAlign};
 
 /// One closed-caption byte triple extracted from a `cc_data` block: a two-bit
 /// `cc_type` and the two caption data bytes. `cc_type` 0/1 select CEA-608 line-21
@@ -159,9 +159,46 @@ fn parse_user_data_registered(p: &[u8], out: &mut Vec<CcTriple>) {
 
 /// The visible row count of a CEA-608 caption grid (rows 1..=15).
 const ROWS: usize = 15;
+/// The visible column count of a CEA-608 caption row.
+const COLS: usize = 32;
 
-/// Caption presentation mode. M426 decodes pop-on; roll-up and paint-on are
-/// recognised enough to switch mode but their scrolling is layered on in M427.
+/// Which of the four CEA-608 caption services to decode. Each line-21 field
+/// carries two interleaved channels selected by the channel bit of the control
+/// codes: CC1 / CC2 ride field 1 (`cc_type` 0), CC3 / CC4 field 2 (`cc_type` 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cea608Channel {
+    /// Field 1, channel 1 (the primary captions).
+    #[default]
+    Cc1,
+    /// Field 1, channel 2.
+    Cc2,
+    /// Field 2, channel 1.
+    Cc3,
+    /// Field 2, channel 2.
+    Cc4,
+}
+
+impl Cea608Channel {
+    /// The line-21 field (`cc_type`) this channel rides: 0 for CC1/CC2, 1 for CC3/CC4.
+    pub fn field(self) -> u8 {
+        match self {
+            Cea608Channel::Cc1 | Cea608Channel::Cc2 => 0,
+            Cea608Channel::Cc3 | Cea608Channel::Cc4 => 1,
+        }
+    }
+
+    /// The in-field channel number (1 or 2) the control-code channel bit selects.
+    fn channel(self) -> u8 {
+        match self {
+            Cea608Channel::Cc1 | Cea608Channel::Cc3 => 1,
+            Cea608Channel::Cc2 | Cea608Channel::Cc4 => 2,
+        }
+    }
+}
+
+/// Caption presentation mode, set by the misc-control commands: pop-on loads a
+/// hidden back buffer flipped on by EOC; roll-up types into the displayed window
+/// and scrolls on CR; paint-on writes directly to the displayed buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     PopOn,
@@ -169,31 +206,98 @@ enum Mode {
     PaintOn,
 }
 
-/// A caption currently on screen: its rows, the running time it appeared, and its
-/// placement. Held until the next display flips or an erase clears it, at which
-/// point it is finalized into a [`Cue`] with the end time.
+/// A 15x32 character grid (the CEA-608 safe-caption area); empty cells are spaces.
 #[derive(Debug, Clone)]
-struct Displayed {
-    rows: [String; ROWS],
-    start_ns: u64,
-    settings: CueSettings,
+struct Screen {
+    rows: [[char; COLS]; ROWS],
 }
 
-/// A CEA-608 line-21 caption decoder (M426: field 1, channel CC1, pop-on mode,
-/// basic North-American character set). Feed it the `(cc_data_1, cc_data_2)` byte
-/// pairs of `cc_type` 0 in presentation order via [`Cea608::push_pair`]; finished
-/// cues accumulate and are drained with [`Cea608::take_cues`].
+impl Screen {
+    fn new() -> Self {
+        Self { rows: [[' '; COLS]; ROWS] }
+    }
+
+    fn clear(&mut self) {
+        self.rows = [[' '; COLS]; ROWS];
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.iter().all(|r| r.iter().all(|&c| c == ' '))
+    }
+
+    /// Join the non-blank rows top-to-bottom into cue text (each row's leading and
+    /// trailing padding trimmed; block placement is carried in [`Screen::settings`]).
+    fn text(&self) -> String {
+        let mut out = String::new();
+        for r in &self.rows {
+            let line: String = r.iter().collect();
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(trimmed);
+        }
+        out
+    }
+
+    /// Derive cue placement: vertical from the topmost non-blank row, horizontal
+    /// from the smallest leading-space count, alignment left (CEA-608 is left-set).
+    fn settings(&self, color: Option<[u8; 4]>) -> CueSettings {
+        let mut first_row = None;
+        let mut min_indent = COLS;
+        for (i, r) in self.rows.iter().enumerate() {
+            let line: String = r.iter().collect();
+            if line.trim().is_empty() {
+                continue;
+            }
+            if first_row.is_none() {
+                first_row = Some(i);
+            }
+            let indent = line.len() - line.trim_start().len();
+            min_indent = min_indent.min(indent);
+        }
+        let line = first_row.map(|r| ((r as u32 * 100) / (ROWS as u32 - 1)) as u8);
+        let position = (min_indent < COLS).then(|| ((min_indent as u32 * 100) / COLS as u32) as u8);
+        CueSettings { position, line, align: TextAlign::Start, color, ..CueSettings::default() }
+    }
+}
+
+/// A CEA-608 line-21 caption decoder. Feed it the `(cc_data_1, cc_data_2)` byte
+/// pairs of its channel's field, in presentation order, via [`Cea608::push_pair`];
+/// finished cues accumulate and are drained with [`Cea608::take_cues`]. It decodes
+/// the chosen channel of the field (the other channel's codes are tracked but not
+/// rendered), pop-on / roll-up / paint-on modes, PAC row+indent positioning, the
+/// basic / special / extended-Western-European character sets, mid-row style
+/// codes, and colour.
 #[derive(Debug)]
 pub struct Cea608 {
+    /// The channel this decoder renders (CC1..CC4).
+    selected: Cea608Channel,
+    /// The channel the most recent control code addressed (1 or 2).
+    cur_channel: u8,
     mode: Mode,
-    /// The non-displayed (back) buffer pop-on captions are loaded into.
-    back: [String; ROWS],
-    /// The caption currently on screen, awaiting an end time.
-    front: Option<Displayed>,
+    /// The displayed (on-air) grid: roll-up / paint-on write here, EOC flips into it.
+    disp: Screen,
+    /// The non-displayed (back) grid pop-on captions load into.
+    back: Screen,
+    /// Running time the current displayed content began, for the next cue's start.
+    disp_start: Option<u64>,
+    /// Roll-up window height (2, 3, or 4 rows).
+    roll_rows: usize,
+    /// Roll-up base (bottom) row, 1-based.
+    base_row: usize,
+    /// Current write row (1..=15) and column (0..=31).
+    row: usize,
+    col: usize,
+    /// Current text colour (from a PAC / mid-row code), applied to finished cues.
+    color: Option<[u8; 4]>,
+    /// PTS of the pair currently being decoded (so writes can stamp `disp_start`).
+    cur_pts: u64,
     /// Last control pair, to drop the immediate doubled retransmission.
     last_ctrl: Option<(u8, u8)>,
-    /// Current write row (1..=15), set by a PAC.
-    row: usize,
     out: Vec<Cue>,
 }
 
@@ -204,14 +308,27 @@ impl Default for Cea608 {
 }
 
 impl Cea608 {
-    /// A fresh decoder in pop-on mode with empty buffers.
+    /// A fresh CC1 decoder in pop-on mode with empty buffers.
     pub fn new() -> Self {
+        Self::for_channel(Cea608Channel::Cc1)
+    }
+
+    /// A fresh decoder rendering `channel` (CC1..CC4).
+    pub fn for_channel(channel: Cea608Channel) -> Self {
         Self {
+            selected: channel,
+            cur_channel: channel.channel(),
             mode: Mode::PopOn,
-            back: core::array::from_fn(|_| String::new()),
-            front: None,
-            last_ctrl: None,
+            disp: Screen::new(),
+            back: Screen::new(),
+            disp_start: None,
+            roll_rows: 4,
+            base_row: 15,
             row: 15,
+            col: 0,
+            color: None,
+            cur_pts: 0,
+            last_ctrl: None,
             out: Vec::new(),
         }
     }
@@ -223,17 +340,20 @@ impl Cea608 {
 
     /// Finalize any on-screen caption at running time `end_ns` (call at EOS).
     pub fn flush(&mut self, end_ns: u64) {
-        self.finalize_front(end_ns);
+        self.snapshot(end_ns);
+        self.disp_start = None;
     }
 
-    /// Decode one field-1 `(cc_data_1, cc_data_2)` pair seen at running time
-    /// `pts_ns`. Parity bits are stripped; control codes are interpreted and
-    /// printable bytes written to the back buffer at the current row.
+    /// Decode one `(cc_data_1, cc_data_2)` pair seen at running time `pts_ns`. The
+    /// caller routes only this channel's field to it. Parity bits are stripped;
+    /// control codes set the channel context and are interpreted for the selected
+    /// channel, while printable bytes write to the active grid at the cursor.
     pub fn push_pair(&mut self, raw0: u8, raw1: u8, pts_ns: u64) {
+        self.cur_pts = pts_ns;
         let b0 = raw0 & 0x7F;
         let b1 = raw1 & 0x7F;
-        // A null pair (both 0 after parity strip) is padding.
         if b0 == 0 {
+            // A null first byte is padding.
             return;
         }
         if (0x10..=0x1F).contains(&b0) {
@@ -244,98 +364,185 @@ impl Cea608 {
                 return;
             }
             self.last_ctrl = Some((b0, b1));
-            self.handle_control(b0, b1, pts_ns);
+            // The 0x08 bit of the base byte selects channel 2; normalize to the
+            // channel-1 form for the command tables.
+            self.cur_channel = if b0 <= 0x17 { 1 } else { 2 };
+            let nb0 = if b0 >= 0x18 { b0 - 8 } else { b0 };
+            if self.cur_channel == self.selected.channel() {
+                self.handle_control(nb0, b1, pts_ns);
+            }
+        } else if b0 >= 0x20 && self.cur_channel == self.selected.channel() {
+            self.last_ctrl = None;
+            self.put_char(basic_char(b0));
+            if b1 >= 0x20 {
+                self.put_char(basic_char(b1));
+            }
         } else {
             self.last_ctrl = None;
-            self.write_char(b0);
-            if b1 >= 0x20 {
-                self.write_char(b1);
-            }
         }
     }
 
-    /// Interpret a control code pair. Recognises channel-1 PACs (row select) and
-    /// the misc-control commands that drive pop-on display (RCL / EOC / EDM /
-    /// ENM); mode-switch commands set the mode for later milestones.
+    /// Interpret a channel-normalized control pair: PAC (row + indent / style),
+    /// mid-row style, special / extended characters, tab offset, and the
+    /// misc-control commands.
     fn handle_control(&mut self, b0: u8, b1: u8, pts_ns: u64) {
-        // PAC: base byte in the channel-1 set with the second byte in 0x40..=0x7F.
-        if (0x40..=0x7F).contains(&b1) {
-            if let Some(row) = pac_row(b0, b1) {
-                self.row = row as usize;
-            }
-            return;
-        }
-        // Misc control: channel-1 base byte 0x14 (or its 0x15 alias) with the
-        // second byte in 0x20..=0x2F.
-        if matches!(b0, 0x14 | 0x15) && (0x20..=0x2F).contains(&b1) {
-            match b1 {
-                0x20 => self.mode = Mode::PopOn,                       // RCL
-                0x25..=0x27 => self.mode = Mode::RollUp,               // RU2/RU3/RU4
-                0x29 => self.mode = Mode::PaintOn,                     // RDC
-                0x2C => self.finalize_front(pts_ns),                  // EDM (erase displayed)
-                0x2E => self.clear_back(),                            // ENM (erase non-displayed)
-                0x2F => self.flip(pts_ns),                            // EOC (end of caption)
+        match b0 {
+            0x11 => match b1 {
+                0x20..=0x2F => self.mid_row(b1),
+                0x30..=0x3F => self.put_char(special_char(b1)),
+                0x40..=0x7F => self.pac(b0, b1),
                 _ => {}
+            },
+            0x12 => match b1 {
+                0x20..=0x3F => self.extended_char(extended_char_1(b1)),
+                0x40..=0x7F => self.pac(b0, b1),
+                _ => {}
+            },
+            0x13 => match b1 {
+                0x20..=0x3F => self.extended_char(extended_char_2(b1)),
+                0x40..=0x7F => self.pac(b0, b1),
+                _ => {}
+            },
+            0x14 => match b1 {
+                0x20..=0x2F => self.misc_control(b1, pts_ns),
+                0x40..=0x7F => self.pac(b0, b1),
+                _ => {}
+            },
+            0x17 => match b1 {
+                0x21..=0x23 => self.col = (self.col + (b1 - 0x20) as usize).min(COLS),
+                0x40..=0x7F => self.pac(b0, b1),
+                _ => {}
+            },
+            0x10 | 0x15 | 0x16 if (0x40..=0x7F).contains(&b1) => self.pac(b0, b1),
+            _ => {}
+        }
+    }
+
+    /// A Preamble Address Code: set the write row, then the column / colour from the
+    /// indent (`0x10` bit set) or style form of the second byte.
+    fn pac(&mut self, b0: u8, b1: u8) {
+        let Some(row) = pac_row(b0, b1) else { return };
+        self.row = row as usize;
+        if b1 & 0x10 != 0 {
+            // Indent form: columns in groups of four.
+            self.col = (((b1 & 0x0E) >> 1) as usize) * 4;
+        } else {
+            // Style form: the second byte selects the colour.
+            self.col = 0;
+            self.color = pac_color((b1 & 0x0E) >> 1);
+        }
+    }
+
+    /// A mid-row style code sets the colour and occupies one cell (a space).
+    fn mid_row(&mut self, b1: u8) {
+        self.color = pac_color((b1 & 0x0E) >> 1);
+        self.put_char(' ');
+    }
+
+    /// Misc-control command (`0x14`, second byte `0x20..=0x2F`).
+    fn misc_control(&mut self, b1: u8, pts_ns: u64) {
+        match b1 {
+            0x20 => self.mode = Mode::PopOn,                  // RCL: resume caption loading
+            0x21 => self.backspace(),                         // BS
+            0x25..=0x27 => {
+                // RU2/RU3/RU4: enter roll-up with a 2/3/4-row window at the base row.
+                self.mode = Mode::RollUp;
+                self.roll_rows = (b1 - 0x23) as usize;
+                self.base_row = ROWS;
+                self.row = ROWS;
+                self.col = 0;
             }
+            0x29 => self.mode = Mode::PaintOn,                // RDC: resume direct captioning
+            0x2C => {
+                // EDM: erase displayed memory.
+                self.snapshot(pts_ns);
+                self.disp.clear();
+                self.disp_start = None;
+            }
+            0x2D => self.carriage_return(pts_ns),             // CR
+            0x2E => self.back.clear(),                        // ENM: erase non-displayed memory
+            0x2F => self.end_of_caption(pts_ns),             // EOC
+            _ => {}
         }
     }
 
-    /// End-of-caption: show the loaded back buffer. The caption already on screen
-    /// ends now; the back buffer becomes the new displayed caption starting now.
-    fn flip(&mut self, pts_ns: u64) {
-        self.finalize_front(pts_ns);
-        let rows = core::mem::replace(&mut self.back, core::array::from_fn(|_| String::new()));
-        if rows.iter().any(|r| !r.is_empty()) {
-            self.front = Some(Displayed { rows, start_ns: pts_ns, settings: CueSettings::default() });
-        }
+    /// EOC: end the on-screen caption and flip the loaded back buffer into view.
+    fn end_of_caption(&mut self, now: u64) {
+        self.snapshot(now);
+        core::mem::swap(&mut self.disp, &mut self.back);
+        self.back.clear();
+        self.disp_start = (!self.disp.is_empty()).then_some(now);
     }
 
-    /// Finalize the on-screen caption into a cue ending at `end_ns`, if any.
-    fn finalize_front(&mut self, end_ns: u64) {
-        let Some(front) = self.front.take() else { return };
-        if end_ns <= front.start_ns {
+    /// CR (roll-up): emit the current window, scroll it up one row, and home the
+    /// cursor to the base row.
+    fn carriage_return(&mut self, now: u64) {
+        if self.mode != Mode::RollUp {
             return;
         }
-        let text = join_rows(&front.rows);
-        if text.is_empty() {
+        self.snapshot(now);
+        for r in 1..ROWS {
+            self.disp.rows[r - 1] = self.disp.rows[r];
+        }
+        self.disp.rows[ROWS - 1] = [' '; COLS];
+        self.col = 0;
+        self.row = self.base_row;
+        self.disp_start = (!self.disp.is_empty()).then_some(now);
+    }
+
+    /// Erase one cell to the left of the cursor.
+    fn backspace(&mut self) {
+        if self.col == 0 {
+            return;
+        }
+        self.col -= 1;
+        let r = self.row.clamp(1, ROWS) - 1;
+        match self.mode {
+            Mode::PopOn => self.back.rows[r][self.col] = ' ',
+            _ => self.disp.rows[r][self.col] = ' ',
+        }
+    }
+
+    /// An extended-character code overwrites the standard fallback glyph the encoder
+    /// sent just before it, so step the cursor back one cell before writing.
+    fn extended_char(&mut self, c: char) {
+        if self.col > 0 {
+            self.col -= 1;
+        }
+        self.put_char(c);
+    }
+
+    /// Write a glyph at the cursor of the active grid (back buffer in pop-on mode,
+    /// displayed buffer otherwise) and advance the column.
+    fn put_char(&mut self, c: char) {
+        let r = self.row.clamp(1, ROWS) - 1;
+        let col = self.col.min(COLS - 1);
+        match self.mode {
+            Mode::PopOn => self.back.rows[r][col] = c,
+            _ => {
+                if self.disp_start.is_none() {
+                    self.disp_start = Some(self.cur_pts);
+                }
+                self.disp.rows[r][col] = c;
+            }
+        }
+        self.col = (self.col + 1).min(COLS);
+    }
+
+    /// Push the current displayed content as a finished cue ending at `end_ns`, if
+    /// it is non-empty and has a known start time. Does not mutate the grid.
+    fn snapshot(&mut self, end_ns: u64) {
+        let Some(start) = self.disp_start else { return };
+        if end_ns <= start || self.disp.is_empty() {
             return;
         }
         self.out.push(Cue {
-            start_ns: front.start_ns,
+            start_ns: start,
             end_ns,
-            text,
-            settings: front.settings,
+            text: self.disp.text(),
+            settings: self.disp.settings(self.color),
         });
     }
-
-    fn clear_back(&mut self) {
-        for row in &mut self.back {
-            row.clear();
-        }
-    }
-
-    /// Append a basic-character-set glyph to the current back-buffer row.
-    fn write_char(&mut self, c: u8) {
-        let row = self.row.clamp(1, ROWS);
-        self.back[row - 1].push(basic_char(c));
-    }
-}
-
-/// Join the non-empty rows of a caption grid top-to-bottom with newlines, trimming
-/// trailing spaces from each row.
-fn join_rows(rows: &[String; ROWS]) -> String {
-    let mut out = String::new();
-    for row in rows {
-        let trimmed = row.trim_end();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(trimmed);
-    }
-    out
 }
 
 /// Map a CEA-608 Preamble Address Code to its 1-based row (1..=15) for data
@@ -358,6 +565,20 @@ fn pac_row(b0: u8, b1: u8) -> Option<u8> {
     Some(base + second)
 }
 
+/// Map a CEA-608 colour index (PAC / mid-row style bits) to an opaque RGBA, or
+/// `None` for white / italics (no override; the overlay uses its default).
+fn pac_color(idx: u8) -> Option<[u8; 4]> {
+    Some(match idx {
+        1 => [0, 255, 0, 255],     // green
+        2 => [0, 0, 255, 255],     // blue
+        3 => [0, 255, 255, 255],   // cyan
+        4 => [255, 0, 0, 255],     // red
+        5 => [255, 255, 0, 255],   // yellow
+        6 => [255, 0, 255, 255],   // magenta
+        _ => return None,          // 0 = white, 7 = italics
+    })
+}
+
 /// Map a CEA-608 basic North-American character byte (0x20..=0x7F, parity
 /// stripped) to its Unicode glyph. Most are ASCII; a handful of code points carry
 /// accented Latin letters and symbols per the standard.
@@ -375,6 +596,110 @@ fn basic_char(c: u8) -> char {
         0x7F => '█',
         // Printable ASCII passes through; anything else renders as a space.
         0x20..=0x7E => c as char,
+        _ => ' ',
+    }
+}
+
+/// Map a CEA-608 special North-American character (`0x11`, second byte
+/// `0x30..=0x3F`) to its glyph.
+fn special_char(b1: u8) -> char {
+    match b1 {
+        0x30 => '®',
+        0x31 => '°',
+        0x32 => '½',
+        0x33 => '¿',
+        0x34 => '™',
+        0x35 => '¢',
+        0x36 => '£',
+        0x37 => '♪',
+        0x38 => 'à',
+        0x39 => ' ', // transparent space
+        0x3A => 'è',
+        0x3B => 'â',
+        0x3C => 'ê',
+        0x3D => 'î',
+        0x3E => 'ô',
+        0x3F => 'û',
+        _ => ' ',
+    }
+}
+
+/// Map a CEA-608 extended Western-European character, set 1 (`0x12`, Spanish /
+/// French), second byte `0x20..=0x3F`, to its glyph.
+fn extended_char_1(b1: u8) -> char {
+    match b1 {
+        0x20 => 'Á',
+        0x21 => 'É',
+        0x22 => 'Ó',
+        0x23 => 'Ú',
+        0x24 => 'Ü',
+        0x25 => 'ü',
+        0x26 => '´',
+        0x27 => '¡',
+        0x28 => '*',
+        0x29 => '\'',
+        0x2A => '—',
+        0x2B => '©',
+        0x2C => '℠',
+        0x2D => '•',
+        0x2E => '“',
+        0x2F => '”',
+        0x30 => 'À',
+        0x31 => 'Â',
+        0x32 => 'Ç',
+        0x33 => 'È',
+        0x34 => 'Ê',
+        0x35 => 'Ë',
+        0x36 => 'ë',
+        0x37 => 'Î',
+        0x38 => 'Ï',
+        0x39 => 'ï',
+        0x3A => 'Ô',
+        0x3B => 'Ù',
+        0x3C => 'ù',
+        0x3D => 'Û',
+        0x3E => '«',
+        0x3F => '»',
+        _ => ' ',
+    }
+}
+
+/// Map a CEA-608 extended Western-European character, set 2 (`0x13`, Portuguese /
+/// German / Danish), second byte `0x20..=0x3F`, to its glyph.
+fn extended_char_2(b1: u8) -> char {
+    match b1 {
+        0x20 => 'Ã',
+        0x21 => 'ã',
+        0x22 => 'Í',
+        0x23 => 'Ì',
+        0x24 => 'ì',
+        0x25 => 'Ò',
+        0x26 => 'ò',
+        0x27 => 'Õ',
+        0x28 => 'õ',
+        0x29 => '{',
+        0x2A => '}',
+        0x2B => '\\',
+        0x2C => '^',
+        0x2D => '_',
+        0x2E => '|',
+        0x2F => '~',
+        0x30 => 'Ä',
+        0x31 => 'ä',
+        0x32 => 'Ö',
+        0x33 => 'ö',
+        0x34 => 'ß',
+        0x35 => '¥',
+        0x36 => '¤',
+        0x37 => '│',
+        0x38 => 'Å',
+        0x39 => 'å',
+        0x3A => 'Ø',
+        0x3B => 'ø',
+        0x3C => '┌',
+        0x3D => '┐',
+        0x3E => '└',
+        0x3F => '┘',
         _ => ' ',
     }
 }
@@ -499,5 +824,85 @@ mod tests {
         assert_eq!(pac_row(0x14, 0x60), Some(15));
         assert_eq!(pac_row(0x10, 0x40), Some(11));
         assert_eq!(pac_row(0x13, 0x60), Some(13));
+    }
+
+    #[test]
+    fn decodes_roll_up_scroll() {
+        let mut dec = Cea608::new();
+        dec.push_pair(parity(0x14), parity(0x25), 0); // RU2: roll-up, 2 rows
+        dec.push_pair(parity(b'A'), parity(b'B'), 100); // type "AB" on the base row
+        dec.push_pair(parity(0x14), parity(0x2D), 200); // CR: emit + scroll
+        dec.push_pair(parity(b'C'), parity(b'D'), 300); // type "CD" on the new base row
+        dec.flush(500);
+        let cues = dec.take_cues();
+        // First the lone base row, then the scrolled two-row window.
+        assert_eq!(cues.len(), 2);
+        assert_eq!(cues[0].text, "AB");
+        assert_eq!((cues[0].start_ns, cues[0].end_ns), (100, 200));
+        assert_eq!(cues[1].text, "AB\nCD");
+        assert_eq!((cues[1].start_ns, cues[1].end_ns), (200, 500));
+    }
+
+    #[test]
+    fn selects_only_the_requested_channel() {
+        let mut dec = Cea608::for_channel(Cea608Channel::Cc2);
+        // Channel-1 control + text (base byte 0x14) must be ignored by a CC2 decoder.
+        dec.push_pair(parity(0x14), parity(0x20), 0); // RCL on channel 1
+        dec.push_pair(parity(b'Z'), parity(b'Z'), 0); // channel-1 text
+        // Channel-2 control + text (base byte 0x1C = 0x14 | 0x08) is rendered.
+        dec.push_pair(parity(0x1C), parity(0x20), 0); // RCL on channel 2
+        dec.push_pair(parity(b'X'), parity(b'Y'), 0); // channel-2 text
+        dec.push_pair(parity(0x1C), parity(0x2F), 100); // EOC channel 2
+        dec.push_pair(parity(0x1C), parity(0x2C), 300); // EDM channel 2
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "XY");
+    }
+
+    #[test]
+    fn decodes_special_and_extended_characters() {
+        let mut dec = Cea608::new();
+        dec.push_pair(parity(0x14), parity(0x20), 0); // RCL
+        dec.push_pair(parity(0x11), parity(0x37), 0); // special char: music note
+        dec.push_pair(parity(b'E'), 0, 0); // fallback glyph for the extended char
+        dec.push_pair(parity(0x12), parity(0x33), 0); // extended set 1 0x33 -> 'È' (overwrites)
+        dec.push_pair(parity(0x14), parity(0x2F), 100); // EOC
+        dec.push_pair(parity(0x14), parity(0x2C), 300); // EDM
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "♪È");
+    }
+
+    #[test]
+    fn pac_indent_drives_position() {
+        let mut dec = Cea608::new();
+        dec.push_pair(parity(0x14), parity(0x20), 0); // RCL
+        // PAC row 3, indent form, column group 2 (= 8 columns): 0x40|0x10|0x04.
+        dec.push_pair(parity(0x12), parity(0x54), 0);
+        dec.push_pair(parity(b'H'), parity(b'I'), 0);
+        dec.push_pair(parity(0x14), parity(0x2F), 100); // EOC
+        dec.flush(500);
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "HI");
+        // Row 3 of 15 -> ~14% down; 8 of 32 columns -> 25% across; left-set.
+        assert_eq!(cues[0].settings.line, Some(14));
+        assert_eq!(cues[0].settings.position, Some(25));
+        assert_eq!(cues[0].settings.align, TextAlign::Start);
+    }
+
+    #[test]
+    fn extracts_field_two_triples_for_h265() {
+        // An H.265 prefix-SEI (NAL type 39, 2-byte header) carrying CC3/CC4 data.
+        let au = {
+            let base = h264_cc_sei(&[(1, 0x20, 0x21)]);
+            // Replace the H.264 NAL header (1 byte, type 6) with an H.265 prefix-SEI
+            // header (2 bytes: type 39 in bits 1..=6 of the first byte).
+            let mut v = vec![0x00, 0x00, 0x00, 0x01, 39 << 1, 0x01];
+            v.extend_from_slice(&base[5..]);
+            v
+        };
+        let triples = extract_cc_data(&au, VideoCodec::H265);
+        assert_eq!(triples, vec![CcTriple { cc_type: 1, b0: 0x20, b1: 0x21 }]);
     }
 }
