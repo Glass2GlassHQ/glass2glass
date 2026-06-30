@@ -69,6 +69,8 @@ pub mod textoverlay;
 pub mod cea;
 // Closed-caption extraction element: compressed video in, timed text cues out.
 pub mod ccextract;
+// Closed-caption insertion element: compressed video + cues in, SEI'd video out.
+pub mod ccinsert;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.

@@ -24,7 +24,10 @@ use alloc::vec::Vec;
 
 use g2g_core::VideoCodec;
 
-use crate::annexb::{h264_nal_type, h265_nal_type, nal_units_any, strip_emulation_prevention};
+use crate::annexb::{
+    add_emulation_prevention, h264_nal_type, h265_nal_type, nal_units_any,
+    strip_emulation_prevention,
+};
 use crate::subparse::{Cue, CueSettings, TextAlign};
 
 /// One closed-caption byte triple extracted from a `cc_data` block: a two-bit
@@ -74,6 +77,58 @@ pub fn extract_cc_data(au: &[u8], codec: VideoCodec) -> Vec<CcTriple> {
         parse_sei_messages(&rbsp, &mut out);
     }
     out
+}
+
+/// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`
+/// block, the inverse of [`extract_cc_data`]: the NAL an inserter prepends to an
+/// access unit so a downstream decoder (or TV) recovers the captions. The SEI RBSP
+/// is emulation-prevention escaped, and the NAL header is the codec's SEI form
+/// (H.264 type 6, one byte; H.265 prefix-SEI type 39, two bytes). Returns the NAL
+/// with a 4-byte start code. Up to 31 triples (the 5-bit `cc_count`); excess is
+/// truncated.
+pub fn build_cc_sei(triples: &[CcTriple], codec: VideoCodec) -> Vec<u8> {
+    let cc_count = triples.len().min(0x1F);
+    // user_data_registered_itu_t_t35 payload (ATSC1 cc_data).
+    let mut payload = Vec::with_capacity(9 + cc_count * 3);
+    payload.push(0xB5); // itu_t_t35_country_code: USA
+    payload.extend_from_slice(&[0x00, 0x31]); // provider_code: ATSC
+    payload.extend_from_slice(&[0x47, 0x41, 0x39, 0x34]); // user_identifier: GA94
+    payload.push(USER_DATA_TYPE_CC); // user_data_type_code: cc_data
+    payload.push(0xC0 | cc_count as u8); // reserved | process_cc_data_flag | cc_count
+    payload.push(0xFF); // em_data
+    for t in &triples[..cc_count] {
+        payload.push(0xF8 | 0x04 | (t.cc_type & 0x03)); // marker | cc_valid | cc_type
+        payload.push(t.b0);
+        payload.push(t.b1);
+    }
+    payload.push(0xFF); // marker_bits trailer
+
+    // SEI message: payloadType 4 (0xFF-extended), payloadSize (0xFF-extended), payload.
+    let mut rbsp = Vec::new();
+    write_ff_extended(&mut rbsp, 4); // user_data_registered_itu_t_t35
+    write_ff_extended(&mut rbsp, payload.len());
+    rbsp.extend_from_slice(&payload);
+    rbsp.push(0x80); // rbsp_trailing_bits
+
+    let mut nal = alloc::vec![0x00, 0x00, 0x00, 0x01];
+    match codec {
+        // H.265 prefix-SEI: nal_unit_type 39, layer 0, tid 1 -> 0x4E 0x01.
+        VideoCodec::H265 => nal.extend_from_slice(&[0x4E, 0x01]),
+        // H.264 SEI: nal_unit_type 6.
+        _ => nal.push(0x06),
+    }
+    nal.extend_from_slice(&add_emulation_prevention(&rbsp));
+    nal
+}
+
+/// Write an SEI `0xFF`-extended value (the inverse of [`read_ff_extended`]): a run
+/// of `0xFF` bytes each worth 255, then the remainder.
+fn write_ff_extended(out: &mut Vec<u8>, mut value: usize) {
+    while value >= 0xFF {
+        out.push(0xFF);
+        value -= 0xFF;
+    }
+    out.push(value as u8);
 }
 
 /// Walk the SEI messages of one SEI RBSP, appending the `cc_data` triples of any
@@ -1309,6 +1364,19 @@ mod tests {
                 CcTriple { cc_type: 0, b0: 0x56, b1: 0x78 },
             ]
         );
+    }
+
+    #[test]
+    fn build_cc_sei_round_trips_through_extract() {
+        // The SEI builder is the inverse of the extractor, for both codecs.
+        let triples = [
+            CcTriple { cc_type: 0, b0: 0x94, b1: 0x20 },
+            CcTriple { cc_type: 0, b0: 0xC8, b1: 0xC9 },
+        ];
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let nal = build_cc_sei(&triples, codec);
+            assert_eq!(extract_cc_data(&nal, codec), triples, "{codec:?} SEI round trips");
+        }
     }
 
     #[test]
