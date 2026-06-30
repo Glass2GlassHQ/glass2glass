@@ -704,6 +704,408 @@ fn extended_char_2(b1: u8) -> char {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CEA-708 (DTVCC)
+// ---------------------------------------------------------------------------
+
+/// The maximum number of CEA-708 caption windows.
+const NUM_WINDOWS: usize = 8;
+
+/// One CEA-708 caption window: a defined region with its own anchor / size, pen
+/// position, and a character grid. Text is written into the current window at the
+/// pen; the window is shown / hidden by the DisplayWindows family of commands.
+#[derive(Debug, Clone)]
+struct Window {
+    defined: bool,
+    visible: bool,
+    priority: u8,
+    /// Vertical / horizontal placement as a percent (0..=100), resolved at define
+    /// time from the anchor (absolute or relative).
+    line_pct: u8,
+    pos_pct: u8,
+    pen_row: usize,
+    pen_col: usize,
+    /// `row_count` x `col_count` character cells; empty cells are spaces.
+    grid: Vec<Vec<char>>,
+}
+
+impl Window {
+    fn new() -> Self {
+        Self {
+            defined: false,
+            visible: false,
+            priority: 0,
+            line_pct: 0,
+            pos_pct: 0,
+            pen_row: 0,
+            pen_col: 0,
+            grid: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.grid.iter().all(|r| r.iter().all(|&c| c == ' '))
+    }
+
+    /// The window's visible text, blank rows dropped and each row trimmed.
+    fn text(&self) -> String {
+        let mut out = String::new();
+        for row in &self.grid {
+            let line: String = row.iter().collect();
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(trimmed);
+        }
+        out
+    }
+}
+
+/// A CEA-708 DTVCC caption decoder for one service (service 1 by default). Feed it
+/// the `cc_type` 2 / 3 caption triples in order via [`Cea708::push_triple`]: it
+/// reassembles the DTVCC packets, splits them into service blocks, runs the
+/// chosen service's window / pen command stream, and emits a [`Cue`] each time the
+/// displayed window set changes. The window command set (DefineWindow,
+/// SetCurrentWindow, the DisplayWindows family, SetPenLocation, pen / window
+/// attributes) drives positioning; G0 / G1 bytes are the text.
+#[derive(Debug)]
+pub struct Cea708 {
+    /// The service number to render (1 = primary caption service).
+    service: u8,
+    /// The DTVCC packet being reassembled (header byte first).
+    buf: Vec<u8>,
+    /// PTS of the packet's start triple, the time its commands take effect.
+    pts: u64,
+    windows: [Window; NUM_WINDOWS],
+    current_window: usize,
+    /// The text currently on screen (joined visible windows) with its start time
+    /// and placement, awaiting the change that ends it.
+    shown: Option<(String, u64, CueSettings)>,
+    out: Vec<Cue>,
+}
+
+impl Default for Cea708 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Cea708 {
+    /// A fresh decoder rendering service 1.
+    pub fn new() -> Self {
+        Self::for_service(1)
+    }
+
+    /// A fresh decoder rendering `service` (1 = primary, 2 = secondary, ...).
+    pub fn for_service(service: u8) -> Self {
+        Self {
+            service,
+            buf: Vec::new(),
+            pts: 0,
+            windows: core::array::from_fn(|_| Window::new()),
+            current_window: 0,
+            shown: None,
+            out: Vec::new(),
+        }
+    }
+
+    /// Take the cues finished so far, leaving the decoder ready for more triples.
+    pub fn take_cues(&mut self) -> Vec<Cue> {
+        core::mem::take(&mut self.out)
+    }
+
+    /// Finalize any on-screen caption at running time `end_ns` (call at EOS).
+    pub fn flush(&mut self, end_ns: u64) {
+        if let Some((text, start, settings)) = self.shown.take() {
+            if end_ns > start && !text.is_empty() {
+                self.out.push(Cue { start_ns: start, end_ns, text, settings });
+            }
+        }
+    }
+
+    /// Feed one caption triple. `cc_type` 3 starts a new DTVCC packet and 2
+    /// continues it; 0 / 1 (CEA-608) are ignored. A completed packet is decoded.
+    pub fn push_triple(&mut self, cc_type: u8, b0: u8, b1: u8, pts_ns: u64) {
+        match cc_type {
+            3 => {
+                // A new packet starts; abandon any incomplete one.
+                self.buf.clear();
+                self.pts = pts_ns;
+                self.buf.push(b0);
+                self.buf.push(b1);
+            }
+            2 => {
+                if self.buf.is_empty() {
+                    return;
+                }
+                self.buf.push(b0);
+                self.buf.push(b1);
+            }
+            _ => return,
+        }
+        self.try_decode_packet();
+    }
+
+    /// Decode the reassembled packet once enough bytes have arrived. The header
+    /// byte's `packet_size_code` gives the data length; the data is a sequence of
+    /// service blocks.
+    fn try_decode_packet(&mut self) {
+        let Some(&header) = self.buf.first() else { return };
+        let size_code = header & 0x3F;
+        let data_size = if size_code == 0 { 127 } else { size_code as usize * 2 - 1 };
+        let total = 1 + data_size;
+        if self.buf.len() < total {
+            return;
+        }
+        let now = self.pts;
+        let data: Vec<u8> = self.buf[1..total].to_vec();
+        self.buf.clear();
+        self.decode_service_blocks(&data, now);
+        self.update_display(now);
+    }
+
+    /// Split a packet's data into service blocks and run the selected service's.
+    fn decode_service_blocks(&mut self, data: &[u8], now: u64) {
+        let mut i = 0;
+        while i < data.len() {
+            let hdr = data[i];
+            i += 1;
+            let mut service = (hdr >> 5) & 0x07;
+            let block_size = (hdr & 0x1F) as usize;
+            if service == 0 {
+                // NULL service block: end of the packet's blocks.
+                break;
+            }
+            if service == 7 {
+                // Extended service number in the next byte.
+                let Some(&ext) = data.get(i) else { break };
+                i += 1;
+                service = ext & 0x3F;
+            }
+            let end = (i + block_size).min(data.len());
+            if service == self.service {
+                self.run_service(&data[i..end], now);
+            }
+            i = end;
+        }
+    }
+
+    /// Run a service block's command stream against the window model.
+    fn run_service(&mut self, block: &[u8], now: u64) {
+        let mut i = 0;
+        while i < block.len() {
+            let c = block[i];
+            match c {
+                // C0 control codes (1 / 2 / 3 bytes by range).
+                0x00..=0x1F => {
+                    self.handle_c0(c);
+                    i += match c {
+                        0x00..=0x0F => 1,
+                        0x10..=0x17 => 2,
+                        _ => 3,
+                    };
+                }
+                // G0: ASCII, with 0x7F the music note.
+                0x20..=0x7F => {
+                    self.put_char(if c == 0x7F { '♪' } else { c as char });
+                    i += 1;
+                }
+                // C1 caption commands (length by code).
+                0x80..=0x9F => {
+                    let len = c1_len(c);
+                    let params = &block[(i + 1).min(block.len())..(i + len).min(block.len())];
+                    self.handle_c1(c, params, now);
+                    i += len;
+                }
+                // G1: ISO 8859-1 Latin-1.
+                0xA0..=0xFF => {
+                    self.put_char(c as char);
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// Handle a C0 control code (only the layout-affecting ones matter here).
+    fn handle_c0(&mut self, c: u8) {
+        let w = &mut self.windows[self.current_window];
+        match c {
+            0x08 => w.pen_col = w.pen_col.saturating_sub(1), // BS
+            0x0C => {
+                // FF: clear the window and home the pen.
+                for row in &mut w.grid {
+                    row.iter_mut().for_each(|cell| *cell = ' ');
+                }
+                w.pen_row = 0;
+                w.pen_col = 0;
+            }
+            0x0D => {
+                // CR: next row, first column.
+                w.pen_row += 1;
+                w.pen_col = 0;
+            }
+            0x0E => w.pen_col = 0, // HCR: home the pen on the current row
+            _ => {}
+        }
+    }
+
+    /// Handle a C1 caption command.
+    fn handle_c1(&mut self, c: u8, params: &[u8], _now: u64) {
+        match c {
+            0x80..=0x87 => self.current_window = (c & 0x07) as usize, // CWx
+            0x88 => self.for_each_window(params, |w| w.grid.iter_mut().for_each(|r| r.iter_mut().for_each(|c| *c = ' '))), // CLW
+            0x89 => self.for_each_window(params, |w| w.visible = true),  // DSW
+            0x8A => self.for_each_window(params, |w| w.visible = false), // HDW
+            0x8B => self.for_each_window(params, |w| w.visible = !w.visible), // TGW
+            0x8C => self.for_each_window(params, |w| {
+                *w = Window::new();
+            }), // DLW
+            0x8F => self.windows = core::array::from_fn(|_| Window::new()), // RST
+            0x92 => self.set_pen_location(params),                       // SPL
+            0x98..=0x9F => self.define_window((c & 0x07) as usize, params), // DFx
+            // CLW/DSW/... handled above; DLY/DLC/SPA/SPC/SWA carry no text effect here.
+            _ => {}
+        }
+    }
+
+    /// Apply `f` to each window whose bit is set in the 1-byte window bitmap.
+    fn for_each_window(&mut self, params: &[u8], f: impl Fn(&mut Window)) {
+        let Some(&bitmap) = params.first() else { return };
+        for (i, w) in self.windows.iter_mut().enumerate() {
+            if bitmap & (1 << i) != 0 {
+                f(w);
+            }
+        }
+    }
+
+    /// SetPenLocation: move the current window's pen to `(row, column)`.
+    fn set_pen_location(&mut self, params: &[u8]) {
+        if params.len() < 2 {
+            return;
+        }
+        let w = &mut self.windows[self.current_window];
+        w.pen_row = (params[0] & 0x0F) as usize;
+        w.pen_col = (params[1] & 0x3F) as usize;
+    }
+
+    /// DefineWindow: set the window's visibility, anchor (resolved to percent),
+    /// size, priority, and allocate its grid; make it the current window.
+    fn define_window(&mut self, id: usize, p: &[u8]) {
+        if p.len() < 6 {
+            return;
+        }
+        let visible = p[0] & 0x20 != 0;
+        let priority = p[0] & 0x07;
+        let relative = p[1] & 0x80 != 0;
+        let anchor_v = p[1] & 0x7F;
+        let anchor_h = p[2];
+        let row_count = ((p[3] & 0x0F) as usize) + 1;
+        let col_count = ((p[4] & 0x3F) as usize) + 1;
+        // Resolve the anchor to a percent of the safe area (absolute ranges are
+        // 0..=74 vertical, 0..=209 horizontal; relative anchors are already 0..=99).
+        let line_pct = if relative {
+            anchor_v.min(100)
+        } else {
+            ((anchor_v as u32 * 100) / 74).min(100) as u8
+        };
+        let pos_pct = if relative {
+            anchor_h.min(100)
+        } else {
+            ((anchor_h as u32 * 100) / 209).min(100) as u8
+        };
+        self.windows[id] = Window {
+            defined: true,
+            visible,
+            priority,
+            line_pct,
+            pos_pct,
+            pen_row: 0,
+            pen_col: 0,
+            grid: alloc::vec![alloc::vec![' '; col_count]; row_count],
+        };
+        self.current_window = id;
+    }
+
+    /// Write a glyph into the current window at the pen and advance the column.
+    fn put_char(&mut self, ch: char) {
+        let w = &mut self.windows[self.current_window];
+        if !w.defined {
+            return;
+        }
+        if let Some(row) = w.grid.get_mut(w.pen_row) {
+            if let Some(cell) = row.get_mut(w.pen_col) {
+                *cell = ch;
+            }
+            w.pen_col += 1;
+        }
+    }
+
+    /// Recompute the displayed text from the visible windows and, if it changed,
+    /// finalize the previous caption (ending now) and start the new one.
+    fn update_display(&mut self, now: u64) {
+        let new = self.visible_text();
+        let changed = new.as_ref().map(|(t, _)| t) != self.shown.as_ref().map(|(t, _, _)| t);
+        if !changed {
+            return;
+        }
+        if let Some((text, start, settings)) = self.shown.take() {
+            if now > start && !text.is_empty() {
+                self.out.push(Cue { start_ns: start, end_ns: now, text, settings });
+            }
+        }
+        self.shown = new.map(|(text, settings)| (text, now, settings));
+    }
+
+    /// Join the text of the visible, non-empty windows (top-to-bottom by anchor,
+    /// then priority) and derive placement from the topmost window.
+    fn visible_text(&self) -> Option<(String, CueSettings)> {
+        let mut wins: Vec<&Window> = self
+            .windows
+            .iter()
+            .filter(|w| w.defined && w.visible && !w.is_empty())
+            .collect();
+        if wins.is_empty() {
+            return None;
+        }
+        wins.sort_by_key(|w| (w.line_pct, w.priority));
+        let mut text = String::new();
+        for w in &wins {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&w.text());
+        }
+        let top = wins[0];
+        let settings = CueSettings {
+            line: Some(top.line_pct),
+            position: Some(top.pos_pct),
+            align: TextAlign::Start,
+            ..CueSettings::default()
+        };
+        Some((text, settings))
+    }
+}
+
+/// Total length in bytes (command + parameters) of a CEA-708 C1 caption command.
+fn c1_len(code: u8) -> usize {
+    match code {
+        0x80..=0x87 => 1, // CW0-CW7
+        0x88..=0x8D => 2, // CLW / DSW / HDW / TGW / DLW / DLY (1 param)
+        0x8E | 0x8F => 1, // DLC / RST
+        0x90 => 3,        // SPA (2 params)
+        0x91 => 4,        // SPC (3 params)
+        0x92 => 3,        // SPL (2 params)
+        0x93..=0x96 => 1, // reserved
+        0x97 => 5,        // SWA (4 params)
+        0x98..=0x9F => 7, // DF0-DF7 (6 params)
+        _ => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,5 +1306,118 @@ mod tests {
         };
         let triples = extract_cc_data(&au, VideoCodec::H265);
         assert_eq!(triples, vec![CcTriple { cc_type: 1, b0: 0x20, b1: 0x21 }]);
+    }
+
+    /// Wrap service-block command bytes for `service` in a DTVCC service-block
+    /// header.
+    fn service_block(service: u8, data: &[u8]) -> Vec<u8> {
+        let mut v = vec![((service & 0x07) << 5) | (data.len() as u8 & 0x1F)];
+        v.extend_from_slice(data);
+        v
+    }
+
+    /// Wrap concatenated service blocks in a DTVCC packet (header byte +
+    /// odd-length-padded data) ready to split into caption triples.
+    fn dtvcc_packet(blocks: &[u8]) -> Vec<u8> {
+        let mut data = blocks.to_vec();
+        if data.len() % 2 == 0 {
+            data.push(0x00); // pad so data_size is odd (= size_code * 2 - 1)
+        }
+        let size_code = ((data.len() + 1) / 2) as u8;
+        let mut pkt = vec![size_code & 0x3F]; // sequence 0
+        pkt.extend_from_slice(&data);
+        pkt
+    }
+
+    /// Feed a DTVCC packet to the decoder as caption triples (first pair `cc_type`
+    /// 3, the rest `cc_type` 2), all stamped `pts`.
+    fn feed(dec: &mut Cea708, pkt: &[u8], pts: u64) {
+        let mut i = 0;
+        let mut first = true;
+        while i < pkt.len() {
+            let b0 = pkt[i];
+            let b1 = if i + 1 < pkt.len() { pkt[i + 1] } else { 0 };
+            dec.push_triple(if first { 3 } else { 2 }, b0, b1, pts);
+            first = false;
+            i += 2;
+        }
+    }
+
+    /// DefineWindow params: hidden, absolute anchor `(v, h)`, `rows` x `cols`.
+    fn define_params(visible: bool, v: u8, h: u8, rows: u8, cols: u8) -> [u8; 6] {
+        [
+            if visible { 0x20 } else { 0x00 },
+            v & 0x7F,
+            h,
+            (rows - 1) & 0x0F,
+            (cols - 1) & 0x3F,
+            0x00,
+        ]
+    }
+
+    #[test]
+    fn decodes_a_708_window_caption() {
+        let mut dec = Cea708::new();
+        // Packet 1: DefineWindow 0 (hidden, anchor v=72), write "HI", DisplayWindows.
+        let p = define_params(false, 72, 0, 3, 32);
+        let mut cmds = vec![0x98]; // DF0
+        cmds.extend_from_slice(&p);
+        cmds.extend_from_slice(b"HI");
+        cmds.extend_from_slice(&[0x89, 0x01]); // DSW window 0
+        feed(&mut dec, &dtvcc_packet(&service_block(1, &cmds)), 1000);
+        // Packet 2: HideWindows 0 -> ends the caption.
+        feed(&mut dec, &dtvcc_packet(&service_block(1, &[0x8A, 0x01])), 5000);
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "HI");
+        assert_eq!((cues[0].start_ns, cues[0].end_ns), (1000, 5000));
+        // Anchor v=72 of 74 -> ~97% down the safe area.
+        assert_eq!(cues[0].settings.line, Some(97));
+    }
+
+    #[test]
+    fn set_pen_location_lays_out_rows() {
+        let mut dec = Cea708::new();
+        let p = define_params(true, 60, 0, 2, 32);
+        let mut cmds = vec![0x98]; // DF0 (visible)
+        cmds.extend_from_slice(&p);
+        cmds.extend_from_slice(b"AB");
+        cmds.extend_from_slice(&[0x92, 0x01, 0x00]); // SPL row 1, col 0
+        cmds.extend_from_slice(b"CD");
+        feed(&mut dec, &dtvcc_packet(&service_block(1, &cmds)), 100);
+        dec.flush(900);
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "AB\nCD");
+    }
+
+    #[test]
+    fn ignores_other_services() {
+        // A service-1 decoder must not render a service-2 block.
+        let mut dec = Cea708::new();
+        let p = define_params(true, 70, 0, 1, 32);
+        let mut cmds = vec![0x98];
+        cmds.extend_from_slice(&p);
+        cmds.extend_from_slice(b"NO");
+        feed(&mut dec, &dtvcc_packet(&service_block(2, &cmds)), 100);
+        dec.flush(900);
+        assert!(dec.take_cues().is_empty());
+    }
+
+    #[test]
+    fn reassembles_packet_across_triples() {
+        // A packet split over several cc_type-2 continuation triples decodes whole.
+        let mut dec = Cea708::new();
+        let p = define_params(true, 70, 0, 1, 32);
+        let mut cmds = vec![0x98];
+        cmds.extend_from_slice(&p);
+        cmds.extend_from_slice(b"LONGER CAPTION TEXT");
+        let pkt = dtvcc_packet(&service_block(1, &cmds));
+        assert!(pkt.len() > 6, "packet should span multiple triples");
+        feed(&mut dec, &pkt, 100);
+        dec.flush(900);
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "LONGER CAPTION TEXT");
     }
 }
