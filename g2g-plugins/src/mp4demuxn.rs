@@ -5,13 +5,19 @@
 //! of [`Mp4Src`](crate::mp4src::Mp4Src) (which forwards a single video track).
 //!
 //! A [`MultiOutputElement`] driven by
-//! [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it buffers the
-//! whole byte stream and, on `Eos`, parses every `moov/trak`
-//! ([`parse_all_tracks`]) and routes each `moof`+`mdat` fragment to the port
-//! matching its `track_ID` ([`parse_fragments_multi`]), so one demuxer feeds
-//! several decode branches (audio + video together). Port `i` emits its
+//! [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses every
+//! `moov/trak` ([`parse_all_tracks`]) and routes each `moof`+`mdat` fragment to
+//! the port matching its `track_ID` ([`parse_fragments_multi`]), so one demuxer
+//! feeds several decode branches (audio + video together). Port `i` emits its
 //! elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its first frame.
 //! With a bus, announces the file's tracks as a `StreamCollection` (M386).
+//!
+//! A *fragmented* (CMAF) file is demuxed **progressively** (M437): once the
+//! `moov` is buffered, each complete `moof`+`mdat` is emitted and drained as it
+//! arrives, so a live / long stream flows segment by segment and the buffer stays
+//! bounded, rather than stalling until `Eos`. A *progressive* (non-fragmented)
+//! `moov`+`mdat` file has one big `mdat` its sample tables index, so it is
+//! accumulated whole and parsed at `Eos`.
 //!
 //! Scope (v1): fragmented multi-track files (what [`Mp4MuxN`](crate::mp4muxn)
 //! writes and CMAF shares); clear (unencrypted) H.264 / H.265 video + AAC audio.
@@ -190,13 +196,29 @@ pub fn subtitle_streams(data: &[u8]) -> Vec<Mp4StreamInfo> {
 /// elementary streams out, one track per port.
 #[derive(Debug)]
 pub struct Mp4DemuxN {
-    /// The whole byte stream, accumulated until `Eos` (the `moov` may sit after
-    /// the fragments in a progressive file; buffering keeps the parse simple).
+    /// The byte stream as it arrives. A *fragmented* (CMAF) file is parsed
+    /// progressively: each complete `moof`+`mdat` is emitted and drained as it
+    /// lands (so a live stream neither stalls until `Eos` nor grows unbounded). A
+    /// *progressive* (non-fragmented) `moov`+`mdat` file is accumulated whole and
+    /// parsed at `Eos` (its samples reference one big `mdat`, so nothing can emit
+    /// before the end).
     buf: Vec<u8>,
+    /// The file's tracks, parsed once the `moov` is complete (shared by the
+    /// progressive emit and the `Eos` whole-file parse).
+    tracks: Option<Vec<TrackHeader>>,
+    /// The layout, learned from the `moov`: `Some(true)` fragmented (has `mvex`,
+    /// emit per fragment), `Some(false)` progressive (parse whole at `Eos`),
+    /// `None` until the `moov` is buffered.
+    fragmented: Option<bool>,
     /// Port `i` forwards `ports[i].track_id` with `ports[i].caps`.
     ports: Vec<Mp4Port>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
     announced: Vec<bool>,
+    /// Whether port `i` still owes the `moov`'s out-of-band parameter sets on its
+    /// next video frame (the first frame of a track that carries none in band).
+    /// Persists across the incremental fragment emits, so only the first frame is
+    /// prepended.
+    need_param_sets: Vec<bool>,
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
     collection_posted: bool,
@@ -214,10 +236,14 @@ impl Mp4DemuxN {
     pub fn new(ports: Vec<Mp4Port>) -> Self {
         assert!(!ports.is_empty(), "Mp4DemuxN needs at least one output port");
         let announced = alloc::vec![false; ports.len()];
+        let need_param_sets = alloc::vec![true; ports.len()];
         Self {
             buf: Vec::new(),
+            tracks: None,
+            fragmented: None,
             ports,
             announced,
+            need_param_sets,
             bus: None,
             collection_posted: false,
             #[cfg(feature = "mp4-cenc")]
@@ -283,10 +309,12 @@ impl Mp4DemuxN {
         }
     }
 
-    /// Parse the fragmented file's samples, decrypting an encrypted track in place
-    /// with the supplied cbcs key (M398). Without the `mp4-cenc` feature (or a
-    /// key), an encrypted track fails loud inside `parse_fragments_multi`.
-    fn parse_fragments(&self, tracks: &[TrackHeader]) -> Result<Vec<(u32, Sample)>, G2gError> {
+    /// Parse the fragments in `data`, decrypting an encrypted track in place with
+    /// the supplied cbcs key (M398). `data` is either the whole progressive-`Eos`
+    /// buffer or a single `moof`+`mdat` fragment (the progressive emit). Without the
+    /// `mp4-cenc` feature (or a key), an encrypted track fails loud inside
+    /// `parse_fragments_multi`.
+    fn parse_fragments_in(&self, data: &[u8], tracks: &[TrackHeader]) -> Result<Vec<(u32, Sample)>, G2gError> {
         #[cfg(feature = "mp4-cenc")]
         if let Some(key) = self.cenc_key {
             let mut decrypt = move |cenc: &crate::fmp4::CencDefaults, buf: &mut [u8], subs: &[crate::fmp4::Subsample]| {
@@ -298,16 +326,81 @@ impl Mp4DemuxN {
                     );
                 }
             };
-            return parse_fragments_multi(&self.buf, tracks, Some(&mut decrypt));
+            return parse_fragments_multi(data, tracks, Some(&mut decrypt));
         }
-        parse_fragments_multi(&self.buf, tracks, None)
+        parse_fragments_multi(data, tracks, None)
     }
 
-    /// Parse the buffered file and route every sample to its track's port, each
-    /// port's opening `CapsChanged` first. Video samples that lack in-band
-    /// parameter sets get the `moov`'s sets prepended to their first frame, so a
-    /// decoder can start (matching [`Mp4Src`](crate::mp4src::Mp4Src)).
-    async fn parse_and_emit(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+    /// Make progress on the buffered bytes (M437): learn the layout from the `moov`,
+    /// then for a *fragmented* file emit every complete `moof`+`mdat` fragment that
+    /// has landed and drain it, so captions / audio / video flow as segments arrive
+    /// instead of all at `Eos`. A no-op until the `moov` is complete; a no-op for a
+    /// *progressive* (non-fragmented) file, whose one big `mdat` is parsed whole at
+    /// `Eos` by [`parse_and_emit_whole`](Self::parse_and_emit_whole).
+    async fn advance(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
+        // Until the `moov` is fully buffered we cannot tell fragmented from
+        // progressive, so keep accumulating. A fragmented file carries `mvex`.
+        if self.fragmented.is_none() {
+            let Some(moov) = find_box(&self.buf, b"moov") else { return Ok(()) };
+            let fragmented = find_box(moov, b"mvex").is_some();
+            let tracks = parse_all_tracks(&self.buf)?;
+            if self.bus.is_some() {
+                self.post_stream_collection(&tracks);
+            }
+            self.fragmented = Some(fragmented);
+            self.tracks = Some(tracks);
+        }
+        // Only a fragmented (CMAF) file emits progressively.
+        if self.fragmented != Some(true) {
+            return Ok(());
+        }
+
+        // Take the tracks out so the per-sample emit can borrow `self` mutably while
+        // reading the (now local) track headers.
+        let tracks = self.tracks.take().expect("tracks set once fragmented is known");
+        let mut off = 0usize;
+        let mut consumed = 0usize; // bytes safe to drain (a pending moof is kept)
+        let mut frag_start: Option<usize> = None;
+        while let Some((kind, size)) = next_box(&self.buf, off) {
+            match &kind {
+                // Remember the fragment header; do not advance `consumed` past it
+                // until its `mdat` has also landed (the moof is needed to parse it).
+                b"moof" => {
+                    frag_start = Some(off);
+                    off += size;
+                }
+                b"mdat" => {
+                    let Some(start) = frag_start.take() else {
+                        // A standalone `mdat` (no preceding `moof`) is the progressive
+                        // layout; it is parsed whole at `Eos`, not here.
+                        break;
+                    };
+                    let end = off + size;
+                    let samples = self.parse_fragments_in(&self.buf[start..end], &tracks)?;
+                    self.emit_samples(&tracks, samples, out).await?;
+                    off = end;
+                    consumed = off;
+                }
+                // ftyp / styp / sidx / moov / free: skip and let it be drained.
+                _ => {
+                    off += size;
+                    consumed = off;
+                }
+            }
+        }
+        self.tracks = Some(tracks);
+        if consumed > 0 {
+            self.buf.drain(..consumed);
+        }
+        Ok(())
+    }
+
+    /// Parse the whole buffered file at `Eos` and emit every sample, for a
+    /// *progressive* (non-fragmented) `moov`+`mdat` layout whose samples reference
+    /// one big `mdat` (nothing can emit incrementally). The fragmented path emits in
+    /// [`advance`](Self::advance) instead, so this is reached only when `fragmented`
+    /// is not `Some(true)`.
+    async fn parse_and_emit_whole(&mut self, out: &mut dyn MultiOutputSink) -> Result<(), G2gError> {
         let tracks = parse_all_tracks(&self.buf)?;
         if self.bus.is_some() {
             self.post_stream_collection(&tracks);
@@ -315,12 +408,25 @@ impl Mp4DemuxN {
         // A `moof` marks a fragmented / CMAF file; its absence is the classic
         // progressive `moov`+`mdat` layout, walked from the sample tables instead.
         let samples = if find_box(&self.buf, b"moof").is_some() {
-            self.parse_fragments(&tracks)?
+            self.parse_fragments_in(&self.buf, &tracks)?
         } else {
             parse_progressive_multi(&self.buf, &tracks)?
         };
-        let mut need_sets = alloc::vec![true; self.ports.len()];
+        self.emit_samples(&tracks, samples, out).await
+    }
 
+    /// Route a parsed sample run to its track's port, each port's opening
+    /// `CapsChanged` first. Video samples that lack in-band parameter sets get the
+    /// `moov`'s sets prepended to their first frame, so a decoder can start
+    /// (matching [`Mp4Src`](crate::mp4src::Mp4Src)). Shared by the progressive
+    /// [`advance`](Self::advance) and the `Eos` [`parse_and_emit_whole`](Self::parse_and_emit_whole),
+    /// so `announced` / `need_param_sets` persist across the incremental fragments.
+    async fn emit_samples(
+        &mut self,
+        tracks: &[TrackHeader],
+        samples: Vec<(u32, Sample)>,
+        out: &mut dyn MultiOutputSink,
+    ) -> Result<(), G2gError> {
         for (track_id, sample) in samples {
             let Some(port) = self.ports.iter().position(|p| p.track_id == track_id) else {
                 continue; // a track no port forwards
@@ -339,7 +445,7 @@ impl Mp4DemuxN {
                 // Prepend out-of-band parameter sets to the first video frame if
                 // it carries none (our own muxer keeps them in-band; CMAF may not).
                 Some(TrackKind::Video { codec, param_sets, .. }) => {
-                    if need_sets[port] && !starts_with_param_set(&data, *codec) {
+                    if self.need_param_sets[port] && !starts_with_param_set(&data, *codec) {
                         let mut with = Vec::new();
                         for set in param_sets {
                             with.extend_from_slice(&[0, 0, 0, 1]);
@@ -362,7 +468,7 @@ impl Mp4DemuxN {
                 // stripped in the sample parse); forward the UTF-8 payload as is.
                 Some(TrackKind::Text { .. }) | None => {}
             }
-            need_sets[port] = false;
+            self.need_param_sets[port] = false;
 
             let frame = Frame {
                 domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
@@ -382,6 +488,20 @@ impl Mp4DemuxN {
         }
         Ok(())
     }
+}
+
+/// The next complete top-level box at `buf[off..]`: its 4cc and total size (header
+/// plus payload), or `None` if fewer than the whole box is buffered yet, or the
+/// size field is malformed. The 64-bit largesize form is unsupported, the same
+/// limitation as the boxes() walker the fragment parsers use.
+fn next_box(buf: &[u8], off: usize) -> Option<([u8; 4], usize)> {
+    let header = buf.get(off..off + 8)?;
+    let size = u32::from_be_bytes(header[0..4].try_into().ok()?) as usize;
+    if size < 8 || off + size > buf.len() {
+        return None;
+    }
+    let kind: [u8; 4] = header[4..8].try_into().ok()?;
+    Some((kind, size))
 }
 
 impl MultiOutputElement for Mp4DemuxN {
@@ -411,21 +531,33 @@ impl MultiOutputElement for Mp4DemuxN {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                // Buffer the byte stream; the parse waits for the whole file.
+                // Buffer the bytes, then emit any complete fragments that have
+                // landed (a fragmented file streams; a progressive one waits for Eos).
                 PipelinePacket::DataFrame(frame) => {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.buf.extend_from_slice(slice.as_slice());
+                    self.advance(out).await?;
                 }
-                // End of stream: parse the buffered file and emit every sample;
-                // the runner broadcasts the merged Eos to every port after this.
+                // End of stream: flush any final fragment, then for a progressive
+                // (non-fragmented) file parse the whole buffer now; the runner
+                // broadcasts the merged Eos to every port after this.
                 PipelinePacket::Eos => {
-                    self.parse_and_emit(out).await?;
+                    self.advance(out).await?;
+                    if self.fragmented != Some(true) {
+                        self.parse_and_emit_whole(out).await?;
+                    }
                 }
-                // A flush discards the buffer (a re-read restarts the file).
+                // A flush discards the buffer and the parse progress (a re-read
+                // restarts the file, so the layout and parameter-set debt reset).
                 PipelinePacket::Flush => {
                     self.buf.clear();
+                    self.tracks = None;
+                    self.fragmented = None;
+                    for owed in self.need_param_sets.iter_mut() {
+                        *owed = true;
+                    }
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
@@ -666,6 +798,40 @@ mod tests {
         assert!(matches!(out.caps[1], Some(Caps::Audio { format: AudioFormat::Aac, .. })));
         assert_eq!(out.frames[1].len(), 2, "two audio access units");
         assert_eq!(demux.emitted(), 4, "four frames forwarded across both ports");
+    }
+
+    /// Progressive demux (M437): a fragmented file streamed in byte by byte must
+    /// emit each fragment as it completes, *before* any `Eos` (the old demuxer
+    /// emitted nothing until `Eos`). Feeding one byte at a time also exercises the
+    /// partial-box buffering, and the result must match the all-at-once decode.
+    #[test]
+    fn emits_fragments_progressively_before_eos() {
+        let bytes = mux_av();
+        let streams = forwardable_streams(&bytes);
+        let ports: Vec<Mp4Port> =
+            streams.iter().map(|s| Mp4Port { track_id: s.track_id, caps: s.caps.clone() }).collect();
+        let mut demux = Mp4DemuxN::new(ports);
+        let mut out = PortCapture::new(2);
+        block_on(async {
+            // Stream the whole file one byte per DataFrame, NO Eos.
+            for b in &bytes {
+                demux.process(vframe(alloc::vec![*b], 0), &mut out).await.unwrap();
+            }
+        });
+
+        // All four samples (2 video + 2 audio) landed without ever sending Eos:
+        // the fragments emitted as they completed, the progressive guarantee.
+        assert_eq!(demux.emitted(), 4, "every fragment emitted before Eos");
+        assert_eq!(out.frames[0].len(), 2, "both video AUs streamed");
+        assert_eq!(out.frames[1].len(), 2, "both audio AUs streamed");
+        assert!(
+            starts_with_param_set(&out.frames[0][0], VideoCodec::H264),
+            "the first video frame still opens with its parameter sets"
+        );
+
+        // A final Eos must not double-emit (the fragments were already drained).
+        block_on(async { demux.process(PipelinePacket::Eos, &mut out).await.unwrap() });
+        assert_eq!(demux.emitted(), 4, "Eos after a fully-streamed fragmented file adds nothing");
     }
 
     /// The audio port emits self-describing ADTS (the ASC wired in-band), so a

@@ -1501,12 +1501,21 @@ known without sniffing the byte stream.
   demuxer, M388), and a TS file is handled by it while an MKV file is handled by
   `mkv_playbin`, each declining the other's container. `mp4_playbin` (M392) is the
   fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer, M391), the multi-track
-  read-side analog of the single-video-track `Mp4Src`: it buffers the byte stream
-  and, on EOS, parses every `moov/trak` (`fmp4::parse_all_tracks`, M390) and routes
-  each sample to the port matching its `track_ID`, picking the fragmented path
-  (`parse_fragments_multi`, by `tfhd` `track_ID`) or the progressive `moov`+`mdat`
-  path (`parse_progressive_multi`, per-track `stbl` sample tables, M393) by the
-  presence of a `moof`. Compressed-audio port caps negotiate as `0/0` (AAC caps
+  read-side analog of the single-video-track `Mp4Src`: it parses every `moov/trak`
+  (`fmp4::parse_all_tracks`, M390) and routes each sample to the port matching its
+  `track_ID`, picking the fragmented path (`parse_fragments_multi`, by `tfhd`
+  `track_ID`) or the progressive `moov`+`mdat` path (`parse_progressive_multi`,
+  per-track `stbl` sample tables, M393) by the presence of a `moof`. A *fragmented*
+  file is demuxed **progressively** (M437): once the `moov` is buffered the layout
+  is known (`mvex` = fragmented), and each complete `moof`+`mdat` fragment is parsed,
+  emitted, and drained as it arrives, so a live / long CMAF stream flows segment by
+  segment with a bounded buffer rather than stalling until EOS (the carrier that
+  makes the M436 fMP4-HLS caption overlay usable live). A *progressive*
+  (non-fragmented) file has one big `mdat` its sample tables index, so it is
+  accumulated whole and parsed at EOS. The per-sample emit (caps announce,
+  parameter-set prepend, ADTS re-framing) is shared, with the per-port "caps
+  announced" / "parameter sets owed" flags persisting across the incremental
+  fragments. Compressed-audio port caps negotiate as `0/0` (AAC caps
   intersect by strict equality, so the concrete channel layout / sample rate is
   refined per port at runtime via `CapsChanged`, not advertised for the static
   branch solve). Demuxed AAC is re-framed to ADTS from the track's `esds`
