@@ -486,20 +486,12 @@ leverage first:
 
 ## ML
 
-- Caps-solver support for a tensor->tensor *dtype*-changing `DerivedOutput` so
-  `TensorConvert` works as an *interior* runner node. The solver's passthrough
-  projection (`project_passthrough_derived`) is built for video / audio
-  Any-wildcard fields; a tensor caps has no wildcard, and a transform that passes
-  the shape through but changes the dtype (F32->U8) re-derives to the *input*
-  dtype, so the runner feeds the unconverted dtype downstream and negotiation
-  fails. `TensorPostprocess` (fixed-shape derived output) and a single tensor hop
-  into an AcceptsAny sink already negotiate; only the dtype-change interior node
-  does not. Until then the quantize is folded into the source (M450). Detector on
-  the Edge TPU is also blocked device-side: this Pixel's older Android ORT NNAPI
-  EP rejects YOLO's op set (int8-weight initializers, SiLU `Mul` QDQ "unsupported
-  quantized type", and an `AddNnapiSplit` divide bug on the C3k2 channel split);
-  a simple conv stack (MobileNet, M447) places fine. Needs a newer ORT build or a
-  TPU-friendly detector (SSD-MobileNet-style, conv-only).
+- Detector on the Edge TPU is blocked device-side: this Pixel's older Android ORT
+  NNAPI EP rejects YOLO's op set (int8-weight initializers, SiLU `Mul` QDQ
+  "unsupported quantized type", and an `AddNnapiSplit` divide bug on the C3k2
+  channel split); a simple conv stack (MobileNet, M447) places fine. Needs a newer
+  ORT build or a TPU-friendly detector (SSD-MobileNet-style, conv-only). The host
+  detector (M448) works.
 - Trained-weight import now exists for the hand-rolled GPU path: a dependency-free
   `safetensors` reader (M262) loads weights at runtime into `WgpuInference`
   (`conv2d_from_safetensors`); architecture stays compiled, weights are a file.

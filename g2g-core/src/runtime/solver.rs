@@ -1721,6 +1721,86 @@ mod tests {
         Caps::RawVideo { format: fmt, width: w, height: h, framerate: r }
     }
 
+    // A multi-hop tensor chain `Produces(f32) -> quantize(f32->u8) ->
+    // infer(u8->[1,N]) -> AcceptsAny` must negotiate: tensor caps have no
+    // wildcard fields, so the DerivedOutput closure is the only source of truth
+    // for the output, and the solver must seed the output edge from it (M451).
+    #[test]
+    fn solve_linear_tensor_dtype_change_chain() {
+        use crate::caps::{TensorDType, TensorLayout, TensorShape};
+        let t = |d: TensorDType, s: alloc::vec::Vec<u32>| Caps::Tensor {
+            dtype: d,
+            shape: TensorShape(s),
+            layout: TensorLayout::Nchw,
+        };
+        let f32_in = t(TensorDType::F32, vec![1, 3, 4, 4]);
+        let u8_mid = t(TensorDType::U8, vec![1, 3, 4, 4]);
+        let logits = t(TensorDType::F32, vec![1, 10]);
+
+        let src = CapsConstraint::Produces(CapsSet::one(f32_in.clone()));
+        // quantize: f32 -> u8, shape/layout passthrough (the TensorConvert shape).
+        let quant = CapsConstraint::DerivedOutput(Box::new(|inp: &Caps| match inp {
+            Caps::Tensor { dtype: TensorDType::F32, shape, layout } => {
+                CapsSet::one(Caps::Tensor { dtype: TensorDType::U8, shape: shape.clone(), layout: *layout })
+            }
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }));
+        // infer: u8 [1,3,4,4] -> f32 [1,10] (the OrtInference shape).
+        let logits_c = logits.clone();
+        let infer = CapsConstraint::DerivedOutput(Box::new(move |inp: &Caps| match inp {
+            Caps::Tensor { dtype: TensorDType::U8, .. } => CapsSet::one(logits_c.clone()),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }));
+        let sink = CapsConstraint::AcceptsAny;
+
+        let links = solve_linear(&[&src, &quant, &infer, &sink]).expect("tensor chain negotiates");
+        assert_eq!(links[0], f32_in, "source link f32");
+        assert_eq!(links[1], u8_mid, "quantize output is u8, not the source f32");
+        assert_eq!(links[2], logits, "inference output [1,10]");
+    }
+
+    // The DAG solver (the path `run_linear_chain` -> `run_graph` takes) must
+    // negotiate the same tensor dtype-change chain as the linear solver.
+    #[test]
+    fn solve_graph_tensor_dtype_change_chain() {
+        use crate::caps::{TensorDType, TensorLayout, TensorShape};
+        use crate::graph::Graph;
+        let t = |d: TensorDType, s: alloc::vec::Vec<u32>| Caps::Tensor {
+            dtype: d,
+            shape: TensorShape(s),
+            layout: TensorLayout::Nchw,
+        };
+        let f32_in = t(TensorDType::F32, vec![1, 3, 4, 4]);
+        let u8_mid = t(TensorDType::U8, vec![1, 3, 4, 4]);
+        let logits = t(TensorDType::F32, vec![1, 10]);
+        let logits_c = logits.clone();
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(f32_in.clone()))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(|inp: &Caps| match inp {
+                Caps::Tensor { dtype: TensorDType::F32, shape, layout } => {
+                    CapsSet::one(Caps::Tensor { dtype: TensorDType::U8, shape: shape.clone(), layout: *layout })
+                }
+                _ => CapsSet::from_alternatives(Vec::new()),
+            }))),
+            NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(move |inp: &Caps| match inp {
+                Caps::Tensor { dtype: TensorDType::U8, .. } => CapsSet::one(logits_c.clone()),
+                _ => CapsSet::from_alternatives(Vec::new()),
+            }))),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let q = g.add_transform(());
+        let inf = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, q).unwrap();
+        g.link(q, inf).unwrap();
+        g.link(inf, sink).unwrap();
+        let v = g.finish().unwrap();
+        let dag = solve_graph(&v, &cs).expect("tensor chain solves as a graph");
+        assert_eq!(dag, vec![f32_in, u8_mid, logits]);
+    }
+
     fn fixed_video(fmt: RawVideoFormat, w: u32, h: u32, fps: u32) -> Caps {
         video(fmt, Dim::Fixed(w), Dim::Fixed(h), Rate::Fixed(fps << 16))
     }

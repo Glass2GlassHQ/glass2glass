@@ -1,4 +1,4 @@
-//! M450: a runner-driven quantized-inference Graph. The M444 / M447 probes drive
+//! M451: a runner-driven quantized-inference Graph. The M444 / M447 probes drive
 //! the chain by hand (`element.process(...)` per stage); this hands the *same*
 //! chain to the g2g runner, which negotiates caps across it and pumps frames
 //! through under backpressure, the gst-style orchestration the probes bypass.
@@ -6,7 +6,10 @@
 //! Chain: `TensorSource(f32 [1,3,224,224]) -> TensorConvert::quantize(u8) ->
 //! OrtInference(uint8 MobileNetV2) -> TensorPostprocess::argmax -> ClassSink`,
 //! the M447 Edge-TPU chain run on the host CPU EP through `run_linear_chain`.
-//! Asserts the runner-produced class matches the known top-1 (258, Samoyed).
+//! `TensorConvert` is an *interior* node, so this exercises the mid-stream
+//! `CapsChanged` each tensor transform forwards (M451 aligned the ML elements to
+//! the videoconvert / videoscale CapsChanged contract). Asserts the
+//! runner-produced class matches the known top-1 (258, Samoyed).
 //!
 //! Uses the gitignored uint8-input model from `fixtures/mobilenet/gen_u8in.py`
 //! (run `tools/android-mobilenet-tpu-smoke.sh` or `gen_u8in.py` once); skips when
@@ -27,7 +30,7 @@ use g2g_core::{
 };
 use g2g_ml::ortinfer::OrtInference;
 use g2g_ml::postprocess::TensorPostprocess;
-use g2g_plugins::tensorconvert::quantize_f32;
+use g2g_plugins::tensorconvert::TensorConvert;
 
 use core::future::Future;
 
@@ -160,27 +163,20 @@ async fn runner_drives_quantize_infer_argmax() {
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
 
-    // Quantize the f32 input to the model's uint8 with TensorConvert's own affine
-    // (the same op `TensorConvert::quantize` applies), then feed it as the source.
-    // The quantize is folded into the source rather than run as a negotiated
-    // transform: the caps solver's DerivedOutput projection is built for video /
-    // audio Any-wildcard fields and does not yet cascade a tensor->tensor dtype
-    // change, so a `TensorConvert` *interior* node mis-negotiates (it feeds the
-    // source dtype downstream). See the milestone note; that is a solver follow-up.
-    let floats: Vec<f32> = input.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    let u8_input = quantize_f32(&floats, TensorDType::U8, scale, zp).expect("quantize to u8");
-
-    let mut src = TensorSource { caps: tensor_caps(TensorDType::U8, vec![1, 3, SIZE, SIZE]), data: Some(u8_input) };
+    // The full M447 chain as a *negotiated* graph: the runner solves caps across
+    // it and pumps the frame through, including the mid-stream `CapsChanged` each
+    // tensor transform emits (which the probes bypass by re-building frames). The
+    // f32 input is quantized in-graph by `TensorConvert`, an interior node.
+    let mut src = TensorSource { caps: tensor_caps(TensorDType::F32, vec![1, 3, SIZE, SIZE]), data: Some(input) };
+    let mut quant = TensorConvert::quantize(TensorDType::U8, scale, zp);
     let mut infer = OrtInference::from_memory(&model).expect("model loads").with_tensor_input();
     let mut argmax = TensorPostprocess::argmax();
     let mut sink = ClassSink::default();
 
-    // The runner negotiates caps across the chain and pumps the frame through it,
-    // the orchestration the M444 / M447 probes do by hand.
-    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut infer, &mut argmax];
+    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut quant, &mut infer, &mut argmax];
     let stats = run_linear_chain(&mut src, transforms, &mut sink, &NullClock, 4)
         .await
-        .expect("runner drives the infer -> argmax chain");
+        .expect("runner drives the quantize -> infer -> argmax chain");
 
     eprintln!(">> runner-driven chain: {stats:?}; top-1 class = {:?}", sink.idx);
     assert_eq!(sink.idx, Some(EXPECTED_IDX), "runner-produced class matches the known top-1 (Samoyed)");

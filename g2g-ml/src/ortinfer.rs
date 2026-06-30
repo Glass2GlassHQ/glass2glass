@@ -462,9 +462,19 @@ impl AsyncElement for OrtInference {
                     out.push(PipelinePacket::DataFrame(tensor_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // geometry is pinned by the model; a mid-stream change
-                    // to anything else is a hard error.
-                    c.intersect(&self.supported_input())?;
+                    // Runner contract (the videoconvert / videoscale convention):
+                    // the transform arm calls `configure_pipeline` (input) then
+                    // `configure_output` (output) and pushes this packet carrying
+                    // the pre-fixed forward *output* caps, NOT a new input. So `c`
+                    // is our output tensor (the model's), not something to validate
+                    // against `supported_input` (a real model's output never
+                    // matches its input, so the old `c.intersect(supported_input)?`
+                    // hard-errored whenever ORT was an interior transform). Forward
+                    // it so a strict downstream sees the tensor caps before the
+                    // first frame, and record `last_caps` to suppress the data
+                    // path's duplicate emit.
+                    self.last_caps = Some(c.clone());
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;

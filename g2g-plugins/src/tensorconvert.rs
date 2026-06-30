@@ -480,17 +480,18 @@ impl AsyncElement for TensorConvert {
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
-                // A mid-stream input caps change: re-validate, update the
-                // configured input, and emit the freshly derived output caps
-                // (suppressed when unchanged). Treated as input, not forwarded
-                // verbatim, the same convention as `TensorPostprocess`.
+                // Runner contract (the videoconvert / videoscale convention): the
+                // transform arm calls `configure_pipeline` (the new input) then
+                // pushes this packet carrying our pre-fixed forward *output* caps,
+                // not a new input. So `c` is already our output: forward it and
+                // record `last_caps` to suppress the data path's duplicate. Do NOT
+                // `accept_input(c)` here, adopting our own output as the next input
+                // is the stacked-convert bug (a u8 output read back as a u8 input
+                // would resolve to an identity pass-through); the real input is set
+                // by `configure_pipeline`.
                 PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
-                    let out_caps = derive_output_caps(&c, self.target, self.out_layout).ok_or(G2gError::CapsMismatch)?;
-                    if self.last_caps.as_ref() != Some(&out_caps) {
-                        out.push(PipelinePacket::CapsChanged(out_caps.clone())).await?;
-                        self.last_caps = Some(out_caps);
-                    }
+                    self.last_caps = Some(c.clone());
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;

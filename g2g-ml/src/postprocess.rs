@@ -186,8 +186,14 @@ impl AsyncElement for TensorPostprocess {
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    self.intercept_caps(&c)?;
-                    self.input_caps = Some(c);
+                    // Runner contract (the videoconvert / videoscale convention):
+                    // the transform arm pushes our pre-fixed forward *output* caps
+                    // here (the input is already set via `configure_pipeline`), so
+                    // `c` is our output (argmax's `[1, 2]`, softmax's echoed input).
+                    // Forward it and record `last_caps` to suppress the data path's
+                    // duplicate; do not adopt it as the input.
+                    self.last_caps = Some(c.clone());
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
