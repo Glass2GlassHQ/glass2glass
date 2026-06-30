@@ -363,6 +363,25 @@ async fn live_starts_near_the_edge_skipping_the_stale_window_front() {
     assert_eq!(sink.body, expected, "playback starts at the live edge, not the window front");
 }
 
+#[tokio::test]
+async fn full_replay_starts_a_live_playlist_from_the_window_front() {
+    // The same six-segment live window, but `with_full_replay()` opts out of the
+    // live-edge skip: every segment from the front plays (DVR replay).
+    let segs: Vec<Vec<u8>> =
+        (0..6u8).map(|s| (0..500u32).map(|i| (i as u8) ^ (s.wrapping_mul(53))).collect()).collect();
+    let url = serve_wide_live(segs.clone());
+
+    let mut src = HlsSrc::new(url).with_reload_interval_ms(20).with_full_replay();
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos, "ENDLIST on the reload terminates the stream");
+    assert_eq!(count, 6, "full replay plays the whole window from the front (seg0..seg5)");
+    let expected: Vec<u8> = segs.concat();
+    assert_eq!(sink.body, expected, "every segment delivered, in order, from the window front");
+}
+
 // --- time seek: jump to the segment containing the target (M367) ----------
 
 /// A 3-segment VOD playlist, 4s each, so a time seek maps unambiguously to a

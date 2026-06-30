@@ -208,6 +208,11 @@ pub struct HlsSrc {
     /// separated so a downstream `SubParse` sees each segment's `WEBVTT` /
     /// `X-TIMESTAMP-MAP` header as its own non-cue block). Off by default.
     text: bool,
+    /// Start a live playlist from the front of the window (full DVR replay)
+    /// instead of near the live edge (M438). Off by default: live playback
+    /// follows what is being published. Opt in for a from-the-beginning replay of
+    /// the available window. No effect on VOD (always from the front).
+    full_replay: bool,
     configured: bool,
 }
 
@@ -223,8 +228,18 @@ impl HlsSrc {
             seek: None,
             abr: false,
             text: false,
+            full_replay: false,
             configured: false,
         }
+    }
+
+    /// Start a live playlist from the front of its sliding window (full DVR
+    /// replay) rather than near the live edge (M438). Off by default, so live
+    /// playback follows what is being published; opt in to replay the whole
+    /// available window from the beginning. No effect on VOD (always front-to-end).
+    pub fn with_full_replay(mut self) -> Self {
+        self.full_replay = true;
+        self
     }
 
     /// Treat the playlist as a WebVTT subtitle rendition (M419): advertise
@@ -511,8 +526,10 @@ impl SourceLoop for HlsSrc {
             // Next HLS media-sequence number to play; segments below it on a live
             // reload were already delivered. A live playlist starts near the live
             // edge (skipping the stale front of the window) instead of its start, so
-            // playback follows what is being published; VOD starts at the front.
-            let mut next_seq = media.media_sequence + live_edge_start(&media) as u64;
+            // playback follows what is being published; VOD starts at the front. The
+            // `full_replay` opt-in starts a live playlist from the window front too.
+            let edge = if self.full_replay { 0 } else { live_edge_start(&media) };
+            let mut next_seq = media.media_sequence + edge as u64;
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
@@ -705,6 +722,13 @@ impl SourceLoop for HlsSrc {
                 }
                 _ => Err(PropError::Type),
             },
+            "full-replay" => match value {
+                PropValue::Bool(v) => {
+                    self.full_replay = v;
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
             _ => Err(PropError::Unknown),
         }
     }
@@ -714,6 +738,7 @@ impl SourceLoop for HlsSrc {
             "location" => Some(PropValue::Str(self.url.clone())),
             "max-bandwidth" => Some(PropValue::Uint(self.max_bandwidth)),
             "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
+            "full-replay" => Some(PropValue::Bool(self.full_replay)),
             _ => None,
         }
     }
@@ -730,6 +755,11 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         "reload-interval-ms",
         PropKind::Uint,
         "live-playlist reload interval in ms; 0 derives it from TARGETDURATION",
+    ),
+    PropertySpec::new(
+        "full-replay",
+        PropKind::Bool,
+        "start a live playlist from the window front (full DVR replay) instead of near the live edge",
     ),
 ];
 
