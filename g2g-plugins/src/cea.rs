@@ -18,6 +18,7 @@
 //! attacker-controlled bitstream, so every read is bounds-checked and a malformed
 //! SEI yields no triples rather than panicking.
 
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -705,6 +706,153 @@ fn extended_char_2(b1: u8) -> char {
 }
 
 // ---------------------------------------------------------------------------
+// CEA-608 encode (the inverse of `Cea608`)
+// ---------------------------------------------------------------------------
+
+/// The CEA-608 null / padding byte (odd parity of 0x00); the decoder masks the
+/// parity bit, reading it back as 0 (padding).
+const CC_NULL: u8 = 0x80;
+
+/// Set odd parity on a 7-bit CEA-608 byte (the line-21 wire format; the decoder
+/// masks the parity bit off, so it is cosmetic for our own round trip but required
+/// by a conformant decoder / TV).
+fn odd_parity(b: u8) -> u8 {
+    if (b & 0x7F).count_ones() % 2 == 0 {
+        (b & 0x7F) | 0x80
+    } else {
+        b & 0x7F
+    }
+}
+
+/// Map a Unicode glyph back to its CEA-608 basic-set byte (the inverse of
+/// [`basic_char`]); characters outside the set fold to a space. Parity is added
+/// separately.
+fn char_to_608(c: char) -> u8 {
+    match c {
+        'á' => 0x2A,
+        'é' => 0x5C,
+        'í' => 0x5E,
+        'ó' => 0x5F,
+        'ú' => 0x60,
+        'ç' => 0x7B,
+        '÷' => 0x7C,
+        'Ñ' => 0x7D,
+        'ñ' => 0x7E,
+        // Printable ASCII passes through; anything else becomes a space.
+        ' '..='~' => c as u8,
+        _ => 0x20,
+    }
+}
+
+/// Encode a 1-based row (1..=15) and a column indent into a channel-1 Preamble
+/// Address Code `(b0, b1)`, the inverse of [`pac_row`] and the indent form of
+/// `Cea608::pac`. The indent is rounded down to the nearest group of four columns.
+fn pac_encode(row: u8, indent_col: usize) -> (u8, u8) {
+    let (b0, second) = match row {
+        1 => (0x11, 0),
+        2 => (0x11, 1),
+        3 => (0x12, 0),
+        4 => (0x12, 1),
+        5 => (0x15, 0),
+        6 => (0x15, 1),
+        7 => (0x16, 0),
+        8 => (0x16, 1),
+        9 => (0x17, 0),
+        10 => (0x17, 1),
+        11 => (0x10, 0),
+        12 => (0x13, 0),
+        13 => (0x13, 1),
+        14 => (0x14, 0),
+        _ => (0x14, 1), // row 15 (and any out-of-range row) -> bottom
+    };
+    let group = (indent_col / 4).min(7) as u8;
+    // 0x40 base | row-pair bit | indent-form bit (0x10) | (group << 1).
+    let b1 = 0x40 | (second << 5) | 0x10 | (group << 1);
+    (b0, b1)
+}
+
+/// A CEA-608 line-21 caption *encoder*: the inverse of [`Cea608`]. Feed it cues
+/// (text + placement) via [`push_cue`](Cc608Enc::push_cue) and clear the screen
+/// with [`erase`](Cc608Enc::erase); it builds the pop-on command sequence (RCL to
+/// load the back buffer, a PAC per row, the row text, EOC to flip it on; EDM to
+/// erase) and queues the resulting `(cc_data_1, cc_data_2)` byte pairs, doubling
+/// the control codes and setting odd parity the way a conformant stream does.
+///
+/// The caption channel carries two bytes per video frame, so the queued pairs are
+/// drained one per frame with [`next_pair`](Cc608Enc::next_pair) (a null pair when
+/// the queue is empty), the pacing an inserter applies against the video frame
+/// rate. Channel 1 (CC1) only.
+#[derive(Debug, Default)]
+pub struct Cc608Enc {
+    /// Pending byte pairs (with parity), drained one per video frame.
+    queue: VecDeque<(u8, u8)>,
+}
+
+impl Cc608Enc {
+    /// A fresh encoder with an empty transmit queue.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue the pop-on command sequence that displays `cue`. The text rows are
+    /// placed from the cue's `line` (vertical) / `position` (indent) settings, or
+    /// the bottom row when unset; at most four rows are emitted (the practical
+    /// caption window). Returns nothing; the bytes are drained via `next_pair`.
+    pub fn push_cue(&mut self, cue: &Cue) {
+        self.ctrl(0x14, 0x20); // RCL: resume caption loading (write the back buffer)
+        // line/position are percentages; map back to a 1-based row and a column.
+        let base_row = cue
+            .settings
+            .line
+            .map(|pct| ((pct as usize * (ROWS - 1)) / 100) + 1)
+            .unwrap_or(ROWS); // default: row 15 (bottom)
+        let indent = cue.settings.position.map(|pct| (pct as usize * COLS) / 100).unwrap_or(0);
+        for (i, line) in cue.text.lines().take(4).enumerate() {
+            let row = (base_row + i).min(ROWS) as u8;
+            let (p0, p1) = pac_encode(row, indent);
+            self.ctrl(p0, p1);
+            self.write_text(line);
+        }
+        self.ctrl(0x14, 0x2F); // EOC: end of caption, flip the back buffer on
+    }
+
+    /// Queue an erase (EDM) that clears the displayed caption.
+    pub fn erase(&mut self) {
+        self.ctrl(0x14, 0x2C); // EDM: erase displayed memory
+    }
+
+    /// The next `(cc_data_1, cc_data_2)` pair to transmit this video frame; a null
+    /// (padding) pair once the queue is drained.
+    pub fn next_pair(&mut self) -> (u8, u8) {
+        self.queue.pop_front().unwrap_or((CC_NULL, CC_NULL))
+    }
+
+    /// Whether bytes remain to transmit (a caption still mid-send).
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Queue a control-code pair, doubled (CEA-608 transmits control codes twice
+    /// so a decoder can recover a single bit error), with odd parity.
+    fn ctrl(&mut self, b0: u8, b1: u8) {
+        let pair = (odd_parity(b0), odd_parity(b1));
+        self.queue.push_back(pair);
+        self.queue.push_back(pair);
+    }
+
+    /// Queue a row of text as character pairs (two glyphs per pair; a lone trailing
+    /// glyph pairs with a null byte).
+    fn write_text(&mut self, line: &str) {
+        let bytes: Vec<u8> = line.chars().map(char_to_608).collect();
+        for chunk in bytes.chunks(2) {
+            let b0 = odd_parity(chunk[0]);
+            let b1 = if chunk.len() == 2 { odd_parity(chunk[1]) } else { CC_NULL };
+            self.queue.push_back((b0, b1));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CEA-708 (DTVCC)
 // ---------------------------------------------------------------------------
 
@@ -1193,6 +1341,57 @@ mod tests {
         assert_eq!(cues[0].text, "HI");
         assert_eq!(cues[0].start_ns, 1000);
         assert_eq!(cues[0].end_ns, 5000);
+    }
+
+    #[test]
+    fn cc608enc_round_trips_through_the_decoder() {
+        // The encoder is the inverse of the decoder: encode a cue, drain the byte
+        // pairs one per frame into a `Cea608`, and recover the same text. This
+        // exercises RCL / PAC / character / EOC encoding plus control doubling and
+        // parity end to end.
+        let mut enc = Cc608Enc::new();
+        let cue = Cue { start_ns: 0, end_ns: 0, text: "HELLO".into(), settings: CueSettings::default() };
+        enc.push_cue(&cue);
+        let mut dec = Cea608::new();
+        let mut t = 1000u64;
+        // Caption load + display.
+        while enc.pending() {
+            let (b0, b1) = enc.next_pair();
+            dec.push_pair(b0, b1, t);
+            t += 33_000;
+        }
+        // A few idle frames, then erase to terminate the caption.
+        for _ in 0..3 {
+            let (b0, b1) = enc.next_pair(); // null padding while idle
+            dec.push_pair(b0, b1, t);
+            t += 33_000;
+        }
+        enc.erase();
+        let erase_t = t;
+        while enc.pending() {
+            let (b0, b1) = enc.next_pair();
+            dec.push_pair(b0, b1, t);
+            t += 33_000;
+        }
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1, "one finished caption");
+        assert_eq!(cues[0].text, "HELLO");
+        assert_eq!(cues[0].end_ns, erase_t, "caption ends at the erase frame");
+    }
+
+    #[test]
+    fn cc608enc_doubles_controls_and_pads_when_idle() {
+        let mut enc = Cc608Enc::new();
+        assert!(!enc.pending());
+        assert_eq!(enc.next_pair(), (CC_NULL, CC_NULL), "null pair when idle");
+
+        enc.erase(); // EDM, doubled
+        let first = enc.next_pair();
+        let second = enc.next_pair();
+        assert_eq!(first, second, "a control code is transmitted twice");
+        assert_eq!(first, (odd_parity(0x14), odd_parity(0x2C)));
+        assert_eq!(first.0.count_ones() % 2, 1, "odd parity on byte 0");
+        assert_eq!(first.1.count_ones() % 2, 1, "odd parity on byte 1");
     }
 
     #[test]
