@@ -3344,8 +3344,10 @@ dependencies = [
 name = "g2g-bridge"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "g2g-core",
  "g2g-plugins",
+ "pkg-config",
  "tokio",
 ]
 

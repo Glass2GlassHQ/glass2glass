@@ -36,6 +36,24 @@ fn round_trips_buffers_across_the_thread_boundary() {
     assert_eq!(stats.frames_consumed, 3, "sink consumed every frame");
 }
 
+/// A real caps-driven transform (not just a pass-through) runs inside the
+/// sub-graph and its output reaches the drain. This exercises the path where the
+/// runner cascades caps a second time through the embedded graph (a format/size
+/// transform), which must not strand the frame at the `appsink`.
+#[test]
+fn caps_driven_transform_delivers_output() {
+    let bridge = BridgeGraph::new("videoconvert", CAPS).expect("appsrc ! videoconvert ! appsink");
+    assert!(bridge.push(&[42u8; 16], 0));
+    bridge.end_of_stream();
+
+    let mut frames = 0;
+    while let Some(frame) = bridge.pull_blocking() {
+        assert!(frame_bytes(&frame).is_some(), "system-memory output");
+        frames += 1;
+    }
+    assert_eq!(frames, 1, "the transformed frame reached the drain");
+}
+
 /// A fragment that names an element g2g lacks fails construction with a parse
 /// error (carrying the launch diagnostics / porting hint), not a panic or a hung
 /// thread. This is the feedback an app developer gets while porting.

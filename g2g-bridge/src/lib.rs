@@ -35,6 +35,11 @@
 #[cfg(feature = "std")]
 mod bridge;
 
+// The GStreamer GObject shell's C-ABI surface. Compiled into the cdylib
+// alongside `csrc/gstglass2glass.c` (see build.rs) when `gstreamer` is on.
+#[cfg(feature = "gstreamer")]
+pub mod ffi;
+
 #[cfg(feature = "std")]
 pub use bridge::{frame_bytes, BridgeError, BridgeGraph};
 

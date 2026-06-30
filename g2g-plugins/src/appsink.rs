@@ -173,7 +173,15 @@ impl AsyncElement for AppSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.mode = SINKS.lock().remove(self.channel_name());
+        // Claim the registered delivery mode once, and only once: a format- or
+        // size-changing upstream transform makes the runner cascade caps a
+        // second time, calling `configure_pipeline` again. The claim removes the
+        // entry from the global, so a re-configure must not run it again or it
+        // would clobber the already-claimed `tx`/callback with `None` and then
+        // silently drop every frame (and never forward EOS).
+        if self.mode.is_none() {
+            self.mode = SINKS.lock().remove(self.channel_name());
+        }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }

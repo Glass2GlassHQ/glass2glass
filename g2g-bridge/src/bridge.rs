@@ -98,8 +98,16 @@ impl BridgeGraph {
         let feed = register_appsrc(&in_ch);
         let pull = register_appsink_pull(&out_ch);
 
-        let desc =
-            format!("appsrc channel={in_ch} caps={input_caps} ! {fragment} ! appsink channel={out_ch}");
+        // Pin the sub-graph's output caps equal to its input with a trailing
+        // inline caps filter. A caps-driven transform (videoconvert, videoflip)
+        // cannot fixate its output when the downstream `appsink` imposes no
+        // concrete caps, so it errors and produces nothing; echoing the input
+        // caps gives it a target. This also enforces the caps/size-preserving
+        // contract the embedding relies on (a format-changing fragment fails
+        // negotiation here rather than silently producing mismatched buffers).
+        let desc = format!(
+            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! {input_caps} ! appsink channel={out_ch}"
+        );
 
         let reg = default_registry();
         let graph = match parse_launch(&reg, &desc) {

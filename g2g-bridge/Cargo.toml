@@ -8,20 +8,30 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# rlib so Rust integration tests can link the `BridgeGraph` impedance core.
-# `cdylib` (the `libgstglass2glass.so` GObject shell) is added with the
-# GStreamer-facing FFI layer, a follow-up milestone.
+# rlib so Rust integration tests can link the `BridgeGraph` impedance core;
+# cdylib so the `gstreamer` feature can emit `libgstglass2glass.so`, the
+# GStreamer-loadable GObject plugin (empty of plugin symbols without the
+# feature, harmless).
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["std"]
 # `multi-thread` makes the boxed graph elements `Send` so the parsed sub-graph
 # can move to the dedicated run thread (mirrors g2g-capi).
 std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins/std", "dep:tokio"]
+# The GStreamer GObject shell (`csrc/gstglass2glass.c`, built by build.rs via
+# pkg-config + cc). Links the system gstreamer-1.0 / gstreamer-base-1.0.
+gstreamer = ["std"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
 g2g-plugins = { path = "../g2g-plugins" }
 tokio = { version = "1", features = ["rt", "time"], optional = true }
+
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
 
 [lints]
 workspace = true
