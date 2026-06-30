@@ -65,6 +65,8 @@ pub mod alpha;
 pub mod subparse;
 pub mod bitmapfont;
 pub mod textoverlay;
+// CEA-608/708 closed captions carried in-band in H.264/H.265 SEI (no_std).
+pub mod cea;
 // Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
 mod pixel;
 // Sans-IO H.264 RTP packetizer (RFC 3550 + 6184), the live-egress foundation.

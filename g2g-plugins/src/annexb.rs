@@ -117,11 +117,6 @@ pub(crate) fn nal_units_any(data: &[u8]) -> NalUnitsAny<'_> {
 }
 
 /// H.264 NAL unit type: the low 5 bits of the first NAL header byte.
-#[cfg(any(
-    all(target_os = "macos", feature = "vtdecode"),
-    all(target_os = "android", feature = "mediacodec"),
-    test
-))]
 pub(crate) fn h264_nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1F)
 }
@@ -164,7 +159,6 @@ pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
 
 /// The H.265 (HEVC) NAL unit type: bits 1..=6 of the first header byte
 /// (`(b >> 1) & 0x3F`), where H.264 uses the low 5 bits.
-#[cfg(any(all(target_os = "android", feature = "mediacodec"), test))]
 pub(crate) fn h265_nal_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| (b >> 1) & 0x3F)
 }
