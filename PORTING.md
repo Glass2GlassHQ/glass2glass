@@ -261,7 +261,11 @@ g2g binary it ships — remains available and needs no ABI match.
   and host must share the same `g2g-core` version, `rustc`, and layout features.
   Cross-toolchain binary plugins (an `abi_stable` facade) are future work.
 - `g2g-bridge` (embed a g2g sub-graph inside a GStreamer pipeline for incremental
-  migration) is designed but not implemented (DESIGN.md §7).
+  migration, DESIGN.md §7): the impedance core (`BridgeGraph`, which runs
+  `appsrc ! <fragment> ! appsink` on its own thread behind a synchronous
+  push/pull API) is implemented and tested; the GObject `GstBaseTransform` shell
+  (`libgstglass2glass.so`) that registers `glass2glass` as a loadable GStreamer
+  element is still to come.
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---
