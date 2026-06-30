@@ -341,13 +341,10 @@ leverage first:
 - **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
   decode path (`cea` decoders + `CcExtract` + file-`playbin` auto-plug) and the
   CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md §4.18). Still
-  open: a text/subtitle *file source* (`.srt` / `.vtt` -> `Text{Srt}` stream) to
-  feed `CcInsert`'s cue pad, so a full caption-authoring pipeline runs from a
-  subtitle file (today the cue pad must be driven programmatically); CEA-708
-  *encode* (window layout, the fat half); MPEG-2 user-data caption extraction; the
-  MP4 `c608` / `c708` *raw-caption track* (the one case justifying a
-  `Caps::ClosedCaption { format }` variant); and HLS-`playbin` caption auto-plug
-  (only the file MKV / TS / MP4 hooks honour `#closed-captions=` today).
+  open: MPEG-2 user-data caption extraction; the MP4 `c608` / `c708` *raw-caption
+  track* (the one case justifying a `Caps::ClosedCaption { format }` variant); and
+  HLS-`playbin` caption auto-plug (only the file MKV / TS / MP4 hooks honour
+  `#closed-captions=` today).
 - **Bitmap / picture subtitles (DVD / PGS / DVB).** RLE-image subtitles, not
   text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
   `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;

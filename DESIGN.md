@@ -2203,21 +2203,30 @@ file-container analog of the HLS `#subtitle-lang=` hint; the file hooks (MKV / T
 MP4) honour it, and the explicit caption request wins over an auto-selected
 subtitle track (there is one overlay text pad).
 
-The encode direction is the mirror image (M431 / M432), for caption authoring and
+The encode direction is the mirror image (M431-M435), for caption authoring and
 broadcast egress. `cea::Cc608Enc` is the inverse of the `Cea608` decoder: fed cues
 (text + placement) it builds the pop-on command sequence (RCL, a PAC per row, the
 row text, EOC; EDM to erase) and queues the `(cc_data_1, cc_data_2)` byte pairs,
-doubling the control codes and setting odd parity. The caption channel carries two
-bytes per video frame, so the pairs are drained one per frame (null padding when
-idle). `CcInsert` is the element wrapping it, the inverse of `CcExtract`: a
-compressed H.264 / H.265 access-unit stream plus a timed cue stream in (a
-`MultiInputElement` merging the two pads by PTS), the same video out with a `GA94`
-caption SEI (`cea::build_cc_sei`, the inverse of `extract_cc_data`) written before
-each access unit's first VCL slice. The video provides the frame clock; a cue is
-queued on arrival and erased when its window ends. A `subparse -> cc608enc /
-ccinsert -> ... -> ccextract -> textoverlay` round trip is thus pure in-graph (an
-authoring pipeline still wants a text/subtitle *file source* to feed `CcInsert`'s
-cue pad from a `.srt` / `.vtt`, the one remaining piece).
+doubling the control codes and setting odd parity. `cea::Cc708Enc` is the 708
+counterpart, the inverse of `Cea708`: it builds the window command stream
+(DefineWindow a hidden window sized to the text and anchored from the cue's
+relative placement, SetPenLocation per row, the G0 text, DisplayWindows to reveal
+it atomically; HideWindows to erase), packs the commands into DTVCC service blocks
+(never splitting a command across the 31-byte `block_size`), wraps each in a DTVCC
+packet, and emits the `cc_type` 3/2 triples. Either drains one caption unit per
+video frame (a byte pair / a triple; padding when idle). `CcInsert` is the element
+wrapping them, the inverse of `CcExtract`: a compressed H.264 / H.265 access-unit
+stream plus a timed cue stream in (a `MultiInputElement` merging the two pads by
+PTS), the same video out with a `GA94` caption SEI (`cea::build_cc_sei`, the
+inverse of `extract_cc_data`) written before each access unit's first VCL slice; it
+encodes CEA-608 by default or CEA-708 via `CcInsert::cea708`. The video provides
+the frame clock; a cue is queued on arrival and erased when its window ends, and a
+warning fires if cues arrive against an untimed video source (the merge would drop
+them). `SubtitleSrc` (a `.srt` / `.vtt` / `.ssa` / `.ttml` file as a `Text` stream)
+is the head of the authoring pipeline, so `subtitlesrc -> subparse -> ccinsert ->
+tsmux` (the `examples/cc_author.rs` flow) embeds captions from a subtitle file; the
+whole `subparse -> ccinsert -> ... -> ccextract -> textoverlay` round trip is pure
+in-graph.
 
 ### 4.19 Native WebRTC (`str0m`)
 
