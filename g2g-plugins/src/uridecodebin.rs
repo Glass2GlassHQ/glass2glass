@@ -128,8 +128,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use g2g_core::runtime::{
-    is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError,
-    PlaybinGraphError, PlaybinPort, Registry,
+    is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, Registry,
 };
 #[cfg(feature = "std")]
 use g2g_core::{ByteStreamEncoding, Graph};
@@ -152,39 +151,6 @@ fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
     Some((parsed.rest.to_string(), prefix))
 }
 
-/// Build one [`PlaybinPort`] per `(elementary caps, is_video)`: an `autovideosink`
-/// for a video stream, an `autoaudiosink` for audio, each with the matching
-/// raw-shape `target`. Shared by every container's playbin hook.
-#[cfg(feature = "std")]
-fn playbin_ports(
-    reg: &Registry,
-    infos: impl Iterator<Item = (Caps, bool)>,
-) -> Result<Vec<PlaybinPort>, ParseError> {
-    let mut ports = Vec::new();
-    for (caps, video) in infos {
-        let sink_name = if video { "autovideosink" } else { "autoaudiosink" };
-        let target: Box<dyn Fn(&Caps) -> bool> =
-            if video { Box::new(is_raw_video) } else { Box::new(is_raw_audio) };
-        let sink = reg
-            .make_element(sink_name)
-            .ok_or_else(|| ParseError::UnknownElement(sink_name.to_string()))?;
-        ports.push(PlaybinPort { input_caps: caps, target, sink });
-    }
-    Ok(ports)
-}
-
-/// Map a multi-stream graph-build failure to the text-parser error.
-#[cfg(feature = "std")]
-fn map_playbin_err(uri: &str, e: PlaybinGraphError) -> ParseError {
-    match e {
-        PlaybinGraphError::NoPorts => {
-            ParseError::NoDecodeChain("playbin: no forwardable streams".to_string())
-        }
-        PlaybinGraphError::Uri(e) => ParseError::Uri(alloc::format!("{uri}: {e:?}")),
-        PlaybinGraphError::Graph(e) => ParseError::Graph(e),
-        PlaybinGraphError::Decode(e) => ParseError::NoDecodeChain(alloc::format!("{e:?}")),
-    }
-}
 
 /// The `playbin uri=X` auto-fan-out hook for Matroska / WebM (M382): probe a
 /// `file://` MKV container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto
@@ -216,18 +182,12 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         }
     }
     let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
-    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     // The file:// URI handler self-demuxes MP4, so build the matching Matroska
-    // byte source directly and feed it to the multi-output demuxer.
+    // byte source directly and feed it to the multi-output demuxer. Audio tracks
+    // go through the convert/resample branch (not decoder -> sink direct).
     let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::Matroska });
-    reg.build_playbin_graph_with_source(
-        Box::new(source),
-        crate::mkvdemux::MkvDemuxN::new(streams),
-        ports,
-        PLAYBIN_MAX_DEPTH,
-    )
-    .map(Some)
-    .map_err(|e| map_playbin_err(uri, e))
+    build_av_fanout(reg, Box::new(source), crate::mkvdemux::MkvDemuxN::new(streams), &av).map(Some)
 }
 
 /// The `playbin uri=X` auto-fan-out hook for MPEG-TS (M389): probe a `file://`
@@ -254,22 +214,14 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
         return Ok(None); // not MPEG-TS (or no PMT yet): decline
     }
     let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
-    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     let source = crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
-    reg.build_playbin_graph_with_source(
-        Box::new(source),
-        crate::tsdemux::TsDemuxN::new(streams),
-        ports,
-        PLAYBIN_MAX_DEPTH,
-    )
-    .map(Some)
-    .map_err(|e| map_playbin_err(uri, e))
+    build_av_fanout(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(streams), &av).map(Some)
 }
 
 /// Map a per-branch decode-chain failure to the text-parser error (the
-/// [`decodebin`](Registry::decodebin) form, vs [`map_playbin_err`]'s whole-graph
-/// form): no chain quotes the unplugged input caps, a link error wraps the graph
-/// error.
+/// [`decodebin`](Registry::decodebin) form): no chain quotes the unplugged input
+/// caps, a link error wraps the graph error.
 #[cfg(feature = "std")]
 fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
     match e {
@@ -345,6 +297,60 @@ fn wire_audio_branch(
     graph.link(resample, snk).map_err(ParseError::Graph)?;
     reg.decodebin(graph, src, convert, caps, &is_raw_audio, PLAYBIN_MAX_DEPTH)
         .map_err(|e| map_decode_err(caps, e))?;
+    Ok(())
+}
+
+/// Build a plain (no-subtitle) A/V fan-out graph: `source -> demux -> { per-stream
+/// branch }`, the non-overlay sibling of [`build_mkv_subtitle_overlay`]. Each video
+/// track decodes straight to an auto video sink (the decoder is auto-plugged to the
+/// sink's format, as `build_playbin_graph` does); each audio track goes through the
+/// [`wire_audio_branch`] decode -> `audioconvert` -> `audioresample` chain so the
+/// sink always sees a fixed PCM format while the converters absorb the stream's real
+/// channels / rate. `av` lists each demux port's `(elementary caps, is_video)` in
+/// port order. This replaces a `build_playbin_graph_with_source` call for the
+/// audio-bearing containers: that g2g-core builder links a decoder straight to the
+/// audio sink (no converter chain), since the plugin-side `audioconvert` /
+/// `audioresample` are outside its element pool.
+#[cfg(feature = "std")]
+fn build_av_fanout<D>(
+    reg: &Registry,
+    source: Box<dyn DynSourceLoop>,
+    demux: D,
+    av: &[(Caps, bool)],
+) -> Result<Graph<GraphNode>, ParseError>
+where
+    D: g2g_core::MultiOutputElement + 'static,
+{
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNodeRef::Source(source));
+    let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+    wire_av_fanout(reg, &mut graph, demux, av)?;
+    Ok(graph)
+}
+
+/// Wire each demux port of a plain A/V fan-out: video -> auto video sink
+/// (auto-plugged decoder), audio -> [`wire_audio_branch`]. Shared by every
+/// container's no-subtitle `playbin` hook (MKV / TS / MP4).
+#[cfg(feature = "std")]
+fn wire_av_fanout(
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    demux: g2g_core::graph::Demux,
+    av: &[(Caps, bool)],
+) -> Result<(), ParseError> {
+    for (i, (caps, video)) in av.iter().enumerate() {
+        if *video {
+            let sink = reg
+                .make_element("autovideosink")
+                .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
+            let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
+            reg.decodebin(graph, demux.out(i as u8), vsnk, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
+                .map_err(|e| map_decode_err(caps, e))?;
+        } else {
+            wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
+        }
+    }
     Ok(())
 }
 
@@ -505,21 +511,14 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
             return build_mp4_subtitle_overlay(reg, &path, &infos, text).map(Some);
         }
     }
-    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     let demux_ports: Vec<_> = infos
         .iter()
         .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
         .collect();
     let source =
         crate::filesrc::FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff });
-    reg.build_playbin_graph_with_source(
-        Box::new(source),
-        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
-        ports,
-        PLAYBIN_MAX_DEPTH,
-    )
-    .map(Some)
-    .map_err(|e| map_playbin_err(uri, e))
+    build_av_fanout(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av).map(Some)
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for
@@ -579,16 +578,9 @@ pub fn build_hls_ts_fanout(
     if ts_streams.len() < 2 {
         return Ok(None); // not a multi-stream muxed TS variant
     }
-    let ports = playbin_ports(reg, port_infos.into_iter())?;
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    reg.build_playbin_graph_with_source(
-        Box::new(source),
-        crate::tsdemux::TsDemuxN::new(ts_streams),
-        ports,
-        PLAYBIN_MAX_DEPTH,
-    )
-    .map(Some)
-    .map_err(|e| map_playbin_err(source_url, e))
+    build_av_fanout(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(ts_streams), &port_infos)
+        .map(Some)
 }
 
 /// Assemble the `HlsSrc -> Mp4DemuxN -> {decode -> auto sink}` fan-out for an
@@ -610,20 +602,14 @@ pub fn build_hls_fmp4_fanout(
     if infos.is_empty() {
         return Ok(None); // init segment carries no A/V track
     }
-    let ports = playbin_ports(reg, infos.iter().map(|i| (i.caps.clone(), i.video)))?;
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
     let demux_ports: Vec<_> = infos
         .iter()
         .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
         .collect();
     let source = crate::hlssrc::HlsSrc::new(source_url);
-    reg.build_playbin_graph_with_source(
-        Box::new(source),
-        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
-        ports,
-        PLAYBIN_MAX_DEPTH,
-    )
-    .map(Some)
-    .map_err(|e| map_playbin_err(source_url, e))
+    build_av_fanout(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av)
+        .map(Some)
 }
 
 /// Assemble a *multi-source* HLS fan-out for a variant with a separate audio
@@ -647,26 +633,21 @@ pub fn build_hls_separate_fanout(
         return Ok(None);
     };
     let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
-    let video_ports = playbin_ports(reg, core::iter::once((video.caps.clone(), true)))?;
-    let mut graph = reg
-        .build_playbin_graph_with_source(
-            Box::new(crate::hlssrc::HlsSrc::new(master_url)),
-            TsDemuxN::new(Vec::from([vts])),
-            video_ports,
-            PLAYBIN_MAX_DEPTH,
-        )
-        .map_err(|e| map_playbin_err(master_url, e))?;
-    // The separate audio rendition playlist, its own source -> demux -> sink chain.
+    let mut graph = build_av_fanout(
+        reg,
+        Box::new(crate::hlssrc::HlsSrc::new(master_url)),
+        TsDemuxN::new(Vec::from([vts])),
+        &[(video.caps.clone(), true)],
+    )?;
+    // The separate audio rendition playlist, its own source -> demux -> audio
+    // branch (decode -> convert -> resample -> sink), merged into the graph.
     let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
-    let audio_ports = playbin_ports(reg, core::iter::once((audio_caps, false)))?;
-    let audio_graph = reg
-        .build_playbin_graph_with_source(
-            Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
-            TsDemuxN::new(Vec::from([TsStream::Aac])),
-            audio_ports,
-            PLAYBIN_MAX_DEPTH,
-        )
-        .map_err(|e| map_playbin_err(audio_url, e))?;
+    let audio_graph = build_av_fanout(
+        reg,
+        Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
+        TsDemuxN::new(Vec::from([TsStream::Aac])),
+        &[(audio_caps, false)],
+    )?;
     graph.merge(audio_graph);
     Ok(Some(graph))
 }

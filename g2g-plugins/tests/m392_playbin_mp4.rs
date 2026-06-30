@@ -169,9 +169,10 @@ async fn playbin_fans_out_a_fragmented_mp4() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("mp4 playbin fans out");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> Mp4DemuxN(2); each port: demux.out(i) -> stub decoder -> auto sink.
-    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two auto sinks");
-    assert_eq!(graph.edges().len(), 5, "one decode branch per forwardable track");
+    // FileSrc -> Mp4DemuxN(2). Video: demux -> decoder -> sink. Audio: demux ->
+    // decoder -> audioconvert -> audioresample -> sink (the M422+ audio branch).
+    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
+    assert_eq!(graph.edges().len(), 7, "video branch (2) + audio branch (4) + src->demux");
 }
 
 #[tokio::test]
@@ -182,5 +183,5 @@ async fn the_mp4_hook_handles_mp4_only() {
     let (mp4_path, mp4_uri) = temp_uri("disp_mp4", &av_mp4().await);
     let mp4_graph = parse_launch(&reg, &format!("playbin uri={mp4_uri}")).expect("mp4 handled");
     std::fs::remove_file(&mp4_path).ok();
-    assert_eq!(mp4_graph.node_count(), 6, "MP4 fans out via mp4_playbin");
+    assert_eq!(mp4_graph.node_count(), 8, "MP4 fans out via mp4_playbin (audio branch adds convert+resample)");
 }

@@ -93,13 +93,15 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
     let streams = variant_streams(&master, &master.variants[0]);
     assert_eq!(streams.len(), 2);
 
-    // The fan-out assembles HlsSrc -> TsDemuxN(2) -> two decode branches.
+    // The fan-out assembles HlsSrc -> TsDemuxN(2) -> two decode branches. The audio
+    // branch adds audioconvert + audioresample (the M422+ chain) so the sink sees a
+    // fixed PCM format: video(decoder+sink) + audio(decoder+convert+resample+sink).
     let reg = registry();
     let graph = build_hls_ts_fanout(&reg, "https://example.com/master.m3u8", &streams)
         .expect("fan-out builds")
         .expect("two muxed streams fan out");
-    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two auto sinks");
-    assert_eq!(graph.edges().len(), 5, "one decode branch per muxed stream");
+    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
+    assert_eq!(graph.edges().len(), 7, "video branch (2) + audio branch (4) + src->demux");
 }
 
 #[test]
@@ -160,9 +162,11 @@ fn separate_audio_rendition_builds_two_source_chains() {
     )
     .expect("separate fan-out builds")
     .expect("video + audio chains");
-    // Two chains: each HlsSrc -> TsDemuxN -> decoder -> sink (4 nodes, 3 edges).
-    assert_eq!(graph.node_count(), 8, "two independent source->sink chains");
-    assert_eq!(graph.edges().len(), 6);
+    // Two chains: video = HlsSrc -> TsDemuxN -> decoder -> sink (4 nodes, 3 edges);
+    // audio = HlsSrc -> TsDemuxN -> decoder -> audioconvert -> audioresample -> sink
+    // (6 nodes, 5 edges, the M422+ audio branch). Total 10 nodes, 8 edges.
+    assert_eq!(graph.node_count(), 10, "video chain (4) + audio chain (6, with convert+resample)");
+    assert_eq!(graph.edges().len(), 8);
 }
 
 /// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered from
@@ -242,6 +246,8 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &init)
         .expect("fmp4 fan-out builds")
         .expect("two tracks fan out");
-    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two auto sinks");
-    assert_eq!(graph.edges().len(), 5);
+    // Audio track goes through the M422+ branch (decoder+convert+resample+sink):
+    // source + demux + video(decoder+sink) + audio(decoder+convert+resample+sink).
+    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
+    assert_eq!(graph.edges().len(), 7);
 }

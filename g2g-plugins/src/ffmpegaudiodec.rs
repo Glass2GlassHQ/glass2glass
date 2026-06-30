@@ -9,10 +9,11 @@
 //! must include the AAC decoder (it does in every standard build).
 //!
 //! Negotiation: the channel count and sample rate are only known once a frame
-//! decodes, so the element advertises a `PcmS16Le { channels, ANY_SAMPLE_RATE }`
-//! output at negotiation (channels from the input caps when the container
-//! declared them, else stereo) and emits a `CapsChanged` with the real
-//! channels / rate before the first decoded `DataFrame`. A downstream
+//! decodes, so the element advertises a `PcmS16Le { ANY_CHANNELS, ANY_SAMPLE_RATE }`
+//! output at negotiation (both wildcards; `fixate` pins channels to a stereo
+//! placeholder for the edge) and emits a `CapsChanged` with the real channels /
+//! rate before the first decoded `DataFrame`. A downstream `audioconvert`
+//! retargets the real channel layout (mono fan-out, multichannel downmix) and
 //! `audioresample` (which tolerates the `ANY_SAMPLE_RATE` placeholder and learns
 //! the real rate from that `CapsChanged`) retargets to the sink's fixed rate.
 
@@ -33,7 +34,8 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_SAMPLE_RATE,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 /// One decoded audio frame: interleaved `PcmS16Le` bytes plus its real layout.
@@ -111,21 +113,22 @@ impl AsyncElement for FfmpegAudioDec {
         }
     }
 
-    /// Native `DerivedOutput`: AAC in -> interleaved `PcmS16Le` out at a *constant*
-    /// stereo, any-rate placeholder. The output channel count must not depend on
-    /// the input: an input-coupled count reads as a passthrough field, and the
-    /// solver then couples the output's concrete channels back onto the input,
-    /// demanding e.g. `Aac{2,..}` from a TS/HLS demuxer that only advertises
-    /// `Aac{0,0}` (unknown until parsed), which is an empty link. A constant output
-    /// (like the video decoder's `Dim::Any`) breaks that coupling; the real channel
-    /// count / rate arrive via the `CapsChanged` a decoded frame emits. Stereo is
-    /// the overwhelmingly common case and what `audioconvert` downstream targets;
-    /// mono / multichannel want a channels wildcard in `Caps::Audio` (a follow-up).
+    /// Native `DerivedOutput`: AAC in -> interleaved `PcmS16Le` out at an
+    /// `ANY_CHANNELS`, any-rate placeholder. The output channel count must not
+    /// depend on the input: an input-coupled count reads as a passthrough field,
+    /// and the solver then couples the output's concrete channels back onto the
+    /// input. With the channels wildcard that back-coupling is no longer fatal
+    /// (`Aac{N} ∩ Aac{0} = Aac{N}`), but a wildcard output is still cleaner: the
+    /// decoder genuinely does not know the layout until it parses a frame, so it
+    /// advertises `ANY_CHANNELS` (like the video decoder's `Dim::Any`) and the real
+    /// channel count / rate arrive via the `CapsChanged` a decoded frame emits.
+    /// `fixate` collapses the placeholder to stereo for the negotiated edge, which
+    /// the downstream `audioconvert` retargets (mono fan-out, multichannel downmix).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::Audio { format: AudioFormat::Aac, .. } => CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
-                channels: 2,
+                channels: ANY_CHANNELS,
                 // A concrete default rate (a raw-PCM `ANY_SAMPLE_RATE` is
                 // deliberately unfixable, M187); the real rate arrives via the
                 // CapsChanged a decoded frame emits, which the downstream
@@ -251,8 +254,8 @@ impl AsyncElement for FfmpegAudioDec {
 
 impl PadTemplates for FfmpegAudioDec {
     fn pad_templates() -> Vec<PadTemplate> {
-        let aac = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
-        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: 0, sample_rate: ANY_SAMPLE_RATE };
+        let aac = Caps::Audio { format: AudioFormat::Aac, channels: ANY_CHANNELS, sample_rate: 0 };
+        let pcm = Caps::Audio { format: AudioFormat::PcmS16Le, channels: ANY_CHANNELS, sample_rate: ANY_SAMPLE_RATE };
         Vec::from([PadTemplate::sink(CapsSet::one(aac)), PadTemplate::source(CapsSet::one(pcm))])
     }
 }

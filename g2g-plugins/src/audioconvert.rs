@@ -5,11 +5,13 @@
 //! AudioConvert -> WavSink (S16)`, or feeding an encoder that wants a specific
 //! layout.
 //!
-//! Channel conversion is limited to the lossless/obvious cases: identity,
-//! mono fan-out to N channels (replicate), and downmix to mono (average).
-//! Mixed multi-channel remaps (e.g. 5.1 -> stereo) are rejected loud. Sample
-//! rate is preserved (no resampler). CPU-only and `no_std`: this element lives
-//! in the crate baseline.
+//! Channel conversion handles any count to any count: identity, mono fan-out to
+//! N channels (replicate), downmix to mono (average), and a layout-agnostic
+//! round-robin fold/replicate for the mixed multi-channel cases (e.g. 5.1 ->
+//! stereo). The fold is position-unaware (we don't track speaker layout), so it
+//! never silently drops a channel rather than applying ITU downmix coefficients.
+//! Sample rate is preserved (no resampler). CPU-only and `no_std`: this element
+//! lives in the crate baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -66,8 +68,10 @@ impl AudioConvert {
     }
 
     /// Validate a PCM caps as a convertible input, returning its
-    /// format/channels/rate. The channel conversion to the target must be one
-    /// of the supported shapes.
+    /// format/channels/rate. Any concrete input channel count converts to the
+    /// target (identity / fan-out / downmix / layout-agnostic remap);
+    /// `ANY_CHANNELS` (0) is the negotiation placeholder, accepted here with the
+    /// real count arriving via a `CapsChanged` before the first frame.
     fn accept_input(&self, caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
         let Caps::Audio {
             format,
@@ -77,20 +81,21 @@ impl AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !FORMATS.contains(format)
-            || *channels == 0
-            || !channel_map_supported(*channels, self.target_channels)
-        {
+        if !FORMATS.contains(format) || !channel_map_supported(*channels, self.target_channels) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
     }
 }
 
-/// Whether converting `in_ch` channels to `out_ch` is supported: identity,
-/// mono fan-out, or downmix to mono.
-fn channel_map_supported(in_ch: u8, out_ch: u8) -> bool {
-    in_ch == out_ch || in_ch == 1 || out_ch == 1
+/// Whether `AudioConvert` can produce `out_ch` channels from `in_ch`. Every
+/// concrete input count converts now (identity, mono fan-out, downmix to mono,
+/// and the layout-agnostic round-robin downmix/upmix in [`map_channel`]);
+/// `ANY_CHANNELS` (0) is the negotiation wildcard (the real count arrives via
+/// `CapsChanged`). The only unsupported shape is a zero *target*, which `new`
+/// already forbids.
+fn channel_map_supported(_in_ch: u8, out_ch: u8) -> bool {
+    out_ch > 0
 }
 
 pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
@@ -328,15 +333,34 @@ fn convert_pcm(
     Ok(dst.into_boxed_slice())
 }
 
-/// Output sample for channel `oc`: the average on downmix to mono, the single
-/// input channel on mono fan-out, identity otherwise (channel counts match).
+/// Output sample for channel `oc`, given the interleaved input frame. Covers the
+/// full N -> M space, position-unaware: identity when counts match; mono fan-out
+/// (replicate the one input); downmix to mono (average all inputs); a round-robin
+/// fold for a general downmix (`out_ch` < `in_ch`, `out_ch` >= 2: output `oc`
+/// averages inputs `oc, oc+out_ch, oc+2*out_ch, ...`, so no channel is dropped);
+/// and a round-robin replicate for upmix (`out_ch` > `in_ch`, `in_ch` >= 2).
 fn map_channel(in_samples: &[f32], oc: usize, out_ch: usize) -> f32 {
-    if out_ch == 1 && in_samples.len() > 1 {
-        in_samples.iter().sum::<f32>() / in_samples.len() as f32
-    } else if in_samples.len() == 1 {
-        in_samples[0]
+    let in_ch = in_samples.len();
+    if in_ch == out_ch {
+        in_samples[oc] // identity
+    } else if in_ch == 1 {
+        in_samples[0] // mono fan-out
+    } else if out_ch == 1 {
+        in_samples.iter().sum::<f32>() / in_ch as f32 // downmix to mono
+    } else if out_ch < in_ch {
+        // General downmix: fold input channels into outputs round-robin and
+        // average each group, so every input contributes (no silent drop).
+        let mut sum = 0.0;
+        let mut n = 0u32;
+        let mut i = oc;
+        while i < in_ch {
+            sum += in_samples[i];
+            n += 1;
+            i += out_ch;
+        }
+        sum / n as f32
     } else {
-        in_samples[oc]
+        in_samples[oc % in_ch] // upmix: round-robin replicate
     }
 }
 
@@ -402,12 +426,11 @@ mod tests {
         );
         // compressed audio is not convertible
         assert!(f(&audio(AudioFormat::Aac, 2, 48_000)).is_empty());
-        // unsupported channel remap (3 -> 2) yields no output
-        let conv2 = AudioConvert::new(AudioFormat::PcmS16Le, 2);
-        let CapsConstraint::DerivedOutput(g) = conv2.caps_constraint_as_transform() else {
-            unreachable!()
-        };
-        assert!(g(&audio(AudioFormat::PcmF32Le, 3, 48_000)).is_empty());
+        // a multi-channel remap (3 -> 2) now produces the target layout.
+        assert_eq!(
+            f(&audio(AudioFormat::PcmF32Le, 3, 48_000)).alternatives(),
+            &[audio(AudioFormat::PcmS16Le, 2, 48_000)]
+        );
     }
 
     #[test]
@@ -467,13 +490,47 @@ mod tests {
     }
 
     #[test]
-    fn configure_rejects_unsupported_channel_remap() {
+    fn configure_accepts_any_channel_count_and_wildcard() {
         let mut conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
+        // 5.1 -> stereo now configures (a real runtime CapsChanged for multichannel
+        // content); identity is fine; ANY_CHANNELS (0) is the negotiation placeholder.
+        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 6, 48_000)).is_ok());
+        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 2, 48_000)).is_ok());
+        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 0, 48_000)).is_ok());
+        // a non-PCM input still fails loud.
         assert!(matches!(
-            conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 6, 48_000)),
+            conv.configure_pipeline(&audio(AudioFormat::Aac, 2, 48_000)),
             Err(G2gError::CapsMismatch)
         ));
-        // identity channels is fine
-        assert!(conv.configure_pipeline(&audio(AudioFormat::PcmF32Le, 2, 48_000)).is_ok());
+    }
+
+    #[test]
+    fn six_channel_downmixes_to_stereo_round_robin() {
+        // 5.1 frame ch0..ch5 = 0,100,200,300,400,500 (s16). Round-robin fold:
+        // L = avg(ch0, ch2, ch4) = 200; R = avg(ch1, ch3, ch5) = 300.
+        let mut six = Vec::new();
+        for v in [0i16, 100, 200, 300, 400, 500] {
+            six.extend_from_slice(&v.to_le_bytes());
+        }
+        let stereo = convert_pcm(&six, AudioFormat::PcmS16Le, 6, AudioFormat::PcmS16Le, 2).unwrap();
+        assert_eq!(stereo.len(), 4);
+        let l = i16::from_le_bytes([stereo[0], stereo[1]]);
+        let r = i16::from_le_bytes([stereo[2], stereo[3]]);
+        assert!((l - 200).abs() <= 1, "L={l}");
+        assert!((r - 300).abs() <= 1, "R={r}");
+    }
+
+    #[test]
+    fn stereo_upmixes_to_six_round_robin() {
+        // L=1000, R=2000 -> six channels replicate round-robin: 1000,2000,1000,...
+        let mut stereo = Vec::new();
+        stereo.extend_from_slice(&1000i16.to_le_bytes());
+        stereo.extend_from_slice(&2000i16.to_le_bytes());
+        let six = convert_pcm(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 6).unwrap();
+        assert_eq!(six.len(), 12);
+        for (i, chunk) in six.chunks_exact(2).enumerate() {
+            let want = if i % 2 == 0 { 1000 } else { 2000 };
+            assert_eq!(i16::from_le_bytes([chunk[0], chunk[1]]), want, "ch{i}");
+        }
     }
 }

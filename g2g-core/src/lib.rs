@@ -66,7 +66,8 @@ pub mod slot;
 pub use aggregator::InputAggregator;
 pub use caps::{
     AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, PassthroughFields, Rate, TensorDType,
-    TensorLayout, TensorShape, TextFormat, VideoCodec, RawVideoFormat, ANY_SAMPLE_RATE,
+    TensorLayout, TensorShape, TextFormat, VideoCodec, RawVideoFormat, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 pub use clock::{
     elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, PipelineClock,

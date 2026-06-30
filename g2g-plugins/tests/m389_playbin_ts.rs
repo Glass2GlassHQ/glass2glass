@@ -227,9 +227,10 @@ async fn playbin_fans_out_a_transport_stream() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("ts playbin fans out");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> TsDemuxN(2); each port: demux.out(i) -> stub decoder -> auto sink.
-    assert_eq!(graph.node_count(), 6, "source, demux, two decoders, two auto sinks");
-    assert_eq!(graph.edges().len(), 5, "one decode branch per forwardable stream");
+    // FileSrc -> TsDemuxN(2). Video: demux -> decoder -> sink. Audio: demux ->
+    // decoder -> audioconvert -> audioresample -> sink (the M422+ audio branch).
+    assert_eq!(graph.node_count(), 8, "source, demux, video decode+sink, audio decode+convert+resample+sink");
+    assert_eq!(graph.edges().len(), 7, "video branch (2) + audio branch (4) + src->demux");
 }
 
 #[tokio::test]
@@ -240,11 +241,11 @@ async fn the_right_hook_handles_each_container() {
     let (ts_path, ts_uri) = temp_uri("disp_ts", &av_ts());
     let ts_graph = parse_launch(&reg, &format!("playbin uri={ts_uri}")).expect("ts handled");
     std::fs::remove_file(&ts_path).ok();
-    assert_eq!(ts_graph.node_count(), 6, "TS fans out via ts_playbin");
+    assert_eq!(ts_graph.node_count(), 8, "TS fans out via ts_playbin (audio branch adds convert+resample)");
 
     // An MKV file is handled by mkv_playbin (ts_playbin declines it).
     let (mkv_path, mkv_uri) = temp_uri("disp_mkv", &av_mkv().await);
     let mkv_graph = parse_launch(&reg, &format!("playbin uri={mkv_uri}")).expect("mkv handled");
     std::fs::remove_file(&mkv_path).ok();
-    assert_eq!(mkv_graph.node_count(), 6, "MKV fans out via mkv_playbin");
+    assert_eq!(mkv_graph.node_count(), 8, "MKV fans out via mkv_playbin (audio branch adds convert+resample)");
 }

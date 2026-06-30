@@ -43,6 +43,19 @@ leverage first:
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
 
+## Runtime / scheduling
+
+- **No cross-arm parallelism.** The graph runner drives every element arm
+  through a single `JoinAll` future (`runtime/join.rs`) in one task, so the
+  whole graph runs on one thread regardless of the tokio runtime's worker count
+  (the `multi-thread` feature only adds a `Send` bound on `ElementBound`; it does
+  not make the runner spawn). `BoxFuture<'a,T>` is not `Send`/`'static`, so arms
+  can't be `tokio::spawn`ed today. Multi-core parallelism would need either a
+  spawning runner with `Send + 'static` arms (large refactor) or `spawn_blocking`
+  offload for heavy synchronous elements (videoconvert / waylandsink XRGB
+  convert). Release-build perf is adequate for now (1080p HLS A/V+subs holds
+  30 fps); debug builds misrepresent it, so validate live runs with `--release`.
+
 ## Platform: macOS
 
 - `VtDecode`: first `cargo build` on a Mac to settle the FFI `// NOTE` spots;
@@ -304,21 +317,19 @@ leverage first:
   AAC decode landed too (M422: `FfmpegAudioDec` + ADTS frame splitting; the playbin
   audio branch wires `decode -> audioconvert -> audioresample -> autoaudiosink`;
   bipbop plays clean video + audio + subtitles live, audio via `PulseSink` ->
-  pipewire-pulse). The overlay graph runs end to end. Remaining playback follow-ups:
-  - **Audio breadth.** `FfmpegAudioDec` advertises a constant stereo / 48 kHz
-    placeholder and relies on `audioconvert` (identity / mono fan-out / downmix-to-
-    mono only) + `audioresample`; **mono / multichannel** need a channels wildcard in
-    `Caps::Audio::intersect` (today only `sample_rate` has a 0 = "any" wildcard, so a
-    runtime mono/5.1 `CapsChanged` mismatches the fixated stereo edge). The converter
-    wiring is in the subtitle-overlay audio branch (`wire_audio_branch`); the **plain
-    A/V fan-out** (`build_playbin_graph`) still links a decoder straight to the sink,
-    so a non-subtitle TS/MP4 audio track needs the same chain. Other codecs (Opus,
-    etc.) beyond AAC. The audio sink needs the `pulse-sink` (or `alsa-sink`) feature
-    built in, else `autoaudiosink` falls back to `fakesink`.
+  pipewire-pulse). Mono / multichannel audio works too (M423: an `ANY_CHANNELS`
+  wildcard in `Caps::Audio`, decoder advertises it instead of constant stereo, and
+  `audioconvert` does general N -> M downmix/upmix), and the plain A/V fan-out routes
+  audio through the convert/resample branch like the overlay path (M424:
+  `build_av_fanout` / `wire_av_fanout`). The overlay graph runs end to end. Remaining
+  playback follow-ups:
+  - **Audio breadth.** Codecs beyond AAC (Opus, etc.). The layout-agnostic downmix in
+    `audioconvert` folds channels round-robin rather than applying ITU/speaker-position
+    coefficients (no channel-position metadata is carried yet). The audio sink needs the
+    `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls back to
+    `fakesink`.
   - An access-unit-re-framing **`h265parse`** (the M421 sibling for HEVC; today it
     is a caps-refinement pass-through, so TS / HLS HEVC has the same mis-framing).
-  - On-screen playback still wants a look at the separate `waylandsink`
-    present-stall (compositor backpressure observed ~1s in).
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature

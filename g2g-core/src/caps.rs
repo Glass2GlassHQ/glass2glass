@@ -12,6 +12,25 @@ use crate::error::G2gError;
 /// [`Dim::Any`]).
 pub const ANY_SAMPLE_RATE: u32 = 0;
 
+/// Sentinel channel count meaning "any / unknown" in [`Caps::Audio`]. Like
+/// [`ANY_SAMPLE_RATE`], `0` is never a real channel count, so it serves as the
+/// wildcard for two cases: a compressed stream whose layout is unknown until the
+/// bitstream is parsed (a demuxer emits `Aac { channels: 0, .. }`), and a decoder
+/// that defers its real channel count to a runtime `CapsChanged` (it advertises
+/// `PcmS16Le { channels: 0, .. }` at negotiation). `intersect` treats it as a
+/// wildcard in *both* the compressed and PCM cases (so a decoder's output channels
+/// coupling back onto a `0` input is not an empty link); `fixate` collapses a PCM
+/// `0` to a concrete stereo placeholder (the real layout arrives via `CapsChanged`,
+/// mirroring video `Dim::Any` -> 16). A compressed `0` stays nominal (unfixed-but-
+/// fixed, like a compressed `ANY_SAMPLE_RATE`), since nothing downstream of a
+/// demuxer reads it before the decoder replaces it.
+pub const ANY_CHANNELS: u8 = 0;
+
+/// The placeholder channel count a PCM [`Caps::Audio`] with [`ANY_CHANNELS`]
+/// fixates to (stereo): a concrete value the negotiation can pin while the stream's
+/// real layout is still unknown, replaced by the decoder's first `CapsChanged`.
+const FIXATE_CHANNELS_PLACEHOLDER: u8 = 2;
+
 /// Caps describes one fixated (or partially-narrowed) link.
 ///
 /// Video is split into [`Caps::CompressedVideo`] and [`Caps::RawVideo`]
@@ -108,19 +127,25 @@ impl Caps {
             (
                 Caps::Audio { format: fa, channels: ca, sample_rate: sa },
                 Caps::Audio { format: fb, channels: cb, sample_rate: sb },
-            ) if fa == fb && ca == cb => {
-                // The "any rate" wildcard (M187) is a raw-PCM concept: a
-                // caps-driven resampler leaves its output rate open. Compressed
-                // audio (AAC/Opus) uses `sample_rate: 0` as "unknown until
-                // parsed" and keeps strict equality, unchanged.
+            ) if fa == fb => {
+                // Channels use the `ANY_CHANNELS` (0) wildcard in *both* the
+                // compressed and PCM cases: a decoder's concrete output channels
+                // coupling back onto a demuxer's unknown `0` input must not be an
+                // empty link. The "any rate" wildcard (M187) is a raw-PCM concept
+                // only: a caps-driven resampler leaves its output rate open, while
+                // compressed audio (AAC/Opus) uses `sample_rate: 0` as "unknown
+                // until parsed" and keeps strict equality, unchanged.
+                let channels = intersect_channels(*ca, *cb);
                 let rate = if is_pcm(*fa) {
                     intersect_sample_rate(*sa, *sb)
                 } else {
                     (sa == sb).then_some(*sa)
                 };
-                match rate {
-                    Some(sample_rate) => Ok(Caps::Audio { format: *fa, channels: *ca, sample_rate }),
-                    None => Err(G2gError::CapsMismatch),
+                match (channels, rate) {
+                    (Some(channels), Some(sample_rate)) => {
+                        Ok(Caps::Audio { format: *fa, channels, sample_rate })
+                    }
+                    _ => Err(G2gError::CapsMismatch),
                 }
             }
             (
@@ -138,10 +163,12 @@ impl Caps {
     /// True when every ranged field is `Fixed`. Scalar-only variants are
     /// always fixed.
     pub fn is_fixed(&self) -> bool {
-        if let Caps::Audio { format, sample_rate, .. } = self {
-            // Only raw PCM uses the "any rate" wildcard (M187); compressed audio
-            // keeps `0` as a fixed (if nominal) value.
-            return !(is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE);
+        if let Caps::Audio { format, channels, sample_rate } = self {
+            // Only raw PCM uses the "any rate" / "any channels" wildcards;
+            // compressed audio keeps `0` as a fixed (if nominal) value, since the
+            // decoder replaces it before anything reads it.
+            return !(is_pcm(*format)
+                && (*sample_rate == ANY_SAMPLE_RATE || *channels == ANY_CHANNELS));
         }
         match self.dims() {
             Some((width, height, framerate)) => {
@@ -180,6 +207,18 @@ impl Caps {
                 if is_pcm(*format) && *sample_rate == ANY_SAMPLE_RATE =>
             {
                 Err(G2gError::CapsMismatch)
+            }
+            // A raw-PCM "any channels" collapses to a concrete stereo placeholder:
+            // the negotiation needs a fixed count, the stream's real layout arrives
+            // via the decoder's first `CapsChanged` (mirrors video `Dim::Any` -> 16).
+            Caps::Audio { format, channels, sample_rate }
+                if is_pcm(*format) && *channels == ANY_CHANNELS =>
+            {
+                Ok(Caps::Audio {
+                    format: *format,
+                    channels: FIXATE_CHANNELS_PLACEHOLDER,
+                    sample_rate: *sample_rate,
+                })
             }
             Caps::Audio { .. }
             | Caps::Tensor { .. }
@@ -447,6 +486,19 @@ fn is_pcm(f: AudioFormat) -> bool {
 fn intersect_sample_rate(a: u32, b: u32) -> Option<u32> {
     match (a, b) {
         (ANY_SAMPLE_RATE, x) | (x, ANY_SAMPLE_RATE) => Some(x),
+        (x, y) if x == y => Some(x),
+        _ => None,
+    }
+}
+
+/// Intersect two [`Caps::Audio`] channel counts, where [`ANY_CHANNELS`] (0) is a
+/// wildcard: `any ∩ x = x`, equal counts agree, distinct concrete counts are
+/// disjoint (`None`). Unlike [`intersect_sample_rate`] this applies to compressed
+/// audio too, so a decoder's concrete output channels coupling back onto a
+/// demuxer's unknown `0` input intersects rather than emptying the link.
+fn intersect_channels(a: u8, b: u8) -> Option<u8> {
+    match (a, b) {
+        (ANY_CHANNELS, x) | (x, ANY_CHANNELS) => Some(x),
         (x, y) if x == y => Some(x),
         _ => None,
     }
@@ -1351,6 +1403,37 @@ mod tests {
         assert!(!video(Dim::Any, Dim::Fixed(1), Rate::Fixed(1)).is_fixed());
         assert!(!video(Dim::Fixed(1), Dim::Range { min: 1, max: 2 }, Rate::Fixed(1)).is_fixed());
         assert!(Caps::Audio { format: AudioFormat::Aac, channels: 2, sample_rate: 44_100 }.is_fixed());
+    }
+
+    #[test]
+    fn audio_channels_wildcard_intersect() {
+        let pcm = |ch, rate| Caps::Audio { format: AudioFormat::PcmS16Le, channels: ch, sample_rate: rate };
+        let aac = |ch, rate| Caps::Audio { format: AudioFormat::Aac, channels: ch, sample_rate: rate };
+        // ANY_CHANNELS (0) is a wildcard for both PCM and compressed: the decoder's
+        // concrete output channels coupling back onto a demuxer's unknown 0 input
+        // must intersect, not empty the link (the M422 back-coupling fix).
+        assert_eq!(aac(ANY_CHANNELS, 48_000).intersect(&aac(6, 48_000)), Ok(aac(6, 48_000)));
+        assert_eq!(pcm(2, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)), Ok(pcm(2, 48_000)));
+        assert_eq!(pcm(ANY_CHANNELS, 48_000).intersect(&pcm(ANY_CHANNELS, 48_000)), Ok(pcm(ANY_CHANNELS, 48_000)));
+        // Two distinct concrete counts are still disjoint.
+        assert_eq!(aac(2, 48_000).intersect(&aac(6, 48_000)), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn audio_channels_wildcard_is_fixed_and_fixate() {
+        let pcm = |ch, rate| Caps::Audio { format: AudioFormat::PcmS16Le, channels: ch, sample_rate: rate };
+        // A PCM "any channels" is not fixed; it fixates to the stereo placeholder
+        // (the real layout arrives via the decoder's CapsChanged).
+        assert!(!pcm(ANY_CHANNELS, 48_000).is_fixed());
+        assert_eq!(pcm(ANY_CHANNELS, 48_000).fixate(), Ok(pcm(2, 48_000)));
+        assert!(pcm(2, 48_000).is_fixed());
+        // An unfixable rate still dominates: 0 channels + any-rate cannot fixate.
+        assert_eq!(pcm(ANY_CHANNELS, ANY_SAMPLE_RATE).fixate(), Err(G2gError::CapsMismatch));
+        // A compressed "any channels" stays nominal/fixed (the decoder replaces it
+        // before anything reads it), so it round-trips through fixate unchanged.
+        let aac0 = Caps::Audio { format: AudioFormat::Aac, channels: ANY_CHANNELS, sample_rate: 0 };
+        assert!(aac0.is_fixed());
+        assert_eq!(aac0.fixate(), Ok(aac0.clone()));
     }
 
     #[test]
