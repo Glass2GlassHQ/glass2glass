@@ -2171,6 +2171,38 @@ travels as a `TextCueMeta` frame-meta (the `metadata` feature) that `SubParse`
 attaches and `TextOverlayN` reads, recovering WebVTT / SSA positioning; on the
 ZST baseline (no meta) streamed cues draw at the renderer default.
 
+Closed captions (CEA-608 / CEA-708) feed the same renderer, but their bytes ride
+*inside* the compressed video bitstream rather than in a container text track, so
+the path is a track, not a `SubParse`-style drop-in. The `cea` module (`no_std`)
+holds the decoders. `extract_cc_data` mines the `(cc_type, b0, b1)` caption
+triples from an access unit's SEI `user_data_registered_itu_t_t35` (ATSC A/53
+`GA94` `cc_data`) messages for H.264 (NAL type 6) and H.265 (prefix/suffix SEI),
+every count / length / offset bounds-checked so a malformed SEI yields no triples.
+`Cea608` decodes the legacy line-21 path (`cc_type` 0/1): a 15x32 character grid
+with pop-on / roll-up / paint-on modes, PAC row + indent positioning, the
+basic / special / extended-Western-European character sets, and channel selection
+(CC1..CC4, the other channel's interleaved codes ignored). `Cea708` decodes the
+DTVCC path (`cc_type` 2/3): it reassembles the DTVCC packets from the triples,
+splits them into service blocks, and runs the selected service's window command
+stream (DefineWindow / the DisplayWindows family / SetPenLocation, G0/G1 text)
+against an eight-window model. Both emit the same timed `Cue` `SubParse` produces.
+
+`CcExtract` (M429) wraps the decoders as a pipeline element: a compressed
+H.264 / H.265 stream in, timed `Text{Utf8}` cue frames out, the same shape
+`SubParse` emits, so the existing overlay consumes either. Because the captions
+ride in the video, no new caps kind is needed (the in-band case taps
+`Caps::CompressedVideo` directly; a `Caps::ClosedCaption` variant would only be
+justified for an MP4 `c608` / `c708` *raw-caption track*, deferred). The element
+selects one service at construction (`CcSource`; default CEA-608 CC1). In the
+`playbin` auto-fan-out (M430) it sits on a *tee* of the parsed video: one tee
+branch decodes for display, the other reframes to access units (so a TS PES does
+not split an SEI NAL) and runs `CcExtract` into the video's `TextOverlayN` text
+pad. Captions are not discoverable up front, so they are opt-in through a
+`#closed-captions=cc1` (alias `#cc=`, or `service-N` / `708-N`) URI fragment, the
+file-container analog of the HLS `#subtitle-lang=` hint; the file hooks (MKV / TS /
+MP4) honour it, and the explicit caption request wins over an auto-selected
+subtitle track (there is one overlay text pad).
+
 ### 4.19 Native WebRTC (`str0m`)
 
 The WebRTC elements are built on **[str0m](https://github.com/algesten/str0m)**, a

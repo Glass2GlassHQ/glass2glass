@@ -338,18 +338,12 @@ leverage first:
   above. WebVTT `::cue` / `::cue(#id)` `color` / `background-color` are applied
   (M410); still open: `::cue(.class)` span selectors and other CSS (font-size,
   text-shadow, etc.).
-- **Closed captions (CEA-608 / CEA-708).** Unlike the text-document formats,
-  captions are an in-band binary command stream (carried in H.264 / H.265 SEI
-  `user_data_registered_itu_t_t35`, MPEG-2 user-data, or an MP4 `c608` / `c708`
-  track), so this is a track, not a parser drop-in. Three pieces: (1) a caps kind
-  for the raw caption stream (the GStreamer `closedcaption/x-cea-608` /
-  `-cea-708` analog, e.g. `Caps::ClosedCaption { format }`, the one place a new
-  variant past `Text` is justified, like a bitmap-subtitle `SubPicture` variant);
-  (2) extraction, surfacing the caption bytes from `h264parse` / `h265parse` SEI
-  or the MP4 caption track (side output or frame-meta); (3) the decoder itself
-  (CEA-608 is a modest 2-byte/field state machine, CEA-708 a windowed DTVCC
-  presentation state machine), emitting `Caps::Text{Utf8 | PangoMarkup}`. Start
-  with 608 to prove the pipeline shape, then 708.
+- **Closed captions: remaining carriers.** The H.264 / H.265 SEI path is done
+  (`cea` decoders + `CcExtract` element + file-`playbin` auto-plug, DESIGN.md
+  §4.18). Still open: MPEG-2 user-data caption extraction; the MP4 `c608` / `c708`
+  *raw-caption track* (the one case justifying a `Caps::ClosedCaption { format }`
+  variant); and HLS-`playbin` caption auto-plug (only the file MKV / TS / MP4 hooks
+  honour `#closed-captions=` today).
 - **Bitmap / picture subtitles (DVD / PGS / DVB).** RLE-image subtitles, not
   text: a `Caps::SubPicture { codec }` variant + RLE image decoders, mirroring the
   `CompressedVideo` / `RawVideo` split rather than folding into `Text`. Niche;
