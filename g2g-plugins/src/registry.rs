@@ -152,13 +152,16 @@ use crate::camera2src::Camera2Src;
 /// The decode-chain parser injector (M421): an auto-plugged decoder is fed one
 /// access unit per packet by splicing an access-unit-re-framing `h264parse` ahead
 /// of it, the way GStreamer's `decodebin` always inserts a parser. Returns `None`
-/// for codecs without a re-framing parser (the input decodes directly). H.265 and
-/// audio still decode directly; an H.265 re-framer is a follow-up (`H265Parse` is
-/// a caps-refinement pass-through today, like `H264Parse` was).
+/// for codecs without a re-framing parser (the input decodes directly). H.264
+/// (M421) and H.265 (M425) re-frame to one access unit per packet; audio still
+/// decodes directly.
 fn video_parser_provider(input: &Caps) -> Option<Box<dyn g2g_core::element::DynAsyncElement>> {
     match input {
         Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => {
             Some(Box::new(crate::h264parse::H264Parse::reframing()))
+        }
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => {
+            Some(Box::new(crate::h265parse::H265Parse::reframing()))
         }
         _ => None,
     }
@@ -302,7 +305,7 @@ pub fn default_registry() -> Registry {
     // output (one coded picture per buffer), matching GStreamer's `h264parse`, so
     // `... ! tsdemux ! h264parse ! <decoder> ! ...` feeds the decoder correctly.
     reg.register_launch(LaunchFactory::of::<H264Parse>("h264parse", || Box::new(H264Parse::reframing())));
-    reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::new())));
+    reg.register_launch(LaunchFactory::of::<H265Parse>("h265parse", || Box::new(H265Parse::reframing())));
     reg.register_launch(LaunchFactory::of::<AacParse>("aacparse", || Box::new(AacParse::new())));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || Box::new(OpusParse::new())));
     reg.register_launch(LaunchFactory::of::<Vp8Parse>("vp8parse", || Box::new(Vp8Parse::new())));

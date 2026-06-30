@@ -23,21 +23,51 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
 };
 
-use crate::annexb::{strip_emulation_prevention, BitReader};
+use crate::annexb::{next_start_code, strip_emulation_prevention, BitReader};
 
 /// H.265 NAL unit type for a sequence parameter set (SPS_NUT).
 const SPS_NUT: u8 = 33;
+
+/// Re-framing accumulator hard cap: flush rather than buffer forever on
+/// non-conforming input (mirrors `h264parse`).
+const MAX_REFRAME_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct H265Parse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     sps_emitted: u64,
+    /// Re-framing mode (M425): when set, the element re-chunks its input into
+    /// access-unit-aligned Annex-B buffers (one coded picture per `DataFrame`)
+    /// rather than passing buffers through unchanged. A decoder fed un-aligned
+    /// units (e.g. one MPEG-TS PES that is not one access unit) mis-parses slice
+    /// boundaries; auto-plugged decode chains insert the parser in this mode so
+    /// the decoder always sees one access unit per packet, the HEVC sibling of
+    /// the M421 `h264parse` re-framer. Off in the default (caps-refinement-only)
+    /// construction, so existing explicit uses keep their pass-through framing.
+    reframe: bool,
+    /// Re-framing accumulator: Annex-B bytes received but not yet emitted as a
+    /// complete access unit (the trailing, possibly-incomplete AU is held until
+    /// the next AU's start code arrives). Empty outside re-framing mode.
+    accum: Vec<u8>,
+    /// Timing to stamp the access unit currently at the head of `accum` (captured
+    /// when that AU's first byte arrived). Re-framing only.
+    au_timing: FrameTiming,
+    /// Monotonic sequence number for emitted re-framed access units.
+    seq: u64,
+    /// Input framing, latched from the first frame (`Some(true)` = Annex-B start
+    /// codes, `Some(false)` = HVCC length prefixes). Fixed for a stream, so it is
+    /// decided once: a per-frame guess misclassifies a mid-AU Annex-B continuation
+    /// buffer (no leading start code) as length-prefixed and mangles it.
+    /// Re-framing only.
+    input_is_annexb: Option<bool>,
 }
 
 impl H265Parse {
@@ -45,10 +75,111 @@ impl H265Parse {
         Self::default()
     }
 
+    /// Construct the parser in access-unit re-framing mode (M425): it accumulates
+    /// the input bitstream and emits one access-unit-aligned Annex-B `DataFrame`
+    /// per coded picture. Auto-plugged decode chains use this so the decoder is
+    /// fed one access unit per packet (the HEVC sibling of `H264Parse::reframing`).
+    pub fn reframing() -> Self {
+        Self { reframe: true, ..Self::default() }
+    }
+
     /// Count of `CapsChanged` packets pushed downstream, for tests asserting
     /// re-emission is suppressed when the SPS dimensions are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.sps_emitted
+    }
+
+    /// Re-framing data path: accumulate the bitstream and emit each complete
+    /// access unit (everything before the last AU start, whose successor's start
+    /// code has arrived). The trailing, possibly-incomplete AU stays buffered
+    /// until the next call or `Eos`. Non-`System` domains pass through unchanged.
+    async fn reframe_frame(
+        &mut self,
+        frame: Frame,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        let MemoryDomain::System(slice) = &frame.domain else {
+            out.push(PipelinePacket::DataFrame(frame)).await?;
+            return Ok(());
+        };
+        // Normalize to Annex-B: an HVCC (length-prefixed) stream is converted, an
+        // Annex-B one is appended as-is. The framing is latched from the first
+        // frame, since a mid-AU Annex-B continuation buffer (no leading start
+        // code) would otherwise be misread as length-prefixed.
+        let bytes = slice.as_slice();
+        let is_annexb = *self.input_is_annexb.get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
+        if self.accum.is_empty() {
+            self.au_timing = frame.timing;
+        }
+        if is_annexb {
+            self.accum.extend_from_slice(bytes);
+        } else {
+            self.accum.extend_from_slice(&crate::annexb::avcc_to_annexb(bytes));
+        }
+
+        // Guard against unbounded growth on non-conforming input.
+        if self.accum.len() > MAX_REFRAME_BYTES {
+            let au = core::mem::take(&mut self.accum);
+            let timing = self.au_timing;
+            self.emit_au(au, timing, out).await?;
+            return Ok(());
+        }
+
+        // Emit each complete AU (everything before the last start), retain the tail.
+        let starts = h265_au_starts(&self.accum);
+        if starts.len() < 2 {
+            return Ok(()); // at most one (still-open) AU buffered so far
+        }
+        let frame_timing = frame.timing;
+        let tail = starts[starts.len() - 1];
+        let done = self.accum[..tail].to_vec();
+        self.accum.drain(..tail);
+        for w in starts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            // The head AU carries the timing captured when it began; AUs that both
+            // begin and end inside this buffer take this buffer's timing.
+            let timing = if lo == 0 { self.au_timing } else { frame_timing };
+            self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
+        }
+        // The retained tail began within this buffer (its predecessor ended here).
+        self.au_timing = frame_timing;
+        Ok(())
+    }
+
+    /// Emit one access-unit-aligned Annex-B buffer as a `DataFrame`: refine caps
+    /// from any SPS it carries (suppressing an unchanged re-emit) and stamp the
+    /// keyframe flag, mirroring the pass-through path's per-frame work.
+    async fn emit_au(
+        &mut self,
+        au: Vec<u8>,
+        mut timing: FrameTiming,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if au.is_empty() {
+            return Ok(());
+        }
+        if let Some(info) = extract_sps_info(&au) {
+            let new_caps = Caps::CompressedVideo {
+                codec: VideoCodec::H265,
+                width: Dim::Fixed(info.width),
+                height: Dim::Fixed(info.height),
+                framerate: Rate::Any,
+            };
+            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
+                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
+                self.last_emitted_caps = Some(new_caps);
+                self.sps_emitted += 1;
+            }
+        }
+        timing.keyframe = h265_au_is_keyframe(&au);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            timing,
+            self.seq,
+        );
+        self.seq += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
     }
 }
 
@@ -105,7 +236,10 @@ impl AsyncElement for H265Parse {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
+                    if self.reframe {
+                        return self.reframe_frame(frame, out).await;
+                    }
+                    if let MemoryDomain::System(slice) = &frame.domain {
                         if let Some(info) = extract_sps_info(slice.as_slice()) {
                             let new_caps = Caps::CompressedVideo {
                                 codec: VideoCodec::H265,
@@ -127,6 +261,9 @@ impl AsyncElement for H265Parse {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
+                    // A seek discontinuity: drop the partial AU rather than splice
+                    // pre-seek bytes onto the post-seek stream.
+                    self.accum.clear();
                     self.last_emitted_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -134,7 +271,15 @@ impl AsyncElement for H265Parse {
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    // Flush the final buffered access unit, else the last coded
+                    // picture would never reach the decoder.
+                    if self.reframe && !self.accum.is_empty() {
+                        let au = core::mem::take(&mut self.accum);
+                        let timing = self.au_timing;
+                        self.emit_au(au, timing, out).await?;
+                    }
+                }
             }
             Ok(())
         })
@@ -182,6 +327,55 @@ fn extract_sps_info(au: &[u8]) -> Option<SpsInfo> {
         }
     }
     None
+}
+
+/// Start-code offsets in an Annex-B buffer at which a new H.265 access unit
+/// begins, per the ISO/IEC 23008-2 access-unit boundary rules. The first NAL
+/// opens the first AU. Once a VCL NAL (`nal_unit_type` 0..=31) has been seen in
+/// the current AU, the next AU begins at: a VCL NAL whose
+/// `first_slice_segment_in_pic_flag` is 1 (the first coded picture slice, the MSB
+/// of the slice RBSP after the 2-byte NAL header), an access-unit delimiter (35),
+/// or the parameter-set / prefix-SEI NALs that lead a picture (VPS 32, SPS 33,
+/// PPS 34, prefix SEI 39). Slices 2..N of a picture carry the flag as 0 and stay
+/// in the same AU. The HEVC sibling of `h264parse`'s `h264_au_starts`.
+fn h265_au_starts(data: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut seen_vcl = false;
+    let mut i = 0;
+    while let Some((sc, begin)) = next_start_code(data, i) {
+        let nal_type = data.get(begin).map(|b| (b >> 1) & 0x3F).unwrap_or(0);
+        let is_vcl = nal_type <= 31;
+        let starts_au = if !seen_vcl {
+            // Leading NALs of the first AU: only the very first opens it.
+            starts.is_empty()
+        } else if is_vcl {
+            // A new picture's first slice has first_slice_segment_in_pic_flag == 1,
+            // the MSB of the slice RBSP (the byte after the 2-byte NAL header).
+            data.get(begin + 2).map(|b| b & 0x80 != 0).unwrap_or(false)
+        } else {
+            // A non-VCL that can only lead the next access unit.
+            matches!(nal_type, 32 | 33 | 34 | 35 | 39)
+        };
+        if starts_au {
+            starts.push(sc);
+            seen_vcl = false;
+        }
+        if is_vcl {
+            seen_vcl = true;
+        }
+        i = begin;
+    }
+    starts
+}
+
+/// True if the access unit contains an IRAP (random-access) picture: a keyframe.
+/// HEVC IRAP `nal_unit_type`s are 16..=23 (BLA / IDR / CRA / reserved IRAP).
+fn h265_au_is_keyframe(au: &[u8]) -> bool {
+    crate::annexb::nal_units_any(au).any(|nal| {
+        nal.first()
+            .map(|b| (16..=23).contains(&((b >> 1) & 0x3F)))
+            .unwrap_or(false)
+    })
 }
 
 /// Parse the SPS RBSP (H.265 7.3.2.2) up to the conformance window, returning
@@ -588,5 +782,114 @@ mod tests {
             }
             _ => panic!("expected Identity"),
         }
+    }
+
+    // -- Re-framing (M425) ------------------------------------------------
+
+    /// One Annex-B H.265 VCL NAL (TRAIL_R, type 1). `first` sets
+    /// `first_slice_segment_in_pic_flag` (the MSB of the slice RBSP, the byte after
+    /// the 2-byte NAL header), so `first == true` opens a new coded picture.
+    fn annexb_vcl_h265(first: bool, tag: u8) -> Vec<u8> {
+        // start code + NAL header: type 1 (TRAIL_R) = (1 << 1) = 0x02, layer 0;
+        // second header byte 0x01 = temporal_id_plus1.
+        let mut v = vec![0u8, 0, 0, 1, 0x02, 0x01];
+        v.push(if first { 0x80 } else { 0x40 }); // slice RBSP: MSB = first_slice flag
+        v.extend_from_slice(&[0xAA, 0xBB, tag, 0x11]);
+        v
+    }
+
+    fn data_payloads(sink: &RecordingSink) -> Vec<Vec<u8>> {
+        sink.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => match &f.domain {
+                    MemoryDomain::System(s) => Some(s.as_slice().to_vec()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn au_starts_groups_slices_into_one_picture() {
+        // Picture A: two slices (first then a continuation). Picture B: one slice.
+        // Two access units, not three.
+        let mut stream = annexb_vcl_h265(true, 1);
+        stream.extend_from_slice(&annexb_vcl_h265(false, 2)); // same picture
+        let b_off = stream.len();
+        stream.extend_from_slice(&annexb_vcl_h265(true, 3)); // new picture
+        let starts = h265_au_starts(&stream);
+        assert_eq!(starts, vec![0, b_off], "two access units: A(2 slices) then B");
+    }
+
+    #[tokio::test]
+    async fn reframing_splits_two_access_units_in_one_buffer() {
+        let mut parse = H265Parse::reframing();
+        parse.configure_pipeline(&h265_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let au0 = annexb_vcl_h265(true, 1);
+        let au1 = annexb_vcl_h265(true, 2);
+        let mut buf = au0.clone();
+        buf.extend_from_slice(&au1);
+        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, buf)), &mut sink).await.unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let payloads = data_payloads(&sink);
+        assert_eq!(payloads.len(), 2, "two pictures -> two access-unit DataFrames");
+        assert_eq!(payloads[0], au0, "first AU emitted whole");
+        assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
+    }
+
+    #[tokio::test]
+    async fn reframing_reassembles_an_au_split_across_buffers() {
+        // One Annex-B access unit delivered as two buffers (e.g. one MPEG-TS PES
+        // carrying the tail), the second with no leading start code. Latching the
+        // framing keeps it Annex-B instead of misreading the tail as length-prefixed.
+        let mut parse = H265Parse::reframing();
+        parse.configure_pipeline(&h265_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let au = annexb_vcl_h265(true, 7);
+        let split = 7; // mid-NAL: past start code + 2-byte header + first RBSP byte
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(0, au[..split].to_vec())), &mut sink)
+            .await
+            .unwrap();
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(1, au[split..].to_vec())), &mut sink)
+            .await
+            .unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let payloads = data_payloads(&sink);
+        assert_eq!(payloads.len(), 1, "the split access unit reassembles into one");
+        assert_eq!(payloads[0], au, "reassembled bytes are bit-for-bit the original AU");
+    }
+
+    #[tokio::test]
+    async fn reframing_stamps_keyframe_on_irap() {
+        // An IDR_W_RADL (type 19) access unit is a keyframe; a TRAIL_R (type 1) is not.
+        let mut parse = H265Parse::reframing();
+        parse.configure_pipeline(&h265_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        // IDR: NAL header first byte = (19 << 1) = 0x26, first-slice flag set.
+        let mut idr = vec![0u8, 0, 0, 1, 0x26, 0x01, 0x80, 0xAA];
+        let trail = annexb_vcl_h265(true, 2);
+        idr.extend_from_slice(&trail);
+        parse.process(PipelinePacket::DataFrame(frame_with_bytes(0, idr)), &mut sink).await.unwrap();
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        let kf: Vec<bool> = sink
+            .packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f.timing.keyframe),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kf, vec![true, false], "IDR AU is a keyframe, TRAIL_R is not");
     }
 }

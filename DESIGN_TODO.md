@@ -321,15 +321,17 @@ leverage first:
   wildcard in `Caps::Audio`, decoder advertises it instead of constant stereo, and
   `audioconvert` does general N -> M downmix/upmix), and the plain A/V fan-out routes
   audio through the convert/resample branch like the overlay path (M424:
-  `build_av_fanout` / `wire_av_fanout`). The overlay graph runs end to end. Remaining
-  playback follow-ups:
-  - **Audio breadth.** Codecs beyond AAC (Opus, etc.). The layout-agnostic downmix in
+  `build_av_fanout` / `wire_av_fanout`). HEVC TS/HLS re-frames like H.264 (M425:
+  `H265Parse::reframing` auto-inserted before the decoder) and Opus auto-plugs in
+  the audio branch (M425: `mkvdemux::forwardable_streams` surfaces concrete channels,
+  `OpusDec` sink template relaxed to match). The overlay graph runs end to end.
+  Remaining playback follow-ups:
+  - **Audio breadth.** More codecs (AC-3, FLAC, etc.). The layout-agnostic downmix in
     `audioconvert` folds channels round-robin rather than applying ITU/speaker-position
-    coefficients (no channel-position metadata is carried yet). The audio sink needs the
+    coefficients (no channel-position metadata is carried yet). Opus in MP4 / TS
+    (`dOps`) is not demuxed yet (WebM / Matroska only). The audio sink needs the
     `pulse-sink` (or `alsa-sink`) feature built in, else `autoaudiosink` falls back to
     `fakesink`.
-  - An access-unit-re-framing **`h265parse`** (the M421 sibling for HEVC; today it
-    is a caps-refinement pass-through, so TS / HLS HEVC has the same mis-framing).
   Parsing SSA / TTML placement into `CueSettings` (only
   WebVTT populates it today, though all three now ride the frame-meta). Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature

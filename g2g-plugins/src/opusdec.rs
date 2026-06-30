@@ -22,7 +22,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use audiopus::coder::Decoder;
@@ -66,8 +67,14 @@ impl OpusDec {
         Self { channels: 0, dec: None, caps_sent: false, sequence: 0, configured: false }
     }
 
+    /// Sink pad template: Opus at any channel count / nominal rate. The auto-plug
+    /// matcher intersects this against the demuxer's caps, which carry a concrete
+    /// channel count (mono or stereo) but the "unknown until parsed" rate
+    /// placeholder (compressed rate intersects strictly, so a fixed rate here would
+    /// not match `rate: 0`). OpusDec ignores the nominal rate anyway: Opus always
+    /// decodes at 48 kHz, and the real channel count is read in `configure_pipeline`.
     fn input_template() -> Caps {
-        Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: OPUS_RATE_HZ }
+        Caps::Audio { format: AudioFormat::Opus, channels: ANY_CHANNELS, sample_rate: ANY_SAMPLE_RATE }
     }
 
     fn output_caps(&self) -> Caps {

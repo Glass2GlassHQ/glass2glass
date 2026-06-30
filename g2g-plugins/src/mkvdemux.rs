@@ -646,7 +646,23 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                 stream,
                 MkvStream::H264 | MkvStream::H265 | MkvStream::Vp8 | MkvStream::Vp9 | MkvStream::Av1
             );
-            Some(MkvStreamInfo { stream, caps: MkvDemux::output_caps(stream), video })
+            // Fill the concrete channel count from the track header for an audio
+            // stream: `output_caps` is the generic per-stream placeholder (channels
+            // 0), but an Opus decoder must be created with the real channel count
+            // (libopus is per-channel-count, unlike AAC where libavcodec discovers
+            // it from the bitstream), so the playbin audio branch needs it up front.
+            // The sample rate stays the "unknown until parsed" placeholder (0):
+            // compressed-audio caps intersect the rate strictly (only PCM has the
+            // wildcard), so a concrete rate would not match a `rate: 0` decoder pad.
+            let caps = match MkvDemux::output_caps(stream) {
+                Caps::Audio { format, sample_rate, .. } => Caps::Audio {
+                    format,
+                    channels: t.channels.max(1),
+                    sample_rate,
+                },
+                other => other,
+            };
+            Some(MkvStreamInfo { stream, caps, video })
         })
         .collect()
 }
@@ -1057,6 +1073,27 @@ mod tests {
         );
         d.process(PipelinePacket::DataFrame(frame), sink).await.unwrap();
         d.process(PipelinePacket::Eos, sink).await.unwrap();
+    }
+
+    #[test]
+    fn forwardable_streams_carry_concrete_audio_channels() {
+        // An Opus decoder is created per channel count, so the playbin audio branch
+        // needs the real channels from the container up front (not the channels-0
+        // placeholder): forwardable_streams must fill them from the track header.
+        let mut demux = MatroskaDemuxer::new();
+        demux.push_data(&webm());
+        let infos = forwardable_streams(&demux);
+        let opus = infos
+            .iter()
+            .find(|i| matches!(i.caps, Caps::Audio { format: AudioFormat::Opus, .. }))
+            .expect("WebM has an Opus track");
+        assert_eq!(
+            opus.caps,
+            Caps::Audio { format: AudioFormat::Opus, channels: 2, sample_rate: 0 },
+            "Opus forwardable caps carry the track's concrete channel count (rate stays the \
+             unknown-until-parsed placeholder, since compressed rate intersects strictly)"
+        );
+        assert!(!opus.video);
     }
 
     #[test]
