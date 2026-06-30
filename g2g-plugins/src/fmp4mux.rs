@@ -43,6 +43,27 @@ pub(crate) struct Fmp4Muxer {
     /// Accumulated decode time in media-timescale units (`tfdt`).
     decode_time: u64,
     prev_pts_ns: Option<u64>,
+    /// Target fragment duration in nanoseconds (`0` = one access unit per fragment,
+    /// the default). When set, access units are batched into a single multi-sample
+    /// `moof`+`mdat` until the accumulated duration reaches the target, closing the
+    /// fragment at the next sync sample (so each fragment begins at a keyframe, the
+    /// CMAF / DASH segment shape). Cuts per-AU box overhead for low-fps or
+    /// high-bitrate streams.
+    fragment_duration_ns: u64,
+    /// Samples buffered for the open fragment (batched mode).
+    pending: Vec<PendingSample>,
+    /// `decode_time` at the start of the open fragment (its `tfdt`).
+    pending_decode_time: u64,
+    /// Accumulated wall duration of the open fragment, in nanoseconds.
+    pending_dur_ns: u64,
+}
+
+/// One buffered sample of an open multi-sample fragment (batched mode).
+#[derive(Debug)]
+struct PendingSample {
+    data: Vec<u8>,
+    duration: u32,
+    is_sync: bool,
 }
 
 impl Fmp4Muxer {
@@ -56,7 +77,18 @@ impl Fmp4Muxer {
             fragments: 0,
             decode_time: 0,
             prev_pts_ns: None,
+            fragment_duration_ns: 0,
+            pending: Vec::new(),
+            pending_decode_time: 0,
+            pending_dur_ns: 0,
         }
+    }
+
+    /// Batch access units into fragments of at least `ns` (closed at the next sync
+    /// sample); `0` keeps one fragment per AU. See [`fragment_duration_ns`](Self::fragment_duration_ns).
+    pub(crate) fn with_fragment_duration_ns(mut self, ns: u64) -> Self {
+        self.fragment_duration_ns = ns;
+        self
     }
 
     /// Apply a mid-stream caps refinement. A geometry change before the header is
@@ -106,14 +138,53 @@ impl Fmp4Muxer {
             }
         };
         self.prev_pts_ns = Some(pts_ns);
-        let duration = ns_to_timescale(duration_ns);
+        let duration = ns_to_timescale(duration_ns) as u32;
         let sample = avcc_sample(&nalus);
         let is_sync = nalus.iter().any(|n| is_keyframe_nal(self.codec, n));
-        let frag = fragment(self.fragments + 1, self.decode_time, duration as u32, &sample, is_sync);
-        out.extend_from_slice(&frag);
-        self.fragments += 1;
-        self.decode_time += duration;
+
+        if self.fragment_duration_ns == 0 {
+            // Default: one access unit per fragment.
+            let frag = fragment(self.fragments + 1, self.decode_time, &[(duration, &sample, is_sync)]);
+            out.extend_from_slice(&frag);
+            self.fragments += 1;
+            self.decode_time += duration as u64;
+            return Ok(out);
+        }
+
+        // Batched: close the open fragment at a sync sample once it has reached the
+        // target duration, so each fragment begins at a keyframe.
+        if is_sync && !self.pending.is_empty() && self.pending_dur_ns >= self.fragment_duration_ns {
+            out.extend_from_slice(&self.flush_pending());
+        }
+        if self.pending.is_empty() {
+            self.pending_decode_time = self.decode_time;
+        }
+        self.pending.push(PendingSample { data: sample, duration, is_sync });
+        self.pending_dur_ns += duration_ns;
         Ok(out)
+    }
+
+    /// Emit the open fragment (batched mode), advancing the decode clock. Empty
+    /// when nothing is buffered.
+    fn flush_pending(&mut self) -> Vec<u8> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let samples: Vec<(u32, &[u8], bool)> =
+            self.pending.iter().map(|s| (s.duration, s.data.as_slice(), s.is_sync)).collect();
+        let frag = fragment(self.fragments + 1, self.pending_decode_time, &samples);
+        let total: u64 = self.pending.iter().map(|s| s.duration as u64).sum();
+        self.fragments += 1;
+        self.decode_time += total;
+        self.pending.clear();
+        self.pending_dur_ns = 0;
+        frag
+    }
+
+    /// Flush the final partial fragment at end of stream (batched mode). A no-op
+    /// in per-AU mode (nothing is ever buffered).
+    pub(crate) fn flush(&mut self) -> Vec<u8> {
+        self.flush_pending()
     }
 }
 
@@ -436,17 +507,10 @@ pub(crate) fn hvcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
     p
 }
 
-/// One `moof`+`mdat` fragment holding a single sample.
-fn fragment(
-    sequence: u64,
-    decode_time: u64,
-    duration: u32,
-    sample: &[u8],
-    is_sync: bool,
-) -> Vec<u8> {
-    // I-frame: depends on nothing; otherwise depends-on + non-sync.
-    let sample_flags: u32 = if is_sync { 0x0200_0000 } else { 0x0101_0000 };
-
+/// One `moof`+`mdat` fragment holding `samples` (one or many): a `trun` with a
+/// per-sample (duration, size, flags) entry and a single `mdat` of the samples
+/// concatenated in order. A one-element slice is the per-AU fragment.
+fn fragment(sequence: u64, decode_time: u64, samples: &[(u32, &[u8], bool)]) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
         let tfhd = {
@@ -456,11 +520,15 @@ fn fragment(
         let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
         let trun = {
             let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes()); // sample count
+            p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample count
             p.extend_from_slice(&data_offset.to_be_bytes());
-            p.extend_from_slice(&duration.to_be_bytes());
-            p.extend_from_slice(&(sample.len() as u32).to_be_bytes());
-            p.extend_from_slice(&sample_flags.to_be_bytes());
+            for (duration, data, is_sync) in samples {
+                // I-frame: depends on nothing; otherwise depends-on + non-sync.
+                let sample_flags: u32 = if *is_sync { 0x0200_0000 } else { 0x0101_0000 };
+                p.extend_from_slice(&duration.to_be_bytes());
+                p.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                p.extend_from_slice(&sample_flags.to_be_bytes());
+            }
             // data-offset | duration | size | flags present
             full_box(b"trun", 0, 0x000701, &p)
         };
@@ -472,7 +540,8 @@ fn fragment(
     // size-stable, so one rebuild with the measured size is exact.
     let moof_len = build_moof(0).len() as u32;
     let moof = build_moof(moof_len + 8);
-    let mdat = mp4_box(b"mdat", sample);
+    let mdat_payload: Vec<u8> = samples.iter().flat_map(|(_, data, _)| data.iter().copied()).collect();
+    let mdat = mp4_box(b"mdat", &mdat_payload);
     [moof, mdat].concat()
 }
 
@@ -556,7 +625,7 @@ mod tests {
 
     #[test]
     fn trun_data_offset_points_at_the_mdat_payload() {
-        let frag = fragment(1, 0, 3000, &[9, 9, 9, 9], true);
+        let frag = fragment(1, 0, &[(3000, &[9, 9, 9, 9], true)]);
         // moof size from its own header
         let moof_len = u32::from_be_bytes(frag[..4].try_into().unwrap()) as usize;
         // mdat payload begins after the mdat 8-byte header

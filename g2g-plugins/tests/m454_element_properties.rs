@@ -174,6 +174,25 @@ fn tsmux_pat_pmt_interval() {
     assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(250)));
 }
 
+#[test]
+fn mkvmux_streamable() {
+    use g2g_plugins::mkvmux::MkvMux;
+    let mut e = MkvMux::new();
+    assert!(declares(e.properties(), "streamable"));
+    e.set_property("streamable", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("streamable"), Some(PropValue::Bool(true)));
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn mp4mux_fragment_duration() {
+    use g2g_plugins::mp4mux::Mp4Mux;
+    let mut e = Mp4Mux::new();
+    assert!(declares(e.properties(), "fragment-duration"));
+    e.set_property("fragment-duration", PropValue::Uint(2000)).unwrap();
+    assert_eq!(e.get_property("fragment-duration"), Some(PropValue::Uint(2000)));
+}
+
 // parse_launch end to end: the parser looks up the kind in properties() and calls
 // set_property, so a pipeline that sets a newly exposed property must parse, and an
 // undeclared property must be rejected.

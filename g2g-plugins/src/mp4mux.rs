@@ -29,7 +29,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, TagList, VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
 };
 
 use crate::fmp4mux::Fmp4Muxer;
@@ -46,6 +46,10 @@ pub struct Mp4Mux {
     mux: Option<Fmp4Muxer>,
     configured: bool,
     emitted: u64,
+    /// Target fragment duration in milliseconds (`0` = one fragment per access
+    /// unit, the default). Batches access units into multi-sample CMAF / DASH
+    /// fragments closed at the next keyframe once the target is reached.
+    fragment_duration_ms: u64,
 }
 
 impl Default for Mp4Mux {
@@ -64,6 +68,7 @@ impl Mp4Mux {
             mux: None,
             configured: false,
             emitted: 0,
+            fragment_duration_ms: 0,
         }
     }
 
@@ -71,6 +76,13 @@ impl Mp4Mux {
     /// segment.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
+    /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
+    pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
+        self.fragment_duration_ms = ms;
         self
     }
 
@@ -145,6 +157,33 @@ impl AsyncElement for Mp4Mux {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "fragment-duration",
+            PropKind::Uint,
+            "target fragment duration, milliseconds (0 = one fragment per access unit)",
+        )
+        .with_default("0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "fragment-duration" => {
+                self.fragment_duration_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -161,23 +200,43 @@ impl AsyncElement for Mp4Mux {
                     };
                     // Build the box writer on the first AU (its moov needs the
                     // in-band parameter sets the first access unit carries).
-                    let mux = self
-                        .mux
-                        .get_or_insert_with(|| Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone()));
+                    let frag_ns = self.fragment_duration_ms.saturating_mul(1_000_000);
+                    let mux = self.mux.get_or_insert_with(|| {
+                        Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
+                            .with_fragment_duration_ns(frag_ns)
+                    });
                     let bytes = mux.push_au(slice.as_slice(), frame.timing.pts_ns, frame.timing.duration_ns)?;
-                    let out_frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-                        FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
-                        self.emitted,
-                    );
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    // In batched mode a buffering push yields no bytes yet; don't
+                    // emit an empty frame.
+                    if !bytes.is_empty() {
+                        let out_frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                            FrameTiming { pts_ns: frame.timing.pts_ns, ..FrameTiming::default() },
+                            self.emitted,
+                        );
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
                 }
                 PipelinePacket::CapsChanged(c) => {
                     self.accept_caps(&c)?;
                 }
-                // The runner's transform arm forwards EOS; nothing to flush here.
-                PipelinePacket::Eos => {}
+                // Flush the final partial fragment (batched mode) before the runner
+                // forwards EOS; a no-op in the default per-AU mode.
+                PipelinePacket::Eos => {
+                    if let Some(mux) = self.mux.as_mut() {
+                        let tail = mux.flush();
+                        if !tail.is_empty() {
+                            let out_frame = Frame::new(
+                                MemoryDomain::System(SystemSlice::from_boxed(tail.into_boxed_slice())),
+                                FrameTiming::default(),
+                                self.emitted,
+                            );
+                            self.emitted += 1;
+                            out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                        }
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -297,5 +356,62 @@ mod tests {
         assert!(find(b"moov"), "init segment carries a moov");
         assert!(find(b"moof"), "fragments carry moof boxes");
         assert!(find(b"mdat"), "fragments carry mdat boxes");
+    }
+
+    /// Count `moof` fragment boxes and sum every `trun`'s sample count.
+    fn moof_and_sample_count(bytes: &[u8]) -> (usize, u64) {
+        let moofs = bytes.windows(4).filter(|w| *w == b"moof").count();
+        let mut samples = 0u64;
+        for (i, w) in bytes.windows(4).enumerate() {
+            if w == b"trun" {
+                // [..'trun'][version+flags:4][sample_count:4]...
+                let off = i + 8;
+                if off + 4 <= bytes.len() {
+                    samples += u32::from_be_bytes([
+                        bytes[off],
+                        bytes[off + 1],
+                        bytes[off + 2],
+                        bytes[off + 3],
+                    ]) as u64;
+                }
+            }
+        }
+        (moofs, samples)
+    }
+
+    #[tokio::test]
+    async fn fragment_duration_batches_aus_into_keyframe_aligned_fragments() {
+        // Six AUs at 30 fps: AU0 and AU5 are IDR (sync), the rest non-IDR.
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        let key = annexb(&[&sps, &pps, &idr]);
+        let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
+        let aus = [key.clone(), inter(), inter(), inter(), inter(), key.clone()];
+
+        // Batched: a 10 ms target (each frame is ~33 ms) closes the fragment at the
+        // next IDR, so AU0..AU4 form one fragment and AU5 the next (flushed at EOS).
+        let mut mux = Mp4Mux::new().with_fragment_duration_ms(10);
+        mux.configure_pipeline(&h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        for (i, au) in aus.iter().enumerate() {
+            mux.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink).await.unwrap();
+        }
+        mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        let (moofs, samples) = moof_and_sample_count(&sink.bytes);
+        assert_eq!(moofs, 2, "six AUs batch into two keyframe-aligned fragments");
+        assert_eq!(samples, 6, "every access unit is preserved as a sample");
+
+        // Default (per-AU): one fragment per access unit.
+        let mut mux0 = Mp4Mux::new();
+        mux0.configure_pipeline(&h264_caps(320, 240)).unwrap();
+        let mut sink0 = CaptureSink::default();
+        for (i, au) in aus.iter().enumerate() {
+            mux0.process(frame(au.clone(), i as u64 * 33_333_333), &mut sink0).await.unwrap();
+        }
+        mux0.process(PipelinePacket::Eos, &mut sink0).await.unwrap();
+        let (moofs0, samples0) = moof_and_sample_count(&sink0.bytes);
+        assert_eq!(moofs0, 6, "per-AU mode emits one fragment per access unit");
+        assert_eq!(samples0, 6);
     }
 }

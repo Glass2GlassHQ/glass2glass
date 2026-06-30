@@ -28,7 +28,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, TagList, VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
 };
 
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackSpec};
@@ -43,6 +43,12 @@ pub struct MkvMux {
     tags: TagList,
     configured: bool,
     emitted: u64,
+    /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
+    /// seek index normally appended at EOS. The Cues let a read-to-end file seek,
+    /// but a live consumer (a pipe, an HTTP push) cannot seek and the muxer would
+    /// have to hold the cluster positions to the end; `streamable` drops it so the
+    /// output is a pure forward stream. Off by default (a recording stays seekable).
+    streamable: bool,
 }
 
 impl Default for MkvMux {
@@ -53,12 +59,25 @@ impl Default for MkvMux {
 
 impl MkvMux {
     pub fn new() -> Self {
-        Self { caps: None, mux: None, tags: TagList::new(), configured: false, emitted: 0 }
+        Self {
+            caps: None,
+            mux: None,
+            tags: TagList::new(),
+            configured: false,
+            emitted: 0,
+            streamable: false,
+        }
     }
 
     /// Attach stream metadata, written as a `Tags` element in the header.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
+    pub fn with_streamable(mut self, streamable: bool) -> Self {
+        self.streamable = streamable;
         self
     }
 
@@ -144,6 +163,33 @@ impl AsyncElement for MkvMux {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "streamable",
+            PropKind::Bool,
+            "live mode: omit the seekable Cues index written at EOS",
+        )
+        .with_default("false")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "streamable" => {
+                self.streamable = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "streamable" => Some(PropValue::Bool(self.streamable)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -183,7 +229,7 @@ impl AsyncElement for MkvMux {
                 // At EOS, flush the Cues index after the last Cluster so the stream
                 // is seekable on a read-to-end (M375); the runner then forwards EOS.
                 PipelinePacket::Eos => {
-                    if let Some(mux) = self.mux.as_ref() {
+                    if let Some(mux) = self.mux.as_ref().filter(|_| !self.streamable) {
                         let cues = mux.finish();
                         if !cues.is_empty() {
                             let out_frame = Frame::new(
@@ -378,5 +424,24 @@ mod tests {
         // Two frames plus the EOS Cues index (both frames share one Cluster, so the
         // dedup-per-Cluster index holds a single CuePoint, emitted as one frame).
         assert_eq!(mux.emitted(), 3);
+    }
+
+    #[tokio::test]
+    async fn streamable_omits_cues_at_eos() {
+        let mut mux = MkvMux::new().with_streamable(true);
+        mux.configure_pipeline(&vp9_caps()).unwrap();
+        assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(true)));
+        let mut sink = CaptureSink::default();
+        mux.process(frame(alloc::vec![1, 2, 3], 0), &mut sink).await.unwrap();
+        mux.process(frame(alloc::vec![4, 5, 6], 33_000_000), &mut sink).await.unwrap();
+        mux.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        // Two header+cluster frames, and no trailing Cues frame (the live mode).
+        assert_eq!(mux.emitted(), 2, "streamable mode emits no Cues index at EOS");
+        let all: Vec<u8> = sink.frames.concat();
+        // Cues element id is 0x1C53BB6B; it must not appear in the output.
+        assert!(
+            !all.windows(4).any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
+            "no Cues element written in streamable mode"
+        );
     }
 }
