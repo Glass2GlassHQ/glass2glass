@@ -172,6 +172,9 @@ pub mod clock;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
+#[cfg(feature = "std")]
+pub mod subtitlesrc;
 #[cfg(feature = "std")]
 mod audio;
 #[cfg(feature = "std")]

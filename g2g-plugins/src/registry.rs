@@ -223,6 +223,14 @@ pub fn default_registry() -> Registry {
         Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
         || Box::new(FileSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
     ));
+    // Subtitle / text file source (M433): a `.srt` / `.vtt` / `.ssa` / `.ttml`
+    // file as a `Text` stream, feeding `subparse` (overlay or caption authoring).
+    // The `format` is sniffed from the `location` extension unless set explicitly.
+    reg.register_source(SourceFactory::new(
+        "subtitlesrc",
+        Caps::Text { format: g2g_core::TextFormat::Srt },
+        || Box::new(crate::subtitlesrc::SubtitleSrc::new("", g2g_core::TextFormat::Srt)),
+    ));
     // Application push source (M233): the real caps come from its `caps`
     // property; buffers arrive from `appsrc::register_appsrc`.
     reg.register_source(SourceFactory::new(
