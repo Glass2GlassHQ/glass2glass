@@ -65,6 +65,11 @@ nnapi = ["ort", "ort/nnapi"]
 # shape). Like `nnapi` it links a symbol a host ORT may lack, so treat it as an
 # Android-target feature.
 xnnpack = ["ort", "ort/xnnpack"]
+# Live Android camera -> quantize -> Edge TPU inference chain (M443): pulls
+# g2g-plugins (Camera2Src capture + TensorConvert quantize) alongside the NNAPI /
+# XNNPACK EPs. Android-target only (it implies nnapi / xnnpack and g2g-plugins's
+# android-only camera2). Drives the `android_camera_tpu_probe` on-device test.
+camera2-tpu = ["nnapi", "xnnpack", "dep:g2g-plugins", "g2g-plugins/camera2"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }

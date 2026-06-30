@@ -455,6 +455,7 @@ tools/android-camera2-smoke.sh           # camera  (caps + FFI; capture best-eff
 tools/android-surface-present-smoke.sh   # decode -> GPU -> on-screen present
 tools/android-nnapi-smoke.sh             # ML inference (NNAPI + XNNPACK ORT EPs)
 tools/android-nnapi-conv-smoke.sh        # ML on the Edge TPU (int8 conv, NNAPI placement + DarwiNN logcat)
+tools/android-camera-tpu-smoke.sh        # live camera -> quantize -> Edge TPU inference, end to end
 ```
 
 Each takes an optional ABI argument (default `arm64-v8a`; also `x86_64`,
