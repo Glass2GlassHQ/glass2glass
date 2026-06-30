@@ -454,6 +454,7 @@ tools/android-aaudio-smoke.sh            # audio   (render; mic capture best-eff
 tools/android-camera2-smoke.sh           # camera  (caps + FFI; capture best-effort)
 tools/android-surface-present-smoke.sh   # decode -> GPU -> on-screen present
 tools/android-nnapi-smoke.sh             # ML inference (NNAPI + XNNPACK ORT EPs)
+tools/android-nnapi-conv-smoke.sh        # ML on the Edge TPU (int8 conv, NNAPI placement + DarwiNN logcat)
 ```
 
 Each takes an optional ABI argument (default `arm64-v8a`; also `x86_64`,
