@@ -52,6 +52,7 @@ pub mod vellooverlay;
 // blitting onto an offscreen target or a caller-provided wgpu::Surface.
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpusink;
+pub mod tensorconvert;
 pub mod videoconvert;
 pub mod videoscale;
 pub mod videorate;

@@ -51,6 +51,7 @@ use crate::vp9parse::Vp9Parse;
 use crate::av1parse::Av1Parse;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
+use crate::tensorconvert::TensorConvert;
 use crate::videoconvert::VideoConvert;
 use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
@@ -244,6 +245,12 @@ pub fn default_registry() -> Registry {
         // Caps-driven by default (M186): a bare `videoconvert` takes its output
         // format from a downstream capsfilter, or passes through.
         Box::new(VideoConvert::auto())
+    }));
+    // Tensor dtype converter (M441): quantize/dequantize, the tensor sibling of
+    // videoconvert. A bare instance quantizes to uint8 (scale 1, zp 0); the real
+    // affine params come from the `scale` / `zero-point` / `dtype` properties.
+    reg.register_launch(LaunchFactory::of::<TensorConvert>("tensorconvert", || {
+        Box::new(TensorConvert::quantize(g2g_core::TensorDType::U8, 1.0, 0))
     }));
     reg.register_launch(LaunchFactory::of::<VideoScale>("videoscale", || {
         Box::new(VideoScale::new(0, 0))
