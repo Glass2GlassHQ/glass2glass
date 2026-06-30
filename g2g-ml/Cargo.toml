@@ -79,6 +79,10 @@ coreml = ["ort", "ort/coreml"]
 # XNNPACK EPs. Android-target only (it implies nnapi / xnnpack and g2g-plugins's
 # android-only camera2). Drives the `android_camera_tpu_probe` on-device test.
 camera2-tpu = ["nnapi", "xnnpack", "dep:g2g-plugins", "g2g-plugins/camera2"]
+# Live Wayland window for the detect_overlay example (Linux desktop). Adds the
+# wayland-sink display backend to the `examples/detect_overlay` graph; without it
+# the example writes a still PPM. Pulls g2g-plugins's wayland-sink + analytics.
+detect-overlay-live = ["ort", "analytics", "dep:g2g-plugins", "g2g-plugins/wayland-sink", "g2g-plugins/analytics"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }
@@ -99,8 +103,17 @@ tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 # Native end-to-end ML pipeline test (M61): the source/transform/sink elements
 # (VideoTestSrc, VideoConvert, VideoScale, FakeSink) that the g2g-ml preprocess
 # and inference elements compose with. g2g-plugins does not depend on g2g-ml,
-# so this is dev-only and acyclic.
-g2g-plugins = { path = "../g2g-plugins" }
+# so this is dev-only and acyclic. `analytics` exposes AnalyticsOverlay for the
+# detect_overlay example's still (PPM) path.
+g2g-plugins = { path = "../g2g-plugins", features = ["analytics"] }
 
 [lints]
 workspace = true
+
+# Visual detector demo: real YOLO detections drawn back onto the frame (still PPM,
+# or a live Wayland window under `detect-overlay-live`). Needs ort + analytics; it
+# loads the gitignored YOLO fixture and skips when absent, so it is excluded from
+# the default build (like the gated GPU / Android tests).
+[[example]]
+name = "detect_overlay"
+required-features = ["ort", "analytics"]
