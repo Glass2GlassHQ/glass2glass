@@ -2048,8 +2048,12 @@ streamed running total exceeds it, so one oversized reply cannot exhaust memory.
 `.m3u8` (the pure `no_std` `hls` parser: master variants for bandwidth-capped ABR,
 media segments), selects a variant, and streams its segments, MPEG-TS into
 `tsdemux` or fMP4/CMAF (signalled by `#EXT-X-MAP`, probed at negotiation) as
-`ByteStream{IsoBmff}` into `fmp4demux`. It reloads a no-ENDLIST live playlist on an
-interval, playing each new segment once by media sequence. With `with_abr()`
+`ByteStream{IsoBmff}` into `fmp4demux`. A no-ENDLIST live playlist starts near the
+live edge (`live_edge_start`: ~3 target durations from the end per RFC 8216
+§6.3.3, M438, so playback follows what is being published rather than replaying the
+stale front of the sliding window, clamped to the window start for a short window),
+then reloads on an interval, playing each new segment once by media sequence. With
+`with_abr()`
 (M371) it is throughput-adaptive: a shared `abr::BandwidthEstimator` keeps an EWMA
 of measured download throughput (bytes over elapsed `monotonic_ns`) and yields an
 effective bandwidth cap (estimate scaled by a safety factor, bounded by

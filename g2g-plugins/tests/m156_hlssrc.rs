@@ -286,6 +286,83 @@ async fn live_reloads_playlist_and_plays_each_new_segment_once() {
     assert_eq!(sink.body, expected, "seg0..seg3 delivered once, in order, no duplicates");
 }
 
+/// A live server whose first media-playlist load offers a *wide* window (6
+/// one-second segments, no ENDLIST), then on the next reload appends ENDLIST with
+/// the same segments. Used to prove live-edge start.
+fn serve_wide_live(segs: Vec<Vec<u8>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reloads = Arc::new(AtomicUsize::new(0));
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut stream = match conn {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let mut req = Vec::new();
+            let mut byte = [0u8; 1];
+            while stream.read(&mut byte).unwrap_or(0) == 1 {
+                req.push(byte[0]);
+                if req.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let line = String::from_utf8_lossy(&req);
+            let path = line.split_whitespace().nth(1).unwrap_or("");
+            let body: Vec<u8> = if path == "/live.m3u8" {
+                let n = reloads.fetch_add(1, Ordering::SeqCst);
+                // The same six-segment window every load; ENDLIST from the 2nd
+                // reload on, so the run terminates after the live-edge segments.
+                let mut p = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n");
+                for i in 0..6 {
+                    p.push_str(&format!("#EXTINF:1.0,\nseg{i}.ts\n"));
+                }
+                if n >= 1 {
+                    p.push_str("#EXT-X-ENDLIST\n");
+                }
+                p.into_bytes()
+            } else if let Some(idx) = path
+                .strip_prefix("/seg")
+                .and_then(|s| s.strip_suffix(".ts"))
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                segs.get(idx).cloned().unwrap_or_default()
+            } else {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                continue;
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    format!("http://127.0.0.1:{port}/live.m3u8")
+}
+
+#[tokio::test]
+async fn live_starts_near_the_edge_skipping_the_stale_window_front() {
+    // Six 1s segments, target duration 1s: the live edge is 3 target durations
+    // (3s) from the end, so the first segment played is seg3 (seg3,4,5 = 3s ahead),
+    // not seg0. The stale front (seg0..seg2) is never fetched.
+    let segs: Vec<Vec<u8>> =
+        (0..6u8).map(|s| (0..500u32).map(|i| (i as u8) ^ (s.wrapping_mul(53))).collect()).collect();
+    let url = serve_wide_live(segs.clone());
+
+    let mut src = HlsSrc::new(url).with_reload_interval_ms(20);
+    src.configure_pipeline(&Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }).unwrap();
+    let mut sink = CaptureSink::default();
+    let count = src.run(&mut sink).await.unwrap();
+
+    assert!(sink.eos, "ENDLIST on the reload terminates the stream");
+    assert_eq!(count, 3, "only the three live-edge segments (seg3..seg5) play");
+    let expected: Vec<u8> = segs[3..].concat();
+    assert_eq!(sink.body, expected, "playback starts at the live edge, not the window front");
+}
+
 // --- time seek: jump to the segment containing the target (M367) ----------
 
 /// A 3-segment VOD playlist, 4s each, so a time seek maps unambiguously to a

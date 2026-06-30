@@ -6,9 +6,11 @@
 //! resolution.
 //!
 //! VOD (a playlist with `#EXT-X-ENDLIST`) plays its segments once then `Eos`.
-//! Live (no ENDLIST) reloads the media playlist on an interval, plays each new
-//! segment once (tracked by HLS media-sequence), and ends when ENDLIST finally
-//! appears or downstream shuts down.
+//! Live (no ENDLIST) starts near the live edge (`live_edge_start`: ~3 target
+//! durations from the end per RFC 8216 §6.3.3, so playback follows what is being
+//! published rather than the stale front of the window), reloads the media
+//! playlist on an interval, plays each new segment once (tracked by HLS
+//! media-sequence), and ends when ENDLIST finally appears or downstream shuts down.
 //!
 //! `#EXT-X-KEY:METHOD=AES-128` segments are decrypted in place: the 16-byte key
 //! is fetched from the key URI (cached per run) and each segment is AES-128-CBC
@@ -25,9 +27,9 @@
 //! HTTP `Range` request (M368), the offset continuing from the previous
 //! sub-range of the same resource when the tag omits an explicit `@offset`.
 //!
-//! Scope: in-order segment fetch, one `DataFrame` per segment, a fixed variant
-//! (no mid-stream ABR switch). Throughput-driven ABR and live-edge start (skip
-//! to the last few segments) are follow-ups (DESIGN_TODO).
+//! Scope: in-order segment fetch, one `DataFrame` per segment. Throughput-driven
+//! ABR mid-stream is opt-in ([`with_abr`](HlsSrc::with_abr)); a plain run keeps
+//! one variant.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -401,6 +403,33 @@ fn segment_for_time(media: &MediaPlaylist, target_ns: u64) -> (usize, u64) {
     (media.segments.len().saturating_sub(1), last_start)
 }
 
+/// The first segment index to play on the initial load of a *live* playlist:
+/// near the live edge, so playback follows what is being published now instead of
+/// replaying the whole sliding window from its (already stale) start. Per RFC 8216
+/// §6.3.3 the start is no closer than three target durations from the end (leaving
+/// a playback buffer), clamped to the window start when the window is shorter than
+/// that. A VOD playlist (`#EXT-X-ENDLIST`) plays from the beginning (index 0).
+fn live_edge_start(media: &MediaPlaylist) -> usize {
+    if media.end_list {
+        return 0;
+    }
+    let edge_ns = u64::from(media.target_duration_secs.max(1))
+        .saturating_mul(3)
+        .saturating_mul(1_000_000_000);
+    // Walk from the end accumulating durations; the start is the earliest segment
+    // that still leaves >= 3 target durations of media ahead of it.
+    let mut ahead_ns = 0u64;
+    let mut start = 0usize;
+    for (i, seg) in media.segments.iter().enumerate().rev() {
+        ahead_ns = ahead_ns.saturating_add((seg.duration_ms as u64).saturating_mul(1_000_000));
+        start = i;
+        if ahead_ns >= edge_ns {
+            break;
+        }
+    }
+    start
+}
+
 impl SourceLoop for HlsSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -480,8 +509,10 @@ impl SourceLoop for HlsSrc {
             // AES-128 keys fetched once per URI and reused across segments.
             let mut keys: Vec<(String, [u8; 16])> = Vec::new();
             // Next HLS media-sequence number to play; segments below it on a live
-            // reload were already delivered.
-            let mut next_seq = media.media_sequence;
+            // reload were already delivered. A live playlist starts near the live
+            // edge (skipping the stale front of the window) instead of its start, so
+            // playback follows what is being published; VOD starts at the front.
+            let mut next_seq = media.media_sequence + live_edge_start(&media) as u64;
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
