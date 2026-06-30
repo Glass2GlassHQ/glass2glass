@@ -25,7 +25,8 @@ from onnxruntime.quantization import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLOAT_PATH = os.path.join(HERE, "qconv_relu_float.onnx")  # intermediate, not committed
-INT8_PATH = os.path.join(HERE, "qconv_relu_int8.onnx")  # the committed fixture
+INT8_PATH = os.path.join(HERE, "qconv_relu_int8.onnx")  # committed: f32 input (M440)
+U8IN_PATH = os.path.join(HERE, "qconv_relu_u8in.onnx")  # committed: uint8 input (M442)
 
 CIN, COUT, H, W, K = 3, 4, 4, 4, 3
 
@@ -83,6 +84,56 @@ def quantize() -> None:
     )
 
 
+def _init_scalar(graph, name):
+    # The scalar value of a named initializer (scale = float, zero_point = int).
+    for init in graph.initializer:
+        if init.name == name:
+            arr = onnx.numpy_helper.to_array(init)
+            return arr.reshape(-1)[0]
+    raise KeyError(name)
+
+
+def make_uint8_input() -> None:
+    # The f32-input QDQ model leaves its boundary QuantizeLinear (float input) on
+    # the CPU because the Edge TPU rejects TENSOR_FLOAT32 (M440). Retype the graph
+    # input to uint8 and drop that leading QuantizeLinear, rewiring its consumer
+    # (the matching DequantizeLinear) onto the now-uint8 graph input, so the whole
+    # graph is accelerator-eligible. The caller must feed uint8 already quantized
+    # with the printed (scale, zero_point) -- exactly what TensorConvert::quantize
+    # produces.
+    model = onnx.load(INT8_PATH)
+    g = model.graph
+    gi = g.input[0].name
+    q = next(n for n in g.node if n.op_type == "QuantizeLinear" and n.input[0] == gi)
+    q_out = q.output[0]
+    scale = float(_init_scalar(g, q.input[1]))
+    zp = int(_init_scalar(g, q.input[2]))
+
+    for n in g.node:
+        n.input[:] = [gi if x == q_out else x for x in n.input]
+    g.node.remove(q)
+    g.input[0].type.tensor_type.elem_type = TensorProto.UINT8
+
+    onnx.checker.check_model(model)
+    onnx.save(model, U8IN_PATH)
+    print(f"   uint8-input model: feed uint8 quantized with scale={scale:.6f}, zero_point={zp}")
+    return scale, zp
+
+
+def verify_uint8(scale: float, zp: int) -> None:
+    sess = ort.InferenceSession(U8IN_PATH, providers=["CPUExecutionProvider"])
+    # Quantize a random f32 input the same way TensorConvert would, then feed uint8.
+    xf = np.random.default_rng(2).random((1, CIN, H, W), dtype=np.float32)
+    xq = np.clip(np.round(xf / scale) + zp, 0, 255).astype(np.uint8)
+    (out,) = sess.run(None, {sess.get_inputs()[0].name: xq})
+    assert out.shape == (1, COUT, H, W) and np.all(out >= 0.0)
+    has_float_input_q = any(
+        n.op_type == "QuantizeLinear" and n.input[0] == U8IN_PATH for n in onnx.load(U8IN_PATH).graph.node
+    )
+    assert not has_float_input_q
+    print(f"OK uint8-input model: {U8IN_PATH} ({os.path.getsize(U8IN_PATH)} bytes), out {out.shape}")
+
+
 def verify() -> None:
     # Confirm the quantized model loads and runs on the CPU EP (host sanity before
     # the fixture goes to the device).
@@ -100,4 +151,6 @@ if __name__ == "__main__":
     build_float_model()
     quantize()
     verify()
+    scale, zp = make_uint8_input()
+    verify_uint8(scale, zp)
     os.remove(FLOAT_PATH)

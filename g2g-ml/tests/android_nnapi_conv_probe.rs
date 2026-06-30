@@ -36,6 +36,30 @@ use ::ort::value::Tensor;
 
 /// The committed int8 QDQ Conv->ReLU fixture (input f32 [1,3,4,4] -> [1,4,4,4]).
 const QCONV: &[u8] = include_bytes!("fixtures/qconv_relu_int8.onnx");
+/// The uint8-input variant (leading float QuantizeLinear removed, M442): the whole
+/// graph is accelerator-eligible (no float boundary the TPU rejects).
+const QCONV_U8IN: &[u8] = include_bytes!("fixtures/qconv_relu_u8in.onnx");
+
+/// Tally the provider of every node compute event in an ORT profiling JSON (crude
+/// scan, no JSON dep, whitespace-tolerant: ORT writes `"provider": "..."`). NNAPI
+/// fuses its claimed subgraph into one node tagged NnapiExecutionProvider.
+fn providers_from_profiling(json: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut providers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut rest = json;
+    while let Some(i) = rest.find("\"provider\"") {
+        rest = &rest[i + "\"provider\"".len()..];
+        let Some(open) = rest.find('"') else { break };
+        rest = &rest[open + 1..];
+        if let Some(end) = rest.find('"') {
+            let prov = &rest[..end];
+            if !prov.is_empty() {
+                *providers.entry(prov.to_owned()).or_insert(0) += 1;
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    providers
+}
 
 /// Start a binder threadpool so the NNAPI vendor HAL (DarwiNN, reached over
 /// binder/AIDL) can set up the accelerator from this bare native binary. Same shim
@@ -161,25 +185,7 @@ async fn nnapi_claims_the_quantized_conv() {
     let json = std::fs::read_to_string(&profile_path).expect("read profiling json");
     let _ = std::fs::remove_file(&profile_path);
 
-    // Tally the provider of every node compute event (crude scan, no JSON dep, and
-    // whitespace-tolerant: ORT writes `"provider": "..."`). NNAPI fuses its claimed
-    // subgraph into one node tagged NnapiExecutionProvider.
-    let mut providers: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut rest = json.as_str();
-    while let Some(i) = rest.find("\"provider\"") {
-        rest = &rest[i + "\"provider\"".len()..];
-        // skip `:` and whitespace up to the opening quote of the value
-        let Some(open) = rest.find('"') else { break };
-        rest = &rest[open + 1..];
-        if let Some(end) = rest.find('"') {
-            let prov = &rest[..end];
-            if !prov.is_empty() {
-                *providers.entry(prov.to_owned()).or_insert(0) += 1;
-            }
-            rest = &rest[end + 1..];
-        }
-    }
-
+    let providers = providers_from_profiling(&json);
     if providers.is_empty() {
         // Diagnostic: show the profiling shape so we can fix the scan if the schema
         // differs (the file should be a non-empty Chrome-trace JSON array).
@@ -200,4 +206,54 @@ async fn nnapi_claims_the_quantized_conv() {
         nnapi_nodes > 0,
         "NNAPI did not claim any node, so the Edge TPU did not run the conv; placement: {providers:?}"
     );
+}
+
+/// The uint8-input variant has no float boundary op, so the *whole* graph is
+/// accelerator-eligible: feeding a pre-quantized uint8 tensor (what
+/// `TensorConvert::quantize` would produce) should place every node on NNAPI, with
+/// nothing left on the CPU. Proves the full conv graph runs on the Edge TPU (M442).
+#[tokio::test]
+async fn fully_on_tpu_with_uint8_input() {
+    start_binder_threadpool();
+
+    let profile_prefix = "/data/local/tmp/g2g_qconv_u8_profile";
+    let mut session = Session::builder()
+        .expect("builder")
+        .with_execution_providers([NNAPI::default().build(), XNNPACK::default().build()])
+        .expect("register NNAPI + XNNPACK")
+        .with_profiling(profile_prefix)
+        .expect("enable profiling")
+        .commit_from_memory(QCONV_U8IN)
+        .expect("uint8-input session builds on-device");
+
+    let input_name = session.inputs()[0].name().to_owned();
+    // A uint8 [1,3,4,4] input, already quantized (raw pixel-like values).
+    let data: Vec<u8> = (0..48u16).map(|i| (i * 5) as u8).collect();
+    {
+        let outputs = session
+            .run(::ort::inputs![input_name.as_str() => Tensor::from_array((vec![1i64, 3, 4, 4], data)).expect("u8 tensor")])
+            .expect("run on-device");
+        let (_s, out) = outputs[0].try_extract_tensor::<f32>().expect("f32 output");
+        assert_eq!(out.len(), 64, "conv output [1,4,4,4]");
+    }
+
+    let profile_path = session.end_profiling().expect("flush profiling");
+    let json = std::fs::read_to_string(&profile_path).expect("read profiling json");
+    let _ = std::fs::remove_file(&profile_path);
+
+    let providers = providers_from_profiling(&json);
+    eprintln!("--- ORT node placement, uint8 input (provider -> node count) ---");
+    for (prov, n) in &providers {
+        eprintln!("    {prov}: {n}");
+    }
+    let nnapi: usize = providers.iter().filter(|(p, _)| p.contains("Nnapi")).map(|(_, n)| *n).sum();
+    let non_nnapi: usize = providers.iter().filter(|(p, _)| !p.contains("Nnapi")).map(|(_, n)| *n).sum();
+    if non_nnapi == 0 && nnapi > 0 {
+        eprintln!(">> FULLY on NNAPI: every node ran on the Edge TPU accelerator (no CPU fallback)");
+    } else {
+        eprintln!(">> {nnapi} node(s) on NNAPI, {non_nnapi} still off-accelerator (see breakdown)");
+    }
+    // The conv must be on NNAPI; with the float boundary gone we expect nothing on CPU.
+    assert!(nnapi > 0, "NNAPI claimed no node; placement: {providers:?}");
+    assert_eq!(non_nnapi, 0, "expected the whole uint8 graph on NNAPI; placement: {providers:?}");
 }
