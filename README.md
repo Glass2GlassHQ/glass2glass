@@ -453,6 +453,7 @@ tools/android-mediacodec-enc-smoke.sh    # encode  (NV12 -> Annex-B H.264)
 tools/android-aaudio-smoke.sh            # audio   (render; mic capture best-effort)
 tools/android-camera2-smoke.sh           # camera  (caps + FFI; capture best-effort)
 tools/android-surface-present-smoke.sh   # decode -> GPU -> on-screen present
+tools/android-nnapi-smoke.sh             # ML inference (NNAPI + XNNPACK ORT EPs)
 ```
 
 Each takes an optional ABI argument (default `arm64-v8a`; also `x86_64`,

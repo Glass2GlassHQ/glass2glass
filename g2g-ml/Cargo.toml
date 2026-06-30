@@ -53,6 +53,18 @@ directml = ["ort", "ort/directml"]
 # verifiable without an NVIDIA device: the in-tree test confirms the EP wires,
 # registers, and runs (on CUDA where present, else CPU), not that CUDA executed.
 cuda = ["ort", "ort/cuda"]
+# NNAPI execution provider (Android NPU / GPU / DSP via the system
+# NeuralNetworks API). Android-target only: it links the Android ONNX Runtime
+# build's NNAPI symbol, which a host ORT does not carry (unlike `cuda`, the
+# `nnapi` feature does not select a different prebuilt), so enabling it on a
+# non-Android target link-fails. Cross-compile with cargo-ndk
+# (`--features nnapi`); never enable it in a host build / CI.
+nnapi = ["ort", "ort/nnapi"]
+# XNNPACK execution provider (ARM-optimized CPU): the Android CPU-side companion
+# to `nnapi` (the accelerator-then-CPU pair, the MediaPipe delegate-with-fallback
+# shape). Like `nnapi` it links a symbol a host ORT may lack, so treat it as an
+# Android-target feature.
+xnnpack = ["ort", "ort/xnnpack"]
 
 [dependencies]
 g2g-core = { path = "../g2g-core" }

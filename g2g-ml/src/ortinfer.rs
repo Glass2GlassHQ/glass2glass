@@ -21,8 +21,12 @@
 //! Execution providers: `from_memory` uses ONNX Runtime's default (CPU) EP;
 //! `from_memory_with_directml` (M26) and `from_memory_with_cuda` (M53) register
 //! a GPU EP ahead of the CPU fallback (best-effort, so the pipeline keeps
-//! flowing without the device). TensorRT / CoreML are the same constructor
-//! shape and remain a follow-up; the element shape doesn't change.
+//! flowing without the device). For Android edge, `from_memory_with_nnapi`
+//! (NPU / GPU / DSP via NNAPI), `from_memory_with_xnnpack` (ARM-optimized CPU),
+//! and `from_memory_for_android` (NNAPI then XNNPACK then CPU, the
+//! delegate-with-fallback shape) are the same constructor pattern (M439). All EP
+//! choices are constructor variants; the element shape never changes. TensorRT /
+//! CoreML / QNN slot in the same way and remain follow-ups.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -98,6 +102,53 @@ impl OrtInference {
         let builder = Session::builder().map_err(ort_err)?;
         let mut builder = builder
             .with_execution_providers([::ort::ep::CUDA::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the NNAPI execution provider (Android's system
+    /// NeuralNetworks API: NPU / GPU / DSP) registered ahead of the CPU fallback.
+    /// Best-effort like the CUDA / DirectML paths: with no usable NNAPI
+    /// accelerator the session runs on the CPU, so the pipeline keeps flowing.
+    /// Android only, the `nnapi` feature links the Android ORT's NNAPI symbol.
+    #[cfg(feature = "nnapi")]
+    pub fn from_memory_with_nnapi(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::NNAPI::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the XNNPACK execution provider (ARM-optimized
+    /// CPU) registered ahead of ONNX Runtime's default CPU EP. The CPU-side
+    /// companion to [`from_memory_with_nnapi`] on Android. Android only, the
+    /// `xnnpack` feature links the Android ORT's XNNPACK symbol.
+    #[cfg(feature = "xnnpack")]
+    pub fn from_memory_with_xnnpack(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::XNNPACK::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], the turnkey Android edge path: NNAPI (accelerator)
+    /// preferred, then XNNPACK (ARM CPU), then ONNX Runtime's default CPU EP. ORT
+    /// assigns each node to the first listed provider that supports it, so a model
+    /// the accelerator cannot fully run still executes (its unsupported nodes drop
+    /// to XNNPACK / CPU), the MediaPipe delegate-with-fallback shape in one call.
+    #[cfg(all(feature = "nnapi", feature = "xnnpack"))]
+    pub fn from_memory_for_android(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([
+                ::ort::ep::NNAPI::default().build(),
+                ::ort::ep::XNNPACK::default().build(),
+            ])
             .map_err(ort_err)?;
         let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
         Self::from_session(session)
