@@ -1311,6 +1311,158 @@ fn c1_len(code: u8) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CEA-708 encode (the inverse of `Cea708`)
+// ---------------------------------------------------------------------------
+
+/// Map a Unicode glyph to a CEA-708 G0 (ASCII) byte; `0x7F` is the music note and
+/// anything outside the printable ASCII range folds to a space.
+fn char_to_g0(ch: char) -> u8 {
+    match ch {
+        '♪' => 0x7F,
+        ' '..='~' => ch as u8,
+        _ => 0x20,
+    }
+}
+
+/// The maximum bytes of caption command data in one DTVCC service block (the
+/// 5-bit `block_size`).
+const MAX_BLOCK: usize = 31;
+
+/// A CEA-708 (DTVCC) caption *encoder*: the inverse of [`Cea708`]. Feed it cues via
+/// [`push_cue`](Cc708Enc::push_cue) and clear the screen with
+/// [`erase`](Cc708Enc::erase); it builds the window command stream (DefineWindow a
+/// hidden window sized to the text, SetPenLocation per row, the G0 text, then
+/// DisplayWindows to show it atomically; HideWindows to erase), packs the commands
+/// into service blocks, wraps each in a DTVCC packet, and queues the `(cc_type,
+/// cc_data_1, cc_data_2)` triples (`cc_type` 3 starts a packet, 2 continues it).
+///
+/// The triples are drained one per video frame with [`next_triple`](Cc708Enc::next_triple)
+/// (an ignored padding triple when idle), the pacing an inserter applies against
+/// the video frame rate. Renders into window 0 of one service (service 1 by
+/// default).
+#[derive(Debug)]
+pub struct Cc708Enc {
+    /// The service the caption is written to (1 = primary).
+    service: u8,
+    /// Queued triples, drained one per frame.
+    queue: VecDeque<(u8, u8, u8)>,
+    /// DTVCC packet sequence number (2 bits), incremented per packet.
+    seq: u8,
+}
+
+impl Default for Cc708Enc {
+    fn default() -> Self {
+        Self::for_service(1)
+    }
+}
+
+impl Cc708Enc {
+    /// A fresh encoder writing service 1.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A fresh encoder writing `service` (1 = primary; clamped to 1..=6, the range
+    /// the single-byte service-block header carries without an extension).
+    pub fn for_service(service: u8) -> Self {
+        Self { service: service.clamp(1, 6), queue: VecDeque::new(), seq: 0 }
+    }
+
+    /// Queue the command sequence that displays `cue` in window 0: define the
+    /// window (hidden, sized to the text, anchored from the cue placement), write
+    /// each text row at its pen location, then DisplayWindows to reveal it.
+    pub fn push_cue(&mut self, cue: &Cue) {
+        let lines: Vec<&str> = cue.text.lines().collect();
+        let rows = lines.len().clamp(1, 16) as u8;
+        let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(1).clamp(1, 64) as u8;
+        // Relative anchor: the decoder reads the percent directly. Default near the
+        // bottom-left when the cue carries no placement.
+        let line = cue.settings.line.unwrap_or(90).min(100);
+        let pos = cue.settings.position.unwrap_or(10).min(100);
+
+        // Command units (each atomic: a control command, or one G0 glyph byte).
+        let mut units: Vec<Vec<u8>> = Vec::new();
+        units.push(alloc::vec![
+            0x98,                 // DefineWindow 0
+            0x00,                 // hidden (no 0x20 visible bit), priority 0
+            0x80 | line,          // relative positioning | anchor vertical
+            pos,                  // anchor horizontal
+            (rows - 1) & 0x0F,    // anchor id 0 | row_count - 1
+            (cols - 1) & 0x3F,    // column_count - 1
+            0x09,                 // window style 1 | pen style 1 (a standard popup)
+        ]);
+        for (r, line) in lines.iter().enumerate() {
+            units.push(alloc::vec![0x92, (r as u8) & 0x0F, 0x00]); // SetPenLocation(row, 0)
+            for ch in line.chars() {
+                units.push(alloc::vec![char_to_g0(ch)]);
+            }
+        }
+        units.push(alloc::vec![0x89, 0x01]); // DisplayWindows window 0
+        self.enqueue_units(&units);
+    }
+
+    /// Queue a HideWindows command that clears the displayed caption (window 0).
+    pub fn erase(&mut self) {
+        self.enqueue_units(&[alloc::vec![0x8A, 0x01]]); // HideWindows window 0
+    }
+
+    /// The next `(cc_type, cc_data_1, cc_data_2)` triple to transmit this frame; an
+    /// ignored padding triple (a `cc_type` 2 continuation with no open packet) once
+    /// the queue is drained.
+    pub fn next_triple(&mut self) -> (u8, u8, u8) {
+        self.queue.pop_front().unwrap_or((2, 0, 0))
+    }
+
+    /// Whether triples remain to transmit (a caption still mid-send).
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Pack command units into service blocks (never splitting a unit across a
+    /// block), wrapping each block in its own DTVCC packet of triples.
+    fn enqueue_units(&mut self, units: &[Vec<u8>]) {
+        let mut block: Vec<u8> = Vec::new();
+        for u in units {
+            if block.len() + u.len() > MAX_BLOCK {
+                self.enqueue_block(&block);
+                block.clear();
+            }
+            block.extend_from_slice(u);
+        }
+        if !block.is_empty() {
+            self.enqueue_block(&block);
+        }
+    }
+
+    /// Wrap one service block's command bytes in a DTVCC packet and queue its
+    /// triples. The packet data is padded to an odd length (so a `packet_size_code`
+    /// of `(len + 1) / 2` describes it), the trailing pad byte reading as a NULL
+    /// service block (end of blocks).
+    fn enqueue_block(&mut self, cmds: &[u8]) {
+        let mut data = alloc::vec![((self.service & 0x07) << 5) | (cmds.len() as u8 & 0x1F)];
+        data.extend_from_slice(cmds);
+        if data.len() % 2 == 0 {
+            data.push(0x00); // NULL service block padding -> odd data length
+        }
+        let size_code = (data.len().div_ceil(2)) as u8 & 0x3F;
+        let mut pkt = alloc::vec![(self.seq << 6) | size_code];
+        pkt.extend_from_slice(&data);
+        self.seq = (self.seq + 1) & 0x03;
+
+        let mut i = 0;
+        let mut first = true;
+        while i < pkt.len() {
+            let b0 = pkt[i];
+            let b1 = if i + 1 < pkt.len() { pkt[i + 1] } else { 0 };
+            // cc_type 3 starts the DTVCC packet, 2 continues it.
+            self.queue.push_back((if first { 3 } else { 2 }, b0, b1));
+            first = false;
+            i += 2;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1688,5 +1840,80 @@ mod tests {
         let cues = dec.take_cues();
         assert_eq!(cues.len(), 1);
         assert_eq!(cues[0].text, "LONGER CAPTION TEXT");
+    }
+
+    /// Drain a `Cc708Enc` into a `Cea708` one triple per frame, the encode/decode
+    /// round trip; returns the recovered cues.
+    fn roundtrip_708(enc: &mut Cc708Enc, dec: &mut Cea708, start: u64) -> u64 {
+        let mut t = start;
+        while enc.pending() {
+            let (ct, b0, b1) = enc.next_triple();
+            dec.push_triple(ct, b0, b1, t);
+            t += 33_000;
+        }
+        t
+    }
+
+    #[test]
+    fn cc708enc_round_trips_through_the_decoder() {
+        // Encode a placed cue, drain the DTVCC triples into the decoder one per
+        // frame, and recover the same text + placement: Cc708Enc is the inverse of
+        // Cea708 (DefineWindow / SetPenLocation / G0 text / DisplayWindows, packet
+        // framing, cc_type 3/2 split).
+        let mut enc = Cc708Enc::new();
+        let cue = Cue {
+            start_ns: 0,
+            end_ns: 0,
+            text: "HELLO".into(),
+            settings: CueSettings { line: Some(50), position: Some(20), ..CueSettings::default() },
+        };
+        enc.push_cue(&cue);
+        let mut dec = Cea708::new();
+        let t = roundtrip_708(&mut enc, &mut dec, 1000);
+        // A few idle frames (padding triples are ignored), then erase.
+        let mut t2 = t;
+        for _ in 0..3 {
+            let (ct, b0, b1) = enc.next_triple();
+            dec.push_triple(ct, b0, b1, t2);
+            t2 += 33_000;
+        }
+        enc.erase();
+        let end = roundtrip_708(&mut enc, &mut dec, t2);
+        dec.flush(end + 33_000);
+
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1, "one finished caption");
+        assert_eq!(cues[0].text, "HELLO");
+        assert_eq!(cues[0].settings.line, Some(50), "relative anchor round-trips");
+        assert_eq!(cues[0].settings.position, Some(20));
+    }
+
+    #[test]
+    fn cc708enc_round_trips_multiline_text_across_blocks() {
+        // Text long enough to span more than one 31-byte service block / packet
+        // still reassembles into the right multi-row caption.
+        let mut enc = Cc708Enc::new();
+        let cue = Cue {
+            start_ns: 0,
+            end_ns: 0,
+            text: "FIRST ROW OF CAPTION\nSECOND ROW OF CAPTION".into(),
+            settings: CueSettings::default(),
+        };
+        enc.push_cue(&cue);
+        let mut dec = Cea708::new();
+        let end = roundtrip_708(&mut enc, &mut dec, 1000);
+        dec.flush(end + 33_000);
+        // The caption shows from the DisplayWindows packet; flush ends it.
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "FIRST ROW OF CAPTION\nSECOND ROW OF CAPTION");
+    }
+
+    #[test]
+    fn cc708enc_pads_when_idle() {
+        let mut enc = Cc708Enc::new();
+        assert!(!enc.pending());
+        // Idle padding is a cc_type-2 continuation with no open packet (ignored).
+        assert_eq!(enc.next_triple(), (2, 0, 0));
     }
 }

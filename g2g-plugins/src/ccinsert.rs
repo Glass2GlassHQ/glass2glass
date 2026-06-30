@@ -25,17 +25,63 @@ use g2g_core::{
     MultiInputElement, OutputSink, PipelinePacket, Rate, VideoCodec,
 };
 
-use crate::cea::{build_cc_sei, Cc608Enc, CcTriple, CC_NULL};
+use crate::cea::{build_cc_sei, Cc608Enc, Cc708Enc, CcTriple};
+use crate::subparse::Cue;
 
 use core::future::Future;
 use core::pin::Pin;
 
-/// Insert CEA-608 captions, encoded from a cue stream, into a compressed
+/// The caption encoder behind a [`CcInsert`]: CEA-608 (cc_type 0 byte pairs) or
+/// CEA-708 DTVCC (cc_type 2/3 triples). One caption triple is drained per video
+/// frame whichever it is.
+#[derive(Debug)]
+enum CcEncoder {
+    Cea608(Cc608Enc),
+    Cea708(Cc708Enc),
+}
+
+impl CcEncoder {
+    fn pending(&self) -> bool {
+        match self {
+            CcEncoder::Cea608(e) => e.pending(),
+            CcEncoder::Cea708(e) => e.pending(),
+        }
+    }
+    fn push_cue(&mut self, cue: &Cue) {
+        match self {
+            CcEncoder::Cea608(e) => e.push_cue(cue),
+            CcEncoder::Cea708(e) => e.push_cue(cue),
+        }
+    }
+    fn erase(&mut self) {
+        match self {
+            CcEncoder::Cea608(e) => e.erase(),
+            CcEncoder::Cea708(e) => e.erase(),
+        }
+    }
+    /// The next caption triple to carry this frame (CEA-608 is always cc_type 0).
+    fn next_triple(&mut self) -> CcTriple {
+        match self {
+            CcEncoder::Cea608(e) => {
+                let (b0, b1) = e.next_pair();
+                CcTriple { cc_type: 0, b0, b1 }
+            }
+            CcEncoder::Cea708(e) => {
+                let (cc_type, b0, b1) = e.next_triple();
+                CcTriple { cc_type, b0, b1 }
+            }
+        }
+    }
+}
+
+/// Insert closed captions, encoded from a cue stream, into a compressed
 /// H.264 / H.265 access-unit stream's SEI. A [`MultiInputElement`]: input 0 is the
 /// video access units (and the merged output), input 1 the timed text cues.
-#[derive(Debug, Default)]
+/// Encodes CEA-608 by default ([`new`](CcInsert::new)) or CEA-708
+/// ([`cea708`](CcInsert::cea708)).
+#[derive(Debug)]
 pub struct CcInsert {
-    enc: Cc608Enc,
+    enc: CcEncoder,
     /// Input codec, fixed at `configure(VIDEO)`; selects the SEI NAL framing.
     codec: Option<VideoCodec>,
     /// The negotiated video caps, the merged output (it follows the video pad).
@@ -56,13 +102,38 @@ pub struct CcInsert {
     instance: Option<alloc::string::String>,
 }
 
+impl Default for CcInsert {
+    fn default() -> Self {
+        Self::with_encoder(CcEncoder::Cea608(Cc608Enc::new()))
+    }
+}
+
 impl CcInsert {
     /// Input pad indices: compressed video on 0, the text-cue stream on 1.
     const VIDEO: usize = 0;
     const CUE: usize = 1;
 
+    /// A CEA-608 caption inserter (channel CC1).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A CEA-708 (DTVCC) caption inserter writing `service` (1 = primary).
+    pub fn cea708(service: u8) -> Self {
+        Self::with_encoder(CcEncoder::Cea708(Cc708Enc::for_service(service)))
+    }
+
+    fn with_encoder(enc: CcEncoder) -> Self {
+        Self {
+            enc,
+            codec: None,
+            video_caps: None,
+            erase_at: None,
+            cues_received: 0,
+            caption_emitted: false,
+            warned: false,
+            instance: None,
+        }
     }
 
     /// Warn once at end of stream if cues were received but no caption byte ever
@@ -112,13 +183,14 @@ impl CcInsert {
             // A non-system buffer carries no walkable bitstream; pass it through.
             return out.push(PipelinePacket::DataFrame(frame)).await.map(|_| ());
         };
-        // Drain this frame's caption byte pair (one per frame) and wrap it in a SEI.
-        let (b0, b1) = self.enc.next_pair();
-        // A non-null pair means a real caption byte was carried (not just padding).
-        if (b0, b1) != (CC_NULL, CC_NULL) {
+        // Drain this frame's caption triple (one per frame) and wrap it in a SEI.
+        // Pending-before-drain marks a real caption byte (vs idle padding).
+        let real = self.enc.pending();
+        let triple = self.enc.next_triple();
+        if real {
             self.caption_emitted = true;
         }
-        let sei = build_cc_sei(&[CcTriple { cc_type: 0, b0, b1 }], codec);
+        let sei = build_cc_sei(&[triple], codec);
 
         let au = slice.as_slice();
         let mut bytes = Vec::with_capacity(au.len() + sei.len());
@@ -320,7 +392,7 @@ impl LogSource for CcInsert {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cea::{extract_cc_data, Cea608};
+    use crate::cea::{extract_cc_data, Cea608, Cea708};
     use g2g_core::{FrameTiming, PushOutcome, TextFormat};
     use alloc::vec;
 
@@ -424,6 +496,34 @@ mod tests {
         let mut sink = RecordingSink::default();
         // The video pad before configure is NotConfigured (no codec for the SEI).
         assert!(el.process(CcInsert::VIDEO, video_frame(0), &mut sink).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn round_trips_a_708_caption_through_insert_then_extract() {
+        // The CEA-708 mode authors DTVCC into the SEI; extract + decode the output
+        // through the 708 decoder and recover the text.
+        let mut el = CcInsert::cea708(1);
+        el.configure_pipeline(CcInsert::VIDEO, &h264_caps()).unwrap();
+        el.configure_pipeline(CcInsert::CUE, &Caps::Text { format: TextFormat::Utf8 }).unwrap();
+        let mut sink = RecordingSink::default();
+
+        el.process(CcInsert::CUE, cue_frame("HI 708", 0, 1_000_000_000), &mut sink).await.unwrap();
+        let frame_dur = 33_000_000u64;
+        for n in 0..40u64 {
+            el.process(CcInsert::VIDEO, video_frame(n * frame_dur), &mut sink).await.unwrap();
+        }
+
+        let mut dec = Cea708::new();
+        for f in &sink.aus {
+            let MemoryDomain::System(s) = &f.domain else { continue };
+            for t in extract_cc_data(s.as_slice(), VideoCodec::H264) {
+                dec.push_triple(t.cc_type, t.b0, t.b1, f.timing.pts_ns);
+            }
+        }
+        dec.flush(100 * frame_dur);
+        let cues = dec.take_cues();
+        assert_eq!(cues.len(), 1, "the inserted 708 caption is recovered");
+        assert_eq!(cues[0].text, "HI 708");
     }
 
     #[tokio::test]
