@@ -140,6 +140,41 @@ impl OrtInference {
         Self::from_session(session)
     }
 
+    /// As [`from_memory`], with the QNN execution provider (Qualcomm AI Engine
+    /// Direct: the Hexagon NPU / Adreno GPU on Snapdragon) ahead of the CPU
+    /// fallback. Best-effort like the CUDA / NNAPI paths: with no usable QNN
+    /// backend the session runs on the CPU, so the pipeline keeps flowing. The
+    /// `qnn` feature links the QNN symbol the Qualcomm ONNX Runtime build carries
+    /// (a host ORT lacks it, like `nnapi`), so treat it as a Snapdragon-target
+    /// feature, never enabled in a host build / CI. QNN is Qualcomm's own NPU
+    /// stack, the alternative to reaching the Hexagon through NNAPI.
+    #[cfg(feature = "qnn")]
+    pub fn from_memory_with_qnn(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::QNN::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
+    /// As [`from_memory`], with the CoreML execution provider (the Apple Neural
+    /// Engine / GPU on macOS / iOS) ahead of the CPU fallback. Best-effort like the
+    /// CUDA / NNAPI paths: with no usable CoreML device the session runs on the
+    /// CPU. The `coreml` feature links the CoreML symbol the Apple ONNX Runtime
+    /// build carries (a non-Apple ORT lacks it, like `nnapi`), so treat it as an
+    /// Apple-target feature, never enabled in a host (non-Apple) build / CI. The
+    /// macOS / iOS sibling of NNAPI / QNN.
+    #[cfg(feature = "coreml")]
+    pub fn from_memory_with_coreml(model_bytes: &[u8]) -> Result<Self, G2gError> {
+        let builder = Session::builder().map_err(ort_err)?;
+        let mut builder = builder
+            .with_execution_providers([::ort::ep::CoreML::default().build()])
+            .map_err(ort_err)?;
+        let session = builder.commit_from_memory(model_bytes).map_err(ort_err)?;
+        Self::from_session(session)
+    }
+
     /// As [`from_memory`], the turnkey Android edge path: NNAPI (accelerator)
     /// preferred, then XNNPACK (ARM CPU), then ONNX Runtime's default CPU EP. ORT
     /// assigns each node to the first listed provider that supports it, so a model

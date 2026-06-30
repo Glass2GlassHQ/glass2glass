@@ -65,6 +65,15 @@ nnapi = ["ort", "ort/nnapi"]
 # shape). Like `nnapi` it links a symbol a host ORT may lack, so treat it as an
 # Android-target feature.
 xnnpack = ["ort", "ort/xnnpack"]
+# QNN execution provider (Qualcomm AI Engine Direct: Hexagon NPU / Adreno GPU on
+# Snapdragon). Qualcomm's own NPU stack, the alternative to reaching the Hexagon
+# via NNAPI. Like `nnapi` it links a symbol only the Qualcomm ORT build carries,
+# so it is a Snapdragon-target feature, never enabled in a host build / CI.
+qnn = ["ort", "ort/qnn"]
+# CoreML execution provider (Apple Neural Engine / GPU on macOS / iOS). Like
+# `nnapi` it links a symbol only the Apple ORT build carries, so it is an
+# Apple-target feature, never enabled in a host (non-Apple) build / CI.
+coreml = ["ort", "ort/coreml"]
 # Live Android camera -> quantize -> Edge TPU inference chain (M443): pulls
 # g2g-plugins (Camera2Src capture + TensorConvert quantize) alongside the NNAPI /
 # XNNPACK EPs. Android-target only (it implies nnapi / xnnpack and g2g-plugins's
