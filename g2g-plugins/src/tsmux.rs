@@ -26,7 +26,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, VideoCodec,
+    PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265};
@@ -50,6 +50,10 @@ pub struct TsMux {
     mux: Option<TsMuxer>,
     configured: bool,
     emitted: u64,
+    /// PAT/PMT re-emission cadence in milliseconds (`0` = once up front). Applied
+    /// to the inner `TsMuxer` when it is built at configure. The PAT and PMT are
+    /// emitted together, so `pat-interval` and `pmt-interval` share this cadence.
+    table_interval_ms: u64,
 }
 
 impl Default for TsMux {
@@ -60,7 +64,13 @@ impl Default for TsMux {
 
 impl TsMux {
     pub fn new() -> Self {
-        Self { mux: None, configured: false, emitted: 0 }
+        Self { mux: None, configured: false, emitted: 0, table_interval_ms: 0 }
+    }
+
+    /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
+    pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
+        self.table_interval_ms = ms;
+        self
     }
 
     /// Count of TS byte frames forwarded.
@@ -116,9 +126,43 @@ impl AsyncElement for TsMux {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let stream_type = stream_type_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.mux = Some(TsMuxer::new(stream_type));
+        let mut mux = TsMuxer::new(stream_type);
+        // 90 kHz clock: 90 ticks per millisecond.
+        mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+        self.mux = Some(mux);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("pat-interval", PropKind::Uint, "PAT/PMT re-emission interval, milliseconds (0 = once)")
+                .with_default("0"),
+            // The PAT and PMT are emitted as a pair, so this shares the cadence.
+            PropertySpec::new("pmt-interval", PropKind::Uint, "alias of pat-interval (the tables are emitted together)")
+                .with_default("0"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "pat-interval" | "pmt-interval" => {
+                self.table_interval_ms = value.as_uint().ok_or(PropError::Type)?;
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+                }
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

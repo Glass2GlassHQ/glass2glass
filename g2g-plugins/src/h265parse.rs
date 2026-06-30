@@ -27,13 +27,19 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    VideoCodec,
 };
 
-use crate::annexb::{next_start_code, strip_emulation_prevention, BitReader};
+use crate::annexb::{
+    h265_nal_type, nal_units, next_start_code, strip_emulation_prevention, BitReader,
+};
 
 /// H.265 NAL unit type for a sequence parameter set (SPS_NUT).
 const SPS_NUT: u8 = 33;
+/// H.265 NAL unit types for the video and picture parameter sets.
+const VPS_NUT: u8 = 32;
+const PPS_NUT: u8 = 34;
 
 /// Re-framing accumulator hard cap: flush rather than buffer forever on
 /// non-conforming input (mirrors `h264parse`).
@@ -68,6 +74,19 @@ pub struct H265Parse {
     /// buffer (no leading start code) as length-prefixed and mangles it.
     /// Re-framing only.
     input_is_annexb: Option<bool>,
+    /// VPS/SPS/PPS re-insertion interval (the gst `config-interval`), in seconds:
+    /// `0` = never (default), `-1` = prepend the cached parameter sets to every
+    /// IRAP access unit, `N > 0` = prepend at the first IRAP once `N` seconds
+    /// elapsed. The HEVC sibling of `h264parse`'s config-interval; applied on the
+    /// access-unit-aligned Annex-B (re-framing) output.
+    config_interval: i32,
+    /// Most-recent VPS / SPS / PPS NAL bodies (start codes stripped), refreshed as
+    /// they flow, so an IRAP that lacks inline parameter sets can be prefixed.
+    cached_vps: Vec<Vec<u8>>,
+    cached_sps: Vec<Vec<u8>>,
+    cached_pps: Vec<Vec<u8>>,
+    /// PTS (ns) of the last AU the parameter sets were (re-)inserted before.
+    last_config_pts_ns: Option<u64>,
 }
 
 impl H265Parse {
@@ -87,6 +106,68 @@ impl H265Parse {
     /// re-emission is suppressed when the SPS dimensions are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.sps_emitted
+    }
+
+    /// Set the VPS/SPS/PPS re-insertion interval in seconds (`0` off, `-1` every
+    /// IRAP, `N` every N seconds); see [`config_interval`](Self::config_interval).
+    pub fn with_config_interval(mut self, seconds: i32) -> Self {
+        self.config_interval = seconds;
+        self
+    }
+
+    /// Refresh the cached parameter sets from `au` and, when re-insertion is due,
+    /// return the AU prefixed with the cached VPS/SPS/PPS (Annex-B). `au` must be
+    /// Annex-B (the re-framing output always is).
+    fn apply_config_interval(&mut self, au: Vec<u8>, pts_ns: u64, keyframe: bool) -> Vec<u8> {
+        let mut vps = Vec::new();
+        let mut sps = Vec::new();
+        let mut pps = Vec::new();
+        for nal in nal_units(&au) {
+            match h265_nal_type(nal) {
+                Some(VPS_NUT) => vps.push(nal.to_vec()),
+                Some(SPS_NUT) => sps.push(nal.to_vec()),
+                Some(PPS_NUT) => pps.push(nal.to_vec()),
+                _ => {}
+            }
+        }
+        let has_config = !sps.is_empty();
+        if !vps.is_empty() {
+            self.cached_vps = vps;
+        }
+        if has_config {
+            self.cached_sps = sps;
+        }
+        if !pps.is_empty() {
+            self.cached_pps = pps;
+        }
+
+        if self.config_interval == 0 || !keyframe {
+            return au;
+        }
+        if has_config {
+            self.last_config_pts_ns = Some(pts_ns);
+            return au;
+        }
+        let due = if self.config_interval < 0 {
+            true
+        } else {
+            let interval_ns = (self.config_interval as u64).saturating_mul(1_000_000_000);
+            match self.last_config_pts_ns {
+                None => true,
+                Some(last) => pts_ns.saturating_sub(last) >= interval_ns,
+            }
+        };
+        if !due || self.cached_sps.is_empty() {
+            return au;
+        }
+        let mut out = Vec::with_capacity(au.len() + 96);
+        for ps in self.cached_vps.iter().chain(&self.cached_sps).chain(&self.cached_pps) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(ps);
+        }
+        out.extend_from_slice(&au);
+        self.last_config_pts_ns = Some(pts_ns);
+        out
     }
 
     /// Re-framing data path: accumulate the bitstream and emit each complete
@@ -172,6 +253,9 @@ impl H265Parse {
             }
         }
         timing.keyframe = h265_au_is_keyframe(&au);
+        // Re-insert cached VPS/SPS/PPS before this AU when config-interval calls
+        // for it (no-op at interval 0 or when the AU already carries them).
+        let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             timing,
@@ -222,6 +306,38 @@ impl AsyncElement for H265Parse {
                 Ok(ConfigureOutcome::Accepted)
             }
             _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "config-interval",
+            PropKind::Int,
+            "VPS/SPS/PPS re-insertion interval in seconds (0 = off, -1 = every IRAP, N = every N s)",
+        )
+        .with_range("-1", "3600")
+        .with_default("0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "config-interval" => {
+                let secs = value.as_int().ok_or(PropError::Type)?;
+                if !(-1..=3600).contains(&secs) {
+                    return Err(PropError::Value);
+                }
+                self.config_interval = secs as i32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "config-interval" => Some(PropValue::Int(self.config_interval as i64)),
+            _ => None,
         }
     }
 
@@ -891,5 +1007,25 @@ mod tests {
             })
             .collect();
         assert_eq!(kf, vec![true, false], "IDR AU is a keyframe, TRAIL_R is not");
+    }
+
+    #[test]
+    fn config_interval_reinserts_vps_sps_pps_on_irap() {
+        let mut p = H265Parse::reframing().with_config_interval(-1);
+        // An IRAP AU with VPS (32) + SPS (33) + PPS (34): cached, returned as-is.
+        // H.265 NAL header type is bits 1..=6 of the first byte: 32<<1=0x40 etc.
+        let mut au1 = vec![0, 0, 0, 1, 0x40, 0x01]; // VPS
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x42, 0x01]); // SPS
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x44, 0x01]); // PPS
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x26, 0x01]); // IDR_W_RADL (19) slice
+        let out1 = p.apply_config_interval(au1.clone(), 0, true);
+        assert_eq!(out1, au1, "an IRAP that already carries parameter sets is untouched");
+        // A later IRAP with no parameter sets gets VPS/SPS/PPS prepended.
+        let au2 = vec![0, 0, 0, 1, 0x26, 0x01];
+        let out2 = p.apply_config_interval(au2.clone(), 90_000, true);
+        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(VPS_NUT)), "result carries a VPS");
+        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(SPS_NUT)), "result carries an SPS");
+        assert!(nal_units(&out2).any(|n| h265_nal_type(n) == Some(PPS_NUT)), "result carries a PPS");
+        assert!(out2.ends_with(&au2), "the original AU is preserved at the tail");
     }
 }

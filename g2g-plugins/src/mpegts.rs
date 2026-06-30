@@ -319,6 +319,14 @@ pub struct TsMuxer {
     pat_cc: u8,
     pmt_cc: u8,
     tables_written: bool,
+    /// PAT/PMT re-emission cadence in 90 kHz ticks (`0` = emit once up front, the
+    /// default). When set, the table pair is re-emitted before the first access
+    /// unit whose PTS is at least this far past the last emission, so a decoder
+    /// that joins mid-stream (a tuned-in multicast, an HLS/DASH segment boundary)
+    /// finds the PSI without waiting for the start of the stream.
+    table_interval_90khz: u64,
+    /// PTS (90 kHz) the tables were last emitted at, for the cadence above.
+    last_tables_pts: Option<u64>,
 }
 
 impl TsMuxer {
@@ -351,7 +359,20 @@ impl TsMuxer {
                 MuxStream { stream_type, pid: MUX_ES_PID + i as u16, stream_id, es_cc: 0 }
             })
             .collect();
-        Self { streams, pat_cc: 0, pmt_cc: 0, tables_written: false }
+        Self {
+            streams,
+            pat_cc: 0,
+            pmt_cc: 0,
+            tables_written: false,
+            table_interval_90khz: 0,
+            last_tables_pts: None,
+        }
+    }
+
+    /// Set the PAT/PMT re-emission cadence in 90 kHz ticks (`0` = once up front).
+    /// See [`table_interval_90khz`](Self::table_interval_90khz).
+    pub fn set_table_interval_90khz(&mut self, ticks: u64) {
+        self.table_interval_90khz = ticks;
     }
 
     /// Mux one access unit of stream 0 (the single-stream convenience). See
@@ -365,10 +386,27 @@ impl TsMuxer {
     /// when present, is written into the PES header.
     pub fn push_au_on(&mut self, stream_index: usize, au: &[u8], pts_90khz: Option<u64>) -> Vec<u8> {
         let mut out = Vec::new();
-        if !self.tables_written {
+        // Emit the PAT/PMT pair up front, then again on the configured cadence so a
+        // mid-stream joiner finds the tables. A `None` PTS can't be time-gated, so
+        // it only ever triggers the initial emission.
+        let due = if !self.tables_written {
+            true
+        } else if self.table_interval_90khz > 0 {
+            match (pts_90khz, self.last_tables_pts) {
+                (Some(now), Some(last)) => now.saturating_sub(last) >= self.table_interval_90khz,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if due {
             self.pat_packet(&mut out);
             self.pmt_packet(&mut out);
             self.tables_written = true;
+            if let Some(now) = pts_90khz {
+                self.last_tables_pts = Some(now);
+            }
         }
         let s = &mut self.streams[stream_index];
         let pes = build_pes(s.stream_id, au, pts_90khz);
@@ -737,5 +775,42 @@ mod tests {
         assert_eq!(out[1] & 0x40, 0x40, "first packet carries PUSI");
         assert_eq!(out[TS_PACKET_LEN + 1] & 0x40, 0x00, "continuation clears PUSI");
         assert_eq!(next_cc, (5 + packets as u8) & 0x0F, "cc advances per packet");
+    }
+
+    #[test]
+    fn pat_pmt_reemitted_on_interval() {
+        // PAT TS packets in a byte stream (sync 0x47, PID == PID_PAT).
+        fn pat_count(ts: &[u8]) -> usize {
+            ts.chunks(TS_PACKET_LEN)
+                .filter(|p| {
+                    p.len() == TS_PACKET_LEN
+                        && p[0] == 0x47
+                        && (((p[1] as u16 & 0x1F) << 8) | p[2] as u16) == PID_PAT
+                })
+                .count()
+        }
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        m.set_table_interval_90khz(90 * 100); // 100 ms cadence
+        let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88]; // a minimal IDR-ish AU
+
+        let out0 = m.push_au(&au, Some(0));
+        assert_eq!(pat_count(&out0), 1, "PAT emitted up front");
+        let out1 = m.push_au(&au, Some(90 * 50)); // +50 ms: under the interval
+        assert_eq!(pat_count(&out1), 0, "no PAT before the interval elapses");
+        let out2 = m.push_au(&au, Some(90 * 150)); // 150 ms since last emit: due
+        assert_eq!(pat_count(&out2), 1, "PAT re-emitted after the interval");
+    }
+
+    #[test]
+    fn table_interval_zero_emits_tables_once() {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88];
+        let _ = m.push_au(&au, Some(0));
+        let later = m.push_au(&au, Some(90 * 10_000)); // 10 s later
+        let pats = later
+            .chunks(TS_PACKET_LEN)
+            .filter(|p| p.len() == TS_PACKET_LEN && (((p[1] as u16 & 0x1F) << 8) | p[2] as u16) == PID_PAT)
+            .count();
+        assert_eq!(pats, 0, "default cadence emits the tables only once");
     }
 }

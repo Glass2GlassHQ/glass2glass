@@ -25,10 +25,11 @@ use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, VideoCodec,
 };
 
-use crate::annexb::{next_start_code, strip_emulation_prevention, BitReader};
+use crate::annexb::{h264_nal_type, nal_units, next_start_code, strip_emulation_prevention, BitReader};
 
 /// Upper bound on bytes buffered while waiting for an access-unit boundary in
 /// re-framing mode. A real H.264 stream emits start codes frequently, so this is
@@ -68,6 +69,22 @@ pub struct H264Parse {
     /// unit, which does not start with a start code) as AVCC and mangles it.
     /// Re-framing only.
     input_is_annexb: Option<bool>,
+    /// SPS/PPS re-insertion interval (the gst `config-interval`), in seconds:
+    /// `0` = never (default), `-1` = prepend the cached SPS/PPS to every IDR
+    /// access unit, `N > 0` = prepend at the first IDR once `N` seconds elapsed
+    /// since the last insertion. Lets a mid-stream tune-in (HLS/DASH segment, a
+    /// joined MPEG-TS multicast) find parameter sets without waiting for the next
+    /// natural SPS. Applied on the access-unit-aligned Annex-B output, i.e. in
+    /// re-framing mode (the launch-registered construction); the pass-through
+    /// caps-refinement mode leaves the bitstream untouched.
+    config_interval: i32,
+    /// Most-recent SPS / PPS NAL bodies (start codes stripped), refreshed as they
+    /// flow, so an IDR that lacks inline parameter sets can be prefixed with them.
+    cached_sps: Vec<Vec<u8>>,
+    cached_pps: Vec<Vec<u8>>,
+    /// PTS (ns) of the last access unit the parameter sets were (re-)inserted
+    /// before, for the `config_interval > 0` time-based cadence.
+    last_config_pts_ns: Option<u64>,
 }
 
 impl H264Parse {
@@ -88,6 +105,66 @@ impl H264Parse {
     /// SPS dimensions are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.sps_emitted
+    }
+
+    /// Set the SPS/PPS re-insertion interval in seconds (`0` off, `-1` every IDR,
+    /// `N` every N seconds); see [`config_interval`](Self::config_interval).
+    pub fn with_config_interval(mut self, seconds: i32) -> Self {
+        self.config_interval = seconds;
+        self
+    }
+
+    /// Refresh the cached parameter sets from `au` and, when re-insertion is due
+    /// for this access unit, return the AU prefixed with the cached SPS/PPS (as
+    /// Annex-B). `au` must be Annex-B (the re-framing output always is).
+    fn apply_config_interval(&mut self, au: Vec<u8>, pts_ns: u64, keyframe: bool) -> Vec<u8> {
+        // Refresh the cache from any parameter sets carried in this AU, and note
+        // whether it already leads with an SPS (then no insertion is needed).
+        let mut sps = Vec::new();
+        let mut pps = Vec::new();
+        for nal in nal_units(&au) {
+            match h264_nal_type(nal) {
+                Some(7) => sps.push(nal.to_vec()),
+                Some(8) => pps.push(nal.to_vec()),
+                _ => {}
+            }
+        }
+        let has_sps = !sps.is_empty();
+        if has_sps {
+            self.cached_sps = sps;
+        }
+        if !pps.is_empty() {
+            self.cached_pps = pps;
+        }
+
+        if self.config_interval == 0 || !keyframe {
+            return au;
+        }
+        // The AU already carries config: nothing to add, but it resets the clock.
+        if has_sps {
+            self.last_config_pts_ns = Some(pts_ns);
+            return au;
+        }
+        let due = if self.config_interval < 0 {
+            true // -1: every IDR
+        } else {
+            let interval_ns = (self.config_interval as u64).saturating_mul(1_000_000_000);
+            match self.last_config_pts_ns {
+                None => true,
+                Some(last) => pts_ns.saturating_sub(last) >= interval_ns,
+            }
+        };
+        if !due || self.cached_sps.is_empty() {
+            return au;
+        }
+        let mut out = Vec::with_capacity(au.len() + 64);
+        for ps in self.cached_sps.iter().chain(self.cached_pps.iter()) {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(ps);
+        }
+        out.extend_from_slice(&au);
+        self.last_config_pts_ns = Some(pts_ns);
+        out
     }
 }
 
@@ -146,6 +223,38 @@ impl AsyncElement for H264Parse {
             "Parses an H.264 Annex-B stream and refines caps from SPS/PPS",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "config-interval",
+            PropKind::Int,
+            "SPS/PPS re-insertion interval in seconds (0 = off, -1 = every IDR, N = every N s)",
+        )
+        .with_range("-1", "3600")
+        .with_default("0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "config-interval" => {
+                let secs = value.as_int().ok_or(PropError::Type)?;
+                if !(-1..=3600).contains(&secs) {
+                    return Err(PropError::Value);
+                }
+                self.config_interval = secs as i32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "config-interval" => Some(PropValue::Int(self.config_interval as i64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -302,6 +411,9 @@ impl H264Parse {
             }
         }
         timing.keyframe = crate::h264util::h264_au_is_keyframe(&au);
+        // Re-insert cached SPS/PPS before this AU when config-interval calls for it
+        // (no-op at interval 0 or when the AU already carries parameter sets).
+        let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
             timing,
@@ -1111,5 +1223,48 @@ mod tests {
         let payloads = data_payloads(&sink);
         assert_eq!(payloads.len(), 1, "the split access unit reassembles into one");
         assert_eq!(payloads[0], au, "reassembled bytes are bit-for-bit the original AU");
+    }
+
+    #[test]
+    fn config_interval_reinserts_sps_on_idr_without_params() {
+        let mut p = H264Parse::reframing().with_config_interval(-1);
+        // An IDR AU carrying SPS + PPS: caches them and is returned unchanged.
+        let mut au1 = build_test_annexb_sps(320, 240);
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xCE]); // PPS (type 8)
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR slice (type 5)
+        let out1 = p.apply_config_interval(au1.clone(), 0, true);
+        assert_eq!(out1, au1, "an IDR that already carries SPS is untouched");
+        // A later IDR with no parameter sets gets the cached SPS/PPS prepended.
+        let au2 = vec![0, 0, 0, 1, 0x65, 0x88];
+        let out2 = p.apply_config_interval(au2.clone(), 90_000, true);
+        assert!(nal_units(&out2).any(|n| h264_nal_type(n) == Some(7)), "result carries an SPS");
+        assert!(nal_units(&out2).any(|n| h264_nal_type(n) == Some(8)), "result carries a PPS");
+        assert!(out2.ends_with(&au2), "the original AU is preserved at the tail");
+    }
+
+    #[test]
+    fn config_interval_zero_leaves_idr_untouched() {
+        let mut p = H264Parse::reframing(); // default config-interval = 0
+        let mut au1 = build_test_annexb_sps(320, 240);
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
+        let _ = p.apply_config_interval(au1, 0, true); // caches the SPS
+        let au2 = vec![0, 0, 0, 1, 0x65, 0x88];
+        let out2 = p.apply_config_interval(au2.clone(), 90_000, true);
+        assert_eq!(out2, au2, "interval 0 never re-inserts parameter sets");
+    }
+
+    #[test]
+    fn config_interval_seconds_paces_reinsertion() {
+        let mut p = H264Parse::reframing().with_config_interval(2); // every 2 s
+        let mut au1 = build_test_annexb_sps(320, 240);
+        au1.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]);
+        let _ = p.apply_config_interval(au1, 0, true); // last insert at pts 0
+        // 1 s later (pts is nanoseconds): under the 2 s interval, not re-inserted.
+        let au = vec![0, 0, 0, 1, 0x65, 0x88];
+        let early = p.apply_config_interval(au.clone(), 1_000_000_000, true);
+        assert_eq!(early, au, "before the interval elapses, no re-insertion");
+        // 2 s later: due.
+        let late = p.apply_config_interval(au.clone(), 2_000_000_000, true);
+        assert!(nal_units(&late).any(|n| h264_nal_type(n) == Some(7)), "re-inserted after 2 s");
     }
 }

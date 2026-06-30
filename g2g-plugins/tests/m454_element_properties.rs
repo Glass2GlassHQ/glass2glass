@@ -140,6 +140,40 @@ fn udpsink_host_port_payload() {
     assert!(e.set_property("payload-type", PropValue::Uint(200)).is_err(), "PT must be <= 127");
 }
 
+#[test]
+fn h264parse_config_interval() {
+    use g2g_plugins::h264parse::H264Parse;
+    let mut e = H264Parse::reframing();
+    assert!(declares(e.properties(), "config-interval"));
+    e.set_property("config-interval", PropValue::Int(-1)).unwrap();
+    assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(-1)));
+    e.set_property("config-interval", PropValue::Int(2)).unwrap();
+    assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(2)));
+    assert!(e.set_property("config-interval", PropValue::Int(-2)).is_err(), "rejects < -1");
+}
+
+#[test]
+fn h265parse_config_interval() {
+    use g2g_plugins::h265parse::H265Parse;
+    let mut e = H265Parse::reframing();
+    assert!(declares(e.properties(), "config-interval"));
+    e.set_property("config-interval", PropValue::Int(-1)).unwrap();
+    assert_eq!(e.get_property("config-interval"), Some(PropValue::Int(-1)));
+}
+
+#[test]
+fn tsmux_pat_pmt_interval() {
+    use g2g_plugins::tsmux::TsMux;
+    let mut e = TsMux::new();
+    assert!(declares(e.properties(), "pat-interval"));
+    assert!(declares(e.properties(), "pmt-interval"));
+    e.set_property("pat-interval", PropValue::Uint(100)).unwrap();
+    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(100)));
+    // pat / pmt share one cadence (the tables are emitted together).
+    e.set_property("pmt-interval", PropValue::Uint(250)).unwrap();
+    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(250)));
+}
+
 // parse_launch end to end: the parser looks up the kind in properties() and calls
 // set_property, so a pipeline that sets a newly exposed property must parse, and an
 // undeclared property must be rejected.
