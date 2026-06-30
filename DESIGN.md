@@ -2199,9 +2199,13 @@ branch decodes for display, the other reframes to access units (so a TS PES does
 not split an SEI NAL) and runs `CcExtract` into the video's `TextOverlayN` text
 pad. Captions are not discoverable up front, so they are opt-in through a
 `#closed-captions=cc1` (alias `#cc=`, or `service-N` / `708-N`) URI fragment, the
-file-container analog of the HLS `#subtitle-lang=` hint; the file hooks (MKV / TS /
-MP4) honour it, and the explicit caption request wins over an auto-selected
-subtitle track (there is one overlay text pad).
+file-container analog of the HLS `#subtitle-lang=` hint. The file hooks (MKV / TS /
+MP4) honour it; so does `hls_playbin` (M436), which tees the variant's video the
+same way for a muxed-TS variant (`build_hls_ts_cc_overlay`), an fMP4 / CMAF variant
+(`build_hls_fmp4_cc_overlay`, tracks from the `#EXT-X-MAP` init), or a variant with
+a separate audio rendition (`build_hls_separate_cc_overlay`, the audio merged in as
+its own source). In every case the explicit caption request wins over an
+auto-selected subtitle track (there is one overlay text pad).
 
 The encode direction is the mirror image (M431-M435), for caption authoring and
 broadcast egress. `cea::Cc608Enc` is the inverse of the `Cea608` decoder: fed cues

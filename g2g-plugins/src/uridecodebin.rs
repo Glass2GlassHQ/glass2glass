@@ -933,6 +933,104 @@ pub fn build_hls_separate_subtitle_overlay(
     Ok(Some(graph))
 }
 
+/// Assemble the muxed-TS HLS closed-caption overlay (M436): the CEA-608 / 708
+/// sibling of [`build_hls_ts_fanout`]. The variant's muxed MPEG-TS streams fan out
+/// through a `TsDemuxN`, the video port teed so one copy decodes for display and the
+/// other feeds a [`CcExtract`](crate::ccextract::CcExtract) into a `TextOverlayN`, so
+/// the in-SEI CEA-608 / 708 captions render on screen, the HLS analog of
+/// [`ts_playbin`]'s `#closed-captions=`. Any muxed audio fans out to its own sink.
+/// `Ok(None)` (decline) when no routable muxed video carries the captions.
+#[cfg(feature = "hls")]
+pub fn build_hls_ts_cc_overlay(
+    reg: &Registry,
+    source_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+    cc: crate::ccextract::CcSource,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let mut ts_streams = Vec::new();
+    let mut av: Vec<(Caps, bool)> = Vec::new();
+    for s in streams.iter().filter(|s| s.uri.is_none()) {
+        if let Some(ts) = hls_ts_stream(s) {
+            ts_streams.push(ts);
+            av.push((s.caps.clone(), s.video));
+        }
+    }
+    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+        return Ok(None); // no routable muxed video to caption
+    };
+    let source = crate::hlssrc::HlsSrc::new(source_url);
+    build_cc_overlay(reg, Box::new(source), crate::tsdemux::TsDemuxN::new(ts_streams), &av, video_idx, cc)
+        .map(Some)
+}
+
+/// Assemble the fMP4 / CMAF HLS closed-caption overlay (M436): the CEA-608 / 708
+/// sibling of [`build_hls_fmp4_fanout`], tracks discovered from the `#EXT-X-MAP`
+/// init segment's `moov`. The video track is teed for a display decode and a
+/// `CcExtract` caption branch into a `TextOverlayN`; any audio track fans out to its
+/// own sink. `Ok(None)` (decline) when the init carries no video track.
+#[cfg(feature = "hls")]
+pub fn build_hls_fmp4_cc_overlay(
+    reg: &Registry,
+    source_url: &str,
+    init: &[u8],
+    cc: crate::ccextract::CcSource,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let infos = crate::mp4demuxn::forwardable_streams(init);
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let Some(video_idx) = av.iter().position(|(_, v)| *v) else {
+        return Ok(None); // init segment carries no video track to caption
+    };
+    let demux_ports: Vec<_> = infos
+        .iter()
+        .map(|i| crate::mp4demuxn::Mp4Port { track_id: i.track_id, caps: i.caps.clone() })
+        .collect();
+    let source = crate::hlssrc::HlsSrc::new(source_url);
+    build_cc_overlay(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av, video_idx, cc)
+        .map(Some)
+}
+
+/// Assemble the *multi-source* HLS closed-caption overlay (M436) for a variant whose
+/// video rides its own TS segments while the audio is a separate `#EXT-X-MEDIA`
+/// rendition: the video-only TS feeds the caption overlay (tee -> {decode for
+/// display, `CcExtract` for the text pad} -> `TextOverlayN`) and the audio rendition
+/// is its own `HlsSrc -> TsDemuxN -> decode -> auto sink` chain merged in, the
+/// caption analog of [`build_hls_separate_fanout`]. `Ok(None)` (decline) when there
+/// is no routable muxed video.
+#[cfg(feature = "hls")]
+pub fn build_hls_separate_cc_overlay(
+    reg: &Registry,
+    master_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+    audio_url: &str,
+    cc: crate::ccextract::CcSource,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    use crate::tsdemux::{TsDemuxN, TsStream};
+
+    // The variant's own (video-only) TS stream feeds the caption overlay.
+    let Some(video) = streams.iter().find(|s| s.video && s.uri.is_none()) else {
+        return Ok(None); // no routable muxed video to caption
+    };
+    let Some(vts) = hls_ts_stream(video) else { return Ok(None) };
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(master_url)));
+    let demux = graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(Vec::from([vts]))), 1);
+    graph.link(src, demux.input()).map_err(ParseError::Graph)?;
+    let av = [(video.caps.clone(), true)];
+    wire_cc_overlay(reg, &mut graph, demux, &av, 0, cc)?;
+
+    // The separate audio rendition: its own source -> demux -> audio branch, merged.
+    let audio_caps = Caps::Audio { format: AudioFormat::Aac, channels: 0, sample_rate: 0 };
+    let audio_graph = build_av_fanout(
+        reg,
+        Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
+        TsDemuxN::new(Vec::from([TsStream::Aac])),
+        &[(audio_caps, false)],
+    )?;
+    graph.merge(audio_graph);
+    Ok(Some(graph))
+}
+
 /// Resolve the playlist URL of the chosen `#EXT-X-MEDIA` rendition in `group`
 /// (M418 language pick: `language` -> DEFAULT -> first), absolute against
 /// `base_url`. `None` when there is no group, no matching rendition, or the chosen
@@ -957,19 +1055,31 @@ fn resolve_rendition(
 /// other place to carry a preference, so the fragment (never sent to the server)
 /// holds it.
 #[cfg(feature = "hls")]
-fn hls_lang_hints(rest: &str) -> (&str, Option<alloc::string::String>, Option<alloc::string::String>) {
+type HlsHints = (
+    Option<alloc::string::String>,
+    Option<alloc::string::String>,
+    Option<crate::ccextract::CcSource>,
+);
+
+#[cfg(feature = "hls")]
+fn hls_lang_hints(rest: &str) -> (&str, HlsHints) {
     let (url, frag) = rest.split_once('#').unwrap_or((rest, ""));
-    let (mut audio, mut subtitle) = (None, None);
+    let (mut audio, mut subtitle, mut cc) = (None, None, None);
     for kv in frag.split('&').filter(|s| !s.is_empty()) {
         if let Some((k, v)) = kv.split_once('=') {
             match k {
                 "audio-lang" => audio = Some(v.to_string()),
                 "subtitle-lang" | "text-lang" => subtitle = Some(v.to_string()),
+                // The file hooks' `#closed-captions=` (alias `#cc=`) carries the same
+                // in-SEI caption opt-in for HLS: captions are not discoverable from the
+                // playlist (they ride the video SEI, not a rendition), so the fragment
+                // selects the CEA-608 channel / CEA-708 service (M436).
+                "closed-captions" | "cc" => cc = parse_cc_source(v),
                 _ => {}
             }
         }
     }
-    (url, audio, subtitle)
+    (url, (audio, subtitle, cc))
 }
 
 #[cfg(feature = "hls")]
@@ -981,7 +1091,7 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // A `#audio-lang=` / `#subtitle-lang=` URI fragment carries the rendition
     // language preference (HLS URIs have no other place for it); strip it off the
     // playlist URL (M418).
-    let (url_rest, audio_lang, subtitle_lang) = hls_lang_hints(parsed.rest);
+    let (url_rest, (audio_lang, subtitle_lang, cc)) = hls_lang_hints(parsed.rest);
     let source_url = alloc::format!("https://{url_rest}");
     // Fetch + parse the master; decline (single-stream fallback) on any failure.
     let Some(master_text) = blocking_get_text(&source_url) else { return Ok(None) };
@@ -1001,6 +1111,13 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     if let Some(map) = &media.map_uri {
         let init_url = crate::fetch::resolve_url(&media_url, map);
         let Some(init) = blocking_get_bytes(&init_url) else { return Ok(None) };
+        // An explicit `#closed-captions=` overlays the in-SEI captions onto the
+        // fMP4 video (M436), the HLS analog of the file hooks' caption auto-plug.
+        if let Some(cc) = cc {
+            if let Some(g) = build_hls_fmp4_cc_overlay(reg, &source_url, &init, cc)? {
+                return Ok(Some(g));
+            }
+        }
         return build_hls_fmp4_fanout(reg, &source_url, &init);
     }
     let streams = crate::hlssrc::variant_streams(&master, variant);
@@ -1023,6 +1140,21 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         audio_lang.as_deref(),
     );
 
+    // An explicit `#closed-captions=` request overlays the in-SEI captions (M436),
+    // the HLS analog of the file hooks' caption auto-plug. Captions and subtitles
+    // share the single overlay text pad, so an explicit caption request wins over a
+    // subtitle rendition (matching the MKV / TS / MP4 hooks). The fMP4 variant is
+    // handled above; here the variant is muxed TS, with an optional separate audio
+    // rendition.
+    if let Some(cc) = cc {
+        if let Some(a) = &audio_url {
+            if let Some(g) = build_hls_separate_cc_overlay(reg, &source_url, &streams, a, cc)? {
+                return Ok(Some(g));
+            }
+        } else if let Some(g) = build_hls_ts_cc_overlay(reg, &source_url, &streams, cc)? {
+            return Ok(Some(g));
+        }
+    }
     // Separate audio + SUBTITLES renditions: the three-source overlay, video from
     // the variant's TS, audio + subtitle each its own rendition source (M420).
     if let (Some(a), Some(s)) = (&audio_url, &subtitle_url) {
@@ -1053,20 +1185,33 @@ mod hls_hint_tests {
 
     #[test]
     fn parses_language_hints_from_the_uri_fragment() {
+        use super::parse_cc_source;
+
         // Both hints present: the URL is returned fragment-free.
-        let (url, a, s) = hls_lang_hints("host/master.m3u8#audio-lang=fr&subtitle-lang=en");
+        let (url, (a, s, cc)) = hls_lang_hints("host/master.m3u8#audio-lang=fr&subtitle-lang=en");
         assert_eq!(url, "host/master.m3u8");
         assert_eq!(a.as_deref(), Some("fr"));
         assert_eq!(s.as_deref(), Some("en"));
+        assert!(cc.is_none());
 
         // `text-lang` is an accepted alias for the subtitle hint; order-independent.
-        let (_, a, s) = hls_lang_hints("h/x.m3u8#text-lang=de");
+        let (_, (a, s, cc)) = hls_lang_hints("h/x.m3u8#text-lang=de");
         assert_eq!(a, None);
         assert_eq!(s.as_deref(), Some("de"));
+        assert!(cc.is_none());
+
+        // A `#closed-captions=` (alias `#cc=`) opt-in selects the in-SEI caption
+        // channel / service, alongside the language hints (M436).
+        let (url, (a, _s, cc)) = hls_lang_hints("h/x.m3u8#audio-lang=fr&closed-captions=cc1");
+        assert_eq!(url, "h/x.m3u8");
+        assert_eq!(a.as_deref(), Some("fr"));
+        assert_eq!(cc, parse_cc_source("cc1"));
+        let (_, (_, _, cc)) = hls_lang_hints("h/x.m3u8#cc=service-2");
+        assert_eq!(cc, parse_cc_source("service-2"));
 
         // No fragment: no preferences, URL unchanged.
-        let (url, a, s) = hls_lang_hints("h/x.m3u8");
+        let (url, (a, s, cc)) = hls_lang_hints("h/x.m3u8");
         assert_eq!(url, "h/x.m3u8");
-        assert!(a.is_none() && s.is_none());
+        assert!(a.is_none() && s.is_none() && cc.is_none());
     }
 }
