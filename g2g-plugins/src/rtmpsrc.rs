@@ -14,6 +14,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 
@@ -24,7 +25,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -109,6 +111,48 @@ impl SourceLoop for RtmpSrc {
             "Accepts an RTMP publisher and emits an FLV byte stream",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
+                .with_default("0.0.0.0"),
+            PropertySpec::new("port", PropKind::Uint, "local TCP port to accept the publisher on")
+                .with_range("0", "65535")
+                .with_default("1935"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "address" => {
+                let ip = value
+                    .as_str()
+                    .ok_or(PropError::Type)?
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| PropError::Value)?;
+                self.bind.set_ip(ip);
+                Ok(())
+            }
+            "port" => {
+                let p = value.as_uint().ok_or(PropError::Type)?;
+                if p > u16::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.bind.set_port(p as u16);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "address" => Some(PropValue::Str(self.bind.ip().to_string())),
+            "port" => Some(PropValue::Uint(self.bind.port() as u64)),
+            _ => None,
+        }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

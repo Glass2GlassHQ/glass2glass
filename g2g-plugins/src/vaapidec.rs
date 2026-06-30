@@ -76,7 +76,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, VideoCodec, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec, RawVideoFormat,
 };
 
 /// Default DRM render node. The user can pick a different device via
@@ -345,6 +345,32 @@ impl AsyncElement for VaapiH264Dec {
             "Hardware H.264 decode via VA-API",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "device",
+            PropKind::Str,
+            "DRM render node for VA-API (e.g. /dev/dri/renderD128)",
+        )];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.render_node = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.render_node.to_string_lossy().into_owned())),
+            _ => None,
+        }
     }
 
     fn process<'a>(

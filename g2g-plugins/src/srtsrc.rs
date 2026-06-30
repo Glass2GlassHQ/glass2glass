@@ -13,7 +13,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
@@ -22,7 +22,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -142,6 +143,61 @@ impl SourceLoop for SrtSrc {
             "Receives an MPEG-TS byte stream over SRT (listener), NAK-recovering loss",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
+                .with_default("0.0.0.0"),
+            PropertySpec::new("port", PropKind::Uint, "local SRT port to listen on")
+                .with_range("0", "65535"),
+            PropertySpec::new("latency", PropKind::Uint, "SRT receiver latency, milliseconds"),
+            PropertySpec::new("passphrase", PropKind::Str, "AES passphrase (empty = unencrypted)"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "address" => {
+                let ip = value
+                    .as_str()
+                    .ok_or(PropError::Type)?
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| PropError::Value)?;
+                self.bind.set_ip(ip);
+                Ok(())
+            }
+            "port" => {
+                let p = value.as_uint().ok_or(PropError::Type)?;
+                if p > u16::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.bind.set_port(p as u16);
+                Ok(())
+            }
+            "latency" => {
+                let ms = value.as_uint().ok_or(PropError::Type)?;
+                self.latency_ms = ms.min(u16::MAX as u64) as u16;
+                Ok(())
+            }
+            "passphrase" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.passphrase = (!s.is_empty()).then(|| s.to_string());
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "address" => Some(PropValue::Str(self.bind.ip().to_string())),
+            "port" => Some(PropValue::Uint(self.bind.port() as u64)),
+            "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
+            "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
+            _ => None,
+        }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

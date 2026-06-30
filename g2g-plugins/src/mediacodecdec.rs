@@ -56,6 +56,9 @@ use g2g_core::{
     HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
     RawVideoFormat, VideoCodec,
 };
+// gpu-output property surface (mediacodec-wgpu only; the underlying field is gated).
+#[cfg(feature = "mediacodec-wgpu")]
+use g2g_core::{PropError, PropKind, PropValue, PropertySpec};
 
 use crate::annexb::{h264_parameter_sets, h265_parameter_sets};
 use crate::mediacodec_common::{queue_input, BUFFER_FLAG_END_OF_STREAM, MAX_OUTPUT_POLLS};
@@ -525,6 +528,36 @@ impl AsyncElement for MediaCodecDec {
                 Ok(ConfigureOutcome::Accepted)
             }
             _ => Err(G2gError::CapsMismatch),
+        }
+    }
+
+    #[cfg(feature = "mediacodec-wgpu")]
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "gpu-output",
+            PropKind::Bool,
+            "decode onto a GPU texture (WgpuTexture) instead of system memory",
+        )
+        .with_default("false")];
+        PROPS
+    }
+
+    #[cfg(feature = "mediacodec-wgpu")]
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "gpu-output" => {
+                self.gpu_output = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    #[cfg(feature = "mediacodec-wgpu")]
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "gpu-output" => Some(PropValue::Bool(self.gpu_output)),
+            _ => None,
         }
     }
 

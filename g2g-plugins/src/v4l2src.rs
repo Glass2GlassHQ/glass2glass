@@ -16,7 +16,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
@@ -25,7 +25,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use v4l::buffer::Type;
@@ -171,6 +171,49 @@ impl SourceLoop for V4l2Src {
             "Captures video from a V4L2 device (YUYV)",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("device", PropKind::Str, "V4L2 device node (e.g. /dev/video0)")
+                .with_default("/dev/video0"),
+            PropertySpec::new("width", PropKind::Uint, "requested capture width (driver may snap)"),
+            PropertySpec::new("height", PropKind::Uint, "requested capture height (driver may snap)"),
+            PropertySpec::new("framerate", PropKind::Uint, "requested capture rate, fps (best effort)"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "width" => {
+                self.req_width = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "height" => {
+                self.req_height = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "framerate" => {
+                self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            "width" => Some(PropValue::Uint(self.req_width as u64)),
+            "height" => Some(PropValue::Uint(self.req_height as u64)),
+            "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
+            _ => None,
+        }
     }
 
     /// Live source: contributes one frame period of latency so the sink keeps a

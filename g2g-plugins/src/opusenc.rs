@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use audiopus::coder::Encoder;
@@ -235,6 +236,42 @@ impl AsyncElement for OpusEnc {
             "Encodes raw S16LE PCM to Opus",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "bitrate",
+            PropKind::Uint,
+            "target bitrate, bits/second (0 = libopus auto)",
+        )
+        .with_default("0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            // bits/second; 0 lets libopus pick a bitrate from the sample rate / channels.
+            "bitrate" => {
+                let bps = value.as_uint().ok_or(PropError::Type)?;
+                self.bitrate = if bps == 0 {
+                    Bitrate::Auto
+                } else {
+                    Bitrate::BitsPerSecond(bps.min(i32::MAX as u64) as i32)
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(match self.bitrate {
+                Bitrate::BitsPerSecond(b) => b.max(0) as u64,
+                _ => 0,
+            })),
+            _ => None,
+        }
     }
 
     fn process<'a>(

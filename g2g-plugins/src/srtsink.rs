@@ -13,7 +13,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use std::net::SocketAddr;
@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::filesink::io_err;
@@ -261,6 +261,61 @@ impl AsyncElement for SrtSink {
             "Sends an MPEG-TS byte stream over SRT (caller), NAK-retransmitting",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("host", PropKind::Str, "destination host (IP of the SRT listener)")
+                .with_default("127.0.0.1"),
+            PropertySpec::new("port", PropKind::Uint, "destination SRT port")
+                .with_range("0", "65535"),
+            PropertySpec::new("latency", PropKind::Uint, "advertised target latency, milliseconds"),
+            PropertySpec::new("passphrase", PropKind::Str, "AES passphrase (empty = unencrypted)"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "host" => {
+                let ip = value
+                    .as_str()
+                    .ok_or(PropError::Type)?
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| PropError::Value)?;
+                self.dest.set_ip(ip);
+                Ok(())
+            }
+            "port" => {
+                let p = value.as_uint().ok_or(PropError::Type)?;
+                if p > u16::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.dest.set_port(p as u16);
+                Ok(())
+            }
+            "latency" => {
+                let ms = value.as_uint().ok_or(PropError::Type)?;
+                self.latency_ms = ms.min(u16::MAX as u64) as u16;
+                Ok(())
+            }
+            "passphrase" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.passphrase = (!s.is_empty()).then(|| s.to_string());
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "host" => Some(PropValue::Str(self.dest.ip().to_string())),
+            "port" => Some(PropValue::Uint(self.dest.port() as u64)),
+            "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
+            "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
+            _ => None,
+        }
     }
 
     fn process<'a>(

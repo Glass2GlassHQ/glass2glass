@@ -22,8 +22,10 @@ use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, VideoCodec,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, VideoCodec,
 };
+use alloc::string::ToString;
 
 use crate::filesink::io_err;
 use crate::rtcp::{self, RtcpPacket};
@@ -352,6 +354,64 @@ impl AsyncElement for UdpSink {
             "Sends RTP H.264 over UDP, honoring NACK retransmit",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("host", PropKind::Str, "destination host (IP to send to)")
+                .with_default("127.0.0.1"),
+            PropertySpec::new("port", PropKind::Uint, "destination UDP port")
+                .with_range("0", "65535"),
+            PropertySpec::new("payload-type", PropKind::Uint, "RTP payload type (96..=127)")
+                .with_range("0", "127"),
+            PropertySpec::new("ssrc", PropKind::Uint, "RTP synchronization source id"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "host" => {
+                let ip = value
+                    .as_str()
+                    .ok_or(PropError::Type)?
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| PropError::Value)?;
+                self.dest.set_ip(ip);
+                Ok(())
+            }
+            "port" => {
+                let p = value.as_uint().ok_or(PropError::Type)?;
+                if p > u16::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.dest.set_port(p as u16);
+                Ok(())
+            }
+            "payload-type" => {
+                let pt = value.as_uint().ok_or(PropError::Type)?;
+                if pt > 127 {
+                    return Err(PropError::Value);
+                }
+                self.payload_type = pt as u8;
+                Ok(())
+            }
+            "ssrc" => {
+                self.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "host" => Some(PropValue::Str(self.dest.ip().to_string())),
+            "port" => Some(PropValue::Uint(self.dest.port() as u64)),
+            "payload-type" => Some(PropValue::Uint(self.payload_type as u64)),
+            "ssrc" => Some(PropValue::Uint(self.ssrc as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

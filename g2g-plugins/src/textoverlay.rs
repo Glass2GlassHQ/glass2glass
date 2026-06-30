@@ -717,6 +717,14 @@ impl AsyncElement for TextOverlay {
                 let path = value.as_str().ok_or(PropError::Type)?;
                 self.load_font(path)
             }
+            // 0xAARRGGBB packed color, the gst textoverlay convention. The
+            // element stores [R, G, B, A].
+            "color" => {
+                let argb = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.text_color =
+                    [(argb >> 16) as u8, (argb >> 8) as u8, argb as u8, (argb >> 24) as u8];
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -730,6 +738,12 @@ impl AsyncElement for TextOverlay {
             "font" => Some(PropValue::Str(self.font_path.clone().unwrap_or_default())),
             #[cfg(not(feature = "truetype-overlay"))]
             "font" => Some(PropValue::Str(String::new())),
+            "color" => {
+                let [r, g, b, a] = self.text_color;
+                Some(PropValue::Uint(
+                    ((a as u64) << 24) | ((r as u64) << 16) | ((g as u64) << 8) | b as u64,
+                ))
+            }
             _ => None,
         }
     }
@@ -930,6 +944,8 @@ static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
         "path to a .ttf / .ttc font for glyph rendering (truetype-overlay); \
          needed for CJK / accented text. Without it the 8x8 ASCII bitmap is used",
     ),
+    PropertySpec::new("color", PropKind::Uint, "text color as 0xAARRGGBB (e.g. 4294967295 = opaque white)")
+        .with_default("4294967295"),
 ];
 
 #[cfg(test)]

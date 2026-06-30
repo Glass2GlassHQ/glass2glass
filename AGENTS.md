@@ -34,6 +34,16 @@ Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
   (source) from `g2g-core`. Pattern: `intercept_caps` (negotiation),
   `configure_pipeline` (accept absolute caps), `process`/`run` (async work).
   Study `g2g-plugins/src/h264parse.rs` and `rtspsrc.rs` as references.
+- **Properties: expose every meaningful knob.** Any `with_*` builder / setting a
+  real pipeline would tune (bitrate, location, port, device, latency, ...) must
+  also be a runtime property, so a `gst-launch` line can set it. Override
+  `properties()` (a `&'static [PropertySpec]`, kebab-case names matching the
+  GStreamer element where one exists), and handle each name in `set_property` /
+  `get_property`. `parse_launch` looks the name up in `properties()` for its
+  `PropKind`, then calls `set_property`, so both halves are required. Match the
+  GStreamer unit/semantics (e.g. `bitrate` is `Uint` bits/second). Never accept a
+  property you then ignore: only expose behavior the element actually applies.
+  Study `g2g-plugins/src/ffmpegenc.rs` and the `m454_element_properties.rs` test.
 - **Caps refinement** flows at runtime via `PipelinePacket::CapsChanged`, not
   just at negotiation. Emit it before the first affected `DataFrame` and on any
   mid-stream change; suppress re-emission when unchanged.

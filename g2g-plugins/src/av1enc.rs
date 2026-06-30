@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    RawVideoFormat, Rate, VideoCodec,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
 };
 
 use rav1e::prelude::{
@@ -415,6 +415,41 @@ impl AsyncElement for Av1Enc {
             "Encodes raw planar YUV (I420/I422/I444) to AV1 via rav1e",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second (0 = quantizer default)")
+                .with_default("0"),
+            PropertySpec::new("speed", PropKind::Uint, "rav1e speed preset (0 slowest/best .. 10 fastest)")
+                .with_range("0", "10")
+                .with_default("9"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            // bits/second; 0 selects rav1e's quantizer default (no rate target).
+            "bitrate" => {
+                let bps = value.as_uint().ok_or(PropError::Type)?;
+                self.bitrate_bps = (bps != 0).then(|| (bps as u32).max(1));
+                Ok(())
+            }
+            "speed" => {
+                self.speed = (value.as_uint().ok_or(PropError::Type)? as u8).min(10);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(self.bitrate_bps.unwrap_or(0) as u64)),
+            "speed" => Some(PropValue::Uint(self.speed as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

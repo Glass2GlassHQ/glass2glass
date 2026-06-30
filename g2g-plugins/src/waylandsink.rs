@@ -102,7 +102,8 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ClockCandidate,
     ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat, Segment,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, Segment,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -501,6 +502,44 @@ impl AsyncElement for WaylandSink {
             "Presents NV12 video to a Wayland surface (software SHM)",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("title", PropKind::Str, "window title")
+                .with_default("glass2glass"),
+            PropertySpec::new("app-id", PropKind::Str, "Wayland xdg app id")
+                .with_default("io.glass2glass.WaylandSink"),
+            PropertySpec::new("max-lateness", PropKind::Uint, "QoS drop threshold, nanoseconds past the deadline"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "title" => {
+                self.title = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            "app-id" => {
+                self.app_id = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            "max-lateness" => {
+                self.max_lateness_ns = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "title" => Some(PropValue::Str(self.title.clone())),
+            "app-id" => Some(PropValue::Str(self.app_id.clone())),
+            "max-lateness" => Some(PropValue::Uint(self.max_lateness_ns)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

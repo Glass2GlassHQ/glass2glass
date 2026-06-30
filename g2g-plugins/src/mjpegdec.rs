@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
-    VideoCodec,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
 };
 
 use zune_jpeg::zune_core::bytestream::ZCursor;
@@ -159,6 +159,43 @@ impl AsyncElement for MjpegDec {
             "Decodes JPEG / Motion-JPEG to RGBA or I420 via zune-jpeg",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "output-format",
+            PropKind::Str,
+            "decoded pixel format: rgba | i420",
+        )
+        .with_default("rgba")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "output-format" => {
+                self.out_format = match value.as_str().ok_or(PropError::Type)? {
+                    "rgba" | "RGBA" | "rgba8" => RawVideoFormat::Rgba8,
+                    "i420" | "I420" => RawVideoFormat::I420,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "output-format" => Some(PropValue::Str(
+                match self.out_format {
+                    RawVideoFormat::I420 => "i420",
+                    _ => "rgba",
+                }
+                .into(),
+            )),
+            _ => None,
+        }
     }
 
     fn process<'a>(

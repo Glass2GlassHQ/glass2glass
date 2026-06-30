@@ -19,8 +19,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, RawVideoFormat, Rate,
-    VideoCodec,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
 };
 
 use jpeg_encoder::{ColorType, Encoder};
@@ -194,6 +194,34 @@ impl AsyncElement for MjpegEnc {
             "Encodes raw video to JPEG / Motion-JPEG via jpeg-encoder",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "quality",
+            PropKind::Uint,
+            "JPEG quality, 0..=100",
+        )
+        .with_range("0", "100")
+        .with_default("85")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "quality" => {
+                self.quality = (value.as_uint().ok_or(PropError::Type)? as u8).min(100);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "quality" => Some(PropValue::Uint(self.quality as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

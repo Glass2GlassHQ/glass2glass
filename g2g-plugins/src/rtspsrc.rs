@@ -45,7 +45,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, VideoCodec,
 };
 
 /// Reconnect policy for [`RtspSrc`]. Off by default: a session failure
@@ -269,6 +270,59 @@ impl SourceLoop for RtspSrc {
             "Receives an RTSP / RTP H.264 stream via retina",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("location", PropKind::Str, "RTSP URL (rtsp://host:port/path)"),
+            PropertySpec::new("user-agent", PropKind::Str, "User-Agent sent on DESCRIBE/SETUP")
+                .with_default("glass2glass/0.1"),
+            PropertySpec::new("user-id", PropKind::Str, "RTSP auth username"),
+            PropertySpec::new("user-pw", PropKind::Str, "RTSP auth password"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "location" => {
+                self.url = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "user-agent" => {
+                self.user_agent = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            // user-id / user-pw build the one Credentials together; either may be
+            // set first, so each preserves the other's current value.
+            "user-id" => {
+                let username = value.as_str().ok_or(PropError::Type)?.to_string();
+                let password = self.creds.as_ref().map(|c| c.password.clone()).unwrap_or_default();
+                self.creds = Some(retina::client::Credentials { username, password });
+                Ok(())
+            }
+            "user-pw" => {
+                let password = value.as_str().ok_or(PropError::Type)?.to_string();
+                let username = self.creds.as_ref().map(|c| c.username.clone()).unwrap_or_default();
+                self.creds = Some(retina::client::Credentials { username, password });
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "location" => Some(PropValue::Str(self.url.clone())),
+            "user-agent" => Some(PropValue::Str(self.user_agent.clone())),
+            "user-id" => {
+                Some(PropValue::Str(self.creds.as_ref().map(|c| c.username.clone()).unwrap_or_default()))
+            }
+            "user-pw" => {
+                Some(PropValue::Str(self.creds.as_ref().map(|c| c.password.clone()).unwrap_or_default()))
+            }
+            _ => None,
+        }
     }
 
     fn run<'a>(

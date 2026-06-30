@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, RawVideoFormat, Rate, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, RawVideoFormat, Rate, VideoCodec,
 };
 
 use vpx_encode::{Config, Encoder, VideoCodecId};
@@ -254,6 +254,50 @@ impl AsyncElement for VpxEnc {
             "Encodes raw I420 video to VP8 or VP9 via libvpx",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("codec", PropKind::Str, "output codec: vp8 | vp9").with_default("vp9"),
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
+                .with_default("1024000"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "codec" => {
+                self.codec = match value.as_str().ok_or(PropError::Type)? {
+                    "vp8" | "VP8" => VideoCodec::Vp8,
+                    "vp9" | "VP9" => VideoCodec::Vp9,
+                    _ => return Err(PropError::Value),
+                };
+                Ok(())
+            }
+            // g2g exposes bitrate in bits/second (the project convention); libvpx
+            // rate control is kbps, so fold down here.
+            "bitrate" => {
+                let bps = value.as_uint().ok_or(PropError::Type)?;
+                self.bitrate_kbps = ((bps / 1000) as u32).max(1);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "codec" => Some(PropValue::Str(
+                match self.codec {
+                    VideoCodec::Vp8 => "vp8",
+                    _ => "vp9",
+                }
+                .into(),
+            )),
+            "bitrate" => Some(PropValue::Uint(self.bitrate_kbps as u64 * 1000)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

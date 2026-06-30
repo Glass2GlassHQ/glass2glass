@@ -37,6 +37,7 @@ use alsa::{Direction, ValueOr};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 /// Negotiated PCM parameters: (ALSA sample format, channels, rate). Compressed
@@ -198,6 +199,33 @@ impl AsyncElement for AlsaSink {
             "Plays interleaved PCM via ALSA",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "device",
+            PropKind::Str,
+            "ALSA PCM device (e.g. default, hw:0,0, plughw:1)",
+        )
+        .with_default("default")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.into();
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            _ => None,
+        }
     }
 
     fn process<'a>(

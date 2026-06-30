@@ -45,8 +45,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 use crate::mediacodec_common::{
@@ -357,6 +357,45 @@ impl AsyncElement for MediaCodecEnc {
         self.build_codec()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("bitrate", PropKind::Uint, "target bitrate, bits/second")
+                .with_default("4000000"),
+            PropertySpec::new("framerate", PropKind::Uint, "encode frame rate, fps")
+                .with_default("30"),
+            PropertySpec::new("i-frame-interval", PropKind::Uint, "keyframe interval, seconds")
+                .with_default("1"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "bitrate" => {
+                self.bitrate = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "framerate" => {
+                self.framerate = (value.as_uint().ok_or(PropError::Type)? as i32).max(1);
+                Ok(())
+            }
+            "i-frame-interval" => {
+                self.keyframe_interval_s = value.as_uint().ok_or(PropError::Type)? as i32;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "bitrate" => Some(PropValue::Uint(self.bitrate as u64)),
+            "framerate" => Some(PropValue::Uint(self.framerate.max(0) as u64)),
+            "i-frame-interval" => Some(PropValue::Uint(self.keyframe_interval_s.max(0) as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

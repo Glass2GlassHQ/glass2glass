@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 
 use g2g_core::{
     AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, RawVideoFormat,
+    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat,
 };
 
 use crate::paint::blend_px;
@@ -192,6 +193,34 @@ impl AsyncElement for AnalyticsOverlay {
         self.height = h;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "thickness",
+            PropKind::Uint,
+            "box outline thickness in pixels (>= 1)",
+        )
+        .with_range("1", "65535")
+        .with_default("2")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "thickness" => {
+                self.thickness = (value.as_uint().ok_or(PropError::Type)? as u32).max(1);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "thickness" => Some(PropValue::Uint(self.thickness as u64)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

@@ -64,7 +64,7 @@ use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
     Dim, ElementMetadata, G2gError, HardwareError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Thin wrapper over `/dev/dri/cardN` implementing the `drm` device traits
@@ -526,6 +526,33 @@ impl AsyncElement for KmsSink {
             "Presents video via DRM / KMS",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "device",
+            PropKind::Str,
+            "DRM device node (e.g. /dev/dri/card0)",
+        )
+        .with_default("/dev/dri/card0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device_path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device_path.to_string_lossy().into_owned())),
+            _ => None,
+        }
     }
 
     fn process<'a>(

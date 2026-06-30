@@ -14,6 +14,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::vec;
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
@@ -23,8 +24,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    VideoCodec,
+    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -234,6 +235,47 @@ impl SourceLoop for UdpSrc {
             "Receives raw RTP H.264 over UDP with a jitter buffer",
             "g2g",
         )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("address", PropKind::Str, "local bind address (IP to listen on)")
+                .with_default("0.0.0.0"),
+            PropertySpec::new("port", PropKind::Uint, "local UDP port to receive on")
+                .with_range("0", "65535"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "address" => {
+                let ip = value
+                    .as_str()
+                    .ok_or(PropError::Type)?
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| PropError::Value)?;
+                self.bind.set_ip(ip);
+                Ok(())
+            }
+            "port" => {
+                let p = value.as_uint().ok_or(PropError::Type)?;
+                if p > u16::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.bind.set_port(p as u16);
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "address" => Some(PropValue::Str(self.bind.ip().to_string())),
+            "port" => Some(PropValue::Uint(self.bind.port() as u64)),
+            _ => None,
+        }
     }
 
     /// Live source: contributes one frame period so the sink keeps a frame in
