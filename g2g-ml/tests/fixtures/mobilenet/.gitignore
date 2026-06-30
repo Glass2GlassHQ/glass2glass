@@ -6,3 +6,10 @@ input_f32.bin
 expected.txt
 sample.jpg
 imagenet_classes.txt
+# Device (Edge TPU) phase artifacts, built by gen_u8in.py.
+mobilenetv2-12-float.onnx
+mn_fixed.onnx
+mn_qdq.onnx
+mn_u8in.onnx
+mn_input_f32.bin
+u8in_quant.txt
