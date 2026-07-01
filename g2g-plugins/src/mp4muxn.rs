@@ -359,6 +359,14 @@ impl MultiInputElement for Mp4MuxN {
         self.inputs
     }
 
+    /// Named request pads (M481): a container mux's inputs are caps-typed slots, so
+    /// `video_%u` / `audio_%u` / `sink_%u` each claim the next positional slot (the
+    /// track type is read from the input's caps, not its index), so a launch line
+    /// can name the pads (`m.video_0` / `m.audio_0`) in any order.
+    fn input_pad_index(&self, _req: &g2g_core::runtime::PadRequest, ordinal: usize) -> Option<usize> {
+        (ordinal < self.inputs).then_some(ordinal)
+    }
+
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         if Self::pad_kind_for(upstream_caps).is_some() {
             Ok(upstream_caps.clone())

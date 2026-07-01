@@ -821,6 +821,22 @@ impl MultiInputElement for TextOverlayN {
         Some(Self::VIDEO)
     }
 
+    /// Named request pads (M481): `video`/`video_0` -> the video pad (0),
+    /// `text`/`subtitle`/`text_0` -> the text pad (1), so a launch line can wire
+    /// `d.video_0 ! ... ! o.video   d.text_0 ! o.text` in either order and the
+    /// video still lands on pad 0 (keeping `output_follows_input`/PTS-merge valid).
+    fn input_pad_index(
+        &self,
+        req: &g2g_core::runtime::PadRequest,
+        _ordinal: usize,
+    ) -> Option<usize> {
+        match req.kind {
+            g2g_core::runtime::PadKind::Video => Some(Self::VIDEO),
+            g2g_core::runtime::PadKind::Text => Some(Self::TEXT),
+            _ => None,
+        }
+    }
+
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match input {
             Self::VIDEO if TextOverlay::accepts(upstream_caps) => Ok(upstream_caps.clone()),

@@ -32,6 +32,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
+use crate::runtime::{PadKind, PadRequest};
 use crate::runtime::SenderSink;
 
 /// Downstream output addressing one of N ports. The fan-out analog of
@@ -310,6 +311,29 @@ pub trait MultiInputElement: ElementBound {
     /// by `caps_constraint_for_output`.
     fn output_follows_input(&self) -> Option<usize> {
         None
+    }
+
+    /// Map a named input-pad request to this element's concrete input index
+    /// (M481), so a `gst-launch` line can reference request pads by name
+    /// (`... ! mux.audio_0`, `... ! o.text`) instead of relying on the order the
+    /// branches are written. The transpose of the demuxer's output-pad selection
+    /// (M476): `req.kind` is `Video` / `Audio` / `Text` / `Any` with an ordinal.
+    ///
+    /// The default maps a bare `mux.` (`PadKind::Any`) to `ordinal` (the
+    /// positional behavior, unchanged), and declines a typed request (`None`) so a
+    /// homogeneous muxer without a naming scheme reports "no such pad" rather than
+    /// silently mis-routing. An element with named pads overrides this: an overlay
+    /// maps `Video -> 0`, `Text -> 1`; a container mux maps `video_%u` / `audio_%u`.
+    fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
+        let _ = ordinal;
+        match req.kind {
+            // A generic request pad (`sink_%u`, or a bare `mux.` whose index the
+            // parser set to the positional ordinal) maps straight to its index.
+            PadKind::Any => Some(req.index),
+            // A typed pad (`video_%u` / `audio_%u` / `text_%u`) needs an element
+            // scheme; a muxer without one declines it (reported as "no such pad").
+            _ => None,
+        }
     }
 
     /// Combine one packet from `input` into the merged output.

@@ -79,6 +79,12 @@ pub enum ParseError {
     /// A muxer (an element with several inputs) has no outgoing link; its single
     /// output pad must feed a downstream consumer.
     MuxerWithoutOutput(String),
+    /// A named input-pad reference (`mux.foo_0`) names a request pad this muxer
+    /// does not define (M481): the element's `input_pad_index` scheme declined it.
+    UnknownInputPad(String),
+    /// Two input-pad references resolve to the same muxer input index (M481), e.g.
+    /// `mux.video_0` named twice, or a named pad colliding with a positional one.
+    DuplicateInputPad(String),
     /// A `queue` / `queue2` sits anywhere but a 1-in/1-out position. It is not an
     /// element in g2g (it collapses into the edge's backpressure policy), so it
     /// cannot be a source, a sink, or a fan-out / fan-in node.
@@ -134,6 +140,12 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::MuxerWithoutOutput(n) => {
                 write!(f, "{n}: muxer has no outgoing link; its output must feed a consumer")
+            }
+            ParseError::UnknownInputPad(n) => {
+                write!(f, "{n}: no such input request pad (this element defines no pad by that name)")
+            }
+            ParseError::DuplicateInputPad(n) => {
+                write!(f, "{n}: two inputs resolve to the same request pad index")
             }
             ParseError::QueueRole(n) => {
                 write!(f, "{n}: a queue must sit between two elements (1-in/1-out); it maps to an edge policy, not a source/sink/branch")
@@ -233,10 +245,12 @@ fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
         "text" | "subtitle" => PadKind::Text,
         _ => PadKind::Any,
     };
-    // `src_N` and unrecognized prefixes select the Nth forwardable stream; a bare
-    // `d.` has no index, so it takes the positional ordinal.
+    // `src_N` (output) / `sink_N` (input) and unrecognized prefixes select the Nth
+    // stream / pad; a bare `d.` has no index, so it takes the positional ordinal.
     let index = match kind {
-        PadKind::Any if prefix == "src" || prefix.is_empty() => index.unwrap_or(ordinal),
+        PadKind::Any if prefix == "src" || prefix == "sink" || prefix.is_empty() => {
+            index.unwrap_or(ordinal)
+        }
         PadKind::Any => ordinal,
         _ => index.unwrap_or(0),
     };
@@ -720,6 +734,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // order, so a demux-select hook can map port i to the requested stream.
     let mut raw_links: Vec<(usize, usize)> = Vec::new();
     let mut demux_pads: Vec<Vec<PadRequest>> = alloc::vec![Vec::new(); specs.len()];
+    // The DESTINATION pad request per raw link (M481): a named input-pad ref
+    // (`... ! mux.audio_0`) carries a request; a bare `mux.` or an inline consumer
+    // carries `None` (positional). The transpose of `demux_pads` (output side).
+    let mut raw_dest_req: Vec<Option<PadRequest>> = Vec::new();
     for eps in &chain_eps {
         let mut idxs: Vec<usize> = Vec::with_capacity(eps.len());
         // The pad suffix of each endpoint that is a reference (`None` for a
@@ -756,6 +774,13 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 None => PadRequest { kind: PadKind::Any, index: ordinal },
             };
             demux_pads[s].push(req);
+            // The destination's input-pad request: a named ref (`mux.audio_0`)
+            // parses; a bare `mux.` (empty suffix) or an inline consumer is `None`
+            // (positional, resolved by the sequential input counter below).
+            raw_dest_req.push(match pads[w + 1] {
+                Some(pad) if !pad.is_empty() => Some(parse_pad_request(pad, 0)),
+                _ => None,
+            });
         }
     }
 
@@ -788,19 +813,28 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // its terminal consumer, carrying the accumulated policy; edges out of a queue
     // are consumed by that walk (skipped here).
     let mut links: Vec<(usize, usize, LinkPolicy)> = Vec::new();
-    for &(s, d) in &raw_links {
+    // The destination input-pad request per contracted link (M481), aligned with
+    // `links`; taken from the raw link that lands on the terminal consumer (so a
+    // `... ! queue ! mux.audio_0` keeps its named pad through the queue contraction).
+    let mut link_dest_req: Vec<Option<PadRequest>> = Vec::new();
+    for (li, &(s, d)) in raw_links.iter().enumerate() {
         if is_queue(s) {
             continue;
         }
-        let mut cur = d;
+        let (mut cur, mut src_li) = (d, li);
         let mut policy = LinkPolicy::Block;
         while is_queue(cur) {
             if queue_policy[cur] != LinkPolicy::Block {
                 policy = queue_policy[cur];
             }
-            cur = queue_succ[cur].expect("queue validated 1-out above");
+            let next = queue_succ[cur].expect("queue validated 1-out above");
+            // The named-pad suffix lives on the raw link that enters the terminal
+            // consumer, i.e. `(cur -> next)`; find it for the request.
+            src_li = raw_links.iter().position(|&(a, b)| a == cur && b == next).unwrap_or(src_li);
+            cur = next;
         }
         links.push((s, cur, policy));
+        link_dest_req.push(raw_dest_req[src_li].clone());
     }
 
     // Link degree per element fixes its role and any tee's output width. Computed
@@ -877,6 +911,10 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // (`None`); they never appear as an endpoint in the contracted links.
     let mut graph: Graph<GraphNode> = Graph::new();
     let mut node_of: Vec<Option<NodeId>> = Vec::with_capacity(specs.len());
+    // The resolved muxer input-pad index per contracted link (M481), aligned with
+    // `links`; filled at muxer construction from the element's `input_pad_index`
+    // scheme. `None` for a non-muxer link or an unnamed ref (sequential fallback).
+    let mut mux_pad_of_link: Vec<Option<u8>> = alloc::vec![None; links.len()];
     for ei in 0..specs.len() {
         if is_queue(ei) {
             node_of.push(None);
@@ -910,6 +948,33 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 .make_muxer(&spec.name, in_deg[ei])
                 .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
             apply_muxer_props(&mut mux, &spec.name, &spec.props)?;
+            // Resolve named input-pad refs (M481) to concrete indices via the
+            // muxer's own scheme, so `... ! mux.audio_0  ... ! mux.video_0` routes
+            // by name regardless of order. Named refs claim their index first;
+            // bare refs fill the remaining slots in link order (the historical
+            // positional behavior).
+            let n = in_deg[ei];
+            let incoming: Vec<usize> =
+                links.iter().enumerate().filter(|(_, (_, d, _))| *d == ei).map(|(k, _)| k).collect();
+            let mut used = alloc::vec![false; n];
+            for (ord, &k) in incoming.iter().enumerate() {
+                let Some(req) = &link_dest_req[k] else { continue };
+                let idx = mux
+                    .input_pad_index(req, ord)
+                    .filter(|&i| i < n)
+                    .ok_or_else(|| ParseError::UnknownInputPad(spec.name.clone()))?;
+                if core::mem::replace(&mut used[idx], true) {
+                    return Err(ParseError::DuplicateInputPad(spec.name.clone()));
+                }
+                mux_pad_of_link[k] = Some(idx as u8);
+            }
+            for &k in &incoming {
+                if link_dest_req[k].is_none() {
+                    let idx = used.iter().position(|u| !u).expect("in_deg matches link count");
+                    used[idx] = true;
+                    mux_pad_of_link[k] = Some(idx as u8);
+                }
+            }
             graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
         } else if is_select[ei] {
             // M476: a demux-select hook already built the multi-output demuxer
@@ -957,8 +1022,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // each muxer input a distinct input pad (0..n); every other output and input
     // is pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
     let mut tee_next = alloc::vec![0u8; specs.len()];
-    let mut mux_next = alloc::vec![0u8; specs.len()];
-    for &(s, d, policy) in &links {
+    for (k, &(s, d, policy)) in links.iter().enumerate() {
         let node_s = node_of[s].expect("contracted link source is a real node");
         let node_d = node_of[d].expect("contracted link destination is a real node");
         let src = if let Some(tee) = implicit_tee[s] {
@@ -974,8 +1038,9 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             PadId::from(node_s)
         };
         let dst = if is_muxer(d) {
-            let index = mux_next[d];
-            mux_next[d] += 1;
+            // The input index was resolved at construction (named pads via the
+            // muxer's scheme, bare refs sequentially); every muxer link has one.
+            let index = mux_pad_of_link[k].expect("muxer link assigned an input pad");
             PadId { node: node_d, index }
         } else {
             PadId::from(node_d)
