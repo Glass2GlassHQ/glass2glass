@@ -228,6 +228,10 @@ cuda-wgpu = ["cuda", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # import-to-wgpu-texture element is gated on this probe succeeding on real
 # hardware (a USB camera's CPU-backed dma-buf cannot be mapped by a dGPU).
 libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Zero-copy DMABUF -> wgpu buffer import element (`dmabuftowgpu`). Same GPU deps
+# as the libcamera probe but without the libcamera dependency, so a bridge /
+# GStreamer dma-buf feed can be imported to the GPU on its own.
+dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);

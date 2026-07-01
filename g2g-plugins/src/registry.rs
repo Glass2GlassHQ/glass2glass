@@ -834,6 +834,10 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new())));
     #[cfg(all(target_os = "linux", feature = "nvenc"))]
     reg.register_launch(LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new())));
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    reg.register_launch(LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>("dmabuftowgpu", || {
+        Box::new(crate::dmabufwgpu::DmaBufToWgpu::new())
+    }));
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())
