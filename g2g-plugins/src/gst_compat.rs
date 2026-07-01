@@ -46,8 +46,13 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("theoraenc", GstEquivalent::Unsupported("no Theora encoder; use `vpxenc` (VP8/VP9) or `av1enc`")),
     ("avdec_h264", GstEquivalent::Renamed("ffmpegdec")),
     ("avdec_h265", GstEquivalent::Renamed("ffmpegdec")),
-    ("nvh264dec", GstEquivalent::Renamed("ffmpegdec")),
-    ("nvh264enc", GstEquivalent::Unsupported("no NVENC encode element; software / AV1 paths only")),
+    // NVIDIA hardware codecs map to the native NVDEC / NVENC elements (their
+    // features are CI-excluded but the names are the direct equivalents, like the
+    // VAAPI rows below); `ffmpegdec`'s cuvid backend is the software-feature fallback.
+    ("nvh264dec", GstEquivalent::Renamed("nvdec")),
+    ("nvh265dec", GstEquivalent::Renamed("nvdec")),
+    ("nvh264enc", GstEquivalent::Renamed("nvenc")),
+    ("nvh265enc", GstEquivalent::Renamed("nvenc")),
     ("vaapih264dec", GstEquivalent::Renamed("vaapidec")),
     ("vah264dec", GstEquivalent::Renamed("vaapidec")),
     ("vp8enc", GstEquivalent::Renamed("vpxenc")),

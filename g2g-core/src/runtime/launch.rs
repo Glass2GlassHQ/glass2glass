@@ -131,7 +131,22 @@ impl core::fmt::Display for ParseError {
                 write!(f, "{element}: no property named '{key}'")
             }
             ParseError::BadValue { element, key, value } => {
-                write!(f, "{element}: invalid value '{value}' for property '{key}'")
+                write!(f, "{element}: invalid value '{value}' for property '{key}'")?;
+                // Inline caps become a `capsfilter` (key `caps`); a gst dev often
+                // reaches for range / list / feature syntax g2g's launch parser
+                // does not accept, and the bare "invalid value" hides why.
+                if element == "capsfilter"
+                    && key == "caps"
+                    && value.contains(['[', '{', '('])
+                {
+                    write!(
+                        f,
+                        " (a launch caps filter takes fixed fields, e.g. width=640; \
+                         ranges [min,max], lists {{a,b}}, and caps features (memory:...) \
+                         are not supported here)"
+                    )?;
+                }
+                Ok(())
             }
             ParseError::UnknownReference(n) => write!(f, "reference to undeclared element name: {n}"),
             ParseError::DuplicateName(n) => write!(f, "duplicate element name: {n}"),
@@ -274,8 +289,8 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
             token: tok.to_string(),
         })?;
         tokens.next();
-        // Strip a single layer of surrounding double quotes from the value.
-        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+        // Strip a single layer of surrounding quotes (double or single) from the value.
+        let value = strip_quotes(value);
         if key == "name" {
             spec.instance = Some(value.to_string());
         } else {
@@ -285,30 +300,63 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
     Ok(spec)
 }
 
-/// Split a pipeline string into tokens, honoring double-quoted property values.
-/// Outside quotes, whitespace separates tokens and `!` is a standalone token;
-/// inside a `"..."` region both are literal, so a value may contain spaces (and
-/// even `!`), e.g. `element="x264enc bitrate=4000"` or `location="/my file.ts"`.
-/// The surrounding quotes are kept on the token; [`consume_element`] strips them
-/// from the value. An unterminated quote runs to end of input (best-effort; the
-/// property parse then reports any resulting malformed token).
+/// Strip a single matching pair of surrounding quotes (double or single) from a
+/// property value. gst-launch accepts both `location="a b"` and `location='a b'`.
+fn strip_quotes(v: &str) -> &str {
+    let b = v.as_bytes();
+    // Quotes are ASCII, so byte-slicing at these bounds stays on char boundaries.
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        &v[1..v.len() - 1]
+    } else {
+        v
+    }
+}
+
+/// Split a pipeline string into tokens, honoring quoted property values and
+/// `#` comments. Outside quotes, whitespace separates tokens and `!` is a
+/// standalone token; inside a `"..."` or `'...'` region both are literal, so a
+/// value may contain spaces (and even `!`), e.g. `element="x264enc bitrate=4000"`
+/// or `location='/my file.ts'`. A `#` outside quotes starts a comment that runs
+/// to end of line (a pasted multi-line pipeline may carry them). The surrounding
+/// quotes are kept on the token; [`consume_element`] strips them from the value.
+/// An unterminated quote runs to end of input (best-effort; the property parse
+/// then reports any resulting malformed token).
 fn tokenize(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut cur = String::new();
-    let mut in_quote = false;
+    // The open quote char (`"` or `'`), or `None` outside a quoted region.
+    let mut quote: Option<char> = None;
+    let mut in_comment = false;
     for c in s.chars() {
+        if in_comment {
+            // A comment runs to end of line; the newline (whitespace) ends it.
+            if c == '\n' {
+                in_comment = false;
+            }
+            continue;
+        }
         match c {
-            '"' => {
-                in_quote = !in_quote;
+            '"' | '\'' if quote.is_none() => {
+                quote = Some(c);
                 cur.push(c);
             }
-            '!' if !in_quote => {
+            _ if Some(c) == quote => {
+                quote = None;
+                cur.push(c);
+            }
+            // A `#` only starts a comment at a token boundary (nothing buffered);
+            // mid-token it is literal, so a URI fragment (`uri=...#closed-captions=cc1`,
+            // `#t=10`) is preserved.
+            '#' if quote.is_none() && cur.is_empty() => {
+                in_comment = true;
+            }
+            '!' if quote.is_none() => {
                 if !cur.is_empty() {
                     tokens.push(core::mem::take(&mut cur));
                 }
                 tokens.push("!".to_string());
             }
-            c if c.is_whitespace() && !in_quote => {
+            c if c.is_whitespace() && quote.is_none() => {
                 if !cur.is_empty() {
                     tokens.push(core::mem::take(&mut cur));
                 }
@@ -1251,6 +1299,58 @@ mod tests {
             tokenize("gstwrap element=\"x y\" ! sink"),
             ["gstwrap", "element=\"x y\"", "!", "sink"]
         );
+    }
+
+    #[test]
+    fn tokenize_treats_single_quoted_region_as_one_token() {
+        assert_eq!(
+            tokenize("filesink location='/my file.ts' ! sink"),
+            ["filesink", "location='/my file.ts'", "!", "sink"]
+        );
+    }
+
+    #[test]
+    fn single_quoted_value_is_unquoted() {
+        let chains = parse_chains("videotestsrc ! identity note='a b c' ! fakesink").unwrap();
+        let Item::Element(id) = &chains[0][1] else { panic!("element") };
+        assert_eq!(id.props, [("note".to_string(), "a b c".to_string())]);
+    }
+
+    #[test]
+    fn hash_starts_a_comment_to_end_of_line() {
+        // Trailing comment on one line, and a comment mid-pipeline across lines.
+        let chains = parse_chains("videotestsrc ! fakesink # trailing note").unwrap();
+        assert_eq!(item_names(&chains[0]), ["videotestsrc", "fakesink"]);
+        let chains = parse_chains("videotestsrc  # the source\n  ! fakesink").unwrap();
+        assert_eq!(item_names(&chains[0]), ["videotestsrc", "fakesink"]);
+    }
+
+    #[test]
+    fn hash_inside_a_value_is_literal_not_a_comment() {
+        // A URI fragment (`#closed-captions=cc1`, `#t=10`) must survive; `#` is a
+        // comment only at a token boundary.
+        assert_eq!(
+            tokenize("uridecodebin uri=file:///v.mp4#closed-captions=cc1 ! sink"),
+            ["uridecodebin", "uri=file:///v.mp4#closed-captions=cc1", "!", "sink"]
+        );
+    }
+
+    #[test]
+    fn caps_range_value_error_carries_a_syntax_hint() {
+        let e = ParseError::BadValue {
+            element: "capsfilter".to_string(),
+            key: "caps".to_string(),
+            value: "video/x-raw,width=[1,1920]".to_string(),
+        };
+        let msg = alloc::format!("{e}");
+        assert!(msg.contains("ranges"), "caps range hint present: {msg}");
+        // A plain element property error keeps the bare message (no caps hint).
+        let plain = ParseError::BadValue {
+            element: "videobox".to_string(),
+            key: "top".to_string(),
+            value: "abc".to_string(),
+        };
+        assert!(!alloc::format!("{plain}").contains("ranges"));
     }
 
     #[test]

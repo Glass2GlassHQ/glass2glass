@@ -124,9 +124,23 @@ The same guidance is available programmatically via
 | Symptom | Why | Fix |
 | :--- | :--- | :--- |
 | `x264enc` unknown | software H.264 encode is behind the `ffmpeg` feature | build `g2g-plugins` with `--features ffmpeg` (libx264); `nvh264enc`→`nvenc` (NVIDIA); `mfencode` (Windows); or AV1/VP8/VP9 via `av1enc`/`vpxenc` |
-| property value has spaces or `!` | needs quoting | wrap it in double quotes: `filesrc location="/my video.ts"`, `gstwrap element="x264enc bitrate=4000"` |
+| property value has spaces or `!` | needs quoting | wrap it in double **or single** quotes: `filesrc location="/my video.ts"`, `filesrc location='/my video.ts'`, `gstwrap element="x264enc bitrate=4000"` |
 | container source won't decode | `bytestream-format` isn't auto-sniffed everywhere | set it explicitly, e.g. `filesrc location=x bytestream-format=mpegts` |
 | `autovideosink` etc. | resolved to an available backend | works; resolves Wayland→KMS→fake on Linux |
+| `# comment` in a pasted pipeline | supported | a `#` outside quotes runs to end of line and is ignored (handy for multi-line pastes) |
+
+### Launch syntax g2g does not accept
+
+The tokenizer is `gst-launch`-shaped but not identical. These forms fail (with a
+hint where possible); rewrite as shown:
+
+| gst-launch form | Status | Do this instead |
+| :--- | :--- | :--- |
+| caps range `width=[1,1920]` / list `format={I420,NV12}` | not supported in a launch caps filter (bare `BadValue` with a syntax hint) | use a fixed value (`width=640`), or let negotiation pick it and constrain downstream |
+| caps feature `video/x-raw(memory:GLMemory)` | not supported | drop the feature; g2g picks the memory domain during negotiation (GPU vs system) automatically |
+| bins `( videoconvert ! videoscale )` | not supported (no bin/grouping syntax) | flatten the group inline, or build the sub-graph in Rust and `Graph::merge` it |
+| per-queue depth `queue max-size-buffers=8` | accepted but ignored (only `leaky=` maps, to the edge's drop policy) | queue depth is `link_capacity` on `run_graph`, one value for the graph |
+| demux fan-out on a network source `udpsrc ! qtdemux name=d d.video_0 ! …` | file sources only | demux a local file, or use `uridecodebin` / `playbin` for network multi-stream |
 
 ### Equivalence cookbook
 
