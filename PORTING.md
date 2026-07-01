@@ -163,6 +163,15 @@ A C/Python/Rust GStreamer app maps onto g2g's typed graph:
 The programmatic path is fully typed — you hold the element values, not opaque
 `GstElement*`. See `run_graph` in [g2g-core/src/runtime/graph_runner.rs](g2g-core/src/runtime/graph_runner.rs).
 
+Worked, runnable side-by-side examples of this text-to-typed mapping (a transform
+chain, an inline caps filter, a `tee` fan-out), each run both ways and asserted
+equivalent, are in
+[g2g-plugins/examples/gst_equivalents.rs](g2g-plugins/examples/gst_equivalents.rs):
+
+```sh
+cargo run -p g2g-plugins --features std --example gst_equivalents
+```
+
 ### 5.1 Dynamic pipelines (the hardest port)
 
 A GStreamer *application* is rarely a static line: it adds and removes branches at
