@@ -12,6 +12,33 @@ See [DESIGN.md](DESIGN.md) for the architecture specification and
 [DEVTOOLS.md](DEVTOOLS.md) for the developer tooling (`cargo xtask`, the pipeline
 visualizer, the caps explainer, benchmarks).
 
+## Coming from GStreamer?
+
+Many `gst-launch-1.0` lines run unchanged through **`g2g-launch`**. Paste one in:
+
+```sh
+cargo run -p g2g-plugins --bin g2g-launch --features std -- \
+  "videotestsrc num-buffers=30 ! videoconvert ! fakesink"
+```
+
+Element names mostly match (with aliases: `avdec_h264`→`ffmpegdec`,
+`qtmux`→`mp4mux`, `autovideosink`→`waylandsink`/`kmssink`, ...). Inline caps
+filters, `tee name=t` fan-out, muxer fan-in, and `decodebin`/`uridecodebin`/`playbin`
+all parse. When a line *doesn't* port, you get a hint, not a bare error:
+
+```
+$ g2g-launch videotestsrc ! theoraenc ! fakesink
+parse error: unknown element: theoraenc
+  hint: `theoraenc` has no g2g element: no Theora encoder; use `vpxenc` (VP8/VP9) or `av1enc`
+```
+
+- **`g2g-launch -v ...`** prints each link's negotiated caps + memory domain (the `gst-launch -v` analog); **`--dot`** dumps a Graphviz graph.
+- **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties/pads, or map a GStreamer name with `g2g-inspect --gst x264enc`. Scan an app's source with `--gst-scan app.c`.
+- Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
+
+Full guide, including the equivalence cookbook and application/element porting:
+**[PORTING.md](PORTING.md)**.
+
 ## The four pillars
 
 1. **Async execution.** Every element is a cooperative `Future`. The

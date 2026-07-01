@@ -67,9 +67,33 @@ The same guidance is available programmatically via
 | :--- | :--- | :--- |
 | `x264enc` unknown | software H.264 encode is behind the `ffmpeg` feature | build `g2g-plugins` with `--features ffmpeg` (libx264); `nvh264enc`→`nvenc` (NVIDIA); `mfencode` (Windows); or AV1/VP8/VP9 via `av1enc`/`vpxenc` |
 | `FanOutWithoutTee` | g2g doesn't auto-insert a tee | add an explicit `tee` before the branches |
-| property with spaces fails | v1 parser has no quoted-value spaces | avoid spaces in property values |
+| property value has spaces or `!` | needs quoting | wrap it in double quotes: `filesrc location="/my video.ts"`, `gstwrap element="x264enc bitrate=4000"` |
 | container source won't decode | `bytestream-format` isn't auto-sniffed everywhere | set it explicitly, e.g. `filesrc location=x bytestream-format=mpegts` |
 | `autovideosink` etc. | resolved to an available backend | works; resolves Wayland→KMS→fake on Linux |
+
+### Equivalence cookbook
+
+Recipes that run verbatim through `g2g-launch` on the baseline `std` registry
+(no extra features). Each is exercised by the regression corpus
+[g2g-plugins/tests/gst_launch_corpus.rs](g2g-plugins/tests/gst_launch_corpus.rs),
+so this list stays honest as the DSL evolves. Swap `gst-launch-1.0` for
+`g2g-launch` and the line is unchanged:
+
+| What | gst-launch-1.0 / g2g-launch line |
+| :--- | :--- |
+| Smoke test | `videotestsrc num-buffers=30 ! videoconvert ! fakesink` |
+| Inline caps (format convert) | `videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink` |
+| Caps-driven scale | `videotestsrc ! videoscale ! video/x-raw,width=640,height=480 ! videoconvert ! fakesink` |
+| Caps-driven framerate | `videotestsrc ! videorate ! video/x-raw,framerate=15/1 ! fakesink` |
+| Enum + numeric props | `videotestsrc ! videoflip method=horizontal-flip ! videobalance saturation=0.5 contrast=1.2 ! videoconvert ! fakesink` |
+| Quoted path with a space | `filesrc location="/tmp/my video.ts" ! fakesink` |
+| `tee` fan-out (explicit) | `videotestsrc ! tee name=t ! queue ! fakesink t. ! queue ! videoconvert ! fakesink` |
+| Audio chain | `audiotestsrc ! volume volume=0.5 ! audioconvert ! audioresample ! fakesink` |
+
+Two departures from GStreamer habit: g2g does **not** auto-insert a `tee` (write
+one explicitly before branches), and `queue`/`queue2` map to a per-edge
+backpressure policy rather than a distinct element node. See the negotiated caps
+of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 
 ---
 
