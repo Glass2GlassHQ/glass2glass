@@ -38,9 +38,10 @@ static LAUNCH_KEYWORDS: &[&str] =
 /// have no same-name g2g element. Extend freely.
 static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("x264enc", GstEquivalent::Unsupported(
-        "no software H.264 encoder; use `mfencode` (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`",
+        "software H.264 encode (`x264enc`, libx264) needs the `ffmpeg` feature on Linux; \
+         otherwise `nvenc` (NVIDIA), `mfencode` (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`",
     )),
-    ("x265enc", GstEquivalent::Unsupported("no H.265 encoder; consider `av1enc`")),
+    ("x265enc", GstEquivalent::Unsupported("no software H.265 encoder; use `nvenc` (NVIDIA HEVC) or `av1enc`")),
     ("theoraenc", GstEquivalent::Unsupported("no Theora encoder; use `vpxenc` (VP8/VP9) or `av1enc`")),
     ("avdec_h264", GstEquivalent::Renamed("ffmpegdec")),
     ("avdec_h265", GstEquivalent::Renamed("ffmpegdec")),

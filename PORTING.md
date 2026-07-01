@@ -49,11 +49,14 @@ backpressure policy), `decodebin` / `uridecodebin` / `playbin`.
 **When it doesn't parse, you get a porting hint**, not just an error:
 
 ```
-$ g2g-launch videotestsrc ! x264enc ! fakesink
-parse error: unknown element: x264enc
-  hint: `x264enc` has no g2g element: no software H.264 encoder; use `mfencode`
-        (Windows), or encode AV1/VP8/VP9 with `av1enc`/`vpxenc`
+$ g2g-launch videotestsrc ! theoraenc ! fakesink
+parse error: unknown element: theoraenc
+  hint: `theoraenc` has no g2g element: no Theora encoder; use `vpxenc`
+        (VP8/VP9) or `av1enc`
 ```
+
+(`x264enc` itself resolves once `g2g-plugins` is built with the `ffmpeg`
+feature, which provides the libx264 software encoder.)
 
 The same guidance is available programmatically via
 `g2g_plugins::gst_compat::lint_launch(&registry, line)`.
@@ -62,7 +65,7 @@ The same guidance is available programmatically via
 
 | Symptom | Why | Fix |
 | :--- | :--- | :--- |
-| `x264enc` / `nvh264enc` unknown | no SW/NVENC H.264 encoder | `mfencode` (Windows) or `av1enc` / `vpxenc`; `g2g-inspect --gst x264enc` |
+| `x264enc` unknown | software H.264 encode is behind the `ffmpeg` feature | build `g2g-plugins` with `--features ffmpeg` (libx264); `nvh264enc`→`nvenc` (NVIDIA); `mfencode` (Windows); or AV1/VP8/VP9 via `av1enc`/`vpxenc` |
 | `FanOutWithoutTee` | g2g doesn't auto-insert a tee | add an explicit `tee` before the branches |
 | property with spaces fails | v1 parser has no quoted-value spaces | avoid spaces in property values |
 | container source won't decode | `bytestream-format` isn't auto-sniffed everywhere | set it explicitly, e.g. `filesrc location=x bytestream-format=mpegts` |
@@ -82,16 +85,18 @@ Most names match GStreamer. Differences are handled two ways:
 
 ```sh
 g2g-inspect --gst jpegdec        # -> g2g calls it `mjpegdec`
-g2g-inspect --gst appsink        # -> no g2g element; use a programmatic sink / pyelement
+g2g-inspect --gst x264enc        # -> software H.264 encode behind the `ffmpeg` feature
 g2g-inspect                      # list every element
 g2g-inspect videoconvert         # one element's properties + pad templates
 ```
 
 Common mappings: `jpegenc`/`jpegdec` → `mjpegenc`/`mjpegdec`; `souphttpsrc` →
-`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`; `appsrc`/`appsink` →
-programmatic graph nodes or the Python host (`pysrc`/`pyelement`). The table
-lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs) and is
-easy to extend.
+`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`. `appsrc`/`appsink`
+exist as named launch elements (`appsrc channel=<name>` / `appsink
+channel=<name>`, the application registers the matching feed/sink before launch),
+as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
+table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
+and is easy to extend.
 
 ---
 
@@ -132,6 +137,35 @@ A C/Python/Rust GStreamer app maps onto g2g's typed graph:
 
 The programmatic path is fully typed — you hold the element values, not opaque
 `GstElement*`. See `run_graph` in [g2g-core/src/runtime/graph_runner.rs](g2g-core/src/runtime/graph_runner.rs).
+
+### 5.1 Dynamic pipelines (the hardest port)
+
+A GStreamer *application* is rarely a static line: it adds and removes branches at
+runtime, blocks pads, relinks on `pad-added`, and pushes/pulls buffers from app
+code. g2g reaches the same outcomes with different primitives, because Rust
+ownership forbids GObject's reference-cycle + signal-callback shape. The full map
+is DESIGN.md §4.9; the patterns an app developer hits most:
+
+| GStreamer idiom | glass2glass |
+| :--- | :--- |
+| `appsrc` `need-data`/`push-buffer` | `appsrc channel=<name>` + `register_appsrc` → `AppSrcFeed::push`, or `g2g-bridge`'s `BridgeGraph` for a whole embedded sub-graph |
+| `appsink` `new-sample`/pull | `appsink channel=<name>` + `set_appsink_callback` (callback) or `register_appsink_pull` (pull) |
+| `pad-added` relink (decodebin) | bounded dynamic pads: `decodebin`/`uridecodebin` auto-plug, or `StreamDemux` / `register_demux` with N typed output ports ("dark slots" populated on discovery) |
+| `gst_pad_add_probe(BLOCK)` / `pad_idle` | a `LinkInterceptor` registered on a slot (the probe analog) |
+| add / remove a branch at runtime | runtime fan-out via `DynamicFanoutHandle::add_branch`, fan-in via `DynamicFaninHandle`; a swappable sub-graph is a `BranchSlot` |
+| enable/disable a branch, A/B switch | `Router` + `Gate` (and their `RouterHandle` / `GateHandle`) |
+| element hot-swap | `ElementSlot::swap` (ArcSwap; no use-after-free with a frame in flight) |
+| flushing seek | `PipelinePacket::Flush` (the runner drains and resets) |
+| child→parent signal/notify | post a `BusMessage`; the parent reads it (no back-reference) |
+
+Two ownership-driven differences to expect: relinking is **moving the receive end
+of a channel under a brief gate hold** (explicit ownership transfer, not pointer
+surgery), and runtime-growable pad counts beyond a fixed N use a `Slab<Slot>` in
+the dynamic layer rather than unbounded GObject pads. The payoff is that the
+hot-swap and pad-block choreography that is famously race-prone in GStreamer is
+memory-safe here by construction. Boundary-aligned switches (bitrate / codec
+change at a segment or keyframe) are part of the §4.9 design surface; check what
+is wired today before relying on them.
 
 ---
 
@@ -245,16 +279,19 @@ g2g binary it ships — remains available and needs no ABI match.
 
 ---
 
-## 8. Known gaps (as of M217)
+## 8. Known gaps (as of M459)
 
-- **Platform coverage: Linux and Windows only.** macOS (VideoToolbox /
-  AVFoundation / Core Audio / Metal) and Android (MediaCodec / Camera2 / AAudio /
-  Surface) have no elements yet, so a pipeline that relies on platform-native
-  decode / capture / present will not build on those targets. The cross-platform
-  software path (parsers, container mux/demux, SW transforms, ffmpeg, `gst-launch`
-  DSL) works everywhere. See DESIGN_TODO.md "Gap analysis to 80% parity".
-- Other structural / transport gaps (allocation re-cascade, RTMP/SRT egress,
-  RTSP server, RTP RTX/FEC) are catalogued in DESIGN_TODO.md.
+- **Platform coverage.** Linux and Windows are the primary targets. Android
+  (MediaCodec decode/encode, Camera2, AAudio, Surface present, plus ML inference)
+  is device-validated. macOS (VideoToolbox / AVFoundation / Core Audio / Metal)
+  is started but not yet built on Apple hardware, so treat it as unverified. The
+  cross-platform software path (parsers, container mux/demux, SW transforms,
+  ffmpeg, `gst-launch` DSL) works everywhere. See DESIGN_TODO.md "Gap analysis".
+- Transport: SRT (TSBPD/AES/key-rotation), RTP with RTCP and FEC (ULPFEC,
+  FlexFEC), and WebRTC (WHIP/WHEP) are in; still open are RTMP egress, an RTSP
+  *server*, and RTP RTX. Catalogued in DESIGN_TODO.md.
+- Other structural gaps (e.g. allocation re-cascade) are catalogued in
+  DESIGN_TODO.md.
 - No quoted property values with spaces in the launch DSL (v1).
 - No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
 - Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
