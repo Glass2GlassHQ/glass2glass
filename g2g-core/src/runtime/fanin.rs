@@ -325,6 +325,9 @@ pub trait DynMultiInputElement: ElementBound {
     fn properties(&self) -> &'static [PropertySpec];
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError>;
     fn get_property(&self, name: &str) -> Option<PropValue>;
+    /// Dyn-safe mirror of [`MultiInputElement::metadata`], for the `gst-inspect`
+    /// "Factory Details" of an erased fan-in muxer.
+    fn metadata(&self) -> ElementMetadata;
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -383,6 +386,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         MultiInputElement::get_property(self, name)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        MultiInputElement::metadata(self)
     }
 }
 
@@ -446,6 +453,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         (**self).get_property(name)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        (**self).metadata()
     }
 }
 

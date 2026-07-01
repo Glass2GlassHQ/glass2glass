@@ -419,7 +419,6 @@ leverage first:
 
 ## Properties / introspection / DSL
 
-- Carry metadata + properties on muxers (their inspect path builds no instance).
 - Property-set the remaining feature-gated sources from text (`location=` /
   `uri=` on rtsp / v4l2, default placeholders today; http / hls / dash now carry
   `location`).

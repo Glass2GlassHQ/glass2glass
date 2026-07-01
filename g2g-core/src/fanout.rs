@@ -31,7 +31,7 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
-use crate::property::{PropError, PropValue, PropertySpec};
+use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::runtime::SenderSink;
 
 /// Downstream output addressing one of N ports. The fan-out analog of
@@ -394,6 +394,14 @@ pub trait MultiInputElement: ElementBound {
     /// Read a property back by name (M104). Default: `None`.
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
+    }
+
+    /// Static introspection metadata for this muxer (M178), the `gst-inspect`
+    /// "Factory Details" (long-name / classification / description / author),
+    /// mirroring [`AsyncElement::metadata`](crate::AsyncElement::metadata).
+    /// Default: empty. A muxer overrides it with a `const ElementMetadata`.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
     }
 }
 

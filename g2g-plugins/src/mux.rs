@@ -20,8 +20,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Frame, G2gError, InputAggregator,
-    MultiInputElement, OutputSink, PipelinePacket,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, Frame, G2gError,
+    InputAggregator, MultiInputElement, OutputSink, PipelinePacket,
 };
 
 #[derive(Debug)]
@@ -97,6 +97,15 @@ impl MultiInputElement for InterleaveMux {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         Ok(self.output.clone())
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Funnel N-to-1 forwarder",
+            "Generic/Muxer",
+            "Interleaves N input streams into one output by presentation timestamp; the structural fan-in for text/data streams (the gst `funnel` analog).",
+            "g2g",
+        )
     }
 
     fn process<'a>(

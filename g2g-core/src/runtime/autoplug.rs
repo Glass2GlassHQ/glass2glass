@@ -1049,10 +1049,18 @@ mod factory {
                 let _ = write!(out, "\nElement Properties:\n{}", format_specs(el.properties()));
                 Some(out)
             } else if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
-                let _ = writeln!(out, "Factory Details:");
-                let _ = writeln!(out, "  Name        {}", m.name);
+                // Build a one-input instance to read its metadata / properties (the
+                // specs are `&'static`, behind instance methods); the fan-in
+                // constructors are side-effect-free, so this is safe. The real input
+                // count is derived from link degree at parse, not needed here.
+                let mux = (m.build)(1);
+                out.push_str(&format_metadata(name, &mux.metadata()));
                 let _ = writeln!(out, "  Role        muxer (fan-in)");
+                if let Ok(caps) = mux.output_caps() {
+                    let _ = writeln!(out, "\nOutput caps:\n  {caps:?}");
+                }
                 let _ = writeln!(out, "\nInputs: derived from link degree");
+                let _ = write!(out, "\nElement Properties:\n{}", format_specs(mux.properties()));
                 Some(out)
             } else {
                 None

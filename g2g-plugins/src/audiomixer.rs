@@ -19,8 +19,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
 };
 
 #[derive(Debug)]
@@ -93,6 +93,15 @@ impl MultiInputElement for AudioMixer {
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
         Ok(self.output.clone())
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Audio mixer",
+            "Filter/Audio",
+            "Sums N time-aligned PCM audio inputs into one output stream (the gst `audiomixer` analog).",
+            "g2g",
+        )
     }
 
     fn process<'a>(

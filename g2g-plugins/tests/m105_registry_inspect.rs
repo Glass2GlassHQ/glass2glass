@@ -3,7 +3,7 @@
 //! pad-template tables, and constructs them by name with properties applied (the
 //! path the M106 `gst-launch` parser drives).
 
-use g2g_core::runtime::{LaunchFactory, Registry, SourceFactory};
+use g2g_core::runtime::{LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{Caps, Dim, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
@@ -62,6 +62,33 @@ fn inspect_dumps_properties_and_templates() {
     assert!(flip.contains("SINK") && flip.contains("SRC"), "lists pad templates:\n{flip}");
 
     assert!(reg.inspect("nonesuch").is_none(), "unknown name -> None");
+}
+
+/// M472: the muxer inspect path builds a one-input instance to carry its metadata
+/// and properties (before, it printed only the name and role). A muxer-only
+/// element (`funnel`) shows its Factory Details; a fan-in muxer with runtime knobs
+/// (M471) lists them in the same dump.
+#[test]
+fn inspect_muxer_carries_metadata_and_properties() {
+    use g2g_plugins::mux::InterleaveMux;
+
+    let mut reg = Registry::new();
+    reg.register_muxer(MuxerFactory::new("funnel", |n| Box::new(InterleaveMux::new(n, rgba_any()))));
+    #[cfg(feature = "std")]
+    reg.register_muxer(MuxerFactory::new("mp4mux", |n| Box::new(g2g_plugins::mp4muxn::Mp4MuxN::new(n))));
+
+    let f = reg.inspect("funnel").expect("muxer registered");
+    assert!(f.contains("Role        muxer (fan-in)"), "muxer role:\n{f}");
+    // Metadata is only present if inspect actually built an instance to read it.
+    assert!(f.contains("Long-name   Funnel"), "carries metadata from a built instance:\n{f}");
+    assert!(f.contains("Output caps:"), "shows the muxer output caps:\n{f}");
+
+    // A fan-in muxer with a property (M471) lists it in the muxer inspect branch.
+    #[cfg(feature = "std")]
+    {
+        let m = reg.inspect("mp4mux").expect("muxer registered");
+        assert!(m.contains("fragment-duration"), "lists the fan-in muxer property:\n{m}");
+    }
 }
 
 #[test]
