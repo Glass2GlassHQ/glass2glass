@@ -78,6 +78,10 @@ fn rescaling_fragment_changes_output_size() {
 /// the zero-copy import foundation; a fragment that *consumes* dma-buf (a GPU
 /// import) is separate future work, so this uses an `identity` passthrough and a
 /// placeholder fd, asserting the domain rather than reading pixels.
+///
+/// dma-buf is a Unix fd concept (`std::os::fd`, `/dev/null`); the Windows CI
+/// build has neither, so gate it to Unix.
+#[cfg(unix)]
 #[test]
 fn imports_a_dmabuf_frame_zero_copy() {
     use std::os::fd::IntoRawFd;
