@@ -112,6 +112,12 @@ pub mod gst_compat;
 // loaded elements register into a `Registry` the parser then uses by name.
 #[cfg(feature = "plugin-loader")]
 pub mod plugin_loader;
+// Tokio thread-per-arm executor for the opt-in multicore graph runner
+// (`run_graph_threaded`). Needs std (tokio) + multi-thread (Send graph).
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+mod graphthreads;
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub use graphthreads::TokioThreadSpawner;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 // Shared seek helper for byte-stream demuxers (M362): drives an upstream

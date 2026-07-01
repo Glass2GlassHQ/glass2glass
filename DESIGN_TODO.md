@@ -45,16 +45,17 @@ leverage first:
 
 ## Runtime / scheduling
 
-- **No cross-arm parallelism.** The graph runner drives every element arm
-  through a single `JoinAll` future (`runtime/join.rs`) in one task, so the
-  whole graph runs on one thread regardless of the tokio runtime's worker count
-  (the `multi-thread` feature only adds a `Send` bound on `ElementBound`; it does
-  not make the runner spawn). `BoxFuture<'a,T>` is not `Send`/`'static`, so arms
-  can't be `tokio::spawn`ed today. Multi-core parallelism would need either a
-  spawning runner with `Send + 'static` arms (large refactor) or `spawn_blocking`
-  offload for heavy synchronous elements (videoconvert / waylandsink XRGB
-  convert). Release-build perf is adequate for now (1080p HLS A/V+subs holds
-  30 fps); debug builds misrepresent it, so validate live runs with `--release`.
+- **Cooperative-runner element offload (Approach C).** Opt-in cross-arm
+  parallelism now exists (`run_graph_threaded`, thread-per-arm, DESIGN.md
+  §4.13.3). The remaining win is for the *cooperative default* runner: offload a
+  heavy synchronous element's per-frame CPU (software `ffmpegdec` decode, the
+  waylandsink XRGB convert) via a runtime-guarded `spawn_blocking`, so the sink
+  renders while decode runs, without opting into `--threads`. `ffmpegdec` holds a
+  `!Send` `AVCodecContext`, so it needs a small `unsafe Send` offload wrapper
+  consistent with the element's existing single-threaded-access contract; a
+  pure-CPU transform (videoconvert) is a cleaner first target. Release-build perf
+  is adequate without either (1080p HLS A/V+subs holds 30 fps); debug builds
+  misrepresent it, so validate live runs with `--release`.
 
 ## Platform: macOS
 

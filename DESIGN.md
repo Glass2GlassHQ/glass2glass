@@ -1095,6 +1095,31 @@ back a fresh `Graph<GraphNode>` per `instantiate()`, which is cleaner than makin
 `Graph` itself reusable: that would force every element to be `Clone` or
 re-initialisable in place, a contract the element traits deliberately avoid.
 
+**Opt-in multicore (thread-per-arm).** `run_graph` drives every arm cooperatively
+on the caller's one executor thread, so a CPU-bound stage (software decode/encode)
+blocks the whole graph while it runs. `run_graph_threaded(graph, clock, cap,
+spawner)` is the opt-in multicore sibling: it negotiates identically (the
+`prepare_graph` / `build_channels` / `fold_run_stats` helpers are shared verbatim,
+so the two drivers cannot diverge in how they solve or aggregate), then hands each
+arm to a [`GraphSpawner`](crate::runtime::GraphSpawner) to run on its **own OS
+thread** instead of `JoinAll`-multiplexing them. This is the GStreamer
+streaming-thread model, one thread per element, so CPU-bound stages overlap across
+cores. Crucially it needs no `Send` *futures*: the spawner receives a `Send`
+*builder closure* and constructs + drives the arm's (`!Send`) future entirely on
+the worker thread, so only the element and its channels (both `Send` under the
+`multi-thread` feature) cross the thread boundary. An element whose future holds a
+raw hardware context (a decoder) therefore runs unchanged, exactly as under the
+cooperative runner. Two spawners ship: core's dependency-free
+[`ThreadSpawner`](crate::runtime::ThreadSpawner) (std threads + the park-based
+`block_on`, for pure-core graphs) and `g2g-plugins`' `TokioThreadSpawner` (a
+per-arm current-thread tokio runtime with `enable_all`, so network / timer
+elements get a reactor). It stays opt-in (`g2g-launch --threads`) because a
+per-stage thread handoff adds wakeup latency: cooperative single-thread is the
+lower-latency default, and it is the only path for the `no_std` / wasm / embassy
+executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
+`run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
+can move its element onto a worker thread.
+
 #### 4.13.4 Mid-stream re-solve
 
 A mid-stream `PipelinePacket::CapsChanged` triggers a re-fixation that stays

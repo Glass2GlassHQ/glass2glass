@@ -86,6 +86,15 @@ pub use graph_runner::{
     GraphTemplate,
 };
 
+// Thread-per-arm (opt-in multicore) runner. Needs `multi-thread` so the graph's
+// elements + channels are `Send` to cross onto worker threads (the `!Send` arm
+// future stays on its thread); `std` for the OS-thread spawner it drives.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub use graph_runner::{
+    run_graph_threaded, run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture,
+    ThreadSpawner,
+};
+
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait
 // (`MultiInputElement::input_pad_index`) references them (M481).
 pub use autoplug::{PadKind, PadRequest};

@@ -48,6 +48,10 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
+#[cfg(feature = "multi-thread")]
+use g2g_core::runtime::run_graph_threaded_with_progress;
+#[cfg(feature = "multi-thread")]
+use g2g_plugins::TokioThreadSpawner;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
@@ -56,7 +60,7 @@ use g2g_plugins::registry::default_registry;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--threads] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
@@ -70,6 +74,11 @@ struct Opts {
     dot: bool,
     /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
     plugins: Vec<String>,
+    /// Run each element on its own OS thread (opt-in multicore, `--threads`),
+    /// via `run_graph_threaded`. Off by default: cooperative single-thread has
+    /// lower per-frame latency; this trades a per-stage thread handoff for
+    /// CPU-bound stages overlapping across cores. Needs the `multi-thread` build.
+    threads: bool,
 }
 
 /// Split leading `gst-launch`-style flags off the front of the args, returning
@@ -99,6 +108,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "-q" | "--quiet" => opts.quiet = true,
             "-h" | "--help" => opts.help = true,
             "--dot" => opts.dot = true,
+            "--threads" => opts.threads = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
                 None => eprintln!("g2g-launch: --plugin needs a path argument"),
@@ -310,7 +320,35 @@ fn main() {
     // macro). A short pipeline finishes inside the first tick, so it stays quiet.
     let mut printed_status = false;
     let result = rt.block_on(async {
-        let mut run = Box::pin(run_graph_with_progress(graph, &clock, LINK_CAPACITY, &progress));
+        // `--threads` runs one OS thread per arm (opt-in multicore); the default
+        // is the cooperative single-thread runner. Both return the same
+        // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
+        type RunFut<'r> = core::pin::Pin<
+            Box<dyn core::future::Future<Output = Result<g2g_core::runtime::RunStats, g2g_core::G2gError>> + 'r>,
+        >;
+        let mut run: RunFut = if opts.threads {
+            #[cfg(feature = "multi-thread")]
+            {
+                Box::pin(run_graph_threaded_with_progress(
+                    graph,
+                    &clock,
+                    LINK_CAPACITY,
+                    &progress,
+                    &TokioThreadSpawner,
+                ))
+            }
+            #[cfg(not(feature = "multi-thread"))]
+            {
+                let _ = graph;
+                eprintln!(
+                    "pipeline error: --threads requires a multi-thread build \
+                     (rebuild with --features multi-thread)"
+                );
+                process::exit(1);
+            }
+        } else {
+            Box::pin(run_graph_with_progress(graph, &clock, LINK_CAPACITY, &progress))
+        };
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,
