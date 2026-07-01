@@ -14,7 +14,7 @@ use core::slice;
 
 use g2g_core::Frame;
 
-use crate::bridge::{frame_bytes, BridgeGraph};
+use crate::bridge::BridgeGraph;
 
 // ---- GStreamer plugin entry points ------------------------------------------
 //
@@ -149,10 +149,20 @@ pub struct G2gBridge(BridgeGraph);
 #[repr(C)]
 #[derive(Debug)]
 pub struct G2gOut {
+    /// `0` = system-memory bytes (`data`/`len` valid), `1` = dma-buf
+    /// (`fd`/`stride`/`offset` valid, for a zero-copy hand-back).
+    kind: c_int,
+    /// System path: borrowed bytes, valid until release.
     data: *const u8,
     len: usize,
+    /// DMABUF path: the descriptor (still owned by the g2g frame; the C side
+    /// `dup`s it to build a `GstBuffer`) plus its plane stride and offset.
+    fd: c_int,
+    stride: u32,
+    offset: u32,
     pts_ns: u64,
-    /// Type-erased `Box<Frame>` keeping `data` alive until release.
+    /// Type-erased `Box<Frame>` keeping the payload (`data` or `fd`) alive until
+    /// release.
     owner: *mut c_void,
 }
 
@@ -287,8 +297,10 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
 }
 
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
-/// with `*out` filled, -1 at end-of-stream (or null handle), -2 if the frame is
-/// GPU-resident (the v1 shell handles only system memory; download upstream).
+/// with `*out` filled (`kind` selects the system-bytes vs dma-buf payload), -1 at
+/// end-of-stream (or null handle), -2 for a memory domain the shell cannot hand
+/// back (a GPU-resident frame that is neither system nor dma-buf; download it in
+/// the sub-graph first).
 ///
 /// # Safety
 /// `bridge` must be a live handle; `out` must point to writable [`G2gOut`].
@@ -298,13 +310,33 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
     let Some(bridge) = (unsafe { bridge.as_ref() }) else { return -1 };
     let Some(frame) = bridge.0.pull_blocking() else { return -1 };
     let boxed = Box::new(frame);
-    let Some(bytes) = frame_bytes(&boxed) else { return -2 };
-    let cout = G2gOut {
-        data: bytes.as_ptr(),
-        len: bytes.len(),
-        pts_ns: boxed.timing.pts_ns,
-        owner: Box::into_raw(boxed).cast::<c_void>(),
+    let pts_ns = boxed.timing.pts_ns;
+    let cout = match &boxed.domain {
+        g2g_core::MemoryDomain::System(slice) => G2gOut {
+            kind: 0,
+            data: slice.as_slice().as_ptr(),
+            len: slice.as_slice().len(),
+            fd: -1,
+            stride: 0,
+            offset: 0,
+            pts_ns,
+            owner: ptr::null_mut(),
+        },
+        g2g_core::MemoryDomain::DmaBuf(dmabuf) => G2gOut {
+            kind: 1,
+            data: ptr::null(),
+            len: 0,
+            fd: dmabuf.as_raw(),
+            stride: dmabuf.stride,
+            offset: dmabuf.offset,
+            pts_ns,
+            owner: ptr::null_mut(),
+        },
+        _ => return -2,
     };
+    // Only now transfer ownership (so an early `-2` return does not leak the box).
+    let mut cout = cout;
+    cout.owner = Box::into_raw(boxed).cast::<c_void>();
     // SAFETY: caller contract: `out` is writable.
     unsafe { *out = cout };
     1
@@ -323,11 +355,13 @@ pub unsafe extern "C" fn g2g_bridge_out_release(out: *mut G2gOut) {
     if out.owner.is_null() {
         return;
     }
-    // SAFETY: `owner` came from `Box::into_raw(Box<Frame>)` in pull_buf.
+    // SAFETY: `owner` came from `Box::into_raw(Box<Frame>)` in pull_buf. Dropping
+    // it releases the system slice or closes the dma-buf fd.
     drop(unsafe { Box::from_raw(out.owner.cast::<Frame>()) });
     out.owner = ptr::null_mut();
     out.data = ptr::null();
     out.len = 0;
+    out.fd = -1;
 }
 
 /// Signal EOS, join the run thread, and free the handle. Passing null is a

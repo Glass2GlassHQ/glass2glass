@@ -30,7 +30,10 @@
 //! for.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(not(feature = "std"), no_std)]
+// The bridge is inherently OS-coupled (a dedicated OS thread + tokio runtime for
+// the embedded graph, and a GStreamer C-FFI cdylib), so it is std, off the
+// no_std baseline by design, like `g2g-capi`. The `std` feature gates its deps
+// (tokio) and the modules that need them.
 
 #[cfg(feature = "std")]
 mod bridge;

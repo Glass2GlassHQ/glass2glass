@@ -308,8 +308,11 @@ g2g binary it ships — remains available and needs no ABI match.
   declares its result with `output-caps`, e.g.
   `glass2glass fragment=videoscale output-caps="video/x-raw,format=RGBA,width=640,height=360,framerate=30/1"`.
   Build and validate with `tools/gst-bridge-smoke.sh` (needs host GStreamer dev
-  libs). Remaining limitation: buffers are mapped and copied (no zero-copy
-  dma-buf import yet).
+  libs). A dma-buf-backed `GstBuffer` is imported and handed back zero-copy (the
+  shell detects `GstDmaBufMemory` on input and re-wraps a dma-buf output;
+  `tools/gst-bridge-dmabuf-smoke.sh`); system-memory buffers are mapped and
+  copied. A GPU-*compute* fragment (`dmabuftowgpu ! <compute>`) still needs a
+  download/export element at its tail to return the GPU result to the shell.
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---

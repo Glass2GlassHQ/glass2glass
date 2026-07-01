@@ -10,15 +10,21 @@
  * caps handed to g2g are the negotiated sink caps, serialized.
  */
 #include <gst/gst.h>
+#include <gst/allocators/gstdmabuf.h>
 #include <gst/base/gstbasetransform.h>
 #include <gst/video/video.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ---- Rust C-ABI core (src/ffi.rs) ---------------------------------------- */
 typedef struct G2gBridge G2gBridge;
 typedef struct {
+  int kind; /* 0 = system bytes, 1 = dma-buf fd */
   const unsigned char *data;
   size_t len;
+  int fd;
+  unsigned int stride;
+  unsigned int offset;
   unsigned long long pts_ns;
   void *owner;
 } G2gOut;
@@ -27,6 +33,8 @@ extern G2gBridge *g2g_bridge_create(const char *fragment, const char *in_caps,
                                     const char *out_caps);
 extern int g2g_bridge_push_buf(G2gBridge *b, const unsigned char *data, size_t len,
                                unsigned long long pts_ns);
+extern int g2g_bridge_push_dmabuf(G2gBridge *b, int fd, unsigned int stride, unsigned int offset,
+                                  unsigned long long pts_ns);
 extern int g2g_bridge_pull_buf(G2gBridge *b, G2gOut *out);
 extern void g2g_bridge_out_release(G2gOut *out);
 extern void g2g_bridge_destroy(G2gBridge *b);
@@ -41,6 +49,9 @@ struct _GstGlass2Glass {
   gchar *input_caps;   /* optional override of the serialized sink caps */
   gchar *output_caps;  /* if set, the sub-graph rescales/reformats to these caps */
   G2gBridge *bridge;   /* live between set_caps and stop */
+  guint in_stride;     /* input plane-0 stride, for a dma-buf input with no video meta */
+  guint out_height;    /* negotiated output height, for dma-buf output sizing */
+  GstAllocator *dmabuf_alloc; /* wraps a produced dma-buf fd into a GstBuffer */
 };
 
 G_DEFINE_TYPE(GstGlass2Glass, gst_glass2glass, GST_TYPE_BASE_TRANSFORM)
@@ -134,7 +145,8 @@ static gboolean gst_glass2glass_get_unit_size(GstBaseTransform *base, GstCaps *c
 /* ---- transform vmethods -------------------------------------------------- */
 /* Build the sub-graph once caps are fixed. `incaps` describes the buffers the
  * embedded appsrc receives; `outcaps` (== incaps for a preserving fragment) the
- * frames it produces. */
+ * frames it produces. Records the input stride and output height for the
+ * dma-buf import (which carries no byte length of its own). */
 static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps,
                                          GstCaps *outcaps) {
   GstGlass2Glass *self = GST_GLASS2GLASS(base);
@@ -142,6 +154,14 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
     g2g_bridge_destroy(self->bridge);
     self->bridge = NULL;
   }
+
+  GstVideoInfo ininfo, outinfo;
+  self->in_stride = gst_video_info_from_caps(&ininfo, incaps)
+                        ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&ininfo, 0)
+                        : 0;
+  self->out_height =
+      gst_video_info_from_caps(&outinfo, outcaps) ? GST_VIDEO_INFO_HEIGHT(&outinfo) : 0;
+
   gchar *instr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
   gchar *outstr = gst_caps_to_string(outcaps);
   const char *frag = self->fragment ? self->fragment : "identity";
@@ -154,50 +174,101 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
   return self->bridge != NULL;
 }
 
-/* Drive the sub-graph: push the input bytes, pull the one processed frame, copy
- * it into `dst`. Shared by the in-place and out-of-place paths. */
-static GstFlowReturn gst_glass2glass_run(GstGlass2Glass *self, GstBuffer *src, GstBuffer *dst) {
+/* Push one input buffer into the sub-graph. A dma-buf-backed buffer is imported
+ * zero-copy (the fd, not the mapped bytes); any other memory is mapped and its
+ * bytes copied in. */
+static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
+  guint64 pts = GST_BUFFER_PTS_IS_VALID(in) ? GST_BUFFER_PTS(in) : 0;
+  GstMemory *mem = gst_buffer_peek_memory(in, 0);
+  if (mem && gst_is_dmabuf_memory(mem)) {
+    int fd = gst_dmabuf_memory_get_fd(mem);
+    guint stride = self->in_stride, offset = 0;
+    GstVideoMeta *vmeta = gst_buffer_get_video_meta(in);
+    if (vmeta && vmeta->n_planes > 0) {
+      stride = (guint)vmeta->stride[0];
+      offset = (guint)vmeta->offset[0];
+    }
+    return g2g_bridge_push_dmabuf(self->bridge, fd, stride, offset, pts);
+  }
+  GstMapInfo map;
+  if (!gst_buffer_map(in, &map, GST_MAP_READ))
+    return FALSE;
+  gboolean ok = g2g_bridge_push_buf(self->bridge, map.data, map.size, pts);
+  gst_buffer_unmap(in, &map);
+  return ok;
+}
+
+/* Build the downstream buffer from a pulled frame: a system frame becomes an
+ * owned GstBuffer (bytes copied); a dma-buf frame is wrapped zero-copy into a
+ * dma-buf GstBuffer (its fd dup'ed, so the g2g frame keeps its own). */
+static GstBuffer *wrap_output(GstGlass2Glass *self, const G2gOut *out) {
+  if (out->kind == 1) {
+    if (!self->dmabuf_alloc)
+      self->dmabuf_alloc = gst_dmabuf_allocator_new();
+    gsize size = (gsize)out->offset + (gsize)out->stride * self->out_height;
+    /* dup: the g2g frame owns `out->fd`; GStreamer's dma-buf memory owns its own. */
+    GstMemory *mem = gst_dmabuf_allocator_alloc(self->dmabuf_alloc, dup(out->fd), size);
+    if (!mem)
+      return NULL;
+    GstBuffer *buf = gst_buffer_new();
+    gst_buffer_append_memory(buf, mem);
+    return buf;
+  }
+  GstBuffer *buf = gst_buffer_new_allocate(NULL, out->len, NULL);
+  if (!buf)
+    return NULL;
+  GstMapInfo map;
+  if (!gst_buffer_map(buf, &map, GST_MAP_WRITE)) {
+    gst_buffer_unref(buf);
+    return NULL;
+  }
+  memcpy(map.data, out->data, MIN(map.size, out->len));
+  gst_buffer_unmap(buf, &map);
+  return buf;
+}
+
+/* Produce one output buffer from the queued input. Overriding `generate_output`
+ * (rather than transform/transform_ip) lets the output buffer differ from the
+ * input in size *and* memory kind (system or dma-buf), which the in-place model
+ * cannot express. */
+static GstFlowReturn gst_glass2glass_generate_output(GstBaseTransform *base, GstBuffer **outbuf) {
+  GstGlass2Glass *self = GST_GLASS2GLASS(base);
+  *outbuf = NULL;
   if (!self->bridge)
     return GST_FLOW_NOT_NEGOTIATED;
 
-  GstMapInfo in;
-  if (!gst_buffer_map(src, &in, GST_MAP_READ))
-    return GST_FLOW_ERROR;
-  guint64 pts = GST_BUFFER_PTS_IS_VALID(src) ? GST_BUFFER_PTS(src) : 0;
-  gboolean pushed = g2g_bridge_push_buf(self->bridge, in.data, in.size, pts);
-  gst_buffer_unmap(src, &in);
-  if (!pushed) {
+  /* Take ownership of the buffer the default submit_input_buffer queued. */
+  GstBuffer *in = base->queued_buf;
+  base->queued_buf = NULL;
+  if (!in)
+    return GST_BASE_TRANSFORM_FLOW_DROPPED;
+
+  if (!push_input(self, in)) {
     GST_ERROR_OBJECT(self, "sub-graph did not accept the buffer (stalled)");
+    gst_buffer_unref(in);
     return GST_FLOW_ERROR;
   }
 
   G2gOut out;
   int r = g2g_bridge_pull_buf(self->bridge, &out);
-  if (r < 0)
-    /* -1 EOS, -2 GPU-resident frame (unsupported in this system-memory shell). */
+  if (r < 0) {
+    gst_buffer_unref(in);
+    /* -1 EOS, -2 a memory domain the shell cannot hand back (download it in the
+     * sub-graph, e.g. end the fragment with a wgpu/cuda download). */
     return (r == -1) ? GST_FLOW_EOS : GST_FLOW_ERROR;
+  }
 
-  GstMapInfo dmap;
-  if (!gst_buffer_map(dst, &dmap, GST_MAP_WRITE)) {
-    g2g_bridge_out_release(&out);
+  GstBuffer *result = wrap_output(self, &out);
+  g2g_bridge_out_release(&out);
+  if (!result) {
+    gst_buffer_unref(in);
     return GST_FLOW_ERROR;
   }
-  memcpy(dmap.data, out.data, MIN(dmap.size, out.len));
-  gst_buffer_unmap(dst, &dmap);
-  g2g_bridge_out_release(&out);
+  /* Carry timestamps / flags from the input. */
+  gst_buffer_copy_into(result, in, GST_BUFFER_COPY_TIMESTAMPS | GST_BUFFER_COPY_FLAGS, 0, -1);
+  gst_buffer_unref(in);
+  *outbuf = result;
   return GST_FLOW_OK;
-}
-
-/* In-place: caps/size preserving fragment, output reuses the input buffer. */
-static GstFlowReturn gst_glass2glass_transform_ip(GstBaseTransform *base, GstBuffer *buf) {
-  return gst_glass2glass_run(GST_GLASS2GLASS(base), buf, buf);
-}
-
-/* Out-of-place: caps/size changing fragment, the base class allocated `outbuf`
- * sized to the negotiated output caps (via get_unit_size). */
-static GstFlowReturn gst_glass2glass_transform(GstBaseTransform *base, GstBuffer *inbuf,
-                                               GstBuffer *outbuf) {
-  return gst_glass2glass_run(GST_GLASS2GLASS(base), inbuf, outbuf);
 }
 
 static gboolean gst_glass2glass_stop(GstBaseTransform *base) {
@@ -214,6 +285,8 @@ static void gst_glass2glass_finalize(GObject *object) {
   GstGlass2Glass *self = GST_GLASS2GLASS(object);
   if (self->bridge)
     g2g_bridge_destroy(self->bridge);
+  if (self->dmabuf_alloc)
+    gst_object_unref(self->dmabuf_alloc);
   g_free(self->fragment);
   g_free(self->input_caps);
   g_free(self->output_caps);
@@ -257,8 +330,9 @@ static void gst_glass2glass_class_init(GstGlass2GlassClass *klass) {
   base_class->transform_caps = gst_glass2glass_transform_caps;
   base_class->get_unit_size = gst_glass2glass_get_unit_size;
   base_class->set_caps = gst_glass2glass_set_caps;
-  base_class->transform = gst_glass2glass_transform;
-  base_class->transform_ip = gst_glass2glass_transform_ip;
+  /* `generate_output` (not transform/transform_ip) so the output buffer can
+   * differ from the input in size and memory kind (system or dma-buf). */
+  base_class->generate_output = gst_glass2glass_generate_output;
   base_class->stop = gst_glass2glass_stop;
 }
 
@@ -267,6 +341,9 @@ static void gst_glass2glass_init(GstGlass2Glass *self) {
   self->input_caps = NULL;
   self->output_caps = NULL;
   self->bridge = NULL;
+  self->in_stride = 0;
+  self->out_height = 0;
+  self->dmabuf_alloc = NULL;
 }
 
 /* ---- plugin init --------------------------------------------------------- */
