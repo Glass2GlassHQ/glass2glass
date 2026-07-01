@@ -105,7 +105,10 @@ pub enum VulkanVideoError {
     ExtensionUnsupported,
     /// No queue family advertises decode for this codec.
     NoDecodeQueue,
-    /// The driver rejected the capability query.
+    /// The access unit carried no decodable slice (no IDR slice NAL).
+    NoDecodableSlice,
+    /// A Vulkan call failed (capability query, session/image/buffer creation, or
+    /// the decode submission).
     QueryFailed(vk::Result),
 }
 
@@ -702,11 +705,14 @@ pub fn to_std_pps(pps: &H264Pps) -> vk::native::StdVideoH264PictureParameterSet 
 // ============================================================================
 
 /// The Vulkan Video decode extensions a decode device enables (on top of the
-/// codec-specific one).
-fn decode_device_extensions(codec: VulkanVideoCodec) -> [&'static core::ffi::CStr; 3] {
+/// codec-specific one). `synchronization2` is required: the video-decode image
+/// barriers use `PipelineStageFlags2::VIDEO_DECODE` / `AccessFlags2` which only
+/// exist in the sync2 (barrier2) path, not classic barriers.
+fn decode_device_extensions(codec: VulkanVideoCodec) -> [&'static core::ffi::CStr; 4] {
     [
         ash::khr::video_queue::NAME,
         ash::khr::video_decode_queue::NAME,
+        ash::khr::synchronization2::NAME,
         codec.decode_extension(),
     ]
 }
@@ -771,6 +777,9 @@ pub struct VulkanVideoDevice {
     phys: vk::PhysicalDevice,
     mem_props: vk::PhysicalDeviceMemoryProperties,
     video_fns: ash::khr::video_queue::Device,
+    decode_fns: ash::khr::video_decode_queue::Device,
+    sync2_fns: ash::khr::synchronization2::Device,
+    decode_queue: vk::Queue,
     decode_queue_family: u32,
     caps: VulkanVideoDecodeCaps,
 }
@@ -871,7 +880,7 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
     // Reach the raw ash handles now owned by the wgpu device.
     // SAFETY: the wgpu device is Vulkan-backed (we requested the Vulkan
     // backend); the guard's handles are cloned/copied, not retained by borrow.
-    let (raw_device, phys, mem_props, video_fns) = unsafe {
+    let (raw_device, phys, mem_props, video_fns, decode_fns, sync2_fns, decode_queue) = unsafe {
         let hal_device = wgpu_device
             .as_hal::<wgpu_hal::api::Vulkan>()
             .ok_or(VulkanVideoError::NoVulkanAdapter)?;
@@ -880,7 +889,10 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
         let raw_instance = hal_device.shared_instance().raw_instance();
         let mem_props = raw_instance.get_physical_device_memory_properties(phys);
         let video_fns = ash::khr::video_queue::Device::new(raw_instance, &raw_device);
-        (raw_device, phys, mem_props, video_fns)
+        let decode_fns = ash::khr::video_decode_queue::Device::new(raw_instance, &raw_device);
+        let sync2_fns = ash::khr::synchronization2::Device::new(raw_instance, &raw_device);
+        let decode_queue = raw_device.get_device_queue(decode_family, 0);
+        (raw_device, phys, mem_props, video_fns, decode_fns, sync2_fns, decode_queue)
     };
 
     Ok(VulkanVideoDevice {
@@ -892,6 +904,9 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
         phys,
         mem_props,
         video_fns,
+        decode_fns,
+        sync2_fns,
+        decode_queue,
         decode_queue_family: decode_family,
         caps,
     })
@@ -1207,6 +1222,402 @@ impl VulkanVideoDevice {
         }
         Ok(memories)
     }
+
+    /// Allocate + bind device memory for an image, returning the memory.
+    /// # Safety
+    /// `image` must be a valid image created from `self.raw_device`.
+    unsafe fn alloc_bind_image(
+        &self,
+        image: vk::Image,
+        flags: vk::MemoryPropertyFlags,
+    ) -> Result<vk::DeviceMemory, VulkanVideoError> {
+        // SAFETY: image is valid (contract).
+        let req = unsafe { self.raw_device.get_image_memory_requirements(image) };
+        let mem_type = find_memory_type(&self.mem_props, req.memory_type_bits, flags)
+            .or_else(|| {
+                find_memory_type(&self.mem_props, req.memory_type_bits, vk::MemoryPropertyFlags::empty())
+            })
+            .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+        let ai = vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(mem_type);
+        // SAFETY: valid allocate info.
+        let mem = unsafe { self.raw_device.allocate_memory(&ai, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh image + memory, single bind.
+        unsafe { self.raw_device.bind_image_memory(image, mem, 0) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        Ok(mem)
+    }
+
+    /// Decode a single IDR frame into an NV12 image and read back its luma
+    /// plane, the minimal end-to-end proof the decode path produces pixels.
+    /// `idr_au` is an Annex-B access unit; the first IDR slice NAL (type 5) is
+    /// submitted (SPS/PPS come from the session parameters, not the bitstream).
+    /// Returns the luma plane (`width*height` bytes).
+    ///
+    /// IDR-only: no inter-frame references, so the DPB holds just the one
+    /// decoded picture and the `Std*` picture info is the known IDR constants
+    /// (frame_num 0, POC 0, IdrPicFlag). Full reference management is a later
+    /// increment. On the error path some transient Vulkan objects may leak; this
+    /// is a one-shot validation entry point, not the steady-state element.
+    pub fn decode_idr_luma(
+        &self,
+        session: &H264DecodeSession,
+        idr_au: &[u8],
+    ) -> Result<DecodedLuma, VulkanVideoError> {
+        let (w, h) = session.coded_extent;
+        let slice = extract_first_idr_slice(idr_au).ok_or(VulkanVideoError::NoDecodableSlice)?;
+        let dev = &self.raw_device;
+        let prof = h264_profile();
+
+        // Decode target (coincide: same image is DPB slot 0 and decode output).
+        let mut profile_list =
+            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(&prof.profile));
+        let image_ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(session.picture_format)
+            .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                    | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut profile_list);
+        // SAFETY: valid create info; the chained profile list outlives the call.
+        let image = unsafe { dev.create_image(&image_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh image.
+        let image_mem = unsafe { self.alloc_bind_image(image, vk::MemoryPropertyFlags::DEVICE_LOCAL) }?;
+        let view_ci = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(session.picture_format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        // SAFETY: image is valid and outlives the view.
+        let view = unsafe { dev.create_image_view(&view_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+
+        // Coded bitstream buffer (host-visible), holding the IDR slice.
+        let size_align = self.caps.min_bitstream_buffer_size_alignment.max(1);
+        let buf_size = round_up(slice.len() as u64, size_align);
+        let mut buf_profile_list =
+            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(&prof.profile));
+        let buf_ci = vk::BufferCreateInfo::default()
+            .size(buf_size)
+            .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut buf_profile_list);
+        // SAFETY: valid create info; chained profile list outlives the call.
+        let bitstream = unsafe { dev.create_buffer(&buf_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh buffer.
+        let breq = unsafe { dev.get_buffer_memory_requirements(bitstream) };
+        let btype = find_memory_type(
+            &self.mem_props,
+            breq.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+        let bai = vk::MemoryAllocateInfo::default().allocation_size(breq.size).memory_type_index(btype);
+        // SAFETY: valid allocate + bind + map of a fresh host-visible buffer.
+        let bitstream_mem = unsafe {
+            let m = dev.allocate_memory(&bai, None).map_err(VulkanVideoError::QueryFailed)?;
+            dev.bind_buffer_memory(bitstream, m, 0).map_err(VulkanVideoError::QueryFailed)?;
+            let ptr = dev
+                .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
+                .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
+            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            dev.unmap_memory(m);
+            m
+        };
+
+        // Readback buffer for the luma plane (w*h bytes), host-visible.
+        let luma_len = (w as u64) * (h as u64);
+        let rb_ci = vk::BufferCreateInfo::default()
+            .size(luma_len)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: valid create info.
+        let readback = unsafe { dev.create_buffer(&rb_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh buffer.
+        let rreq = unsafe { dev.get_buffer_memory_requirements(readback) };
+        let rtype = find_memory_type(
+            &self.mem_props,
+            rreq.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+        let rai = vk::MemoryAllocateInfo::default().allocation_size(rreq.size).memory_type_index(rtype);
+        // SAFETY: allocate + bind of a fresh buffer.
+        let readback_mem = unsafe {
+            let m = dev.allocate_memory(&rai, None).map_err(VulkanVideoError::QueryFailed)?;
+            dev.bind_buffer_memory(readback, m, 0).map_err(VulkanVideoError::QueryFailed)?;
+            m
+        };
+
+        // Command pool + buffer on the decode queue family.
+        let pool_ci = vk::CommandPoolCreateInfo::default().queue_family_index(self.decode_queue_family);
+        // SAFETY: valid create info.
+        let pool = unsafe { dev.create_command_pool(&pool_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+        let cb_ai = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        // SAFETY: valid allocate info.
+        let cb = unsafe { dev.allocate_command_buffers(&cb_ai) }
+            .map_err(VulkanVideoError::QueryFailed)?[0];
+
+        // Per-frame Std picture info: a lone IDR, decoded into DPB slot 0.
+        // SAFETY: bitfield POD, valid all-zero.
+        let mut pic_flags: vk::native::StdVideoDecodeH264PictureInfoFlags =
+            unsafe { core::mem::zeroed() };
+        pic_flags.set_field_pic_flag(0);
+        pic_flags.set_is_intra(1);
+        pic_flags.set_IdrPicFlag(1);
+        pic_flags.set_is_reference(1);
+        let std_pic = vk::native::StdVideoDecodeH264PictureInfo {
+            flags: pic_flags,
+            seq_parameter_set_id: session_sps_id(session),
+            pic_parameter_set_id: 0,
+            reserved1: 0,
+            reserved2: 0,
+            frame_num: 0,
+            idr_pic_id: 0,
+            PicOrderCnt: [0, 0],
+        };
+        let slice_offsets = [0u32];
+        let mut h264_pic = vk::VideoDecodeH264PictureInfoKHR::default()
+            .std_picture_info(&std_pic)
+            .slice_offsets(&slice_offsets);
+
+        // The decoded picture as a DPB resource (slot 0).
+        let picres = vk::VideoPictureResourceInfoKHR::default()
+            .coded_offset(vk::Offset2D { x: 0, y: 0 })
+            .coded_extent(vk::Extent2D { width: w, height: h })
+            .base_array_layer(0)
+            .image_view_binding(view);
+        // At begin, reserve the slot being set up with slot_index -1 (not yet a
+        // valid reference); the decode call activates it as slot 0.
+        let begin_slot = vk::VideoReferenceSlotInfoKHR::default()
+            .slot_index(-1)
+            .picture_resource(&picres);
+        let setup_slot = vk::VideoReferenceSlotInfoKHR::default()
+            .slot_index(0)
+            .picture_resource(&picres);
+
+        let begin_info = vk::VideoBeginCodingInfoKHR::default()
+            .video_session(session.session)
+            .video_session_parameters(session.parameters)
+            .reference_slots(core::slice::from_ref(&begin_slot));
+        let control_info = vk::VideoCodingControlInfoKHR::default()
+            .flags(vk::VideoCodingControlFlagsKHR::RESET);
+        let end_info = vk::VideoEndCodingInfoKHR::default();
+        let decode_info = vk::VideoDecodeInfoKHR::default()
+            .src_buffer(bitstream)
+            .src_buffer_offset(0)
+            .src_buffer_range(buf_size)
+            .dst_picture_resource(picres)
+            .setup_reference_slot(&setup_slot)
+            .push_next(&mut h264_pic);
+
+        // Record and submit.
+        // SAFETY: all handles above are valid and outlive the submission we wait
+        // on; the barriers move the image UNDEFINED -> DPB (decode) -> TRANSFER_SRC.
+        let submit_result = unsafe {
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            dev.begin_command_buffer(cb, &begin).map_err(VulkanVideoError::QueryFailed)?;
+
+            let to_dpb = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .src_access_mask(vk::AccessFlags2::empty())
+                .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let dep = vk::DependencyInfo::default()
+                .image_memory_barriers(core::slice::from_ref(&to_dpb));
+            (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep);
+
+            (self.video_fns.fp().cmd_begin_video_coding_khr)(cb, &begin_info);
+            (self.video_fns.fp().cmd_control_video_coding_khr)(cb, &control_info);
+            (self.decode_fns.fp().cmd_decode_video_khr)(cb, &decode_info);
+            (self.video_fns.fp().cmd_end_video_coding_khr)(cb, &end_info);
+
+            let to_src = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                .src_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let dep2 = vk::DependencyInfo::default()
+                .image_memory_barriers(core::slice::from_ref(&to_src));
+            (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep2);
+
+            let region = vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::PLANE_0,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            dev.cmd_copy_image_to_buffer(
+                cb,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback,
+                core::slice::from_ref(&region),
+            );
+
+            dev.end_command_buffer(cb).map_err(VulkanVideoError::QueryFailed)?;
+
+            let fence = dev
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(VulkanVideoError::QueryFailed)?;
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            let r = dev
+                .queue_submit(self.decode_queue, core::slice::from_ref(&submit), fence)
+                .and_then(|_| dev.wait_for_fences(&[fence], true, u64::MAX));
+            dev.destroy_fence(fence, None);
+            r.map_err(VulkanVideoError::QueryFailed)
+        };
+
+        // Read back the luma plane before tearing down.
+        let luma = match submit_result {
+            Ok(()) => {
+                // SAFETY: readback_mem is host-visible/coherent and holds
+                // `luma_len` bytes written by the completed copy.
+                unsafe {
+                    let ptr = dev
+                        .map_memory(readback_mem, 0, luma_len, vk::MemoryMapFlags::empty())
+                        .map_err(VulkanVideoError::QueryFailed)?
+                        as *const u8;
+                    let mut v = alloc::vec![0u8; luma_len as usize];
+                    core::ptr::copy_nonoverlapping(ptr, v.as_mut_ptr(), luma_len as usize);
+                    dev.unmap_memory(readback_mem);
+                    v
+                }
+            }
+            Err(e) => {
+                // SAFETY: destroy the transient objects created above once.
+                unsafe { self.destroy_decode_transients(pool, image, view, image_mem, bitstream, bitstream_mem, readback, readback_mem) };
+                return Err(e);
+            }
+        };
+
+        // SAFETY: teardown of all transient objects, each destroyed once, after
+        // the decode has completed (fence waited).
+        unsafe { self.destroy_decode_transients(pool, image, view, image_mem, bitstream, bitstream_mem, readback, readback_mem) };
+
+        Ok(DecodedLuma { width: w, height: h, luma })
+    }
+
+    /// Destroy the one-shot decode objects (fence already destroyed inline).
+    /// # Safety
+    /// Every handle must have been created from `self.raw_device` and not yet
+    /// destroyed; no work referencing them may still be in flight.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn destroy_decode_transients(
+        &self,
+        pool: vk::CommandPool,
+        image: vk::Image,
+        view: vk::ImageView,
+        image_mem: vk::DeviceMemory,
+        bitstream: vk::Buffer,
+        bitstream_mem: vk::DeviceMemory,
+        readback: vk::Buffer,
+        readback_mem: vk::DeviceMemory,
+    ) {
+        let dev = &self.raw_device;
+        // SAFETY: contract above; destroy in dependency order.
+        unsafe {
+            dev.destroy_command_pool(pool, None);
+            dev.destroy_image_view(view, None);
+            dev.destroy_image(image, None);
+            dev.free_memory(image_mem, None);
+            dev.destroy_buffer(bitstream, None);
+            dev.free_memory(bitstream_mem, None);
+            dev.destroy_buffer(readback, None);
+            dev.free_memory(readback_mem, None);
+        }
+    }
+}
+
+/// A decoded luma plane read back to system memory (validation output).
+#[derive(Debug, Clone)]
+pub struct DecodedLuma {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` bytes, one per luma sample (row-major, tightly packed).
+    pub luma: alloc::vec::Vec<u8>,
+}
+
+/// The SPS id the session was built with (constant 0 for our single-SPS path).
+fn session_sps_id(_session: &H264DecodeSession) -> u8 {
+    0
+}
+
+fn round_up(x: u64, align: u64) -> u64 {
+    x.div_ceil(align).saturating_mul(align)
+}
+
+/// Extract the first IDR slice NAL (nal_unit_type 5) from an Annex-B / AVCC
+/// access unit and return it framed with a 4-byte start code, ready for the
+/// Vulkan bitstream buffer (slice offset 0). `None` if the AU has no IDR slice.
+fn extract_first_idr_slice(au: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+    for nal in nal_units_any(au) {
+        if nal.is_empty() {
+            continue;
+        }
+        if nal[0] & 0x1F == 5 {
+            let mut out = alloc::vec::Vec::with_capacity(nal.len() + 4);
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+            return Some(out);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

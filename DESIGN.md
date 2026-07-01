@@ -691,7 +691,7 @@ quartet `cuGraphicsGLRegisterImage` / `cuGraphicsMapResources` /
 `cuGraphicsSubResourceGetMappedArray` / `cuGraphicsUnmapResources`. The
 plugin links `libcuda` directly.
 
-#### 4.11.6 Vulkan Video (vendor-neutral GPU-resident decode) — capability probe done, decode session planned
+#### 4.11.6 Vulkan Video (vendor-neutral GPU-resident decode) — H.264 IDR decode working, element planned
 
 The NVDEC→CUDA→wgpu path of §4.11.5 is fast but **vendor-locked**: CUDA has no
 AMD or Intel analog, so a wgpu-based consumer (a game engine, a visualization

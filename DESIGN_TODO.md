@@ -144,19 +144,23 @@ leverage first:
   (`open_h264_decode_device`, decode queue added via wgpu-hal `open_with_callback`,
   no hand-built `VkDevice`) and `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`
   (`create_h264_session`), whose parameter creation makes the driver validate the
-  M487 mapping. What is left for a decoded frame:
-  1. DPB + output `VkImage`s (NV12 `G8_B8R8_2PLANE_420_UNORM`) and the coded
-     bitstream `VkBuffer`;
-  2. per-frame `Std*` picture/slice info (`StdVideoDecodeH264PictureInfo` +
-     slice offsets) and DPB reference-slot management from the slice headers;
-  3. `vkCmdDecodeVideoKHR` recording (begin/decode/end video coding) on the decode
-     queue + fence sync, output `VkImage` wrapped as a `wgpu::Texture` and pipelined
-     through the YCbCr pass with a `RING_DEPTH` in-flight ring;
-  4. the `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
-     properties, `output_domains`), re-emitting parameters on mid-stream SPS/PPS
-     change via `CapsChanged`.
-  Sizing: the IDR-only decode (no inter-reference DPB) is the next checkpoint;
-  full P/B-frame DPB, then H.265 and AV1 (+1 each, mostly their parameter mapping).
+  M487 mapping. DONE (M489, validated on the 3060): `decode_idr_luma` decodes a
+  single IDR frame end to end (NV12 DPB/output image, host-visible bitstream
+  buffer, `vkCmdBeginVideoCodingKHR` + `RESET` + `vkCmdDecodeVideoKHR` + end, with
+  `synchronization2` image barriers) and reads back a non-uniform luma plane, the
+  first real Vulkan Video decode in the tree. What is left:
+  1. Full DPB reference management: per-frame slice-header parse (frame_num, POC,
+     idr_pic_id, slice_type), multi-slice pictures, and P/B-frame reference slots
+     (M489 hardcodes the lone-IDR `Std*` constants and one DPB slot).
+  2. Output `VkImage` -> `wgpu::Texture` (reuse `cudawgpu`/`dmabufwgpu`
+     `texture_from_raw`) + the NV12 -> RGBA `VkSamplerYcbcrConversion` pass
+     (`mediacodec_wgpu`), pipelined through a `RING_DEPTH` in-flight ring, instead
+     of the M489 CPU luma readback.
+  3. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
+     properties, `output_domains = {WgpuTexture}`), re-emitting parameters on
+     mid-stream SPS/PPS change via `CapsChanged`.
+  4. Hardening: PSNR-vs-ffmpeg reference comparison; then H.265 and AV1 (+1 each,
+     mostly their parameter mapping).
   Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
   bleed correctness) and the `create_from_hal` device adoption under wgpu 29
   (prototype in isolation first). Test `mNNN_vulkan_video_decode.rs`: decode a
