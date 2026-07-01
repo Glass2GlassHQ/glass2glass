@@ -348,14 +348,13 @@ g2g-launch 'videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! 
   `gstreamer` feature; v1 is system-memory (a copy each way), dma-buf zero-copy
   through it is future work. Usable from `g2g-launch` (the tokenizer is
   quote-aware, so `gstwrap element="x264enc bitrate=4000"` parses).
-- `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---
 
 ## 9. CLI quick reference
 
 ```sh
-g2g-launch [-v] <pipeline>        # run a gst-launch-style line (-v: dump wiring)
+g2g-launch [-v] <pipeline>        # run a gst-launch-style line (-v: per-link negotiated caps)
 g2g-inspect                       # list elements
 g2g-inspect <element>             # one element's role, properties, pad templates
 g2g-inspect --all                 # full catalog

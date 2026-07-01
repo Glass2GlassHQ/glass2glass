@@ -44,9 +44,21 @@ domain (GPU / zero-copy links are drawn bold and labelled e.g. `memory:Cuda`),
 its non-default `LinkPolicy`, and fan-out / fan-in pad indices. On a negotiation
 failure it falls back to a topology-only dump.
 
+For a quick text dump without Graphviz, `g2g-launch -v` prints the same per-link
+**negotiated caps** + memory domain + `LinkPolicy` to stderr before running (the
+gst `-v` analog), falling back to a topology-only wiring list if negotiation
+fails:
+
+```sh
+g2g-launch -v videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink
+#   [0] VideoTestSrc -> VideoConvert : video/x-raw,format=RGBA,...  mem=System policy=Block
+#   [1] VideoConvert -> CapsFilter   : video/x-raw,format=NV12,...  mem=System policy=Block
+```
+
 In code, `Graph::to_dot` / `ValidatedGraph::to_dot` (in `g2g_core::dot`) render
 any graph; `g2g_core::runtime::negotiate_graph` runs the caps solve without
-running the pipeline and returns the per-edge caps + memory domains the dump uses.
+running the pipeline and returns the per-edge caps + memory domains both the DOT
+dump and `-v` use.
 
 ## Caps-negotiation explainer
 

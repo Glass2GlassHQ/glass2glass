@@ -12,7 +12,8 @@
 //! feature (registry + wall clock are std-only).
 //!
 //! Options (the common `gst-launch-1.0` set):
-//!   -v, --verbose       print the parsed pipeline (elements + link policies)
+//!   -v, --verbose       print the pipeline with each link's negotiated caps +
+//!                       memory domain (falls back to topology if nego fails)
 //!   -q, --quiet         suppress the PLAYING / Done progress lines
 //!   --dot               dump the parsed pipeline as Graphviz DOT and exit
 //!                       (pipe to `dot -Tsvg`); does not run the pipeline
@@ -242,13 +243,48 @@ fn main() {
     }
 
     if opts.verbose {
-        // Best-effort `-v`: report the wiring the parse produced (link count and
-        // each edge's backpressure policy). Per-pad negotiated caps are not
-        // surfaced from the runner yet, so this stops short of gst's caps dump.
         eprintln!("pipeline: {pipeline}");
-        eprintln!("links ({}):", graph.edges().len());
-        for (i, e) in graph.edges().iter().enumerate() {
-            eprintln!("  [{i}] {:?} -> {:?}  policy={:?}", e.src, e.dst, e.policy);
+        // Show each link's negotiated caps + memory domain (gst `-v` style). The
+        // solve lives in `negotiate_graph`, which consumes a graph, so negotiate a
+        // freshly-parsed throwaway copy and keep `graph` for the run. On any
+        // negotiation failure, fall back to the topology-only wiring dump.
+        let negotiated = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()
+            .and_then(|rt| {
+                let fresh = parse_launch(&reg, &pipeline).ok()?;
+                rt.block_on(g2g_core::runtime::negotiate_graph(fresh)).ok()
+            });
+        match negotiated {
+            Some((vg, caps, memory)) => {
+                let name = |n: g2g_core::NodeId| {
+                    vg.element(n)
+                        .map(|el| el.log_category().to_string())
+                        .unwrap_or_else(|| format!("n{}", n.0))
+                };
+                eprintln!("negotiated links ({}):", vg.edge_count());
+                for id in 0..vg.edge_count() {
+                    let e = vg.edge(id);
+                    let caps = caps.get(id).map_or_else(|| "?".to_string(), |c| c.to_gst_string());
+                    let mem = memory.get(id).copied().unwrap_or(g2g_core::MemoryDomainKind::System);
+                    eprintln!(
+                        "  [{id}] {} -> {} : {caps}  mem={mem:?} policy={:?}",
+                        name(e.src.node),
+                        name(e.dst.node),
+                        e.policy
+                    );
+                }
+            }
+            None => {
+                eprintln!(
+                    "links ({}) [negotiation unavailable, topology only]:",
+                    graph.edges().len()
+                );
+                for (i, e) in graph.edges().iter().enumerate() {
+                    eprintln!("  [{i}] {:?} -> {:?}  policy={:?}", e.src, e.dst, e.policy);
+                }
+            }
         }
     }
 
