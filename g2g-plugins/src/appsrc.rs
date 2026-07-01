@@ -26,7 +26,7 @@ use alloc::string::{String, ToString};
 use spin::Mutex;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::{bounded, Receiver, Sender, SourceLoop};
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
@@ -42,11 +42,12 @@ use crate::capsfilter::parse_caps_set;
 /// drains it as it runs.
 const FEED_DEPTH: usize = 16;
 
-/// One item crossing the feed channel: a buffer (owned or a zero-copy foreign
-/// lend, both a `SystemSlice`) or the end-of-stream marker.
+/// One item crossing the feed channel: a frame in some memory domain (an owned
+/// or foreign-lent `System` slice, or an imported `DmaBuf` descriptor) or the
+/// end-of-stream marker.
 #[derive(Debug)]
 enum AppItem {
-    Frame { slice: SystemSlice, pts_ns: u64 },
+    Frame { domain: MemoryDomain, pts_ns: u64 },
     Eos,
 }
 
@@ -78,7 +79,17 @@ impl AppSrcFeed {
     /// copy (the free callback fires when the frame is finally dropped).
     /// Returns `false` (releasing `slice`) if the feed is full or closed.
     pub fn push_slice(&self, slice: SystemSlice, pts_ns: u64) -> bool {
-        self.tx.try_send(AppItem::Frame { slice, pts_ns }).is_ok()
+        self.tx.try_send(AppItem::Frame { domain: MemoryDomain::System(slice), pts_ns }).is_ok()
+    }
+
+    /// Push an imported DMABUF frame: the descriptor stays on the GPU/producer,
+    /// no bytes are copied. `dmabuf` owns its fd (dup it from the producer's, so
+    /// the two lifetimes are independent). Returns `false` (dropping `dmabuf`,
+    /// which closes its fd) if the feed is full or closed. The downstream element
+    /// must accept the `DmaBuf` memory domain; a system-memory consumer needs an
+    /// import/download step first.
+    pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
+        self.tx.try_send(AppItem::Frame { domain: MemoryDomain::DmaBuf(dmabuf), pts_ns }).is_ok()
     }
 
     /// Signal end-of-stream: the source emits a final `Eos` and `run` returns.
@@ -176,9 +187,9 @@ impl SourceLoop for AppSrc {
             let mut pushed = 0u64;
             // The loop ends when the pattern stops matching: an explicit
             // `AppItem::Eos`, or `None` once every feed handle has dropped.
-            while let Some(AppItem::Frame { slice, pts_ns }) = feed.recv().await {
+            while let Some(AppItem::Frame { domain, pts_ns }) = feed.recv().await {
                 let frame = Frame {
-                    domain: MemoryDomain::System(slice),
+                    domain,
                     timing: FrameTiming { pts_ns, dts_ns: pts_ns, ..FrameTiming::default() },
                     sequence: self.seq,
                     meta: Default::default(),

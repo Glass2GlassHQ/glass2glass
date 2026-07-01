@@ -73,6 +73,34 @@ fn rescaling_fragment_changes_output_size() {
     assert_eq!(out_lens, vec![64], "the downscaled frame is 4x4 RGBA, not the 8x8 input");
 }
 
+/// An imported DMABUF frame is ingested by the embedded graph and travels
+/// through it in the `DmaBuf` memory domain (no copy to system memory). This is
+/// the zero-copy import foundation; a fragment that *consumes* dma-buf (a GPU
+/// import) is separate future work, so this uses an `identity` passthrough and a
+/// placeholder fd, asserting the domain rather than reading pixels.
+#[test]
+fn imports_a_dmabuf_frame_zero_copy() {
+    use std::os::fd::IntoRawFd;
+    use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
+
+    let bridge = BridgeGraph::new("identity", CAPS).expect("builds");
+
+    // A real, closeable fd stands in for a dma-buf descriptor; `identity` does
+    // not read it, so no mapping is needed. `OwnedDmaBuf` closes it on drop.
+    let fd = std::fs::File::open("/dev/null").expect("open /dev/null").into_raw_fd();
+    // SAFETY: `fd` is a fresh fd this test solely owns; ownership transfers to
+    // the OwnedDmaBuf, which closes it once.
+    let dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, /*stride*/ 8, /*offset*/ 0) };
+    assert!(bridge.push_dmabuf(dmabuf, 0), "feed accepted the dma-buf frame");
+    bridge.end_of_stream();
+
+    let mut domains = Vec::new();
+    while let Some(frame) = bridge.pull_blocking() {
+        domains.push(matches!(frame.domain, MemoryDomain::DmaBuf(_)));
+    }
+    assert_eq!(domains, vec![true], "the frame stayed in the DmaBuf domain end to end");
+}
+
 /// A fragment that names an element g2g lacks fails construction with a parse
 /// error (carrying the launch diagnostics / porting hint), not a panic or a hung
 /// thread. This is the feedback an app developer gets while porting.

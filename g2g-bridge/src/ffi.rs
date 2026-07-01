@@ -248,6 +248,44 @@ pub unsafe extern "C" fn g2g_bridge_push_buf(
     0
 }
 
+/// Import a DMABUF buffer into the sub-graph zero-copy: `fd` is `dup`ed (so the
+/// sub-graph's descriptor lifetime is independent of GStreamer's, which keeps
+/// the original) and handed downstream without copying pixel bytes. Returns 1 on
+/// success, 0 if the feed is full / the handle is null / the `dup` failed.
+///
+/// The fragment's first element must accept the `DmaBuf` domain (a GPU import);
+/// a system-memory fragment has no consumer for it. Use [`g2g_bridge_push_buf`]
+/// for the mapped-bytes path.
+///
+/// # Safety
+/// `bridge` must be a live handle; `fd` must be a valid DMABUF descriptor owned
+/// by the caller for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
+    bridge: *mut G2gBridge,
+    fd: c_int,
+    stride: u32,
+    offset: u32,
+    pts_ns: u64,
+) -> c_int {
+    // SAFETY: caller contract.
+    let Some(bridge) = (unsafe { bridge.as_ref() }) else { return 0 };
+    // Duplicate the fd: GStreamer retains ownership of the buffer's original, and
+    // the g2g `OwnedDmaBuf` closes only this dup on drop.
+    extern "C" {
+        fn dup(fd: c_int) -> c_int;
+    }
+    // SAFETY: `dup` on a valid fd returns a new owned fd or -1.
+    let dup_fd = unsafe { dup(fd) };
+    if dup_fd < 0 {
+        return 0;
+    }
+    // SAFETY: `dup_fd` is a fresh fd this call solely owns; ownership transfers
+    // to the `OwnedDmaBuf`, which closes it on drop.
+    let dmabuf = unsafe { g2g_core::memory::OwnedDmaBuf::from_raw(dup_fd, stride, offset) };
+    c_int::from(bridge.0.push_dmabuf(dmabuf, pts_ns))
+}
+
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
 /// with `*out` filled, -1 at end-of-stream (or null handle), -2 if the frame is
 /// GPU-resident (the v1 shell handles only system memory; download upstream).

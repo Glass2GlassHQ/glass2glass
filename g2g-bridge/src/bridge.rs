@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use g2g_core::memory::MemoryDomain;
+use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
 use g2g_core::runtime::{parse_launch, run_graph, ParseError, RunStats};
 use g2g_core::{Frame, G2gError, PipelineClock};
 
@@ -161,6 +161,18 @@ impl BridgeGraph {
     /// Non-blocking: safe to call from a GStreamer streaming thread's `chain`.
     pub fn push(&self, data: &[u8], pts_ns: u64) -> bool {
         self.feed.as_ref().is_some_and(|f| f.push(data, pts_ns))
+    }
+
+    /// Push an imported DMABUF frame into the embedded graph, zero-copy: the
+    /// descriptor `dmabuf` (which owns its fd, so it must be `dup`ed from the
+    /// producer's) is handed to the sub-graph without copying pixel bytes.
+    /// Returns `false` if the feed is full or the graph is gone.
+    ///
+    /// The fragment's first element must accept the `DmaBuf` memory domain (a GPU
+    /// import / download). With a system-memory fragment, use [`push`](Self::push)
+    /// instead; a `DmaBuf` frame handed to such a graph has no consumer.
+    pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
+        self.feed.as_ref().is_some_and(|f| f.push_dmabuf(dmabuf, pts_ns))
     }
 
     /// Drain one processed frame if ready. Returns [`Pull::Empty`] when the graph
