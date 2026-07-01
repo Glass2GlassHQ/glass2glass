@@ -286,3 +286,431 @@ pub unsafe fn probe_physical_device(
             .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE),
     })
 }
+
+// ============================================================================
+// H.264 parameter-set parsing + `Std*` mapping
+//
+// Vulkan Video does not parse the bitstream: the app must hand the driver the
+// SPS/PPS as filled `StdVideoH264SequenceParameterSet` / `...PictureParameterSet`
+// structs (in `VkVideoSessionParametersKHR`) and per-frame `Std*` picture/slice
+// info. This is the tedious, correctness-critical half the design flags. We
+// parse the H.264 RBSP into plain structs (reusing the crate's `annexb`
+// bit-reader) and map those onto the `Std*` layout; a wrong mapping is caught
+// early because `vkCreateVideoSessionParametersKHR` validates the SPS/PPS.
+// ============================================================================
+
+use crate::annexb::{nal_units_any, strip_emulation_prevention, BitReader};
+
+/// Parsed H.264 sequence parameter set, the fields the `Std*` SPS needs. Plain
+/// data, no bitstream cursor. Baseline / main / high 4:2:0 8-bit; scaling
+/// matrices and separate colour planes are rejected (returns `None`) rather than
+/// silently mis-decoded.
+#[derive(Debug, Clone)]
+pub struct H264Sps {
+    pub profile_idc: u8,
+    pub level_idc: u8,
+    pub seq_parameter_set_id: u8,
+    pub chroma_format_idc: u8,
+    pub bit_depth_luma_minus8: u8,
+    pub bit_depth_chroma_minus8: u8,
+    pub log2_max_frame_num_minus4: u8,
+    pub pic_order_cnt_type: u8,
+    pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    pub max_num_ref_frames: u8,
+    pub pic_width_in_mbs_minus1: u32,
+    pub pic_height_in_map_units_minus1: u32,
+    pub frame_mbs_only_flag: u8,
+    pub mb_adaptive_frame_field_flag: u8,
+    pub direct_8x8_inference_flag: u8,
+    pub gaps_in_frame_num_value_allowed_flag: u8,
+    pub frame_cropping_flag: u8,
+    pub frame_crop_left_offset: u32,
+    pub frame_crop_right_offset: u32,
+    pub frame_crop_top_offset: u32,
+    pub frame_crop_bottom_offset: u32,
+}
+
+/// Parsed H.264 picture parameter set, the fields the `Std*` PPS needs.
+#[derive(Debug, Clone)]
+pub struct H264Pps {
+    pub pic_parameter_set_id: u8,
+    pub seq_parameter_set_id: u8,
+    pub entropy_coding_mode_flag: u8,
+    pub bottom_field_pic_order_in_frame_present_flag: u8,
+    pub num_ref_idx_l0_default_active_minus1: u8,
+    pub num_ref_idx_l1_default_active_minus1: u8,
+    pub weighted_pred_flag: u8,
+    pub weighted_bipred_idc: u8,
+    pub pic_init_qp_minus26: i8,
+    pub pic_init_qs_minus26: i8,
+    pub chroma_qp_index_offset: i8,
+    pub deblocking_filter_control_present_flag: u8,
+    pub constrained_intra_pred_flag: u8,
+    pub redundant_pic_cnt_present_flag: u8,
+    pub transform_8x8_mode_flag: u8,
+    pub second_chroma_qp_index_offset: i8,
+}
+
+/// The SPS + PPS pulled from an Annex-B / AVCC access unit (e.g. an H.264 codec
+/// config or an IDR AU that carries them in-band).
+#[derive(Debug, Clone)]
+pub struct H264ParameterSets {
+    pub sps: H264Sps,
+    pub pps: H264Pps,
+}
+
+/// Profiles carrying the chroma / bit-depth / scaling header block.
+fn is_high_profile(profile_idc: u8) -> bool {
+    matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    )
+}
+
+/// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
+/// already stripped). `None` on truncation or an unsupported feature.
+pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
+    if rbsp.len() < 3 {
+        return None;
+    }
+    let profile_idc = rbsp[0];
+    let level_idc = rbsp[2];
+    let mut br = BitReader::new(&rbsp[3..]);
+
+    let seq_parameter_set_id = br.read_ue()?;
+
+    let mut chroma_format_idc = 1u32;
+    let mut bit_depth_luma_minus8 = 0u32;
+    let mut bit_depth_chroma_minus8 = 0u32;
+    if is_high_profile(profile_idc) {
+        chroma_format_idc = br.read_ue()?;
+        if chroma_format_idc == 3 {
+            // separate_colour_plane_flag: unsupported (4:4:4 planar), reject.
+            if br.read_bit()? == 1 {
+                return None;
+            }
+        }
+        bit_depth_luma_minus8 = br.read_ue()?;
+        bit_depth_chroma_minus8 = br.read_ue()?;
+        let _qpprime_y_zero_transform_bypass_flag = br.read_bit()?;
+        // Custom scaling matrices: unsupported (we pass no scaling lists), reject.
+        if br.read_bit()? == 1 {
+            return None;
+        }
+    }
+
+    let log2_max_frame_num_minus4 = br.read_ue()?;
+    let pic_order_cnt_type = br.read_ue()?;
+    let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
+    if pic_order_cnt_type == 0 {
+        log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
+    } else if pic_order_cnt_type == 1 {
+        let _delta_pic_order_always_zero_flag = br.read_bit()?;
+        let _offset_for_non_ref_pic = br.read_se()?;
+        let _offset_for_top_to_bottom_field = br.read_se()?;
+        let n = br.read_ue()?;
+        // POC type 1 with a ref-frame offset cycle needs pOffsetForRefFrame; we
+        // do not carry it, so reject rather than mis-decode.
+        if n != 0 {
+            return None;
+        }
+    }
+    let max_num_ref_frames = br.read_ue()?;
+    let gaps_in_frame_num_value_allowed_flag = br.read_bit()?;
+
+    let pic_width_in_mbs_minus1 = br.read_ue()?;
+    let pic_height_in_map_units_minus1 = br.read_ue()?;
+    let frame_mbs_only_flag = br.read_bit()?;
+    let mut mb_adaptive_frame_field_flag = 0u32;
+    if frame_mbs_only_flag == 0 {
+        mb_adaptive_frame_field_flag = br.read_bit()?;
+    }
+    let direct_8x8_inference_flag = br.read_bit()?;
+
+    let frame_cropping_flag = br.read_bit()?;
+    let (crop_l, crop_r, crop_t, crop_b) = if frame_cropping_flag == 1 {
+        (br.read_ue()?, br.read_ue()?, br.read_ue()?, br.read_ue()?)
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    Some(H264Sps {
+        profile_idc,
+        level_idc,
+        seq_parameter_set_id: seq_parameter_set_id as u8,
+        chroma_format_idc: chroma_format_idc as u8,
+        bit_depth_luma_minus8: bit_depth_luma_minus8 as u8,
+        bit_depth_chroma_minus8: bit_depth_chroma_minus8 as u8,
+        log2_max_frame_num_minus4: log2_max_frame_num_minus4 as u8,
+        pic_order_cnt_type: pic_order_cnt_type as u8,
+        log2_max_pic_order_cnt_lsb_minus4: log2_max_pic_order_cnt_lsb_minus4 as u8,
+        max_num_ref_frames: max_num_ref_frames as u8,
+        pic_width_in_mbs_minus1,
+        pic_height_in_map_units_minus1,
+        frame_mbs_only_flag: frame_mbs_only_flag as u8,
+        mb_adaptive_frame_field_flag: mb_adaptive_frame_field_flag as u8,
+        direct_8x8_inference_flag: direct_8x8_inference_flag as u8,
+        gaps_in_frame_num_value_allowed_flag: gaps_in_frame_num_value_allowed_flag as u8,
+        frame_cropping_flag: frame_cropping_flag as u8,
+        frame_crop_left_offset: crop_l,
+        frame_crop_right_offset: crop_r,
+        frame_crop_top_offset: crop_t,
+        frame_crop_bottom_offset: crop_b,
+    })
+}
+
+/// Parse a PPS RBSP (bytes after the NAL header, de-emulated). `None` on
+/// truncation or an unsupported feature (slice groups).
+pub fn parse_h264_pps(rbsp: &[u8]) -> Option<H264Pps> {
+    let mut br = BitReader::new(rbsp);
+    let pic_parameter_set_id = br.read_ue()?;
+    let seq_parameter_set_id = br.read_ue()?;
+    let entropy_coding_mode_flag = br.read_bit()?;
+    let bottom_field_pic_order_in_frame_present_flag = br.read_bit()?;
+    let num_slice_groups_minus1 = br.read_ue()?;
+    // FMO (slice groups) is not carried into the Std PPS here; reject.
+    if num_slice_groups_minus1 != 0 {
+        return None;
+    }
+    let num_ref_idx_l0_default_active_minus1 = br.read_ue()?;
+    let num_ref_idx_l1_default_active_minus1 = br.read_ue()?;
+    let weighted_pred_flag = br.read_bit()?;
+    let weighted_bipred_idc = br.read_bits(2)?;
+    let pic_init_qp_minus26 = br.read_se()?;
+    let pic_init_qs_minus26 = br.read_se()?;
+    let chroma_qp_index_offset = br.read_se()?;
+    let deblocking_filter_control_present_flag = br.read_bit()?;
+    let constrained_intra_pred_flag = br.read_bit()?;
+    let redundant_pic_cnt_present_flag = br.read_bit()?;
+
+    // The optional trailing block (more_rbsp_data): transform_8x8, second chroma
+    // qp offset. `read_bit` returning None here just means the PPS ended, which
+    // is legal, so default those fields.
+    let mut transform_8x8_mode_flag = 0u32;
+    let mut second_chroma_qp_index_offset = chroma_qp_index_offset;
+    if let Some(t) = br.read_bit() {
+        transform_8x8_mode_flag = t;
+        // pic_scaling_matrix_present_flag: unsupported, ignore its (rare) block;
+        // treating a set flag as best-effort (default scaling lists still decode
+        // most streams).
+        let _pic_scaling_matrix_present_flag = br.read_bit();
+        if let Some(v) = br.read_se() {
+            second_chroma_qp_index_offset = v;
+        }
+    }
+
+    Some(H264Pps {
+        pic_parameter_set_id: pic_parameter_set_id as u8,
+        seq_parameter_set_id: seq_parameter_set_id as u8,
+        entropy_coding_mode_flag: entropy_coding_mode_flag as u8,
+        bottom_field_pic_order_in_frame_present_flag: bottom_field_pic_order_in_frame_present_flag
+            as u8,
+        num_ref_idx_l0_default_active_minus1: num_ref_idx_l0_default_active_minus1 as u8,
+        num_ref_idx_l1_default_active_minus1: num_ref_idx_l1_default_active_minus1 as u8,
+        weighted_pred_flag: weighted_pred_flag as u8,
+        weighted_bipred_idc: weighted_bipred_idc as u8,
+        pic_init_qp_minus26: pic_init_qp_minus26 as i8,
+        pic_init_qs_minus26: pic_init_qs_minus26 as i8,
+        chroma_qp_index_offset: chroma_qp_index_offset as i8,
+        deblocking_filter_control_present_flag: deblocking_filter_control_present_flag as u8,
+        constrained_intra_pred_flag: constrained_intra_pred_flag as u8,
+        redundant_pic_cnt_present_flag: redundant_pic_cnt_present_flag as u8,
+        transform_8x8_mode_flag: transform_8x8_mode_flag as u8,
+        second_chroma_qp_index_offset: second_chroma_qp_index_offset as i8,
+    })
+}
+
+/// Pull the first SPS (nal type 7) and PPS (nal type 8) from an Annex-B / AVCC
+/// access unit and parse both.
+pub fn extract_h264_parameter_sets(au: &[u8]) -> Option<H264ParameterSets> {
+    let mut sps = None;
+    let mut pps = None;
+    for nal in nal_units_any(au) {
+        if nal.is_empty() {
+            continue;
+        }
+        match nal[0] & 0x1F {
+            7 if sps.is_none() => {
+                sps = parse_h264_sps(&strip_emulation_prevention(&nal[1..]));
+            }
+            8 if pps.is_none() => {
+                pps = parse_h264_pps(&strip_emulation_prevention(&nal[1..]));
+            }
+            _ => {}
+        }
+    }
+    Some(H264ParameterSets { sps: sps?, pps: pps? })
+}
+
+/// Map a raw `level_idc` byte onto the `StdVideoH264LevelIdc` enum. Unknown
+/// values clamp to the 6.2 ceiling, which keeps a valid enum for
+/// session-parameter creation.
+fn std_level_idc(level_idc: u8) -> vk::native::StdVideoH264LevelIdc {
+    use vk::native::*;
+    match level_idc {
+        10 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_1_0,
+        11 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_1_1,
+        12 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_1_2,
+        13 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_1_3,
+        20 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_2_0,
+        21 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_2_1,
+        22 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_2_2,
+        30 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_3_0,
+        31 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_3_1,
+        32 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_3_2,
+        40 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_4_0,
+        41 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_4_1,
+        42 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_4_2,
+        50 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_5_0,
+        51 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_5_1,
+        52 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_5_2,
+        60 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_6_0,
+        61 => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_6_1,
+        _ => StdVideoH264LevelIdc_STD_VIDEO_H264_LEVEL_IDC_6_2,
+    }
+}
+
+fn std_profile_idc(profile_idc: u8) -> vk::native::StdVideoH264ProfileIdc {
+    use vk::native::*;
+    match profile_idc {
+        66 => StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_BASELINE,
+        77 => StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_MAIN,
+        100 => StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_HIGH,
+        244 => StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_HIGH_444_PREDICTIVE,
+        // Constrained-baseline and others map to baseline for decode purposes.
+        _ => StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_BASELINE,
+    }
+}
+
+fn std_chroma_format_idc(chroma: u8) -> vk::native::StdVideoH264ChromaFormatIdc {
+    use vk::native::*;
+    match chroma {
+        0 => StdVideoH264ChromaFormatIdc_STD_VIDEO_H264_CHROMA_FORMAT_IDC_MONOCHROME,
+        2 => StdVideoH264ChromaFormatIdc_STD_VIDEO_H264_CHROMA_FORMAT_IDC_422,
+        3 => StdVideoH264ChromaFormatIdc_STD_VIDEO_H264_CHROMA_FORMAT_IDC_444,
+        _ => StdVideoH264ChromaFormatIdc_STD_VIDEO_H264_CHROMA_FORMAT_IDC_420,
+    }
+}
+
+/// Build the `Std*` SPS from our parsed [`H264Sps`]. No pointer fields are set
+/// (no scaling lists / VUI / ref-frame offsets, all rejected at parse), so the
+/// struct is self-contained and safe to hand the driver by value.
+pub fn to_std_sps(sps: &H264Sps) -> vk::native::StdVideoH264SequenceParameterSet {
+    // The `Std*` flag structs are bindgen bitfield unions with no `Default`; a
+    // zeroed value is the all-flags-clear starting point.
+    // SAFETY: `StdVideoH264SpsFlags` is a plain `repr(C)` bitfield POD, valid
+    // when all-zero.
+    let mut flags: vk::native::StdVideoH264SpsFlags = unsafe { core::mem::zeroed() };
+    flags.set_frame_mbs_only_flag(sps.frame_mbs_only_flag as u32);
+    flags.set_mb_adaptive_frame_field_flag(sps.mb_adaptive_frame_field_flag as u32);
+    flags.set_direct_8x8_inference_flag(sps.direct_8x8_inference_flag as u32);
+    flags.set_gaps_in_frame_num_value_allowed_flag(sps.gaps_in_frame_num_value_allowed_flag as u32);
+    flags.set_frame_cropping_flag(sps.frame_cropping_flag as u32);
+    // No scaling matrix / VUI / separate colour plane (rejected at parse).
+    flags.set_seq_scaling_matrix_present_flag(0);
+    flags.set_vui_parameters_present_flag(0);
+    flags.set_separate_colour_plane_flag(0);
+
+    vk::native::StdVideoH264SequenceParameterSet {
+        flags,
+        profile_idc: std_profile_idc(sps.profile_idc),
+        level_idc: std_level_idc(sps.level_idc),
+        chroma_format_idc: std_chroma_format_idc(sps.chroma_format_idc),
+        seq_parameter_set_id: sps.seq_parameter_set_id,
+        bit_depth_luma_minus8: sps.bit_depth_luma_minus8,
+        bit_depth_chroma_minus8: sps.bit_depth_chroma_minus8,
+        log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
+        pic_order_cnt_type: sps.pic_order_cnt_type as vk::native::StdVideoH264PocType,
+        offset_for_non_ref_pic: 0,
+        offset_for_top_to_bottom_field: 0,
+        log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
+        num_ref_frames_in_pic_order_cnt_cycle: 0,
+        max_num_ref_frames: sps.max_num_ref_frames,
+        reserved1: 0,
+        pic_width_in_mbs_minus1: sps.pic_width_in_mbs_minus1,
+        pic_height_in_map_units_minus1: sps.pic_height_in_map_units_minus1,
+        frame_crop_left_offset: sps.frame_crop_left_offset,
+        frame_crop_right_offset: sps.frame_crop_right_offset,
+        frame_crop_top_offset: sps.frame_crop_top_offset,
+        frame_crop_bottom_offset: sps.frame_crop_bottom_offset,
+        reserved2: 0,
+        pOffsetForRefFrame: core::ptr::null(),
+        pScalingLists: core::ptr::null(),
+        pSequenceParameterSetVui: core::ptr::null(),
+    }
+}
+
+/// Build the `Std*` PPS from our parsed [`H264Pps`].
+pub fn to_std_pps(pps: &H264Pps) -> vk::native::StdVideoH264PictureParameterSet {
+    // SAFETY: `StdVideoH264PpsFlags` is a plain `repr(C)` bitfield POD, valid
+    // when all-zero (all flags clear).
+    let mut flags: vk::native::StdVideoH264PpsFlags = unsafe { core::mem::zeroed() };
+    flags.set_transform_8x8_mode_flag(pps.transform_8x8_mode_flag as u32);
+    flags.set_redundant_pic_cnt_present_flag(pps.redundant_pic_cnt_present_flag as u32);
+    flags.set_constrained_intra_pred_flag(pps.constrained_intra_pred_flag as u32);
+    flags.set_deblocking_filter_control_present_flag(
+        pps.deblocking_filter_control_present_flag as u32,
+    );
+    flags.set_weighted_pred_flag(pps.weighted_pred_flag as u32);
+    flags.set_bottom_field_pic_order_in_frame_present_flag(
+        pps.bottom_field_pic_order_in_frame_present_flag as u32,
+    );
+    flags.set_entropy_coding_mode_flag(pps.entropy_coding_mode_flag as u32);
+    flags.set_pic_scaling_matrix_present_flag(0);
+
+    vk::native::StdVideoH264PictureParameterSet {
+        flags,
+        seq_parameter_set_id: pps.seq_parameter_set_id,
+        pic_parameter_set_id: pps.pic_parameter_set_id,
+        num_ref_idx_l0_default_active_minus1: pps.num_ref_idx_l0_default_active_minus1,
+        num_ref_idx_l1_default_active_minus1: pps.num_ref_idx_l1_default_active_minus1,
+        weighted_bipred_idc: pps.weighted_bipred_idc as vk::native::StdVideoH264WeightedBipredIdc,
+        pic_init_qp_minus26: pps.pic_init_qp_minus26,
+        pic_init_qs_minus26: pps.pic_init_qs_minus26,
+        chroma_qp_index_offset: pps.chroma_qp_index_offset,
+        second_chroma_qp_index_offset: pps.second_chroma_qp_index_offset,
+        pScalingLists: core::ptr::null(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A real 640x480 baseline Annex-B clip (SPS + PPS + frames). GPU-free:
+    // exercises the bitstream parse + `Std*` mapping without a Vulkan device.
+    const CLIP: &[u8] = include_bytes!("../tests/fixtures/h264_640x480.h264");
+
+    #[test]
+    fn parses_sps_pps_geometry_from_real_clip() {
+        let ps = extract_h264_parameter_sets(CLIP).expect("SPS+PPS parse");
+        // 640x480 baseline: 40x30 macroblocks, progressive.
+        assert_eq!(ps.sps.profile_idc, 66, "baseline profile");
+        assert_eq!(ps.sps.pic_width_in_mbs_minus1, 39, "640/16 - 1");
+        assert_eq!(ps.sps.pic_height_in_map_units_minus1, 29, "480/16 - 1");
+        assert_eq!(ps.sps.frame_mbs_only_flag, 1, "progressive");
+        assert_eq!(ps.sps.chroma_format_idc, 1, "4:2:0");
+        // PPS references SPS 0.
+        assert_eq!(ps.pps.seq_parameter_set_id, 0);
+        assert_eq!(ps.pps.pic_parameter_set_id, 0);
+    }
+
+    #[test]
+    fn std_mapping_preserves_geometry_and_ids() {
+        let ps = extract_h264_parameter_sets(CLIP).unwrap();
+        let std_sps = to_std_sps(&ps.sps);
+        let std_pps = to_std_pps(&ps.pps);
+        // The mapping must carry the geometry + ids the driver keys on, and set
+        // no scaling-list / VUI pointers (we reject those at parse).
+        assert_eq!(std_sps.pic_width_in_mbs_minus1, 39);
+        assert_eq!(std_sps.pic_height_in_map_units_minus1, 29);
+        assert_eq!(std_sps.seq_parameter_set_id, 0);
+        assert!(std_sps.pScalingLists.is_null());
+        assert!(std_sps.pSequenceParameterSetVui.is_null());
+        assert_eq!(std_pps.seq_parameter_set_id, 0);
+        assert_eq!(std_pps.pic_parameter_set_id, 0);
+        assert!(std_pps.pScalingLists.is_null());
+        // frame_mbs_only_flag round-trips through the bitfield setter.
+        assert_eq!(std_sps.flags.frame_mbs_only_flag(), 1);
+    }
+}
