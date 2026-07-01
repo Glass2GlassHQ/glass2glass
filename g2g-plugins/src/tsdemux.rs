@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::SeekController;
+use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
     CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, MultiOutputElement,
@@ -507,6 +507,11 @@ pub struct TsDemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` has been announced (M386), so it posts once.
     collection_posted: bool,
+    /// App-driven stream selection (M475): the app names the stream id each port
+    /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
+    /// Inert unless `with_stream_select` wired it. The MPEG-TS sibling of
+    /// [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
+    stream_select: Option<StreamSelectController>,
     emitted: u64,
 }
 
@@ -523,6 +528,7 @@ impl TsDemuxN {
             announced,
             bus: None,
             collection_posted: false,
+            stream_select: None,
             emitted: 0,
         }
     }
@@ -532,6 +538,43 @@ impl TsDemuxN {
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
         self.bus = Some(bus);
         self
+    }
+
+    /// Make the per-port stream assignment app-selectable (M475): the controller
+    /// carries stream ids (from the announced collection, e.g. `"mpegts-pid-256"`);
+    /// port `i` re-maps to the stream named by selection id `i`. The demuxer
+    /// re-emits that port's `CapsChanged` for the new stream and confirms the active
+    /// ids on the bus ([`BusMessage::StreamsSelected`]). Because TS ports route by
+    /// PMT `stream_type`, a re-map to a different *codec* takes effect at routing;
+    /// two streams of the same codec share a port (as in [`MkvDemuxN`]). The
+    /// MPEG-TS sibling of [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
+    pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
+        self.stream_select = Some(select);
+        self
+    }
+
+    /// Apply any pending app selection (M475): re-map port `i` to the stream named
+    /// by the `i`-th selected id, re-arming that port's `CapsChanged` when its
+    /// stream changes, and confirm the active ids on the bus. A no-op without a
+    /// controller, with no pending selection, or before the PMT is parsed (an id
+    /// resolves against the PMT's declared streams).
+    fn apply_stream_selection(&mut self) {
+        let Some(ctrl) = &self.stream_select else { return };
+        let Some(ids) = ctrl.take_pending() else { return };
+        let mut active = Vec::new();
+        for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
+            let Some(stream) = resolve_ts_stream_id(&self.demux, id) else { continue };
+            if self.ports[port] != stream {
+                self.ports[port] = stream;
+                self.announced[port] = false; // re-emit caps for the new stream
+            }
+            active.push(id.clone());
+        }
+        if !active.is_empty() {
+            if let Some(bus) = &self.bus {
+                bus.try_post(BusMessage::StreamsSelected { ids: active });
+            }
+        }
     }
 
     /// Number of output ports (the selected-stream count).
@@ -622,6 +665,21 @@ impl TsDemuxN {
     }
 }
 
+/// Resolve a collection stream id (`"mpegts-pid-{pid}"`) to the [`TsStream`] that
+/// selects it, by looking the PID up in the parsed PMT and mapping its
+/// `stream_type`. `None` for an unparseable id, an unknown PID, or a stream_type
+/// g2g does not forward (M475).
+fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<TsStream> {
+    let pid: u16 = id.strip_prefix("mpegts-pid-")?.parse().ok()?;
+    let es = demux.streams().iter().find(|e| e.pid == pid)?;
+    match es.stream_type {
+        STREAM_TYPE_H264 => Some(TsStream::H264),
+        STREAM_TYPE_H265 => Some(TsStream::H265),
+        STREAM_TYPE_AAC => Some(TsStream::Aac),
+        _ => None,
+    }
+}
+
 impl MultiOutputElement for TsDemuxN {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -658,6 +716,9 @@ impl MultiOutputElement for TsDemuxN {
                     if self.bus.is_some() {
                         self.post_stream_collection();
                     }
+                    // Honor an app selection before routing this batch, so a re-map
+                    // (and its re-armed CapsChanged) takes effect for the frames now.
+                    self.apply_stream_selection();
                     self.route_units(out).await?;
                 }
                 // A flush resets the parser; the re-read stream re-establishes

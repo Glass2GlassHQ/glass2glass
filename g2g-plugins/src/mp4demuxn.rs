@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
     BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, Rate, Stream,
@@ -222,6 +223,12 @@ pub struct Mp4DemuxN {
     bus: Option<BusHandle>,
     /// Set once the `StreamCollection` (M386) has been announced, so it posts once.
     collection_posted: bool,
+    /// App-driven stream selection (M475): the app names the track id each port
+    /// should carry (port `i` <- selection id `i`); the demuxer re-maps its ports.
+    /// Inert unless `with_stream_select` wired it. Unlike the codec-routed
+    /// [`TsDemuxN`](crate::tsdemux::TsDemuxN) / [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN),
+    /// MP4 routes by `track_ID`, so two same-codec tracks are distinguishable.
+    stream_select: Option<StreamSelectController>,
     /// Clear-key cbcs decryption key (M398), supplied by the app for an encrypted
     /// file; the constant IV + crypt/skip pattern come from each track's `tenc`.
     /// Without it an encrypted track fails loud.
@@ -246,9 +253,60 @@ impl Mp4DemuxN {
             need_param_sets,
             bus: None,
             collection_posted: false,
+            stream_select: None,
             #[cfg(feature = "mp4-cenc")]
             cenc_key: None,
             emitted: 0,
+        }
+    }
+
+    /// Make the per-port track assignment app-selectable (M475): the controller
+    /// carries track ids (from the announced collection, e.g. `"mp4-track-2"`);
+    /// port `i` re-maps to the track named by selection id `i`. The demuxer
+    /// re-emits that port's `CapsChanged` (and re-owes the `moov`'s parameter sets)
+    /// for the new track and confirms the active ids on the bus
+    /// ([`BusMessage::StreamsSelected`]). Because MP4 routes by `track_ID`, a re-map
+    /// takes effect at routing even between two tracks of the same codec (a strict
+    /// superset of the codec-routed [`TsDemuxN`](crate::tsdemux::TsDemuxN) /
+    /// [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN)). Meaningful for a *fragmented*
+    /// file (tracks parse and stream early); a progressive file emits once at `Eos`.
+    pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
+        self.stream_select = Some(select);
+        self
+    }
+
+    /// Apply any pending app selection (M475): re-map port `i` to the track named
+    /// by the `i`-th selected id, re-arming that port's `CapsChanged` and
+    /// parameter-set debt when its track changes, and confirm the active ids on the
+    /// bus. A no-op without a controller, with no pending selection, or before the
+    /// `moov` is parsed (an id resolves against the file's declared tracks).
+    fn apply_stream_selection(&mut self) {
+        let Some(ctrl) = &self.stream_select else { return };
+        let Some(ids) = ctrl.take_pending() else { return };
+        let Some(tracks) = self.tracks.as_ref() else { return };
+        // Resolve against the parsed tracks first (immutable borrow), then re-map.
+        let mut resolved: Vec<(usize, u32, Caps)> = Vec::new();
+        let mut active = Vec::new();
+        for (port, id) in ids.iter().enumerate().take(self.ports.len()) {
+            let Some(track_id) = id.strip_prefix("mp4-track-").and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(track) = tracks.iter().find(|t| t.track_id == track_id) else { continue };
+            resolved.push((port, track_id, nego_caps(&track.kind).0));
+            active.push(id.clone());
+        }
+        for (port, track_id, caps) in resolved {
+            if self.ports[port].track_id != track_id {
+                self.ports[port] = Mp4Port { track_id, caps };
+                self.announced[port] = false; // re-emit caps for the new track
+                self.need_param_sets[port] = true; // the new video track owes its sets
+            }
+        }
+        if !active.is_empty() {
+            if let Some(bus) = &self.bus {
+                bus.try_post(BusMessage::StreamsSelected { ids: active });
+            }
         }
     }
 
@@ -538,6 +596,9 @@ impl MultiOutputElement for Mp4DemuxN {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     self.buf.extend_from_slice(slice.as_slice());
+                    // Honor an app selection before emitting this batch, so a re-map
+                    // takes effect for the fragments now (no-op until the moov parsed).
+                    self.apply_stream_selection();
                     self.advance(out).await?;
                 }
                 // End of stream: flush any final fragment, then for a progressive
