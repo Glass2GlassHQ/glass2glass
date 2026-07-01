@@ -278,10 +278,13 @@ leverage first:
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
   the `TextOverlay` renderer (M171), and `TextOverlayN` (M403), the two-input
   video + `Caps::Text` stream overlay, with incremental cue streaming (M405) and
-  cue positioning carried as `TextCueMeta` frame-meta (M406). Remaining
-  text-document work: register `SubParse` / `TextOverlayN` (and a text source /
-  sink) in the launch registry so `gst-launch` text pipelines parse;
-  subtitle-track extraction out of the demuxers as `Caps::Text` (feeds
+  cue positioning carried as `TextCueMeta` frame-meta (M406). The `gst-launch`
+  surface is complete (M477): `subparse` and `subtitlesrc` are launch elements,
+  `textoverlay` doubles as a video + text-stream fan-in muxer (the text_sink
+  request-pad analog, picked by link degree), and an explicit demux fan-out
+  selects an embedded subtitle track by pad name (`d.text_0` / `d.subtitle_0`),
+  so a subtitle-overlay line parses end to end.
+  Subtitle-track extraction out of the demuxers as `Caps::Text` (feeds
   `TextOverlayN`) is started: MP4 `tx3g` timed text fans out of `Mp4DemuxN` as
   `Caps::Text{Utf8}` (M411) and `mp4_playbin` auto-plugs it through a
   `TextOverlayN` on the video branch (M412); MKV `S_TEXT/UTF8` likewise fans out of

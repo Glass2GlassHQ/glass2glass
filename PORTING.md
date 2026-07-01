@@ -50,10 +50,27 @@ inline caps filters (`! video/x-raw,format=NV12,width=640 !`), `queue`/`queue2`
 A **demuxer fan-out** (`matroskademux` / `tsdemux` / `qtdemux` fed by a file
 source) probes the file at parse time and splits it into its elementary streams,
 one per output-pad reference. Pad names select by media kind the GStreamer way:
-`d.video_0` is the first video stream, `d.audio_0` the first audio, `d.src_2` the
-third stream overall (a bare `d.` is positional). Each branch names its own
-downstream (`d.video_0 ! h264parse ! avdec_h264 ! autovideosink`). File sources
-only; a network source still uses `playbin`.
+`d.video_0` is the first video stream, `d.audio_0` the first audio, `d.text_0`
+(or `d.subtitle_0`) the first subtitle track, `d.src_2` the third stream overall
+(a bare `d.` is positional). Each branch names its own downstream
+(`d.video_0 ! h264parse ! avdec_h264 ! autovideosink`). File sources only; a
+network source still uses `playbin`. Subtitle pads work for `matroskademux` and
+`qtdemux` (MPEG-TS carries no demuxer subtitle track).
+
+**Subtitle overlay** uses `textoverlay` as a fan-in, the analog of GStreamer's
+`textoverlay` text_sink request pad: link a video branch and a text branch into
+one named `textoverlay` (video first, then text), and it paints the cues onto the
+video by PTS. The text comes from a demuxed subtitle pad or a `subtitlesrc` file
+run through `subparse`:
+
+```
+filesrc location=movie.mkv ! matroskademux name=d
+  d.video_0 ! h264parse ! avdec_h264 ! videoconvert ! o.
+  d.text_0 ! o.
+  textoverlay name=o ! videoconvert ! autovideosink
+
+subtitlesrc location=subs.srt ! subparse ! o.   # or an out-of-band .srt/.vtt
+```
 
 **When it doesn't parse, you get a porting hint**, not just an error:
 

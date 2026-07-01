@@ -271,6 +271,13 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
         Box::new(TextOverlay::new())
     }));
+    // Subtitle parser (M477): a structured subtitle document (`Text{Srt/WebVtt/
+    // Ssa/Ttml}`) in, timed plain `Text{Utf8}` cues out, so a launch line can turn
+    // a `subtitlesrc` file (or a demuxed `stpp`/TTML text pad) into overlayable
+    // cues: `subtitlesrc location=x.srt ! subparse ! textoverlay name=o`.
+    reg.register_launch(LaunchFactory::of::<crate::subparse::SubParse>("subparse", || {
+        Box::new(crate::subparse::SubParse::new())
+    }));
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
     // e.g. `... ! h264parse ! ccextract ! textoverlay ...` on a teed branch.
@@ -359,6 +366,18 @@ pub fn default_registry() -> Registry {
                 framerate: Rate::Fixed(30 << 16),
             },
         ))
+    }));
+    // Subtitle-overlay fan-in (M477): the launch-line sibling of the single-input
+    // `textoverlay` above, the analog of GStreamer's `textoverlay` text_sink
+    // request pad. A `TextOverlayN` merges an RGBA8 video pad (input 0) and a timed
+    // `Text{Utf8}` pad (input 1) by PTS, painting cues onto the video:
+    // `d.video_0 ! ffmpegdec ! videoconvert ! o.   d.text_0 ! o.   textoverlay
+    // name=o ! videoconvert ! autovideosink`. Registered both as a single-input
+    // launch element and here as a fan-in muxer; the parser picks by link degree
+    // (M122), the same one-name-two-roles model as `mpegtsmux`. Always 2-input, so
+    // link exactly the video and text branches.
+    reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
+        Box::new(crate::textoverlay::TextOverlayN::new())
     }));
     // Summing audio fan-in (M130): adds aligned S16LE buffers from N inputs. The
     // output caps are a nominal default matching `audiotestsrc`.

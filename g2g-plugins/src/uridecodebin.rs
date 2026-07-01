@@ -695,19 +695,18 @@ fn read_prefix(path: &str) -> Option<Vec<u8>> {
     Some(prefix)
 }
 
-/// Resolve each output-pad request to a forwardable-stream index (M476), given the
-/// per-stream video flags in forwardable order. `video_k` picks the k-th video
-/// stream, `audio_k` the k-th audio, `src_k` / a bare `d.` the k-th stream overall.
-/// `None` if any request is unsatisfiable (out of range, or a text pad, which the
-/// A/V fan-out does not carry yet), declining the whole hook.
+/// Resolve each output-pad request to a selectable-stream index (M476, text M477),
+/// given the per-stream kind in selection order (A/V streams first, then subtitle
+/// streams). `video_k` picks the k-th video stream, `audio_k` the k-th audio,
+/// `text_k` / `subtitle_k` the k-th subtitle, `src_k` / a bare `d.` the k-th stream
+/// overall. `None` if any request is unsatisfiable (out of range, or a text pad on
+/// a container with no subtitle track), declining the whole hook.
 #[cfg(feature = "std")]
-fn resolve_pads(video: &[bool], pads: &[PadRequest]) -> Option<Vec<usize>> {
+fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
     pads.iter()
         .map(|req| match req.kind {
-            PadKind::Any => (req.index < video.len()).then_some(req.index),
-            PadKind::Video => video.iter().enumerate().filter(|(_, v)| **v).nth(req.index).map(|(i, _)| i),
-            PadKind::Audio => video.iter().enumerate().filter(|(_, v)| !**v).nth(req.index).map(|(i, _)| i),
-            PadKind::Text => None,
+            PadKind::Any => (req.index < kinds.len()).then_some(req.index),
+            want => kinds.iter().enumerate().filter(|(_, k)| **k == want).nth(req.index).map(|(i, _)| i),
         })
         .collect()
 }
@@ -723,12 +722,20 @@ pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Opti
     let prefix = read_prefix(location)?;
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
-    let infos = crate::mkvdemux::forwardable_streams(&demux);
+    // Selection order: A/V streams first, then subtitle streams (M477), so a
+    // `d.text_0` request maps to the container's subtitle track. `MkvDemuxN`
+    // de-frames a selected subtitle block to `Text{Utf8}` on its port.
+    let mut infos = crate::mkvdemux::forwardable_streams(&demux);
+    let mut kinds: Vec<PadKind> =
+        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    for text in crate::mkvdemux::subtitle_streams(&demux) {
+        kinds.push(PadKind::Text);
+        infos.push(text);
+    }
     if infos.is_empty() {
         return None;
     }
-    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
-    let sel = resolve_pads(&video, pads)?;
+    let sel = resolve_pads(&kinds, pads)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
     Some(Box::new(crate::mkvdemux::MkvDemuxN::new(streams)))
 }
@@ -753,8 +760,11 @@ pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Optio
     if infos.is_empty() {
         return None;
     }
-    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
-    let sel = resolve_pads(&video, pads)?;
+    // MPEG-TS carries no subtitle track in the demuxer, so a `d.text_0` request
+    // finds no `Text` kind and declines (M477).
+    let kinds: Vec<PadKind> =
+        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    let sel = resolve_pads(&kinds, pads)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
     Some(Box::new(crate::tsdemux::TsDemuxN::new(streams)))
 }
@@ -768,12 +778,21 @@ pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Opti
         return None;
     }
     let prefix = read_prefix(location)?;
-    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
+    // tracks (M477), so a `d.text_0` request maps to the container's text track.
+    // `Mp4DemuxN` forwards a `tx3g`/`wvtt` cue as `Text{Utf8}` (a `stpp` track as
+    // `Text{Ttml}`, which a following `subparse` reduces to `Text{Utf8}`).
+    let mut infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    let mut kinds: Vec<PadKind> =
+        infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
+    for text in crate::mp4demuxn::subtitle_streams(&prefix) {
+        kinds.push(PadKind::Text);
+        infos.push(text);
+    }
     if infos.is_empty() {
         return None;
     }
-    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
-    let sel = resolve_pads(&video, pads)?;
+    let sel = resolve_pads(&kinds, pads)?;
     let ports: Vec<_> = sel
         .iter()
         .map(|&i| crate::mp4demuxn::Mp4Port { track_id: infos[i].track_id, caps: infos[i].caps.clone() })
