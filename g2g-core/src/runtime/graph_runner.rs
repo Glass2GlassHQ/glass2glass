@@ -934,7 +934,9 @@ fn build_channels<'a>(
     // increment it per dropped frame, so the total surfaces in `RunStats`.
     let dropped = alloc::sync::Arc::new(spin::Mutex::new(0u64));
     for eid in 0..ne {
-        let (mut tx, rx) = link(link_capacity);
+        // A per-edge depth (a `queue max-size-buffers=N`) overrides the graph-wide
+        // default; most edges leave it `None` and take `link_capacity`.
+        let (mut tx, rx) = link(vg.edge(eid).capacity.unwrap_or(link_capacity));
         let policy = vg.edge(eid).policy;
         tx.set_policy(policy);
         if policy != crate::link::LinkPolicy::Block {

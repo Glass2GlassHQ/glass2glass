@@ -117,6 +117,10 @@ pub struct Edge {
     pub src: PadId,
     pub dst: PadId,
     pub policy: LinkPolicy,
+    /// Per-edge channel depth, or `None` to use the runner's graph-wide
+    /// `link_capacity`. The launch parser sets it from a `queue max-size-buffers=N`
+    /// (the gst per-queue depth), so one branch can buffer more/less than the rest.
+    pub capacity: Option<usize>,
 }
 
 /// A tee handle returned by [`Graph::add_tee`]: 1 input pad, `n` output pads.
@@ -286,10 +290,23 @@ impl<E> Graph<E> {
         to: impl Into<PadId>,
         policy: LinkPolicy,
     ) -> Result<(), GraphError> {
+        self.link_full(from, to, policy, None)
+    }
+
+    /// Link with an explicit policy *and* a per-edge channel depth (`None` = use
+    /// the runner's graph-wide `link_capacity`). The launch parser passes the
+    /// depth from a `queue max-size-buffers=N`.
+    pub fn link_full(
+        &mut self,
+        from: impl Into<PadId>,
+        to: impl Into<PadId>,
+        policy: LinkPolicy,
+        capacity: Option<usize>,
+    ) -> Result<(), GraphError> {
         let (src, dst) = (from.into(), to.into());
         self.check_pad(src, PadDir::Out)?;
         self.check_pad(dst, PadDir::In)?;
-        self.edges.push(Edge { src, dst, policy });
+        self.edges.push(Edge { src, dst, policy, capacity });
         Ok(())
     }
 
@@ -313,10 +330,11 @@ impl<E> Graph<E> {
         let new = self.push(NodeKind::Transform, Some(element));
         let old_dst = self.edges[edge_idx].dst;
         let policy = self.edges[edge_idx].policy;
+        let capacity = self.edges[edge_idx].capacity;
         // P -> K (rewire the original edge's destination to the new node).
         self.edges[edge_idx].dst = PadId { node: new, index: 0 };
-        // K -> C (the original destination).
-        self.edges.push(Edge { src: PadId { node: new, index: 0 }, dst: old_dst, policy });
+        // K -> C (the original destination), preserving policy + depth on both halves.
+        self.edges.push(Edge { src: PadId { node: new, index: 0 }, dst: old_dst, policy, capacity });
         new
     }
 
@@ -354,6 +372,7 @@ impl<E> Graph<E> {
                 src: offset.apply_pad(e.src),
                 dst: offset.apply_pad(e.dst),
                 policy: e.policy,
+                capacity: e.capacity,
             });
         }
         offset

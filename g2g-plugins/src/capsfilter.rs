@@ -183,63 +183,202 @@ const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
 /// The raw sample formats a format-less `audio/x-raw` expands to (M184).
 const RAW_AUDIO_FORMATS: [AudioFormat; 2] = [AudioFormat::PcmS16Le, AudioFormat::PcmF32Le];
 
+/// A parsed caps field value: a fixed scalar (`width=640`), a `[min,max]` range
+/// (`width=[1,1920]`), or a `{a,b,...}` list (`format={I420,NV12}`). A range maps
+/// to `Dim::Range` / `Rate::Range` within one caps; a list expands to alternatives
+/// in the returned `CapsSet` (the gst idiom, so a launch caps filter constrains
+/// negotiation without over-fixing).
+enum FieldVal<'a> {
+    One(&'a str),
+    Range(&'a str, &'a str),
+    List(Vec<&'a str>),
+}
+
+/// Split on top-level commas only, so the commas inside a `[..]` range or `{..}`
+/// list are not mistaken for field separators.
+fn split_top_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+fn parse_field_val(v: &str) -> FieldVal<'_> {
+    let v = v.trim();
+    if let Some(inner) = v.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let p = split_top_commas(inner);
+        // gst ranges are `[min,max]`; a third `step` element is ignored.
+        if p.len() >= 2 {
+            return FieldVal::Range(p[0].trim(), p[1].trim());
+        }
+    }
+    if let Some(inner) = v.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        return FieldVal::List(
+            split_top_commas(inner).into_iter().map(str::trim).filter(|s| !s.is_empty()).collect(),
+        );
+    }
+    FieldVal::One(v)
+}
+
+// Expand a dimension field into its constraint(s): a fixed value or `Any`, a
+// `Range`, or (for a list) one `Fixed` per alternative. A present-but-unparseable
+// fixed value stays lenient (`Any`), as before; a range / list must parse or the
+// whole caps is rejected (`None`).
+fn expand_dim(fv: Option<&FieldVal>) -> Option<Vec<Dim>> {
+    Some(match fv {
+        None => alloc::vec![Dim::Any],
+        Some(FieldVal::One(s)) => alloc::vec![s.parse::<u32>().map_or(Dim::Any, Dim::Fixed)],
+        Some(FieldVal::Range(a, b)) => {
+            alloc::vec![Dim::Range { min: a.parse().ok()?, max: b.parse().ok()? }]
+        }
+        Some(FieldVal::List(xs)) => {
+            xs.iter().map(|x| x.parse::<u32>().ok().map(Dim::Fixed)).collect::<Option<Vec<_>>>()?
+        }
+    })
+}
+
+fn expand_rate(fv: Option<&FieldVal>) -> Option<Vec<Rate>> {
+    Some(match fv {
+        None => alloc::vec![Rate::Any],
+        Some(FieldVal::One(s)) => alloc::vec![parse_rate(s).unwrap_or(Rate::Any)],
+        Some(FieldVal::Range(a, b)) => {
+            alloc::vec![Rate::Range { min_q16: rate_q16(a)?, max_q16: rate_q16(b)? }]
+        }
+        Some(FieldVal::List(xs)) => xs.iter().map(|x| parse_rate(x)).collect::<Option<Vec<_>>>()?,
+    })
+}
+
+fn expand_raw_format(fv: Option<&FieldVal>) -> Option<Vec<RawVideoFormat>> {
+    Some(match fv {
+        None => RAW_VIDEO_FORMATS.to_vec(),
+        Some(FieldVal::One(s)) => alloc::vec![parse_raw_format(s)?],
+        Some(FieldVal::List(xs)) => {
+            xs.iter().map(|x| parse_raw_format(x)).collect::<Option<Vec<_>>>()?
+        }
+        Some(FieldVal::Range(..)) => return None, // a format range is meaningless
+    })
+}
+
+fn expand_audio_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
+    Some(match fv {
+        None => RAW_AUDIO_FORMATS.to_vec(),
+        Some(FieldVal::One(s)) => alloc::vec![parse_audio_format(s)?],
+        Some(FieldVal::List(xs)) => {
+            xs.iter().map(|x| parse_audio_format(x)).collect::<Option<Vec<_>>>()?
+        }
+        Some(FieldVal::Range(..)) => return None,
+    })
+}
+
+// `Caps::Audio` holds scalar channels (u8) / sample_rate (u32) with no range
+// type, so a range is rejected; a list expands to alternatives.
+fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
+    Some(match fv {
+        None => alloc::vec![default],
+        Some(FieldVal::One(s)) => alloc::vec![s.parse().unwrap_or(default)],
+        Some(FieldVal::List(xs)) => xs.iter().map(|x| x.parse::<u8>().ok()).collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Range(..)) => return None,
+    })
+}
+
+fn expand_u32(fv: Option<&FieldVal>, default: u32) -> Option<Vec<u32>> {
+    Some(match fv {
+        None => alloc::vec![default],
+        Some(FieldVal::One(s)) => alloc::vec![s.parse().unwrap_or(default)],
+        Some(FieldVal::List(xs)) => xs.iter().map(|x| x.parse::<u32>().ok()).collect::<Option<Vec<_>>>()?,
+        Some(FieldVal::Range(..)) => return None,
+    })
+}
+
 /// Parse a `gst-launch` caps description (`media/type,field=value,...`) into a
-/// [`CapsSet`]. A `video/x-raw` or `audio/x-raw` with no `format` field expands
-/// to all supported raw formats at the given geometry (the gst-idiomatic
-/// format-less caps), so a downstream capsfilter can pin geometry while leaving
-/// the format to negotiation. Other media types yield a single-alternative set.
-/// `None` on an unknown media type or an unparseable field. Format values are
-/// case-insensitive (GStreamer's uppercase or the historical lowercase, M182).
+/// [`CapsSet`]. Field values may be fixed (`width=640`), a `[min,max]` range
+/// (`width=[1,1920]`, mapped to `Dim::Range` / `Rate::Range`), or a `{a,b,...}`
+/// list (`format={I420,NV12}`, expanded to alternatives). A `video/x-raw` /
+/// `audio/x-raw` with no `format` expands to all supported raw formats at the
+/// given geometry (the gst-idiomatic format-less caps). `None` on an unknown
+/// media type or an unparseable range / list. Format values are case-insensitive
+/// (GStreamer's uppercase or the historical lowercase, M182).
 pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
-    let mut parts = desc.split(',');
+    let mut parts = split_top_commas(desc).into_iter();
     let media = parts.next()?.trim();
-    let fields: Vec<(&str, &str)> =
-        parts.filter_map(|p| p.trim().split_once('=')).map(|(k, v)| (k.trim(), v.trim())).collect();
+    let fields: Vec<(&str, FieldVal)> =
+        parts.filter_map(|p| p.split_once('=')).map(|(k, v)| (k.trim(), parse_field_val(v))).collect();
+    let fv = |key: &str| fields.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
 
-    let dim = |key: &str| field(&fields, key).and_then(|v| v.parse::<u32>().ok()).map_or(Dim::Any, Dim::Fixed);
-    let framerate = field(&fields, "framerate").and_then(parse_rate).unwrap_or(Rate::Any);
-
-    let one = |caps: Caps| Some(CapsSet::one(caps));
-    match media {
-        "video/x-raw" => {
-            let (width, height) = (dim("width"), dim("height"));
-            match field(&fields, "format") {
-                Some(f) => one(Caps::RawVideo {
-                    format: parse_raw_format(f)?,
-                    width,
-                    height,
-                    framerate,
-                }),
-                // Format-less: any supported pixel format at this geometry.
-                None => Some(CapsSet::from_alternatives(
-                    RAW_VIDEO_FORMATS
-                        .iter()
-                        .map(|&format| Caps::RawVideo {
-                            format,
-                            width: width.clone(),
-                            height: height.clone(),
-                            framerate: framerate.clone(),
-                        })
-                        .collect(),
-                )),
+    // Cartesian product of the list-valued fields; range fields stay as one
+    // `Range` inside each alternative.
+    let compressed_set = |codec: VideoCodec| -> Option<CapsSet> {
+        let (widths, heights, rates) = (expand_dim(fv("width"))?, expand_dim(fv("height"))?, expand_rate(fv("framerate"))?);
+        let mut alts = Vec::new();
+        for w in &widths {
+            for h in &heights {
+                for r in &rates {
+                    alts.push(compressed(codec, w.clone(), h.clone(), r.clone()));
+                }
             }
         }
-        "audio/x-raw" => match field(&fields, "format") {
-            Some(f) => one(audio(parse_audio_format(f)?, &fields)),
-            // Format-less: any supported sample format at these channels / rate.
-            None => Some(CapsSet::from_alternatives(
-                RAW_AUDIO_FORMATS.iter().map(|&format| audio(format, &fields)).collect(),
-            )),
-        },
-        "video/x-h264" => one(compressed(VideoCodec::H264, dim("width"), dim("height"), framerate)),
-        "video/x-h265" => one(compressed(VideoCodec::H265, dim("width"), dim("height"), framerate)),
-        "video/x-vp8" => one(compressed(VideoCodec::Vp8, dim("width"), dim("height"), framerate)),
-        "video/x-vp9" => one(compressed(VideoCodec::Vp9, dim("width"), dim("height"), framerate)),
-        "video/x-av1" => one(compressed(VideoCodec::Av1, dim("width"), dim("height"), framerate)),
-        "image/jpeg" => one(compressed(VideoCodec::Mjpeg, dim("width"), dim("height"), framerate)),
-        "audio/x-opus" => one(audio(AudioFormat::Opus, &fields)),
+        Some(CapsSet::from_alternatives(alts))
+    };
+    let audio_set = |formats: &[AudioFormat]| -> Option<CapsSet> {
+        let (channels, rates) = (expand_u8(fv("channels"), 2)?, expand_u32(fv("rate"), 48_000)?);
+        let mut alts = Vec::new();
+        for &format in formats {
+            for &ch in &channels {
+                for &sr in &rates {
+                    alts.push(Caps::Audio { format, channels: ch, sample_rate: sr });
+                }
+            }
+        }
+        Some(CapsSet::from_alternatives(alts))
+    };
+
+    match media {
+        "video/x-raw" => {
+            let (formats, widths, heights, rates) = (
+                expand_raw_format(fv("format"))?,
+                expand_dim(fv("width"))?,
+                expand_dim(fv("height"))?,
+                expand_rate(fv("framerate"))?,
+            );
+            let mut alts = Vec::new();
+            for &format in &formats {
+                for w in &widths {
+                    for h in &heights {
+                        for r in &rates {
+                            alts.push(Caps::RawVideo {
+                                format,
+                                width: w.clone(),
+                                height: h.clone(),
+                                framerate: r.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            Some(CapsSet::from_alternatives(alts))
+        }
+        "audio/x-raw" => audio_set(&expand_audio_format(fv("format"))?),
+        "video/x-h264" => compressed_set(VideoCodec::H264),
+        "video/x-h265" => compressed_set(VideoCodec::H265),
+        "video/x-vp8" => compressed_set(VideoCodec::Vp8),
+        "video/x-vp9" => compressed_set(VideoCodec::Vp9),
+        "video/x-av1" => compressed_set(VideoCodec::Av1),
+        "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
+        "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
         // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
-        "audio/mpeg" => one(audio(AudioFormat::Aac, &fields)),
+        "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
         _ => None,
     }
 }
@@ -255,20 +394,8 @@ pub fn parse_caps(desc: &str) -> Option<Caps> {
     }
 }
 
-fn field<'a>(fields: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
-    fields.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
-}
-
 fn compressed(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
     Caps::CompressedVideo { codec, width, height, framerate }
-}
-
-fn audio(format: AudioFormat, fields: &[(&str, &str)]) -> Caps {
-    Caps::Audio {
-        format,
-        channels: field(fields, "channels").and_then(|c| c.parse().ok()).unwrap_or(2),
-        sample_rate: field(fields, "rate").and_then(|r| r.parse().ok()).unwrap_or(48_000),
-    }
 }
 
 // GStreamer caps name formats uppercase (NV12, RGBA, YUY2, S16LE); accept any
@@ -300,9 +427,10 @@ fn parse_audio_format(s: &str) -> Option<AudioFormat> {
     })
 }
 
-/// Parse a framerate `num/den` (or bare integer) into a Q16 [`Rate::Fixed`].
-fn parse_rate(s: &str) -> Option<Rate> {
-    let q16 = match s.split_once('/') {
+/// Parse a framerate `num/den` (or bare integer) into a Q16 fixed-point value.
+/// Shared by [`parse_rate`] and the `[min,max]` framerate-range expansion.
+fn rate_q16(s: &str) -> Option<u32> {
+    Some(match s.trim().split_once('/') {
         Some((n, d)) => {
             let n: u64 = n.trim().parse().ok()?;
             let d: u64 = d.trim().parse().ok()?;
@@ -312,8 +440,12 @@ fn parse_rate(s: &str) -> Option<Rate> {
             ((n << 16) / d) as u32
         }
         None => (s.trim().parse::<u64>().ok()? << 16) as u32,
-    };
-    Some(Rate::Fixed(q16))
+    })
+}
+
+/// Parse a framerate `num/den` (or bare integer) into a Q16 [`Rate::Fixed`].
+fn parse_rate(s: &str) -> Option<Rate> {
+    rate_q16(s).map(Rate::Fixed)
 }
 
 #[cfg(test)]
@@ -456,6 +588,44 @@ mod tests {
             Some(Caps::Audio { format: g2g_core::AudioFormat::Opus, channels: 2, sample_rate: 48_000 })
         );
         assert_eq!(parse_caps("video/x-bogus"), None);
+    }
+
+    #[test]
+    fn parse_caps_range_maps_to_dim_and_rate_range() {
+        // `[min,max]` on width/height -> Dim::Range in one caps (not an expansion).
+        let set = parse_caps_set("video/x-raw,format=nv12,width=[1,1920],height=[1,1080]").unwrap();
+        assert_eq!(set.alternatives().len(), 1);
+        let Caps::RawVideo { width, height, .. } = &set.alternatives()[0] else { panic!() };
+        assert_eq!(*width, Dim::Range { min: 1, max: 1920 });
+        assert_eq!(*height, Dim::Range { min: 1, max: 1080 });
+        // A framerate range maps to Rate::Range.
+        let set = parse_caps_set("video/x-h264,framerate=[0/1,60/1]").unwrap();
+        let Caps::CompressedVideo { framerate, .. } = &set.alternatives()[0] else { panic!() };
+        assert!(matches!(framerate, Rate::Range { .. }), "got {framerate:?}");
+    }
+
+    #[test]
+    fn parse_caps_list_expands_to_alternatives() {
+        // `format={I420,NV12}` -> two alternatives, geometry fixed on both.
+        let set = parse_caps_set("video/x-raw,format={I420,NV12},width=640,height=480").unwrap();
+        let fmts: Vec<RawVideoFormat> = set
+            .alternatives()
+            .iter()
+            .map(|c| match c {
+                Caps::RawVideo { format, width, .. } => {
+                    assert_eq!(*width, Dim::Fixed(640));
+                    *format
+                }
+                _ => panic!("raw video"),
+            })
+            .collect();
+        assert_eq!(fmts.len(), 2);
+        assert!(fmts.contains(&RawVideoFormat::I420) && fmts.contains(&RawVideoFormat::Nv12));
+        // A width list expands too (cartesian with format): {640,1280} x one format.
+        let set = parse_caps_set("video/x-raw,format=nv12,width={640,1280}").unwrap();
+        assert_eq!(set.alternatives().len(), 2);
+        // A malformed range fails the whole caps (rejected, not silently dropped).
+        assert!(parse_caps_set("video/x-raw,width=[a,b]").is_none());
     }
 
     #[test]

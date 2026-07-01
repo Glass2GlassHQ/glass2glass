@@ -141,9 +141,9 @@ impl core::fmt::Display for ParseError {
                 {
                     write!(
                         f,
-                        " (a launch caps filter takes fixed fields, e.g. width=640; \
-                         ranges [min,max], lists {{a,b}}, and caps features (memory:...) \
-                         are not supported here)"
+                        " (a launch caps filter takes fixed fields, ranges [min,max], \
+                         and lists {{a,b}} with numeric / known values; caps features \
+                         like (memory:...) are not supported)"
                     )?;
                 }
                 Ok(())
@@ -872,19 +872,21 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     }
     let mut queue_succ: Vec<Option<usize>> = alloc::vec![None; specs.len()];
     let mut queue_policy = alloc::vec![LinkPolicy::Block; specs.len()];
+    let mut queue_capacity: Vec<Option<usize>> = alloc::vec![None; specs.len()];
     for ei in 0..specs.len() {
         if is_queue(ei) {
             if raw_in[ei] != 1 || raw_out[ei] != 1 {
                 return Err(ParseError::QueueRole(specs[ei].name.clone()));
             }
             queue_policy[ei] = queue_leaky_policy(&specs[ei]);
+            queue_capacity[ei] = queue_capacity_of(&specs[ei]);
             queue_succ[ei] = raw_links.iter().find(|(s, _)| *s == ei).map(|(_, d)| *d);
         }
     }
     // Each edge whose source is a real element walks through any run of queues to
     // its terminal consumer, carrying the accumulated policy; edges out of a queue
     // are consumed by that walk (skipped here).
-    let mut links: Vec<(usize, usize, LinkPolicy)> = Vec::new();
+    let mut links: Vec<(usize, usize, LinkPolicy, Option<usize>)> = Vec::new();
     // The destination input-pad request per contracted link (M481), aligned with
     // `links`; taken from the raw link that lands on the terminal consumer (so a
     // `... ! queue ! mux.audio_0` keeps its named pad through the queue contraction).
@@ -895,9 +897,14 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         }
         let (mut cur, mut src_li) = (d, li);
         let mut policy = LinkPolicy::Block;
+        let mut capacity: Option<usize> = None;
         while is_queue(cur) {
             if queue_policy[cur] != LinkPolicy::Block {
                 policy = queue_policy[cur];
+            }
+            // A run of queues carries the last explicit depth (rare to chain them).
+            if let Some(c) = queue_capacity[cur] {
+                capacity = Some(c);
             }
             let next = queue_succ[cur].expect("queue validated 1-out above");
             // The named-pad suffix lives on the raw link that enters the terminal
@@ -905,7 +912,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             src_li = raw_links.iter().position(|&(a, b)| a == cur && b == next).unwrap_or(src_li);
             cur = next;
         }
-        links.push((s, cur, policy));
+        links.push((s, cur, policy, capacity));
         link_dest_req.push(raw_dest_req[src_li].clone());
     }
 
@@ -914,7 +921,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // as nodes below.
     let mut in_deg = alloc::vec![0usize; specs.len()];
     let mut out_deg = alloc::vec![0usize; specs.len()];
-    for &(s, d, _) in &links {
+    for &(s, d, _, _) in &links {
         out_deg[s] += 1;
         in_deg[d] += 1;
     }
@@ -946,8 +953,8 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             // The upstream file location (the source linking into this demux).
             let Some(location) = links
                 .iter()
-                .find(|(_, d, _)| *d == ei)
-                .and_then(|(s, _, _)| prop(&specs[*s], "location"))
+                .find(|(_, d, _, _)| *d == ei)
+                .and_then(|(s, _, _, _)| prop(&specs[*s], "location"))
             else {
                 continue;
             };
@@ -973,8 +980,8 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             }
             let Some(location) = links
                 .iter()
-                .find(|(_, d, _)| *d == ei)
-                .and_then(|(s, _, _)| prop(&specs[*s], "location"))
+                .find(|(_, d, _, _)| *d == ei)
+                .and_then(|(s, _, _, _)| prop(&specs[*s], "location"))
             else {
                 continue;
             };
@@ -1055,7 +1062,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             // positional behavior).
             let n = in_deg[ei];
             let incoming: Vec<usize> =
-                links.iter().enumerate().filter(|(_, (_, d, _))| *d == ei).map(|(k, _)| k).collect();
+                links.iter().enumerate().filter(|(_, (_, d, _, _))| *d == ei).map(|(k, _)| k).collect();
             let mut used = alloc::vec![false; n];
             for (ord, &k) in incoming.iter().enumerate() {
                 let Some(req) = &link_dest_req[k] else { continue };
@@ -1122,7 +1129,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // each muxer input a distinct input pad (0..n); every other output and input
     // is pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
     let mut tee_next = alloc::vec![0u8; specs.len()];
-    for (k, &(s, d, policy)) in links.iter().enumerate() {
+    for (k, &(s, d, policy, capacity)) in links.iter().enumerate() {
         let node_s = node_of[s].expect("contracted link source is a real node");
         let node_d = node_of[d].expect("contracted link destination is a real node");
         let src = if let Some(tee) = implicit_tee[s] {
@@ -1163,7 +1170,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 continue;
             }
         }
-        graph.link_with(src, dst, policy)?;
+        graph.link_full(src, dst, policy, capacity)?;
     }
 
     Ok(graph)
@@ -1172,11 +1179,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
 /// Map a `queue` / `queue2` node's `leaky=` property to the edge backpressure
 /// policy it stands in for (M190). gst accepts the enum by value or nick:
 /// `0`/`no` (lossless, the default), `1`/`upstream` (drop the newest incoming
-/// buffer), `2`/`downstream` (drop the oldest queued buffer). Other queue
-/// properties (the `max-size-*` / `min-threshold-*` bounds, `silent`, ...) are
-/// accepted but not modeled: g2g has no per-edge capacity (`link_capacity` is a
-/// single pipeline-wide knob), so they are ignored for paste compatibility
-/// rather than rejected.
+/// buffer), `2`/`downstream` (drop the oldest queued buffer). The other buffering
+/// bounds (`max-size-bytes` / `max-size-time`, `min-threshold-*`, `silent`) are
+/// accepted but not modeled (g2g's link depth is a buffer count), so they are
+/// ignored for paste compatibility rather than rejected; `max-size-buffers` maps
+/// to the edge depth, see [`queue_capacity_of`].
 fn queue_leaky_policy(spec: &ElementSpec) -> LinkPolicy {
     for (k, v) in &spec.props {
         if k == "leaky" {
@@ -1189,6 +1196,19 @@ fn queue_leaky_policy(spec: &ElementSpec) -> LinkPolicy {
         }
     }
     LinkPolicy::Block
+}
+
+/// A `queue max-size-buffers=N` sets the depth of the edge it contracts to (the
+/// gst per-queue buffer bound), overriding the runner's graph-wide `link_capacity`
+/// for just that link. `0` in gst means "unbounded"; g2g has no unbounded channel,
+/// so a `0` is ignored (falls back to the default depth). An unparseable value is
+/// ignored too (paste compatibility).
+fn queue_capacity_of(spec: &ElementSpec) -> Option<usize> {
+    spec.props
+        .iter()
+        .find(|(k, _)| k == "max-size-buffers")
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
 }
 
 /// Parse a `gst-launch`-style pipeline string into a runnable [`Graph`], building

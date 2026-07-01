@@ -128,6 +128,7 @@ The same guidance is available programmatically via
 | container source won't decode | `bytestream-format` isn't auto-sniffed everywhere | set it explicitly, e.g. `filesrc location=x bytestream-format=mpegts` |
 | `autovideosink` etc. | resolved to an available backend | works; resolves Wayland→KMS→fake on Linux |
 | `# comment` in a pasted pipeline | supported | a `#` outside quotes runs to end of line and is ignored (handy for multi-line pastes) |
+| caps range `width=[1,1920]` / list `format={I420,NV12}` | supported | a range maps to a `Dim::Range` / `Rate::Range`, a list expands to alternatives; negotiation narrows it like GStreamer |
 
 ### Launch syntax g2g does not accept
 
@@ -136,10 +137,8 @@ hint where possible); rewrite as shown:
 
 | gst-launch form | Status | Do this instead |
 | :--- | :--- | :--- |
-| caps range `width=[1,1920]` / list `format={I420,NV12}` | not supported in a launch caps filter (bare `BadValue` with a syntax hint) | use a fixed value (`width=640`), or let negotiation pick it and constrain downstream |
 | caps feature `video/x-raw(memory:GLMemory)` | not supported | drop the feature; g2g picks the memory domain during negotiation (GPU vs system) automatically |
 | bins `( videoconvert ! videoscale )` | not supported (no bin/grouping syntax) | flatten the group inline, or build the sub-graph in Rust and `Graph::merge` it |
-| per-queue depth `queue max-size-buffers=8` | accepted but ignored (only `leaky=` maps, to the edge's drop policy) | queue depth is `link_capacity` on `run_graph`, one value for the graph |
 | demux fan-out on a network source `udpsrc ! qtdemux name=d d.video_0 ! …` | file sources only | demux a local file, or use `uridecodebin` / `playbin` for network multi-stream |
 
 ### Equivalence cookbook
