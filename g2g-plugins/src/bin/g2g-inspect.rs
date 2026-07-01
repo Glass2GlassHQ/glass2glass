@@ -117,6 +117,37 @@ fn main() {
                 }
             }
         }
+        // `--gst-scan <file>`: scan a GStreamer application source file (C or
+        // Python) and report the element factories it uses that are not portable
+        // as-is, plus the dynamic-pipeline APIs that map to a g2g primitive.
+        Some(flag) if flag == "--gst-scan" => {
+            let Some(path) = args.next() else {
+                eprintln!("usage: g2g-inspect --gst-scan <source-file.c|.py>");
+                process::exit(2);
+            };
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    process::exit(2);
+                }
+            };
+            let report = g2g_plugins::gst_compat::scan_source(&reg, &source);
+            if report.findings.is_empty() {
+                println!("{path}: every element factory resolves to a g2g element");
+            } else {
+                println!("{path}: elements needing attention:");
+                for f in &report.findings {
+                    println!("  - {f}");
+                }
+            }
+            for n in &report.notes {
+                println!("  note: {n}");
+            }
+            if !report.findings.is_empty() {
+                process::exit(1);
+            }
+        }
         Some(name) => match reg.inspect(&name) {
             Some(dump) => print!("{dump}"),
             None => {

@@ -7,6 +7,7 @@
 //! the linter runs it and enriches the first error with a gst->g2g suggestion,
 //! so porting is fix-and-rerun rather than decode-the-error.
 
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -150,6 +151,114 @@ pub fn lint_launch(registry: &Registry, line: &str) -> LintReport {
     }
 }
 
+/// The result of scanning GStreamer application source for g2g portability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceScanReport {
+    /// Porting guidance for each distinct non-portable element factory the
+    /// source instantiates (renamed / unsupported / unknown), deduplicated and
+    /// sorted. Empty when every element resolves.
+    pub findings: Vec<String>,
+    /// Advisories for dynamic-pipeline APIs the source uses (pad-added relink,
+    /// pad probes, appsrc/appsink), each pointing at the porting guidance. These
+    /// are not errors: they flag idioms that map to a different g2g primitive.
+    pub notes: Vec<String>,
+}
+
+/// The quoted string argument immediately following each occurrence of `anchor`,
+/// best-effort: only when a `"..."` opens before any `)` / `;` / newline, so a
+/// call passing a *variable* (e.g. `gst_parse_launch(pipeline, &err)`) is
+/// skipped rather than grabbing an unrelated later literal.
+fn quoted_args_after(source: &str, anchor: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find(anchor) {
+        let after = &rest[pos + anchor.len()..];
+        if let Some(q) = after.find('"') {
+            let pre = &after[..q];
+            if !pre.contains(';') && !pre.contains('\n') && !pre.contains(')') {
+                let tail = &after[q + 1..];
+                if let Some(end) = tail.find('"') {
+                    out.push(tail[..end].to_string());
+                }
+            }
+        }
+        rest = after; // strictly shorter, so this terminates
+    }
+    out
+}
+
+/// Scan GStreamer *application source* (C or Python) for g2g portability: the
+/// element factories it instantiates (`gst_element_factory_make("x", ...)`,
+/// `Gst.ElementFactory.make("x")`, and the elements inside any
+/// `gst_parse_launch("...")` / `Gst.parse_launch("...")` string) and the
+/// dynamic-pipeline APIs it uses. Best-effort and static, it complements
+/// [`lint_launch`] (a single launch string) for apps that build pipelines in
+/// code; the authoritative check is still running the ported pipeline.
+pub fn scan_source(registry: &Registry, source: &str) -> SourceScanReport {
+    // Element factories: the first quoted arg of each make-call, plus every
+    // element inside each parse_launch string.
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for anchor in ["factory_make", "ElementFactory.make"] {
+        for name in quoted_args_after(source, anchor) {
+            names.insert(name);
+        }
+    }
+    for line in quoted_args_after(source, "parse_launch") {
+        for name in element_names(&line) {
+            names.insert(name.to_string());
+        }
+    }
+
+    let mut findings = Vec::new();
+    for name in &names {
+        match gst_equivalent(registry, name) {
+            GstEquivalent::Available => {}
+            GstEquivalent::Renamed(g) => findings.push(format!(
+                "`{name}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)"
+            )),
+            GstEquivalent::Unsupported(hint) => {
+                findings.push(format!("`{name}` has no g2g element: {hint}"))
+            }
+            GstEquivalent::Unknown => findings.push(format!(
+                "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
+            )),
+        }
+    }
+
+    // Dynamic-pipeline idioms: map each to its g2g primitive (PORTING.md §5.1).
+    let mut notes = Vec::new();
+    let has = |needle: &str| source.contains(needle);
+    if has("pad-added") {
+        notes.push(
+            "uses `pad-added` dynamic relink: in g2g use `decodebin`/`uridecodebin` auto-plug, \
+             or `StreamDemux` / `register_demux` with typed output ports (PORTING.md §5.1)"
+                .to_string(),
+        );
+    }
+    if has("add_probe") || has("pad_add_probe") {
+        notes.push(
+            "uses pad probes: in g2g register a `LinkInterceptor` on the slot (PORTING.md §5.1)"
+                .to_string(),
+        );
+    }
+    if has("appsrc") || has("need-data") || has("push-buffer") {
+        notes.push(
+            "uses appsrc: g2g has `appsrc channel=<name>` + `register_appsrc`, or `g2g-bridge` \
+             for a whole embedded sub-graph (PORTING.md §5.1)"
+                .to_string(),
+        );
+    }
+    if has("appsink") || has("new-sample") || has("pull-sample") {
+        notes.push(
+            "uses appsink: g2g has `appsink channel=<name>` + `set_appsink_callback` (callback) \
+             or `register_appsink_pull` (pull) (PORTING.md §5.1)"
+                .to_string(),
+        );
+    }
+
+    SourceScanReport { findings, notes }
+}
+
 /// Turn a [`ParseError`] into porting-oriented guidance.
 fn explain(registry: &Registry, e: &ParseError) -> String {
     match e {
@@ -275,5 +384,40 @@ mod tests {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "appsrc"), GstEquivalent::Available);
         assert_eq!(gst_equivalent(&reg, "appsink"), GstEquivalent::Available);
+    }
+
+    #[test]
+    fn scans_c_source_for_factories_and_dynamic_apis() {
+        let reg = default_registry();
+        // A snippet of a C GStreamer app: factory_make calls (one renamed), a
+        // parse_launch string (one unsupported element), a pad-added handler.
+        let src = r#"
+            GstElement *conv = gst_element_factory_make("videoconvert", "c");
+            GstElement *dec  = gst_element_factory_make("jpegdec", "d");
+            pipeline = gst_parse_launch("videotestsrc ! theoraenc ! fakesink", &err);
+            g_signal_connect(demux, "pad-added", G_CALLBACK(on_pad_added), NULL);
+        "#;
+        let r = scan_source(&reg, src);
+        // videoconvert is available (no finding); jpegdec renamed; theoraenc unsupported.
+        assert!(r.findings.iter().any(|m| m.contains("jpegdec") && m.contains("mjpegdec")), "{:?}", r.findings);
+        assert!(r.findings.iter().any(|m| m.contains("theoraenc")), "{:?}", r.findings);
+        assert!(!r.findings.iter().any(|m| m.contains("videoconvert")), "available element flagged: {:?}", r.findings);
+        assert!(r.notes.iter().any(|n| n.contains("pad-added")), "notes: {:?}", r.notes);
+    }
+
+    #[test]
+    fn scans_python_source_and_ignores_variable_parse_launch() {
+        let reg = default_registry();
+        let src = r#"
+            conv = Gst.ElementFactory.make("videoconvert", "conv")
+            sink = Gst.ElementFactory.make("appsink", "sink")
+            pipeline = Gst.parse_launch(user_supplied_string)  # variable, not a literal
+        "#;
+        let r = scan_source(&reg, src);
+        // appsink resolves (registered); videoconvert too; the variable
+        // parse_launch yields no phantom element findings.
+        assert!(r.findings.is_empty(), "unexpected findings: {:?}", r.findings);
+        // appsink triggers the dynamic-API note.
+        assert!(r.notes.iter().any(|n| n.contains("appsink")), "notes: {:?}", r.notes);
     }
 }
