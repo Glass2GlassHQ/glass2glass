@@ -184,18 +184,27 @@ leverage first:
   picture with a leading `CapsChanged`. Registered `vulkanvideodec` (launch-only).
   `m493_vulkan_video_element` feeds the fixture one AU per `process` call and
   asserts 10 real NV12 frames. `examples/vulkan_video_smoke` dumps PPM frames you
-  can open. Left:
-  1. Zero-copy GPU-resident `WgpuTexture` output (`output_domains = {WgpuTexture}`)
-     -- the wedge's performance claim. The decode -> RGBA-texture half is proven
-     (M490/M491); needs the per-frame DPB image wired through the ycbcr compute
-     pass (DPB slots need `SAMPLED` + CONCURRENT sharing) AND a wgpu-consuming
-     display/encode sink (none exists yet: today WgpuTexture must be read back to
-     system memory before any sink). Until then the element emits system NV12.
-  2. Auto-plug: a `CapabilityDescriptor` rank so `decodebin` picks it (currently
+  can open.
+  DONE (M494/M495, validated on the 3060): zero-copy GPU-resident output end to
+  end. `H264DpbDecoder::decode_all_to_textures` (via `create_h264_dpb_decoder_gpu`)
+  decodes every picture and converts each DPB slot in place through the ycbcr
+  compute pass (shared free fn `nv12_to_wgpu_texture` with a `restore_to_dpb`
+  barrier, so a slot stays a valid reference) into an RGBA `wgpu::Texture`; DPB
+  slot images are `SAMPLED` + `CONCURRENT` in GPU mode. `VulkanVideoDec` is now a
+  multi-domain producer (`output_memory` = `WgpuTexture` preferred,
+  `output_domains = {WgpuTexture, System}`, `configure_allocation` settles it;
+  falls back to NV12 if no compute queue). `VulkanVideoDevice::gpu_context` /
+  `VulkanVideoDec::gpu_context` expose the decode device as a `GpuContext` so a
+  `WgpuSink` shares it; the `gpu` module is built for `vulkan-video`.
+  `m494_vulkan_video_dpb_texture` decodes to 10 GPU textures; `m495` runs the full
+  `VulkanVideoDec -> WgpuSink::offscreen` wedge with no GPU->CPU readback. Left:
+  1. Auto-plug: a `CapabilityDescriptor` rank so `decodebin` picks it (currently
      launch-only, referenced by explicit `vulkanvideodec` name).
+  2. On-screen `WgpuSink::with_surface` example (needs an app-owned window +
+     event loop, so an example rather than a self-checking test).
   3. Mid-stream SPS/PPS re-config (rebuild the session, re-emit `CapsChanged`);
-     M493 builds the session once from the first keyframe AU.
-  4. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M493
+     the element builds the session once from the first keyframe AU.
+  4. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M495
      fence-wait each submission; fine for validation, not for throughput).
   5. H.265 and AV1 (+1 each, mostly their `Std*` parameter mapping); the decode is
      proven bit-exact vs ffmpeg, so a PSNR harness is optional.

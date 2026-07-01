@@ -702,6 +702,11 @@ required-features = ["std"]
 name = "vulkan_video_smoke"
 required-features = ["vulkan-video"]
 
+# M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
+[[test]]
+name = "m495_vulkan_video_wgpu_sink"
+required-features = ["vulkan-video", "wgpu-sink"]
+
 # M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
 [[test]]
