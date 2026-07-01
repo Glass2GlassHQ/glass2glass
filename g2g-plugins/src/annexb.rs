@@ -325,6 +325,32 @@ impl<'a> BitReader<'a> {
         Some(val - 1)
     }
 
+    /// H.264 `more_rbsp_data()` (7.2): is there RBSP payload left before the
+    /// `rbsp_stop_one_bit`? The stop bit is the last `1` in the buffer, followed
+    /// only by zero alignment padding. Reading an optional trailing syntax
+    /// element without this check would misread the stop bit as real data (e.g.
+    /// a baseline PPS has no `transform_8x8_mode_flag`, so the next bit is the
+    /// stop bit, not the flag).
+    // Only the `vulkan-video` PPS parser needs this today; keep it compiled in
+    // every build (other parsers may adopt it) but do not warn when unused.
+    #[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+    pub(crate) fn more_rbsp_data(&self) -> bool {
+        let total_bits = self.buf.len() * 8;
+        if self.bit_pos >= total_bits {
+            return false;
+        }
+        // Locate the rbsp_stop_one_bit: the last set bit in the whole buffer.
+        for byte_idx in (0..self.buf.len()).rev() {
+            let b = self.buf[byte_idx];
+            if b != 0 {
+                let bit_in_byte = 7 - b.trailing_zeros() as usize;
+                let stop_bit_pos = byte_idx * 8 + bit_in_byte;
+                return self.bit_pos < stop_bit_pos;
+            }
+        }
+        false
+    }
+
     /// Signed exp-Golomb, mapping ue to se per H.264 SS9.1.1.
     pub(crate) fn read_se(&mut self) -> Option<i32> {
         let ue = self.read_ue()?;

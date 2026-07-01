@@ -158,19 +158,30 @@ leverage first:
   pass on a dedicated compute queue converts it through a `VkSamplerYcbcrConversion`
   (reusing the `mediacodec_wgpu` shader) to an RGBA `VkImage` imported into wgpu via
   `texture_from_raw`, no CPU round-trip; read-back matches the M490 CPU convert. The
-  vendor-neutral hardware-decode-into-wgpu-texture path now works end to end. Left:
+  vendor-neutral hardware-decode-into-wgpu-texture path now works end to end.
+  DONE (M492, validated on the 3060): full DPB reference management. `H264DpbDecoder`
+  (`create_h264_dpb_decoder` + `decode_all`) parses each slice header (`frame_num`,
+  POC types 0/2, `idr_pic_id`, `slice_type`, `nal_ref_idc`), splits access units on
+  `first_mb_in_slice == 0`, computes picture-order-count, and runs H.264
+  sliding-window reference marking, handing the driver the active reference slots
+  (with their `StdVideoDecodeH264ReferenceInfo`) per picture, so P frames after the
+  IDR decode against their references. The whole 640x480 fixture (2 GOPs of IDR + 4
+  P frames) decodes **bit-exact** against the ffmpeg software decoder (SAD/px 0).
+  This exposed and fixed a latent one-bit bug that had been silently corrupting
+  M489-M491: `parse_h264_pps` read the trailing optional block without an
+  `more_rbsp_data()` check, so a baseline PPS's `rbsp_stop_one_bit` was misread as
+  `transform_8x8_mode_flag = 1`, desyncing the driver's CAVLC coefficient parse
+  (every decoded frame was flat mid-grey; the old tests only checked non-uniformity,
+  not correctness). `BitReader::more_rbsp_data()` added; m489 now also asserts bright
+  content is present. Left:
   1. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
      properties, `output_domains = {WgpuTexture}`, driving the decode per frame),
-     re-emitting parameters on mid-stream SPS/PPS change via `CapsChanged`.
-  2. Full DPB reference management: per-frame slice-header parse (frame_num, POC,
-     idr_pic_id, slice_type), multi-slice pictures, and P/B-frame reference slots
-     (M489-M491 hardcode the lone-IDR `Std*` constants + one DPB slot, so only
-     all-intra streams decode past the first frame today). The gate to a useful
-     element.
-  3. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M491
-     fence-wait each submission; fine one-shot, not for throughput).
-  4. Hardening: PSNR-vs-ffmpeg reference comparison; then H.265 and AV1 (+1 each,
-     mostly their parameter mapping).
+     re-emitting parameters on mid-stream SPS/PPS change via `CapsChanged`. Now
+     straightforward on top of M492 (per-frame decode -> wgpu texture already work).
+  2. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M492
+     fence-wait each submission; fine for validation, not for throughput).
+  3. Hardening: H.265 and AV1 (+1 each, mostly their parameter mapping); the
+     decode is now proven bit-exact vs ffmpeg, so a PSNR harness is optional.
   Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
   bleed correctness) and the `create_from_hal` device adoption under wgpu 29
   (prototype in isolation first). Test `mNNN_vulkan_video_decode.rs`: decode a
