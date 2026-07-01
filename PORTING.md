@@ -72,6 +72,19 @@ filesrc location=movie.mkv ! matroskademux name=d
 subtitlesrc location=subs.srt ! subparse ! o.   # or an out-of-band .srt/.vtt
 ```
 
+**Typefind.** GStreamer's `filesrc` emits untyped bytes and a downstream
+`typefind` sniffs the media type at runtime. g2g negotiates types statically, so a
+byte source must announce its type up front, but you rarely name it by hand: a bare
+`filesrc location=X` derives its type from the extension (`.mp4`/`.mkv`/`.ts`/
+`.ogg`/`.flv` containers, `.vtt`/`.srt`/`.ass`/`.ttml` subtitles), so
+`filesrc location=subs.vtt ! subparse` and `filesrc location=movie.mkv !
+matroskademux name=d ...` run with no hint. For a mis-named or extensionless file,
+`bytestream-format=auto` sniffs the header content instead (containers by magic,
+subtitles by their signature). An explicit `bytestream-format=` always overrides.
+Caveat: `filesrc ! decodebin` on a *progressive* single-file `.mp4` needs
+`uridecodebin uri=file://…` instead (the `decodebin` autoplug pool has only the
+fragmented MP4 demuxer); MKV/TS/FLV/Ogg decode fine through `decodebin`.
+
 **When it doesn't parse, you get a porting hint**, not just an error:
 
 ```

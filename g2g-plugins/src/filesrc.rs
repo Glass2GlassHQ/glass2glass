@@ -50,6 +50,11 @@ pub struct FileSrc {
     /// `bytestream-format=auto`: sniff the container from the file header at
     /// negotiation, replacing `caps` with the detected `ByteStream{..}`.
     auto_detect: bool,
+    /// `true` once the media type is pinned explicitly (the `new` caps argument or
+    /// a `bytestream-format` property). While `false` (a bare launch `filesrc`),
+    /// setting `location` derives the type from the file extension (M478), so
+    /// `filesrc location=movie.mp4` / `subs.vtt` types without an explicit format.
+    format_explicit: bool,
     chunk_size: usize,
     configured: bool,
     /// Optional byte-offset seek channel (M361). A `FileSrc` is a byte source, so
@@ -69,6 +74,25 @@ impl FileSrc {
             path: path.into(),
             caps,
             auto_detect: false,
+            // The caller pinned the caps, so `location` must not re-type it.
+            format_explicit: true,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            configured: false,
+            seek: None,
+        }
+    }
+
+    /// A launch-registry `filesrc` with no pinned type (M478): the media type is
+    /// derived from the `location` extension unless a `bytestream-format` property
+    /// overrides it, so `filesrc location=X.mp4 ! decodebin` and
+    /// `filesrc location=X.vtt ! subparse` type without an explicit format. Falls
+    /// back to the MPEG-TS default for an unknown / missing extension.
+    pub fn untyped() -> Self {
+        Self {
+            path: PathBuf::new(),
+            caps: Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+            auto_detect: false,
+            format_explicit: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
             configured: false,
             seek: None,
@@ -104,8 +128,9 @@ impl FileSrc {
             filled += n;
         }
         header.truncate(filled);
-        let encoding = crate::typefind::sniff(&header).ok_or(G2gError::CapsMismatch)?;
-        self.caps = Caps::ByteStream { encoding };
+        // Sniff a container (-> ByteStream) or a subtitle document (-> Text), so
+        // `filesrc location=subs.vtt bytestream-format=auto ! subparse` types too.
+        self.caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
         self.auto_detect = false;
         Ok(())
     }
@@ -239,9 +264,18 @@ impl SourceLoop for FileSrc {
         match name {
             "location" => {
                 self.path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
+                // Derive the type from the extension unless it was pinned
+                // explicitly (M478); an unknown extension keeps the default.
+                if !self.format_explicit {
+                    if let Some(caps) = caps_from_extension(&self.path) {
+                        self.caps = caps;
+                    }
+                }
                 Ok(())
             }
             "bytestream-format" => {
+                // An explicit format pins the type; a later `location` won't re-type.
+                self.format_explicit = true;
                 match value.as_str().ok_or(PropError::Type)? {
                     "auto" => self.auto_detect = true,
                     s => {
@@ -283,6 +317,29 @@ static FILESRC_PROPS: &[PropertySpec] = &[
         "container of a raw byte stream: mpegts | matroska | ogg | flv | auto (sniff the header)",
     ),
 ];
+
+/// Derive the media type from a file extension (M478), so a bare launch
+/// `filesrc location=X` types without an explicit `bytestream-format`. Containers
+/// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`; an unknown
+/// extension returns `None` (the caller keeps the MPEG-TS default). String-only,
+/// so it costs no filesystem read at parse time. Content sniffing
+/// (`bytestream-format=auto`) covers a mis-named or extensionless file.
+fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let encoding = match ext.as_str() {
+        "ts" | "m2ts" | "mts" => ByteStreamEncoding::MpegTs,
+        "mkv" | "webm" => ByteStreamEncoding::Matroska,
+        "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
+        "flv" => ByteStreamEncoding::Flv,
+        "mp4" | "m4v" | "m4a" | "mov" => ByteStreamEncoding::IsoBmff,
+        "vtt" => return Some(Caps::Text { format: g2g_core::TextFormat::WebVtt }),
+        "srt" => return Some(Caps::Text { format: g2g_core::TextFormat::Srt }),
+        "ass" | "ssa" => return Some(Caps::Text { format: g2g_core::TextFormat::Ssa }),
+        "ttml" | "dfxp" => return Some(Caps::Text { format: g2g_core::TextFormat::Ttml }),
+        _ => return None,
+    };
+    Some(Caps::ByteStream { encoding })
+}
 
 /// Parse a `bytestream-format` value to an encoding (the `auto` value is handled
 /// separately in `set_property`).

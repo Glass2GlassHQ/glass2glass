@@ -217,12 +217,13 @@ pub fn default_registry() -> Registry {
         },
         || Box::new(Camera2Src::new(640, 480, u64::MAX)),
     ));
-    // The output caps are a nominal default; the `bytestream-format` property
-    // (incl. `auto`) sets the real container per instance before negotiation.
+    // The output caps are a nominal default; a bare launch `filesrc` derives its
+    // type from the `location` extension (M478), and the `bytestream-format`
+    // property (incl. `auto`) overrides that per instance before negotiation.
     reg.register_source(SourceFactory::new(
         "filesrc",
         Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
-        || Box::new(FileSrc::new("", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })),
+        || Box::new(FileSrc::untyped()),
     ));
     // Subtitle / text file source (M433): a `.srt` / `.vtt` / `.ssa` / `.ttml`
     // file as a `Text` stream, feeding `subparse` (overlay or caption authoring).
