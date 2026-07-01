@@ -81,6 +81,7 @@ use crate::mjpegdec::MjpegDec;
 #[cfg(feature = "mjpeg-encode")]
 use crate::mjpegenc::MjpegEnc;
 use crate::fmp4demux::Fmp4Demux;
+use crate::mp4demux::Mp4Demux;
 #[cfg(feature = "rtsp")]
 use crate::rtspsrc::RtspSrc;
 #[cfg(feature = "onvif")]
@@ -328,6 +329,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Mp4Mux>("mp4mux", || Box::new(Mp4Mux::new())));
     reg.register_launch(LaunchFactory::of::<OggDemux>("oggdemux", || Box::new(OggDemux::new())));
     reg.register_launch(LaunchFactory::of::<Fmp4Demux>("fmp4demux", || Box::new(Fmp4Demux::new())));
+    // Progressive MP4 single-output demux (M479): `filesrc location=X.mp4 ! qtdemux
+    // ! h264parse ! ...` (the video track). A multi-branch `qtdemux name=d
+    // d.video_0 ! ... d.audio_0 ! ...` still fans out via the demux-select hook
+    // (Mp4DemuxN); this covers the single-stream / video-only file.
+    #[cfg(feature = "std")]
+    reg.register_launch(LaunchFactory::of::<Mp4Demux>("qtdemux", || Box::new(Mp4Demux::new())));
     reg.register_launch(LaunchFactory::of::<FlvDemux>("flvdemux", || Box::new(FlvDemux::new())));
     reg.register_launch(LaunchFactory::of::<FlvMux>("flvmux", || Box::new(FlvMux::new())));
     // Re-framing mode (M421): a `gst-launch` `h264parse` access-unit-aligns its
@@ -526,6 +533,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<TsDemux>("tsdemux", |_| Box::new(TsDemux::new())));
     reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| Box::new(MkvDemux::new())));
     reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| Box::new(Fmp4Demux::new())));
+    // Whole-file / progressive MP4 (M479): `ByteStream{Mp4}` -> the video track, so
+    // `filesrc location=X.mp4 ! decodebin` auto-plugs a demuxer (the fragmented
+    // `fmp4demux` above stays on the streaming `IsoBmff` that HLS / DASH produce).
+    reg.register(ElementFactory::of::<Mp4Demux>("qtdemux", |_| Box::new(Mp4Demux::new())));
     reg.register(ElementFactory::of::<OggDemux>("oggdemux", |_| Box::new(OggDemux::new())));
     reg.register(ElementFactory::of::<FlvDemux>("flvdemux", |_| Box::new(FlvDemux::new())));
 

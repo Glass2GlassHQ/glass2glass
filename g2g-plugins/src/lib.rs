@@ -404,6 +404,10 @@ pub mod dashsrc;
 mod fmp4;
 #[cfg(feature = "std")]
 pub mod fmp4demux;
+// Progressive / whole-file MP4 demuxer (M479): the single-output, buffer-to-Eos
+// sibling of fmp4demux, for a bare `filesrc location=X.mp4 ! decodebin`.
+#[cfg(feature = "std")]
+pub mod mp4demux;
 // Shared cbcs (MPEG-CENC) sample decryption for the HLS fMP4 and MP4 demux paths.
 #[cfg(any(feature = "hls", feature = "mp4-cenc"))]
 mod cenc;

@@ -336,8 +336,14 @@ impl Mp4DemuxN {
         self.emitted
     }
 
-    fn input_caps() -> Caps {
-        Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff }
+    /// The fan-out demuxer reads a whole MP4, so it accepts both the streaming
+    /// `IsoBmff` form (HLS / DASH fragments) and the whole-file `Mp4` form (M479,
+    /// a `filesrc` progressive `.mp4`); the parse is the same either way.
+    fn accepts(caps: &Caps) -> bool {
+        matches!(
+            caps,
+            Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff | ByteStreamEncoding::Mp4 }
+        )
     }
 
     /// Announce every forwardable track as a `StreamCollection` (M386), once. A
@@ -569,7 +575,11 @@ impl MultiOutputElement for Mp4DemuxN {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&Self::input_caps())
+        if Self::accepts(upstream_caps) {
+            Ok(upstream_caps.clone())
+        } else {
+            Err(G2gError::CapsMismatch)
+        }
     }
 
     /// Declare each port's elementary caps (M380), so the solver negotiates each
@@ -579,7 +589,11 @@ impl MultiOutputElement for Mp4DemuxN {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        absolute_caps.intersect(&Self::input_caps()).map(|_| ConfigureOutcome::Accepted)
+        if Self::accepts(absolute_caps) {
+            Ok(ConfigureOutcome::Accepted)
+        } else {
+            Err(G2gError::CapsMismatch)
+        }
     }
 
     fn process<'a>(

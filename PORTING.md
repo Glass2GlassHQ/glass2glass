@@ -81,9 +81,9 @@ byte source must announce its type up front, but you rarely name it by hand: a b
 matroskademux name=d ...` run with no hint. For a mis-named or extensionless file,
 `bytestream-format=auto` sniffs the header content instead (containers by magic,
 subtitles by their signature). An explicit `bytestream-format=` always overrides.
-Caveat: `filesrc ! decodebin` on a *progressive* single-file `.mp4` needs
-`uridecodebin uri=file://…` instead (the `decodebin` autoplug pool has only the
-fragmented MP4 demuxer); MKV/TS/FLV/Ogg decode fine through `decodebin`.
+A progressive (whole-file) `.mp4` decodes through `decodebin` too
+(`filesrc location=X.mp4 ! decodebin ! …`, or explicitly `! qtdemux ! h264parse
+! …`); the streaming fragmented form (CMAF, from HLS / DASH) stays on `fmp4demux`.
 
 **When it doesn't parse, you get a porting hint**, not just an error:
 

@@ -36,7 +36,10 @@ fn filesrc_reflects_explicit_container() {
     for (nick, encoding) in [
         ("matroska", ByteStreamEncoding::Matroska),
         ("mpegts", ByteStreamEncoding::MpegTs),
-        ("mp4", ByteStreamEncoding::IsoBmff),
+        // M479: `mp4` is the whole-file form (demuxed by `mp4demux`); the streaming
+        // `isobmff` / `cmaf` / `fmp4` nicks name the fragmented form (`fmp4demux`).
+        ("mp4", ByteStreamEncoding::Mp4),
+        ("isobmff", ByteStreamEncoding::IsoBmff),
         ("flv", ByteStreamEncoding::Flv),
     ] {
         let fs = filesrc_with_format(nick);

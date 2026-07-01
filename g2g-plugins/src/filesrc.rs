@@ -130,7 +130,14 @@ impl FileSrc {
         header.truncate(filled);
         // Sniff a container (-> ByteStream) or a subtitle document (-> Text), so
         // `filesrc location=subs.vtt bytestream-format=auto ! subparse` types too.
-        self.caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
+        let mut caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
+        // A `filesrc` is always a seekable file, so a sniffed ISO-BMFF stream is the
+        // whole-file `Mp4` form (demuxed by `mp4demux`), not the streaming `IsoBmff`
+        // form (which `fmp4demux` consumes for live HLS / DASH).
+        if let Caps::ByteStream { encoding: ByteStreamEncoding::IsoBmff } = caps {
+            caps = Caps::ByteStream { encoding: ByteStreamEncoding::Mp4 };
+        }
+        self.caps = caps;
         self.auto_detect = false;
         Ok(())
     }
@@ -331,7 +338,7 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "mkv" | "webm" => ByteStreamEncoding::Matroska,
         "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
         "flv" => ByteStreamEncoding::Flv,
-        "mp4" | "m4v" | "m4a" | "mov" => ByteStreamEncoding::IsoBmff,
+        "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
         "vtt" => return Some(Caps::Text { format: g2g_core::TextFormat::WebVtt }),
         "srt" => return Some(Caps::Text { format: g2g_core::TextFormat::Srt }),
         "ass" | "ssa" => return Some(Caps::Text { format: g2g_core::TextFormat::Ssa }),
@@ -349,7 +356,10 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
         "ogg" | "opus" => Some(ByteStreamEncoding::Ogg),
         "flv" => Some(ByteStreamEncoding::Flv),
-        "mp4" | "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
+        // A file MP4 / QuickTime is whole-file (progressive or fragmented);
+        // `isobmff` / `cmaf` / `fmp4` name the streaming (incremental) form.
+        "mp4" | "mov" | "qt" | "m4v" => Some(ByteStreamEncoding::Mp4),
+        "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
         _ => None,
     }
 }
@@ -361,6 +371,7 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Matroska => "matroska",
         ByteStreamEncoding::Ogg => "ogg",
         ByteStreamEncoding::Flv => "flv",
-        ByteStreamEncoding::IsoBmff => "mp4",
+        ByteStreamEncoding::IsoBmff => "isobmff",
+        ByteStreamEncoding::Mp4 => "mp4",
     }
 }

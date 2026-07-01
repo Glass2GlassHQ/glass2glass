@@ -183,5 +183,6 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ogg => "ogg",
         ByteStreamEncoding::Flv => "flv",
         ByteStreamEncoding::IsoBmff => "mp4",
+        ByteStreamEncoding::Mp4 => "mp4",
     }
 }

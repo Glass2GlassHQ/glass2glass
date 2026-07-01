@@ -351,6 +351,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ogg => "application/ogg",
         ByteStreamEncoding::Flv => "video/x-flv",
         ByteStreamEncoding::IsoBmff => "video/quicktime",
+        ByteStreamEncoding::Mp4 => "video/quicktime",
     }
 }
 
@@ -1111,8 +1112,16 @@ pub enum ByteStreamEncoding {
     Flv,
     /// ISO Base Media File Format / fragmented MP4 (CMAF): `ftyp`/`moov` init then
     /// `moof`+`mdat` fragments. The modern HLS/DASH segment container, demuxed by
-    /// `fmp4demux`.
+    /// `fmp4demux` incrementally (a live stream, no end).
     IsoBmff,
+    /// Progressive / whole-file MP4 / QuickTime (M479): `ftyp` + `moov` (sample
+    /// tables) + `mdat`, in either order. A seekable file rather than a live
+    /// stream, so it is demuxed by `mp4demux` after the whole file is buffered (the
+    /// `moov` may sit at the end, and `stco` chunk offsets are absolute). The local
+    /// `.mp4` / `.mov` case, distinct from the streaming `IsoBmff` above so the
+    /// auto-plugger picks the whole-file demuxer for files and the incremental one
+    /// for HLS / DASH.
+    Mp4,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link
