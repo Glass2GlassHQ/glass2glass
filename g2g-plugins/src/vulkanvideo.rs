@@ -89,6 +89,9 @@ pub struct VulkanVideoDecodeCaps {
     pub min_bitstream_buffer_size_alignment: u64,
     /// The decoded picture can alias its DPB reference image (no extra copy).
     pub dpb_and_output_coincide: bool,
+    /// The codec Std header version the driver implements; a video session must
+    /// be created with exactly this (name + spec version).
+    pub std_header_version: vk::ExtensionProperties,
 }
 
 /// Errors from probing / setting up Vulkan Video decode.
@@ -273,17 +276,31 @@ pub unsafe fn probe_physical_device(
         return Err(VulkanVideoError::QueryFailed(ret));
     }
 
+    // Copy out the scalars, then drop `caps` to release its `push_next` borrow
+    // of `decode_caps` before reading the decode-specific flags.
+    let min_coded_extent = (caps.min_coded_extent.width, caps.min_coded_extent.height);
+    let max_coded_extent = (caps.max_coded_extent.width, caps.max_coded_extent.height);
+    let max_dpb_slots = caps.max_dpb_slots;
+    let max_active_reference_pictures = caps.max_active_reference_pictures;
+    let min_bitstream_buffer_offset_alignment = caps.min_bitstream_buffer_offset_alignment;
+    let min_bitstream_buffer_size_alignment = caps.min_bitstream_buffer_size_alignment;
+    let std_header_version = caps.std_header_version;
+    // `caps` (Copy) is last used above; NLL ends its `push_next` borrow of
+    // `decode_caps` here, so the decode-specific flags read below.
+    let dpb_and_output_coincide = decode_caps
+        .flags
+        .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE);
+
     Ok(VulkanVideoDecodeCaps {
         decode_queue_family,
-        min_coded_extent: (caps.min_coded_extent.width, caps.min_coded_extent.height),
-        max_coded_extent: (caps.max_coded_extent.width, caps.max_coded_extent.height),
-        max_dpb_slots: caps.max_dpb_slots,
-        max_active_reference_pictures: caps.max_active_reference_pictures,
-        min_bitstream_buffer_offset_alignment: caps.min_bitstream_buffer_offset_alignment,
-        min_bitstream_buffer_size_alignment: caps.min_bitstream_buffer_size_alignment,
-        dpb_and_output_coincide: decode_caps
-            .flags
-            .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE),
+        min_coded_extent,
+        max_coded_extent,
+        max_dpb_slots,
+        max_active_reference_pictures,
+        min_bitstream_buffer_offset_alignment,
+        min_bitstream_buffer_size_alignment,
+        dpb_and_output_coincide,
+        std_header_version,
     })
 }
 
@@ -670,6 +687,525 @@ pub fn to_std_pps(pps: &H264Pps) -> vk::native::StdVideoH264PictureParameterSet 
         chroma_qp_index_offset: pps.chroma_qp_index_offset,
         second_chroma_qp_index_offset: pps.second_chroma_qp_index_offset,
         pScalingLists: core::ptr::null(),
+    }
+}
+
+// ============================================================================
+// Decode device + video session
+//
+// A `wgpu::Device` opened with the Vulkan Video decode extensions and a decode
+// queue (added through wgpu-hal's `open_with_callback`, which lets us extend the
+// queue-create list, so we never build the `VkDevice` ourselves). The
+// `VkVideoSessionKHR` + `VkVideoSessionParametersKHR` are the decode context;
+// creating the parameters is where the driver validates the `Std*` SPS/PPS
+// mapping above.
+// ============================================================================
+
+/// The Vulkan Video decode extensions a decode device enables (on top of the
+/// codec-specific one).
+fn decode_device_extensions(codec: VulkanVideoCodec) -> [&'static core::ffi::CStr; 3] {
+    [
+        ash::khr::video_queue::NAME,
+        ash::khr::video_decode_queue::NAME,
+        codec.decode_extension(),
+    ]
+}
+
+/// Build the H.264 decode `VideoProfileInfoKHR` (with its codec profile + usage
+/// chained). The three chained structs are returned alongside so the caller
+/// keeps them alive for as long as the profile pointer is read.
+struct H264Profile {
+    profile: vk::VideoProfileInfoKHR<'static>,
+    _usage: alloc::boxed::Box<vk::VideoDecodeUsageInfoKHR<'static>>,
+    _h264: alloc::boxed::Box<vk::VideoDecodeH264ProfileInfoKHR<'static>>,
+}
+
+fn h264_profile() -> H264Profile {
+    let mut usage = alloc::boxed::Box::new(
+        vk::VideoDecodeUsageInfoKHR::default()
+            .video_usage_hints(vk::VideoDecodeUsageFlagsKHR::DEFAULT),
+    );
+    let h264 = alloc::boxed::Box::new(
+        vk::VideoDecodeH264ProfileInfoKHR::default()
+            .std_profile_idc(vk::native::StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_HIGH)
+            .picture_layout(vk::VideoDecodeH264PictureLayoutFlagsKHR::PROGRESSIVE),
+    );
+    let mut profile = vk::VideoProfileInfoKHR::default()
+        .video_codec_operation(vk::VideoCodecOperationFlagsKHR::DECODE_H264)
+        .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+        .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+        .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8);
+    // Chain manually via the raw p_next pointers: profile -> usage -> h264. The
+    // boxes keep stable heap addresses, so the pointers stay valid as the struct
+    // moves into the return value (ash's lifetime-tracked `push_next` cannot
+    // produce a self-contained `'static` value). The boxes are owned by the
+    // returned struct, so the pointees outlive every read of the profile.
+    usage.p_next = (&*h264 as *const vk::VideoDecodeH264ProfileInfoKHR).cast();
+    profile.p_next = (&*usage as *const vk::VideoDecodeUsageInfoKHR).cast();
+    H264Profile { profile, _usage: usage, _h264: h264 }
+}
+
+/// Pick a memory type index satisfying `type_bits` with `flags` (mirrors the
+/// helper in `cudawgpu.rs`).
+fn find_memory_type(
+    props: &vk::PhysicalDeviceMemoryProperties,
+    type_bits: u32,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    (0..props.memory_type_count).find(|&i| {
+        (type_bits & (1 << i)) != 0
+            && props.memory_types[i as usize].property_flags.contains(flags)
+    })
+}
+
+/// A wgpu device opened with a Vulkan Video H.264 decode queue + extensions.
+/// Keeps the wgpu device/queue (for the later YCbCr conversion + interop) and
+/// the raw `ash` handles the decode path drives directly.
+pub struct VulkanVideoDevice {
+    /// The wgpu device that owns the underlying `VkDevice`; keep it alive.
+    pub wgpu_device: wgpu::Device,
+    pub wgpu_queue: wgpu::Queue,
+    _adapter: wgpu::Adapter,
+    _instance: wgpu::Instance,
+    raw_device: ash::Device,
+    phys: vk::PhysicalDevice,
+    mem_props: vk::PhysicalDeviceMemoryProperties,
+    video_fns: ash::khr::video_queue::Device,
+    decode_queue_family: u32,
+    caps: VulkanVideoDecodeCaps,
+}
+
+impl core::fmt::Debug for VulkanVideoDevice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VulkanVideoDevice")
+            .field("decode_queue_family", &self.decode_queue_family)
+            .field("caps", &self.caps)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Open a wgpu device with an H.264 Vulkan Video decode queue + extensions.
+/// `Err(NoVulkanAdapter)` on a non-Vulkan / GPU-less host.
+pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoError> {
+    let codec = VulkanVideoCodec::H264;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: Default::default(),
+        backend_options: Default::default(),
+        display: None,
+    });
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        })
+        .await
+        .map_err(|_| VulkanVideoError::NoVulkanAdapter)?;
+
+    // Probe first (also yields the decode queue family we must request).
+    // SAFETY: the guard holds the adapter's live handles for the probe call.
+    let caps = unsafe {
+        let hal_adapter = adapter
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or(VulkanVideoError::NoVulkanAdapter)?;
+        let shared = hal_adapter.shared_instance();
+        probe_physical_device(
+            shared.entry(),
+            shared.raw_instance(),
+            hal_adapter.raw_physical_device(),
+            codec,
+        )
+    }?;
+
+    let decode_family = caps.decode_queue_family;
+    let exts = decode_device_extensions(codec);
+    // Priorities array lives in this scope so the queue-create pointer the
+    // callback records stays valid through `open_with_callback`.
+    let priorities = [1.0f32];
+
+    // SAFETY: `open_with_callback` + `create_device_from_hal` follow the
+    // documented cudawgpu pattern; the callback only appends extensions and (for
+    // a distinct decode family) one queue-create-info borrowing `priorities`,
+    // which outlives the call.
+    let (wgpu_device, wgpu_queue) = unsafe {
+        let hal_adapter = adapter
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or(VulkanVideoError::NoVulkanAdapter)?;
+        let open = hal_adapter
+            .open_with_callback(
+                wgpu::Features::empty(),
+                &wgpu::Limits::default(),
+                &wgpu::MemoryHints::default(),
+                Some(alloc::boxed::Box::new(
+                    |args: wgpu_hal::vulkan::CreateDeviceCallbackArgs| {
+                        for e in exts {
+                            args.extensions.push(e);
+                        }
+                        // wgpu opens family 0; add the decode family only if it
+                        // is distinct (Vulkan forbids two create-infos per
+                        // family).
+                        if decode_family != 0 {
+                            args.queue_create_infos.push(
+                                vk::DeviceQueueCreateInfo::default()
+                                    .queue_family_index(decode_family)
+                                    .queue_priorities(&priorities),
+                            );
+                        }
+                    },
+                )),
+            )
+            .map_err(|_| VulkanVideoError::NoVulkanAdapter)?;
+        adapter
+            .create_device_from_hal(
+                open,
+                &wgpu::DeviceDescriptor {
+                    label: Some("vulkan-video-decode"),
+                    ..Default::default()
+                },
+            )
+            .map_err(|_| VulkanVideoError::NoVulkanAdapter)?
+    };
+
+    // Reach the raw ash handles now owned by the wgpu device.
+    // SAFETY: the wgpu device is Vulkan-backed (we requested the Vulkan
+    // backend); the guard's handles are cloned/copied, not retained by borrow.
+    let (raw_device, phys, mem_props, video_fns) = unsafe {
+        let hal_device = wgpu_device
+            .as_hal::<wgpu_hal::api::Vulkan>()
+            .ok_or(VulkanVideoError::NoVulkanAdapter)?;
+        let raw_device = hal_device.raw_device().clone();
+        let phys = hal_device.raw_physical_device();
+        let raw_instance = hal_device.shared_instance().raw_instance();
+        let mem_props = raw_instance.get_physical_device_memory_properties(phys);
+        let video_fns = ash::khr::video_queue::Device::new(raw_instance, &raw_device);
+        (raw_device, phys, mem_props, video_fns)
+    };
+
+    Ok(VulkanVideoDevice {
+        wgpu_device,
+        wgpu_queue,
+        _adapter: adapter,
+        _instance: instance,
+        raw_device,
+        phys,
+        mem_props,
+        video_fns,
+        decode_queue_family: decode_family,
+        caps,
+    })
+}
+
+/// An H.264 `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`, with the
+/// session-backing device memory. Destroys them (params, session, memory) on
+/// drop.
+pub struct H264DecodeSession {
+    session: vk::VideoSessionKHR,
+    parameters: vk::VideoSessionParametersKHR,
+    memories: alloc::vec::Vec<vk::DeviceMemory>,
+    raw_device: ash::Device,
+    video_fns: ash::khr::video_queue::Device,
+    /// The decode picture format chosen at session creation (e.g. NV12).
+    pub picture_format: vk::Format,
+    pub coded_extent: (u32, u32),
+}
+
+impl core::fmt::Debug for H264DecodeSession {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("H264DecodeSession")
+            .field("picture_format", &self.picture_format)
+            .field("coded_extent", &self.coded_extent)
+            .field("memory_bindings", &self.memories.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for H264DecodeSession {
+    fn drop(&mut self) {
+        // SAFETY: all handles were created from `raw_device` / `video_fns` and
+        // are destroyed exactly once here, params before session before memory,
+        // with no in-flight decode (the caller holds the session for the decode
+        // and drops it after).
+        unsafe {
+            (self.video_fns.fp().destroy_video_session_parameters_khr)(
+                self.raw_device.handle(),
+                self.parameters,
+                core::ptr::null(),
+            );
+            (self.video_fns.fp().destroy_video_session_khr)(
+                self.raw_device.handle(),
+                self.session,
+                core::ptr::null(),
+            );
+            for &mem in &self.memories {
+                self.raw_device.free_memory(mem, None);
+            }
+        }
+    }
+}
+
+impl VulkanVideoDevice {
+    pub fn caps(&self) -> &VulkanVideoDecodeCaps {
+        &self.caps
+    }
+
+    /// Choose the decode picture format the driver supports for the H.264
+    /// profile (DPB + output usage). Prefers the two-plane 4:2:0 NV12 layout.
+    fn h264_decode_format(&self, profile: &H264Profile) -> Result<vk::Format, VulkanVideoError> {
+        let mut profile_list = vk::VideoProfileListInfoKHR::default()
+            .profiles(core::slice::from_ref(&profile.profile));
+        let fmt_info = vk::PhysicalDeviceVideoFormatInfoKHR::default()
+            .image_usage(
+                vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                    | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR,
+            )
+            .push_next(&mut profile_list);
+
+        // Two-call enumeration; `fmt_info` (with its chained profile list)
+        // outlives both calls. The physical-device video-format query lives on
+        // the instance extension.
+        let fp = self.instance_video_fp();
+        // SAFETY: null out-array just counts; `fmt_info` is valid.
+        let count = unsafe {
+            let mut n = 0u32;
+            let _ = (fp.get_physical_device_video_format_properties_khr)(
+                self.phys,
+                &fmt_info,
+                &mut n,
+                core::ptr::null_mut(),
+            );
+            n
+        };
+        if count == 0 {
+            return Err(VulkanVideoError::ExtensionUnsupported);
+        }
+        let mut formats: alloc::vec::Vec<vk::VideoFormatPropertiesKHR> =
+            (0..count).map(|_| Default::default()).collect();
+        // SAFETY: `formats` sized to `count`.
+        unsafe {
+            let mut n = count;
+            let _ = (fp.get_physical_device_video_format_properties_khr)(
+                self.phys,
+                &fmt_info,
+                &mut n,
+                formats.as_mut_ptr(),
+            );
+        }
+        // Prefer NV12 (two-plane 4:2:0); else take the first offered format.
+        let chosen = formats
+            .iter()
+            .find(|f| f.format == vk::Format::G8_B8R8_2PLANE_420_UNORM)
+            .or_else(|| formats.first())
+            .map(|f| f.format)
+            .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+        Ok(chosen)
+    }
+
+    /// The physical-device video-format query lives on the instance extension;
+    /// rebuild the instance fn table from the wgpu device's shared instance.
+    fn instance_video_fp(&self) -> ash::khr::video_queue::InstanceFn {
+        // SAFETY: the wgpu device is Vulkan-backed; its shared instance is live.
+        unsafe {
+            let hal_device = self
+                .wgpu_device
+                .as_hal::<wgpu_hal::api::Vulkan>()
+                .expect("vulkan wgpu device");
+            let shared = hal_device.shared_instance();
+            ash::khr::video_queue::InstanceFn::load(|name| {
+                shared
+                    .entry()
+                    .get_instance_proc_addr(shared.raw_instance().handle(), name.as_ptr())
+                    .map_or(core::ptr::null(), |f| f as *const _)
+            })
+        }
+    }
+
+    /// Create an H.264 decode session + parameters for `ps`, sized to
+    /// `max_w`x`max_h` (clamped to the device's coded-extent range). Session
+    /// parameter creation validates the `Std*` SPS/PPS mapping.
+    pub fn create_h264_session(
+        &self,
+        ps: &H264ParameterSets,
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<H264DecodeSession, VulkanVideoError> {
+        let prof = h264_profile();
+        let picture_format = self.h264_decode_format(&prof)?;
+
+        let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
+        let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
+        let coded_extent = vk::Extent2D { width: w, height: h };
+
+        let session_ci = vk::VideoSessionCreateInfoKHR::default()
+            .queue_family_index(self.decode_queue_family)
+            .video_profile(&prof.profile)
+            .picture_format(picture_format)
+            .max_coded_extent(coded_extent)
+            .reference_picture_format(picture_format)
+            .max_dpb_slots(self.caps.max_dpb_slots)
+            .max_active_reference_pictures(self.caps.max_active_reference_pictures)
+            .std_header_version(&self.caps.std_header_version);
+
+        let mut session = vk::VideoSessionKHR::null();
+        // SAFETY: `session_ci` (with its chained profile) outlives the call.
+        let ret = unsafe {
+            (self.video_fns.fp().create_video_session_khr)(
+                self.raw_device.handle(),
+                &session_ci,
+                core::ptr::null(),
+                &mut session,
+            )
+        };
+        if ret != vk::Result::SUCCESS {
+            return Err(VulkanVideoError::QueryFailed(ret));
+        }
+
+        // Bind the session's device memory (one allocation per requirement).
+        let memories = match self.bind_session_memory(session) {
+            Ok(m) => m,
+            Err(e) => {
+                // SAFETY: session was created above; destroy on the error path.
+                unsafe {
+                    (self.video_fns.fp().destroy_video_session_khr)(
+                        self.raw_device.handle(),
+                        session,
+                        core::ptr::null(),
+                    );
+                }
+                return Err(e);
+            }
+        };
+
+        // Create session parameters carrying the Std SPS + PPS. This is where
+        // the driver validates the mapping.
+        let std_sps = [to_std_sps(&ps.sps)];
+        let std_pps = [to_std_pps(&ps.pps)];
+        let add = vk::VideoDecodeH264SessionParametersAddInfoKHR::default()
+            .std_sp_ss(&std_sps)
+            .std_pp_ss(&std_pps);
+        let mut h264_params = vk::VideoDecodeH264SessionParametersCreateInfoKHR::default()
+            .max_std_sps_count(1)
+            .max_std_pps_count(1)
+            .parameters_add_info(&add);
+        let params_ci = vk::VideoSessionParametersCreateInfoKHR::default()
+            .video_session(session)
+            .push_next(&mut h264_params);
+
+        let mut parameters = vk::VideoSessionParametersKHR::null();
+        // SAFETY: `params_ci` and its chained H.264 add-info (referencing the
+        // local Std arrays) outlive the call.
+        let ret = unsafe {
+            (self.video_fns.fp().create_video_session_parameters_khr)(
+                self.raw_device.handle(),
+                &params_ci,
+                core::ptr::null(),
+                &mut parameters,
+            )
+        };
+        if ret != vk::Result::SUCCESS {
+            for &mem in &memories {
+                // SAFETY: allocated in bind_session_memory, freed once here.
+                unsafe { self.raw_device.free_memory(mem, None) };
+            }
+            // SAFETY: session created above, destroyed once on this error path.
+            unsafe {
+                (self.video_fns.fp().destroy_video_session_khr)(
+                    self.raw_device.handle(),
+                    session,
+                    core::ptr::null(),
+                );
+            }
+            return Err(VulkanVideoError::QueryFailed(ret));
+        }
+
+        Ok(H264DecodeSession {
+            session,
+            parameters,
+            memories,
+            raw_device: self.raw_device.clone(),
+            video_fns: self.video_fns.clone(),
+            picture_format,
+            coded_extent: (w, h),
+        })
+    }
+
+    /// Query the session's memory requirements and allocate + bind one
+    /// `VkDeviceMemory` per bind index.
+    fn bind_session_memory(
+        &self,
+        session: vk::VideoSessionKHR,
+    ) -> Result<alloc::vec::Vec<vk::DeviceMemory>, VulkanVideoError> {
+        // Two-call: count, then fill.
+        let mut count = 0u32;
+        // SAFETY: null out-array counts.
+        unsafe {
+            let _ = (self.video_fns.fp().get_video_session_memory_requirements_khr)(
+                self.raw_device.handle(),
+                session,
+                &mut count,
+                core::ptr::null_mut(),
+            );
+        }
+        let mut reqs: alloc::vec::Vec<vk::VideoSessionMemoryRequirementsKHR> =
+            (0..count).map(|_| Default::default()).collect();
+        // SAFETY: `reqs` sized to `count`.
+        unsafe {
+            let _ = (self.video_fns.fp().get_video_session_memory_requirements_khr)(
+                self.raw_device.handle(),
+                session,
+                &mut count,
+                reqs.as_mut_ptr(),
+            );
+        }
+
+        let mut memories = alloc::vec::Vec::with_capacity(count as usize);
+        let mut binds = alloc::vec::Vec::with_capacity(count as usize);
+        for req in &reqs {
+            // The requirement's `memory_type_bits` already lists the acceptable
+            // memory types; do not impose an extra property flag (some session
+            // bindings need a non-DEVICE_LOCAL type). Prefer DEVICE_LOCAL when it
+            // is among the allowed types, else take any allowed type.
+            let type_bits = req.memory_requirements.memory_type_bits;
+            let mem_type = find_memory_type(
+                &self.mem_props,
+                type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .or_else(|| find_memory_type(&self.mem_props, type_bits, vk::MemoryPropertyFlags::empty()))
+            .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(req.memory_requirements.size)
+                .memory_type_index(mem_type);
+            // SAFETY: valid allocate info; freed on error / drop.
+            let mem = unsafe { self.raw_device.allocate_memory(&alloc_info, None) }
+                .map_err(VulkanVideoError::QueryFailed)?;
+            memories.push(mem);
+            binds.push(
+                vk::BindVideoSessionMemoryInfoKHR::default()
+                    .memory_bind_index(req.memory_bind_index)
+                    .memory(mem)
+                    .memory_offset(0)
+                    .memory_size(req.memory_requirements.size),
+            );
+        }
+        // SAFETY: `binds` references `memories` still owned here; bind once.
+        let ret = unsafe {
+            (self.video_fns.fp().bind_video_session_memory_khr)(
+                self.raw_device.handle(),
+                session,
+                binds.len() as u32,
+                binds.as_ptr(),
+            )
+        };
+        if ret != vk::Result::SUCCESS {
+            for &mem in &memories {
+                // SAFETY: freed once on this error path.
+                unsafe { self.raw_device.free_memory(mem, None) };
+            }
+            return Err(VulkanVideoError::QueryFailed(ret));
+        }
+        Ok(memories)
     }
 }
 

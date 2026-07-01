@@ -137,22 +137,26 @@ leverage first:
   slot / active-ref budget + `DPB_AND_OUTPUT_COINCIDE` that `intercept_caps` and
   DPB sizing negotiate against (survives fixate, never advertises `Dim::Any`),
   and the driver wrinkle that the caps query needs the codec-specific output caps
-  struct chained (else `ERROR_INITIALIZATION_FAILED`). What is left:
-  1. a `VkDevice` created via `ash` with a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue +
-     the video extensions, adopted into wgpu (`create_from_hal`) since wgpu won't
-     request a decode queue itself (the remaining load-bearing integration point;
-     the probe already proves the queue family exists);
-  2. `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`, populating the `Std*`
-     parameter structs from parsed SPS/PPS/VPS (one mapping module per codec,
-     the tedious, correctness-critical part), re-emitted on mid-stream change via
-     `CapsChanged`;
-  3. DPB reference-picture slot management from the slice headers;
-  4. `vkCmdDecodeVideoKHR` recording, output `VkImage` wrapped as a `wgpu::Texture`
-     and pipelined through the YCbCr pass with a `RING_DEPTH` in-flight ring;
-  5. the `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
-     properties, `output_domains`).
-  Sizing: ~1 milestone for H.264 (the plumbing is reuse; budget it for the `Std*`
-  mapping + DPB rules), H.265 and AV1 +1 each (mostly their parameter mapping).
+  struct chained (else `ERROR_INITIALIZATION_FAILED`).
+  DONE (M487): the H.264 SPS/PPS parse (`parse_h264_sps`/`_pps`) + `Std*` mapping
+  (`to_std_sps`/`to_std_pps`), the tedious correctness-critical half, with GPU-free
+  unit tests. DONE (M488, validated on the 3060): the decode device
+  (`open_h264_decode_device`, decode queue added via wgpu-hal `open_with_callback`,
+  no hand-built `VkDevice`) and `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`
+  (`create_h264_session`), whose parameter creation makes the driver validate the
+  M487 mapping. What is left for a decoded frame:
+  1. DPB + output `VkImage`s (NV12 `G8_B8R8_2PLANE_420_UNORM`) and the coded
+     bitstream `VkBuffer`;
+  2. per-frame `Std*` picture/slice info (`StdVideoDecodeH264PictureInfo` +
+     slice offsets) and DPB reference-slot management from the slice headers;
+  3. `vkCmdDecodeVideoKHR` recording (begin/decode/end video coding) on the decode
+     queue + fence sync, output `VkImage` wrapped as a `wgpu::Texture` and pipelined
+     through the YCbCr pass with a `RING_DEPTH` in-flight ring;
+  4. the `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
+     properties, `output_domains`), re-emitting parameters on mid-stream SPS/PPS
+     change via `CapsChanged`.
+  Sizing: the IDR-only decode (no inter-reference DPB) is the next checkpoint;
+  full P/B-frame DPB, then H.265 and AV1 (+1 each, mostly their parameter mapping).
   Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
   bleed correctness) and the `create_from_hal` device adoption under wgpu 29
   (prototype in isolation first). Test `mNNN_vulkan_video_decode.rs`: decode a
