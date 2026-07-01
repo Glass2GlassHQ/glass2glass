@@ -848,6 +848,14 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
         Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
     }));
+    // Vendor-neutral Vulkan Video H.264 hardware decoder (M493): H.264 in, NV12
+    // system-memory out, on the same Vulkan device wgpu runs (AMD/NVIDIA/Intel).
+    // Launch-only for now (no auto-plug rank yet).
+    #[cfg(feature = "vulkan-video")]
+    reg.register_launch(LaunchFactory::of::<crate::vulkanvideo::VulkanVideoDec>(
+        "vulkanvideodec",
+        || Box::new(crate::vulkanvideo::VulkanVideoDec::new()),
+    ));
     // ffmpeg / libavcodec H.264 *encoder* (M266 / M274), the encode-side mirror of
     // ffmpegdec. `ffmpegenc` defaults to the NVENC backend (`h264_nvenc`); the
     // explicit `x264enc` name opens the libx264 software encoder for hosts without

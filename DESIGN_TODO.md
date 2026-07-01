@@ -173,20 +173,32 @@ leverage first:
   `transform_8x8_mode_flag = 1`, desyncing the driver's CAVLC coefficient parse
   (every decoded frame was flat mid-grey; the old tests only checked non-uniformity,
   not correctness). `BitReader::more_rbsp_data()` added; m489 now also asserts bright
-  content is present. Left:
-  1. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
-     properties, `output_domains = {WgpuTexture}`, driving the decode per frame),
-     re-emitting parameters on mid-stream SPS/PPS change via `CapsChanged`. Now
-     straightforward on top of M492 (per-frame decode -> wgpu texture already work).
-  2. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M492
+  content is present.
+  DONE (M493, validated on the 3060): the `VulkanVideoDec` `AsyncElement` wrapper.
+  `Caps::CompressedVideo{H264}` in -> `Caps::RawVideo{Nv12}` system memory out
+  (the decoder's native layout, no colour convert); `intercept_caps` +
+  `caps_constraint_as_transform` (H.264 -> NV12 same geometry) so the solver gives
+  each link real caps; `configure_pipeline` opens the device, the session + DPB
+  build lazily on the first SPS/PPS-bearing AU (in-band, not in caps); `process`
+  decodes each AU (DPB state carries across calls) and emits one NV12 frame per
+  picture with a leading `CapsChanged`. Registered `vulkanvideodec` (launch-only).
+  `m493_vulkan_video_element` feeds the fixture one AU per `process` call and
+  asserts 10 real NV12 frames. `examples/vulkan_video_smoke` dumps PPM frames you
+  can open. Left:
+  1. Zero-copy GPU-resident `WgpuTexture` output (`output_domains = {WgpuTexture}`)
+     -- the wedge's performance claim. The decode -> RGBA-texture half is proven
+     (M490/M491); needs the per-frame DPB image wired through the ycbcr compute
+     pass (DPB slots need `SAMPLED` + CONCURRENT sharing) AND a wgpu-consuming
+     display/encode sink (none exists yet: today WgpuTexture must be read back to
+     system memory before any sink). Until then the element emits system NV12.
+  2. Auto-plug: a `CapabilityDescriptor` rank so `decodebin` picks it (currently
+     launch-only, referenced by explicit `vulkanvideodec` name).
+  3. Mid-stream SPS/PPS re-config (rebuild the session, re-emit `CapsChanged`);
+     M493 builds the session once from the first keyframe AU.
+  4. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M493
      fence-wait each submission; fine for validation, not for throughput).
-  3. Hardening: H.265 and AV1 (+1 each, mostly their parameter mapping); the
-     decode is now proven bit-exact vs ffmpeg, so a PSNR harness is optional.
-  Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
-  bleed correctness) and the `create_from_hal` device adoption under wgpu 29
-  (prototype in isolation first). Test `mNNN_vulkan_video_decode.rs`: decode a
-  known clip on the 3060, assert the output texture matches an ffmpeg reference
-  (same harness as the CUDA->wgpu validation), skips with no adapter.
+  5. H.265 and AV1 (+1 each, mostly their `Std*` parameter mapping); the decode is
+     proven bit-exact vs ffmpeg, so a PSNR harness is optional.
   Strategic note: this is the path that turns the wgpu-resident decode story from
   NVIDIA-only into genuinely cross-vendor (a wgpu-based consumer such as a game
   engine or a visualization viewer gets hardware decode straight into its own

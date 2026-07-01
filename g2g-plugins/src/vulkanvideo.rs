@@ -23,7 +23,14 @@
 
 use ash::vk;
 
-use g2g_core::VideoCodec;
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::block_on;
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    RawVideoFormat, Rate, VideoCodec,
+};
 
 /// Compiled SPIR-V for the YCbCr -> RGBA compute shader, shared with the Android
 /// `mediacodec-wgpu` path (`shaders/mediacodec_ycbcr.comp`): it samples a
@@ -3348,6 +3355,241 @@ fn extract_first_idr_slice(au: &[u8]) -> Option<alloc::vec::Vec<u8>> {
         }
     }
     None
+}
+
+// ============================================================================
+// VulkanVideoDec pipeline element (M493)
+//
+// The `AsyncElement` wrapper around the decoder above: `Caps::CompressedVideo`
+// H.264 Annex-B in, `Caps::RawVideo{Nv12}` in system memory out (the layout the
+// `H264DpbDecoder` already produces, so no colour conversion), on the same
+// Vulkan device wgpu runs. Emitting NV12 in system memory makes it usable in any
+// pipeline today (videoconvert / waylandsink / a file dump); the zero-copy
+// GPU-resident `WgpuTexture` output (M490/M491 already prove the decode->texture
+// half) is the next increment, gated on a wgpu-consuming sink.
+// ============================================================================
+
+/// A pipeline element: hardware H.264 decode via Vulkan Video (vendor-neutral),
+/// emitting NV12 frames in system memory. Wraps [`H264DpbDecoder`].
+///
+/// The device is opened at `configure_pipeline`; the decode session + DPB are
+/// built lazily on the first access unit that carries SPS/PPS (they arrive
+/// in-band, not in the caps). Field order is drop order: the decoder (holds
+/// copies of the session/device handles) drops first, then the session
+/// (destroys the `VkVideoSession`), then the device (destroys the `VkDevice`).
+pub struct VulkanVideoDec {
+    decoder: Option<H264DpbDecoder>,
+    session: Option<H264DecodeSession>,
+    device: Option<VulkanVideoDevice>,
+    last_caps: Option<Caps>,
+    framerate: Rate,
+    emitted: u64,
+}
+
+impl core::fmt::Debug for VulkanVideoDec {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VulkanVideoDec")
+            .field("configured", &self.decoder.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for VulkanVideoDec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VulkanVideoDec {
+    pub fn new() -> Self {
+        Self {
+            decoder: None,
+            session: None,
+            device: None,
+            last_caps: None,
+            framerate: Rate::Any,
+            emitted: 0,
+        }
+    }
+
+    /// Build the decode session + DPB from an access unit that carries SPS/PPS.
+    /// Returns `Ok(false)` if the AU has no parameter sets yet (skip and wait for
+    /// the keyframe AU that does), `Ok(true)` once the decoder is ready.
+    fn ensure_decoder(&mut self, au: &[u8]) -> Result<bool, G2gError> {
+        if self.decoder.is_some() {
+            return Ok(true);
+        }
+        let Some(ps) = extract_h264_parameter_sets(au) else {
+            return Ok(false);
+        };
+        let device = self.device.as_ref().ok_or(G2gError::CapsMismatch)?;
+        let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
+        let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+        let session = device
+            .create_h264_session(&ps, width, height)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        let decoder = device
+            .create_h264_dpb_decoder(&session, &ps)
+            .map_err(|_| G2gError::CapsMismatch)?;
+        self.session = Some(session);
+        self.decoder = Some(decoder);
+        Ok(true)
+    }
+}
+
+impl PadTemplates for VulkanVideoDec {
+    fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
+        alloc::vec::Vec::from([
+            PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
+                codec: VideoCodec::H264,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
+            PadTemplate::source(CapsSet::one(Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })),
+        ])
+    }
+}
+
+impl AsyncElement for VulkanVideoDec {
+    type ProcessFuture<'a> = core::pin::Pin<alloc::boxed::Box<dyn core::future::Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        let candidate = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        upstream_caps.intersect(&candidate).map_err(|_| G2gError::CapsMismatch)
+    }
+
+    /// H.264 in (any geometry) -> NV12 out at the same dims/framerate, so the
+    /// caps solver hands each link real caps (H.264 to the decoder, NV12 to the
+    /// sink) instead of falling back to the dynamic `intercept_caps` cascade.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(|input: &Caps| match input {
+            Caps::CompressedVideo { codec: VideoCodec::H264, width, height, framerate } => {
+                CapsSet::one(Caps::RawVideo {
+                    format: RawVideoFormat::Nv12,
+                    width: width.clone(),
+                    height: height.clone(),
+                    framerate: framerate.clone(),
+                })
+            }
+            _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        match absolute_caps {
+            Caps::CompressedVideo { codec: VideoCodec::H264, framerate, .. } => {
+                self.framerate = framerate.clone();
+            }
+            _ => return Err(G2gError::CapsMismatch),
+        }
+        // Open the decode device now (independent of the stream's SPS/PPS, which
+        // arrive in-band and build the session lazily on the first keyframe AU).
+        let device = block_on(open_h264_decode_device()).map_err(|_| G2gError::CapsMismatch)?;
+        self.device = Some(device);
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Vulkan Video H.264 decoder",
+            "Codec/Decoder/Video/Hardware",
+            "Vendor-neutral GPU hardware H.264 decode via VK_KHR_video_queue, NV12 out",
+            "g2g",
+        )
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        alloc::boxed::Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let MemoryDomain::System(slice) = &frame.domain else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    // Decode the access unit. The whole thing is owned by the
+                    // packet, so borrow the bytes into an owned Vec first (the
+                    // decoder borrows `self.decoder` mutably below).
+                    let au = slice.as_slice().to_vec();
+                    if !self.ensure_decoder(&au)? {
+                        // No SPS/PPS yet (a leading non-keyframe AU); skip it.
+                        return Ok(());
+                    }
+                    let decoded = self
+                        .decoder
+                        .as_mut()
+                        .expect("decoder built")
+                        .decode_all(&au)
+                        .map_err(|_| G2gError::CapsMismatch)?;
+
+                    for f in decoded {
+                        let caps = Caps::RawVideo {
+                            format: RawVideoFormat::Nv12,
+                            width: Dim::Fixed(f.width),
+                            height: Dim::Fixed(f.height),
+                            framerate: self.framerate.clone(),
+                        };
+                        if self.last_caps.as_ref() != Some(&caps) {
+                            out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                            self.last_caps = Some(caps);
+                        }
+                        // NV12 = luma plane followed by interleaved CbCr, which is
+                        // exactly the two planes `Nv12Frame` carries: concatenate.
+                        let mut nv12 =
+                            alloc::vec::Vec::with_capacity(f.luma.len() + f.chroma.len());
+                        nv12.extend_from_slice(&f.luma);
+                        nv12.extend_from_slice(&f.chroma);
+                        let out_frame = Frame {
+                            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                                nv12.into_boxed_slice(),
+                            )),
+                            timing: FrameTiming {
+                                pts_ns: frame.timing.pts_ns,
+                                dts_ns: frame.timing.pts_ns,
+                                duration_ns: 0,
+                                capture_ns: frame.timing.capture_ns,
+                                arrival_ns: frame.timing.arrival_ns,
+                                keyframe: frame.timing.keyframe,
+                            },
+                            sequence: self.emitted,
+                            meta: Default::default(),
+                        };
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                    Ok(())
+                }
+                PipelinePacket::CapsChanged(c) => match &c {
+                    Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Ok(()),
+                    _ => Err(G2gError::CapsMismatch),
+                },
+                PipelinePacket::Flush => {
+                    self.last_caps = None;
+                    out.push(PipelinePacket::Flush).await?;
+                    Ok(())
+                }
+                other => {
+                    out.push(other).await?;
+                    Ok(())
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]
