@@ -697,6 +697,11 @@ required-features = ["std"]
 name = "cc_author"
 required-features = ["std"]
 
+# Visual smoke test: decode an H.264 stream via Vulkan Video and dump PPM frames.
+[[example]]
+name = "vulkan_video_smoke"
+required-features = ["vulkan-video"]
+
 # M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
 [[test]]
