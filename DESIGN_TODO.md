@@ -21,7 +21,12 @@ leverage first:
    libdav1d (`Dav1dDec`, `dav1d` feature, C FFI) and pure Rust (`Rav1dDec`,
    `rav1d` feature, via `re_rav1d`). VP8 / VP9 decode is covered by `FfmpegVideoDec`
    (a dedicated libvpx `VpxDec` is deferred: no pure-Rust decoder exists, and a
-   libvpx-FFI element would only duplicate the ffmpeg path).
+   libvpx-FFI element would only duplicate the ffmpeg path). The headline open
+   item is **`VulkanVideoDec`** (see "Receive / decode"): vendor-neutral,
+   GPU-resident hardware decode straight into a `wgpu::Texture`, the cross-vendor
+   generalization of the CUDA-locked `NvDec` path and the wedge that gives a
+   wgpu-based consumer (game engine / visualization viewer) hardware decode on its
+   own render device.
 4. **Browser demo (speculative product path).** Cross-target ONNX in-browser:
    CPU-round-trip MVP via `ort-web` (`WebSocketSrc -> WebCodecsDecode ->
    ort-web -> CanvasSink`), then a deployed reference app + native sibling. The
@@ -107,6 +112,56 @@ leverage first:
 - H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
 - Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
 - 10-bit pixel formats in `FfmpegH264Dec` (`YUV420P10` / `P010`).
+
+- **`VulkanVideoDec` (vendor-neutral GPU-resident hardware decode).** Decode
+  H.264/H.265/AV1 with `VK_KHR_video_queue` + `VK_KHR_video_decode_*` on the same
+  Vulkan device wgpu already runs, emitting a `MemoryDomain::WgpuTexture` (RGBA)
+  frame with no PCIe download, the vendor-neutral analog of the CUDA-locked
+  `NvDec -> CudaToWgpu` path. AMD (RADV), NVIDIA and Intel (ANV) all expose the
+  extensions, so one element covers all three (validated per vendor as hardware
+  is available; NVIDIA on the RTX 3060 first, AMD/Intel stay `VERIFY:` until run).
+  New feature `vulkan-video = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]`;
+  `AsyncElement` transform, `Caps::CompressedVideo{H264|H265|AV1}` Annex-B in ->
+  `Caps::RawVideo{Rgba8}` `WgpuTexture` out; `output_domains = {WgpuTexture}`
+  (optionally `VulkanTexture` / multiplanar NV12). Properties: `codec`,
+  `output-format`, `num-dpb-slots`, `low-latency` (bounded DPB / no reorder for
+  streaming), `device-index`.
+  The expensive interop half is already in-tree and reused: the VkImage -> wgpu
+  import seam (`cudawgpu.rs` / `dmabufwgpu.rs` `texture_from_raw` +
+  `TextureMemory::External`), custom Vulkan device creation with extra extensions
+  (the `cuda-wgpu` device path), the multiplanar NV12 -> RGBA `VkSamplerYcbcrConversion`
+  compute pass (`mediacodec_wgpu.rs`), the Annex-B + SPS/PPS front-end
+  (`h264parse.rs` / h265parse), and domain auto-plug (M351-M354).
+  DONE (M486, `vulkanvideo::probe_decode_caps`, validated on the 3060): the
+  capability probe -> the decode-capable queue family + coded-extent range + DPB
+  slot / active-ref budget + `DPB_AND_OUTPUT_COINCIDE` that `intercept_caps` and
+  DPB sizing negotiate against (survives fixate, never advertises `Dim::Any`),
+  and the driver wrinkle that the caps query needs the codec-specific output caps
+  struct chained (else `ERROR_INITIALIZATION_FAILED`). What is left:
+  1. a `VkDevice` created via `ash` with a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue +
+     the video extensions, adopted into wgpu (`create_from_hal`) since wgpu won't
+     request a decode queue itself (the remaining load-bearing integration point;
+     the probe already proves the queue family exists);
+  2. `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`, populating the `Std*`
+     parameter structs from parsed SPS/PPS/VPS (one mapping module per codec,
+     the tedious, correctness-critical part), re-emitted on mid-stream change via
+     `CapsChanged`;
+  3. DPB reference-picture slot management from the slice headers;
+  4. `vkCmdDecodeVideoKHR` recording, output `VkImage` wrapped as a `wgpu::Texture`
+     and pipelined through the YCbCr pass with a `RING_DEPTH` in-flight ring;
+  5. the `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
+     properties, `output_domains`).
+  Sizing: ~1 milestone for H.264 (the plumbing is reuse; budget it for the `Std*`
+  mapping + DPB rules), H.265 and AV1 +1 each (mostly their parameter mapping).
+  Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
+  bleed correctness) and the `create_from_hal` device adoption under wgpu 29
+  (prototype in isolation first). Test `mNNN_vulkan_video_decode.rs`: decode a
+  known clip on the 3060, assert the output texture matches an ffmpeg reference
+  (same harness as the CUDA->wgpu validation), skips with no adapter.
+  Strategic note: this is the path that turns the wgpu-resident decode story from
+  NVIDIA-only into genuinely cross-vendor (a wgpu-based consumer such as a game
+  engine or a visualization viewer gets hardware decode straight into its own
+  render device, matching what a browser gets from WebCodecs).
 
 ## CUDA / display
 

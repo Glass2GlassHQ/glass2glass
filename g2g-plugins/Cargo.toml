@@ -232,6 +232,11 @@ libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # as the libcamera probe but without the libcamera dependency, so a bridge /
 # GStreamer dma-buf feed can be imported to the GPU on its own.
 dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Vendor-neutral GPU-resident hardware video decode via Vulkan Video
+# (`VK_KHR_video_queue` + `VK_KHR_video_decode_*`), decoding into a wgpu texture
+# on the same Vulkan device wgpu runs, the cross-vendor analog of the CUDA-locked
+# NvDec -> CudaToWgpu path (AMD/RADV, NVIDIA, Intel/ANV). See DESIGN.md 4.11.6.
+vulkan-video = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element inside
 # a g2g graph. The element drives `appsrc ! <element> ! appsink` in a real
 # GStreamer pipeline (a small C helper over the gstreamer-1.0 / gstreamer-app-1.0

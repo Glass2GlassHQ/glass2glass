@@ -691,6 +691,50 @@ quartet `cuGraphicsGLRegisterImage` / `cuGraphicsMapResources` /
 `cuGraphicsSubResourceGetMappedArray` / `cuGraphicsUnmapResources`. The
 plugin links `libcuda` directly.
 
+#### 4.11.6 Vulkan Video (vendor-neutral GPU-resident decode) — capability probe done, decode session planned
+
+The NVDEC→CUDA→wgpu path of §4.11.5 is fast but **vendor-locked**: CUDA has no
+AMD or Intel analog, so a wgpu-based consumer (a game engine, a visualization
+viewer) that wants hardware decode straight into its own render device gets it
+only on NVIDIA. `VulkanVideoDec` (planned, see DESIGN_TODO "Receive / decode")
+closes that gap by decoding with `VK_KHR_video_queue` + `VK_KHR_video_decode_*`
+on the **same Vulkan device wgpu already runs**, so the decoded `VkImage` is
+imported as a `wgpu::Texture` with no download and no second interop bridge. One
+element then covers AMD (RADV), NVIDIA and Intel (ANV), each validated as
+hardware is available.
+
+The **capability probe** (M486, `vulkanvideo::probe_decode_caps`) is the first
+increment and is done + validated on the RTX 3060: it reaches the adapter's raw
+`ash` handles via `as_hal::<Vulkan>()`, finds a decode-capable queue family, and
+queries `vkGetPhysicalDeviceVideoCapabilitiesKHR` for H.264/H.265/AV1, returning
+the coded-extent range, DPB slot / active-reference budget, and the
+`DPB_AND_OUTPUT_COINCIDE` flag that `intercept_caps` and DPB sizing negotiate
+against (on the 3060: H.264 to 4096², H.265/AV1 to 8192², output coincides with
+the DPB). It settled the load-bearing driver wrinkle: the query returns a
+generic `ERROR_INITIALIZATION_FAILED` unless the codec-specific output caps
+struct (`VkVideoDecodeH264/H265/AV1CapabilitiesKHR`) is chained alongside
+`VkVideoDecodeCapabilitiesKHR`, with a `VkVideoDecodeUsageInfoKHR` on the profile.
+
+The element is deliberately mostly reuse: the `VkImage`→`wgpu::Texture` import
+(`cudawgpu.rs` / `dmabufwgpu.rs` `texture_from_raw` + `TextureMemory::External`,
+§5.1), custom Vulkan device creation with extra extensions (the `cuda-wgpu`
+device path), the multiplanar NV12→RGBA `VkSamplerYcbcrConversion` compute pass
+(shared with the Android `mediacodec-wgpu` decoder), the Annex-B + SPS/PPS
+front-end (`h264parse` / h265parse), and the allocation-domain auto-plug
+(§4.13.5) all already exist. The new surface is the decode session itself: a
+`VkDevice` with a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue adopted into wgpu via
+`create_from_hal` (wgpu will not request a decode queue on its own, the
+load-bearing integration point), a `vkGetPhysicalDeviceVideoCapabilitiesKHR`
+probe feeding `intercept_caps`, a `VkVideoSessionKHR` /
+`VkVideoSessionParametersKHR` whose `Std*` parameter structs are populated from
+the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
+codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
+management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
+YCbCr pass with an in-flight ring. Output caps are
+`Caps::RawVideo { format: Rgba8, .. }` in `MemoryDomain::WgpuTexture`
+(optionally `VulkanTexture` / multiplanar NV12); negotiation and the frame
+keep-alive follow the `NvDec` multi-domain pattern (§4.11.3).
+
 ### 4.12 Live Egress
 
 The receive path (§4.11) has an inverse: encoded video out over RTP. The

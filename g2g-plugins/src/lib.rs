@@ -506,6 +506,12 @@ pub mod libcamera_dmabuf;
 #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 pub mod dmabufwgpu;
 
+// Vendor-neutral GPU-resident hardware video decode via Vulkan Video
+// (VK_KHR_video_queue). Linux + Windows (both expose the extensions on RADV /
+// ANV / the NVIDIA proprietary driver). See DESIGN.md 4.11.6.
+#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "vulkan-video"))]
+pub mod vulkanvideo;
+
 // Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element
 // inside a g2g graph. Drives `appsrc ! <element> ! appsink` via a C helper.
 #[cfg(feature = "gstreamer")]
