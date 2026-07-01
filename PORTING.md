@@ -277,6 +277,35 @@ rejected as it loses the ergonomic Rust trait.) Regime (a) — including the
 **package-rebuild** path, where a vendor compiles extra element crates into the
 g2g binary it ships — remains available and needs no ABI match.
 
+### d) Hosting an *un-ported* GStreamer element (`gstwrap`)
+
+The three regimes above register a g2g-native element. When a stage has no g2g
+port yet (a proprietary GStreamer element, one you have not gotten to), you don't
+have to block the migration: `gstwrap` runs the real GStreamer element *inside*
+your g2g graph. This is the mirror of `g2g-bridge` (§8, which embeds g2g inside a
+GStreamer app); `gstwrap` embeds GStreamer inside g2g, so you can adopt g2g as
+the top-level framework now and port the remaining stages later.
+
+```rust
+// videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! autovideosink
+graph.add_transform({
+    let mut w = GstWrap::new();
+    w.set_property("element", PropValue::Str("videoflip method=horizontal-flip".into()))?;
+    w                       // a caps-preserving element declares nothing
+});
+// A reformatting element (encoder, scaler) declares its result:
+//   w.set_property("element",     PropValue::Str("x264enc bitrate=4000".into()))?;
+//   w.set_property("output-caps", PropValue::Str("video/x-h264,...".into()))?;
+```
+
+It drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline internally;
+system-memory frames flow in and out (a copy each way in v1). Built behind the
+`gstreamer` feature (needs the gstreamer-1.0 + gstreamer-app-1.0 dev packages).
+**Caveat:** the launch DSL v1 can't carry a quoted property value with spaces, so
+from `g2g-launch` a single-token `gstwrap element=videoflip` works but a
+multi-word `element="x264enc bitrate=4000"` needs the programmatic API above
+until the tokenizer learns quoting (§8).
+
 ---
 
 ## 8. Known gaps (as of M459)
@@ -292,7 +321,10 @@ g2g binary it ships — remains available and needs no ABI match.
   *server*, and RTP RTX. Catalogued in DESIGN_TODO.md.
 - Other structural gaps (e.g. allocation re-cascade) are catalogued in
   DESIGN_TODO.md.
-- No quoted property values with spaces in the launch DSL (v1).
+- No quoted property values with spaces in the launch DSL (v1). This also caps
+  `gstwrap` from the CLI: `gstwrap element=videoflip` parses but
+  `gstwrap element="x264enc bitrate=4000"` needs the programmatic API (§7d). A
+  tokenizer that honours quotes would lift both.
 - No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
 - Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
   and host must share the same `g2g-core` version, `rustc`, and layout features.
@@ -313,6 +345,11 @@ g2g binary it ships — remains available and needs no ABI match.
   `tools/gst-bridge-dmabuf-smoke.sh`); system-memory buffers are mapped and
   copied. A GPU-*compute* fragment (`dmabuftowgpu ! <compute>`) still needs a
   download/export element at its tail to return the GPU result to the shell.
+- `gstwrap` (§7d) is the reverse bridge: it hosts an un-ported GStreamer element
+  *inside* a g2g graph (`appsrc ! <element> ! appsink` on GStreamer's own
+  threads), so g2g can be the top-level framework during a migration. Behind the
+  `gstreamer` feature; v1 is system-memory (a copy each way), dma-buf zero-copy
+  through it is future work. CLI use is limited by the DSL-quoting gap above.
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---

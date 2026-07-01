@@ -838,6 +838,13 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>("dmabuftowgpu", || {
         Box::new(crate::dmabufwgpu::DmaBufToWgpu::new())
     }));
+    // Reverse GStreamer bridge: host an unported GStreamer element in a g2g graph.
+    // No pad templates (caps are what the negotiation settles + the `output-caps`
+    // property declares), like `identity`.
+    #[cfg(feature = "gstreamer")]
+    reg.register_launch(LaunchFactory::new("gstwrap", Vec::new(), || {
+        Box::new(crate::gstwrap::GstWrap::new())
+    }));
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
         Box::new(WaylandSink::new())

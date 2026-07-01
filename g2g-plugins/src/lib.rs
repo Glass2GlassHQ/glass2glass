@@ -318,13 +318,15 @@ pub mod mfaacencode;
 #[cfg(all(target_os = "windows", feature = "mf-aac"))]
 pub mod mfaacdecode;
 
-// Shared frame-emission loop for the packet-producing encoders below.
+// Shared frame-emission loop for the packet-producing encoders below (and
+// `gstwrap`, which emits its hosted element's output frames the same way).
 #[cfg(any(
     feature = "av1-encode",
     feature = "vpx",
     feature = "opus",
     feature = "ffmpeg",
-    feature = "nvenc"
+    feature = "nvenc",
+    feature = "gstreamer"
 ))]
 mod encoder_base;
 
@@ -493,6 +495,11 @@ pub mod libcamera_dmabuf;
 // Zero-copy DMABUF -> wgpu buffer import element (Linux + GPU).
 #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 pub mod dmabufwgpu;
+
+// Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element
+// inside a g2g graph. Drives `appsrc ! <element> ! appsink` via a C helper.
+#[cfg(feature = "gstreamer")]
+pub mod gstwrap;
 
 // Wayland display sink (NV12 -> XRGB8888 via wl_shm). Linux-only;
 // desktop-dev convenience sink — see module docs.

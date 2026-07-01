@@ -232,6 +232,15 @@ libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # as the libcamera probe but without the libcamera dependency, so a bridge /
 # GStreamer dma-buf feed can be imported to the GPU on its own.
 dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element inside
+# a g2g graph. The element drives `appsrc ! <element> ! appsink` in a real
+# GStreamer pipeline (a small C helper over the gstreamer-1.0 / gstreamer-app-1.0
+# C API, built by build.rs via pkg-config + cc, mirroring g2g-bridge's shell).
+# The incremental-migration path in the g2g-as-top-framework direction: adopt g2g
+# now, keep unported GStreamer stages running until they are ported. Implies std;
+# needs the gstreamer-1.0 + gstreamer-app-1.0 dev packages. Linux-primary (the C
+# API is portable; only build.rs's pkg-config probe is host-specific).
+gstreamer = ["std"]
 # KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
 # active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
 # implies std. Requires DRM master (drop to tty or run with a DRM lease);
@@ -637,6 +646,13 @@ web-sys = { version = "0.3", optional = true, features = [
     "RtcDataChannelType",
 ] }
 
+# Build the `gstwrap` C helper (csrc/gstwrap_host.c) when the `gstreamer` feature
+# is on. Unconditionally present (like g2g-bridge's), but build.rs no-ops without
+# the feature, so a default no_std build compiles nothing here.
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
@@ -687,6 +703,12 @@ required-features = ["plugin-loader"]
 [[test]]
 name = "m214_gpu_fanout"
 required-features = ["vello-overlay", "wgpu-sink"]
+
+# M466: `gstwrap` hosts a real GStreamer element inside a g2g graph. Needs host
+# GStreamer runtime + dev libs; run locally, not in CI (like the bridge smokes).
+[[test]]
+name = "gstwrap"
+required-features = ["gstreamer"]
 
 [lints]
 workspace = true
