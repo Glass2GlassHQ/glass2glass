@@ -1261,11 +1261,11 @@ impl VulkanVideoDevice {
     /// (frame_num 0, POC 0, IdrPicFlag). Full reference management is a later
     /// increment. On the error path some transient Vulkan objects may leak; this
     /// is a one-shot validation entry point, not the steady-state element.
-    pub fn decode_idr_luma(
+    pub fn decode_idr_nv12(
         &self,
         session: &H264DecodeSession,
         idr_au: &[u8],
-    ) -> Result<DecodedLuma, VulkanVideoError> {
+    ) -> Result<Nv12Frame, VulkanVideoError> {
         let (w, h) = session.coded_extent;
         let slice = extract_first_idr_slice(idr_au).ok_or(VulkanVideoError::NoDecodableSlice)?;
         let dev = &self.raw_device;
@@ -1343,10 +1343,13 @@ impl VulkanVideoDevice {
             m
         };
 
-        // Readback buffer for the luma plane (w*h bytes), host-visible.
+        // Readback buffer for the full NV12 frame (luma w*h + interleaved CbCr
+        // w*h/2), host-visible. Chroma follows luma at offset w*h.
         let luma_len = (w as u64) * (h as u64);
+        let chroma_len = luma_len / 2;
+        let nv12_len = luma_len + chroma_len;
         let rb_ci = vk::BufferCreateInfo::default()
-            .size(luma_len)
+            .size(nv12_len)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: valid create info.
@@ -1489,7 +1492,7 @@ impl VulkanVideoDevice {
                 .image_memory_barriers(core::slice::from_ref(&to_src));
             (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep2);
 
-            let region = vk::BufferImageCopy::default()
+            let luma_region = vk::BufferImageCopy::default()
                 .buffer_offset(0)
                 .buffer_row_length(0)
                 .buffer_image_height(0)
@@ -1501,12 +1504,27 @@ impl VulkanVideoDevice {
                 })
                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                 .image_extent(vk::Extent3D { width: w, height: h, depth: 1 });
+            // Chroma plane (PLANE_1): interleaved CbCr at half resolution, RG8,
+            // packed right after luma in the readback buffer.
+            let chroma_region = vk::BufferImageCopy::default()
+                .buffer_offset(luma_len)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::PLANE_1,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D { width: w / 2, height: h / 2, depth: 1 });
+            let regions = [luma_region, chroma_region];
             dev.cmd_copy_image_to_buffer(
                 cb,
                 image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 readback,
-                core::slice::from_ref(&region),
+                &regions,
             );
 
             dev.end_command_buffer(cb).map_err(VulkanVideoError::QueryFailed)?;
@@ -1523,20 +1541,26 @@ impl VulkanVideoDevice {
             r.map_err(VulkanVideoError::QueryFailed)
         };
 
-        // Read back the luma plane before tearing down.
-        let luma = match submit_result {
+        // Read back the full NV12 frame before tearing down.
+        let (luma, chroma) = match submit_result {
             Ok(()) => {
                 // SAFETY: readback_mem is host-visible/coherent and holds
-                // `luma_len` bytes written by the completed copy.
+                // `nv12_len` bytes written by the completed copies.
                 unsafe {
                     let ptr = dev
-                        .map_memory(readback_mem, 0, luma_len, vk::MemoryMapFlags::empty())
+                        .map_memory(readback_mem, 0, nv12_len, vk::MemoryMapFlags::empty())
                         .map_err(VulkanVideoError::QueryFailed)?
                         as *const u8;
-                    let mut v = alloc::vec![0u8; luma_len as usize];
-                    core::ptr::copy_nonoverlapping(ptr, v.as_mut_ptr(), luma_len as usize);
+                    let mut luma = alloc::vec![0u8; luma_len as usize];
+                    let mut chroma = alloc::vec![0u8; chroma_len as usize];
+                    core::ptr::copy_nonoverlapping(ptr, luma.as_mut_ptr(), luma_len as usize);
+                    core::ptr::copy_nonoverlapping(
+                        ptr.add(luma_len as usize),
+                        chroma.as_mut_ptr(),
+                        chroma_len as usize,
+                    );
                     dev.unmap_memory(readback_mem);
-                    v
+                    (luma, chroma)
                 }
             }
             Err(e) => {
@@ -1550,7 +1574,124 @@ impl VulkanVideoDevice {
         // the decode has completed (fence waited).
         unsafe { self.destroy_decode_transients(pool, image, view, image_mem, bitstream, bitstream_mem, readback, readback_mem) };
 
-        Ok(DecodedLuma { width: w, height: h, luma })
+        Ok(Nv12Frame { width: w, height: h, luma, chroma })
+    }
+
+    /// Decode a single IDR frame and return just the luma plane (`width*height`
+    /// bytes). Thin wrapper over [`decode_idr_nv12`](Self::decode_idr_nv12).
+    pub fn decode_idr_luma(
+        &self,
+        session: &H264DecodeSession,
+        idr_au: &[u8],
+    ) -> Result<DecodedLuma, VulkanVideoError> {
+        let f = self.decode_idr_nv12(session, idr_au)?;
+        Ok(DecodedLuma { width: f.width, height: f.height, luma: f.luma })
+    }
+
+    /// Decode a single IDR frame and upload it to an RGBA `wgpu::Texture` on this
+    /// device's wgpu queue, the output type a wgpu consumer (game engine /
+    /// visualization viewer) samples directly. NV12 -> RGBA is converted on the
+    /// CPU here (M490); the zero-copy GPU-resident `VkSamplerYcbcrConversion`
+    /// path that keeps the frame on the GPU is the next increment.
+    pub fn decode_idr_to_rgba_texture(
+        &self,
+        session: &H264DecodeSession,
+        idr_au: &[u8],
+    ) -> Result<wgpu::Texture, VulkanVideoError> {
+        let frame = self.decode_idr_nv12(session, idr_au)?;
+        let rgba = nv12_to_rgba(&frame);
+        let texture = self.wgpu_device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vulkan-video-decoded-rgba"),
+            size: wgpu::Extent3d {
+                width: frame.width,
+                height: frame.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.wgpu_queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(frame.width * 4),
+                rows_per_image: Some(frame.height),
+            },
+            wgpu::Extent3d {
+                width: frame.width,
+                height: frame.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.wgpu_queue.submit([]);
+        Ok(texture)
+    }
+
+    /// Read an `Rgba8Unorm` wgpu texture on this device back to tightly-packed
+    /// `width*height*4` bytes (validation / CPU-consumer helper). Handles the
+    /// 256-byte row alignment wgpu requires for buffer copies.
+    pub fn read_rgba_texture(&self, texture: &wgpu::Texture) -> alloc::vec::Vec<u8> {
+        let (w, h) = (texture.width(), texture.height());
+        let unpadded = (w * 4) as usize;
+        let padded = unpadded.div_ceil(256) * 256;
+        let buffer = self.wgpu_device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vulkan-video-readback"),
+            size: (padded * h as usize) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .wgpu_device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded as u32),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.wgpu_queue.submit([enc.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.wgpu_device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let mapped = slice.get_mapped_range();
+        // Strip the row padding back to tightly-packed rows.
+        let mut out = alloc::vec::Vec::with_capacity(unpadded * h as usize);
+        for row in 0..h as usize {
+            let start = row * padded;
+            out.extend_from_slice(&mapped[start..start + unpadded]);
+        }
+        drop(mapped);
+        buffer.unmap();
+        out
     }
 
     /// Destroy the one-shot decode objects (fence already destroyed inline).
@@ -1591,6 +1732,47 @@ pub struct DecodedLuma {
     pub height: u32,
     /// `width * height` bytes, one per luma sample (row-major, tightly packed).
     pub luma: alloc::vec::Vec<u8>,
+}
+
+/// A decoded NV12 frame read back to system memory: a full-resolution luma
+/// plane followed by a half-resolution interleaved CbCr plane.
+#[derive(Debug, Clone)]
+pub struct Nv12Frame {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` luma (Y) samples, row-major.
+    pub luma: alloc::vec::Vec<u8>,
+    /// `width * height / 2` bytes: `(width/2) * (height/2)` interleaved Cb,Cr
+    /// pairs, row-major.
+    pub chroma: alloc::vec::Vec<u8>,
+}
+
+/// Convert an [`Nv12Frame`] to packed RGBA8 (BT.601 limited-range), the layout a
+/// wgpu `Rgba8Unorm` texture expects. CPU reference conversion; the GPU-resident
+/// `VkSamplerYcbcrConversion` path is a later increment.
+fn nv12_to_rgba(frame: &Nv12Frame) -> alloc::vec::Vec<u8> {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let cw = w / 2;
+    let mut rgba = alloc::vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yv = frame.luma[y * w + x] as f32;
+            let ci = ((y / 2) * cw + (x / 2)) * 2;
+            let cb = frame.chroma[ci] as f32 - 128.0;
+            let cr = frame.chroma[ci + 1] as f32 - 128.0;
+            // BT.601 limited-range YCbCr -> RGB.
+            let yc = (yv - 16.0) * 1.164_383;
+            let r = yc + 1.596_027 * cr;
+            let g = yc - 0.391_762 * cb - 0.812_968 * cr;
+            let b = yc + 2.017_232 * cb;
+            let o = (y * w + x) * 4;
+            rgba[o] = r.clamp(0.0, 255.0) as u8;
+            rgba[o + 1] = g.clamp(0.0, 255.0) as u8;
+            rgba[o + 2] = b.clamp(0.0, 255.0) as u8;
+            rgba[o + 3] = 255;
+        }
+    }
+    rgba
 }
 
 /// The SPS id the session was built with (constant 0 for our single-SPS path).

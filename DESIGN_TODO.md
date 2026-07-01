@@ -149,13 +149,17 @@ leverage first:
   buffer, `vkCmdBeginVideoCodingKHR` + `RESET` + `vkCmdDecodeVideoKHR` + end, with
   `synchronization2` image barriers) and reads back a non-uniform luma plane, the
   first real Vulkan Video decode in the tree. What is left:
-  1. Full DPB reference management: per-frame slice-header parse (frame_num, POC,
+  DONE (M490, validated on the 3060): `decode_idr_to_rgba_texture` lands a decoded
+  frame in an `Rgba8Unorm` `wgpu::Texture` on the decode device (the wedge
+  payload), via a full-NV12 readback + CPU BT.601 conversion; `m490` reads the
+  texture back through wgpu and asserts real content. What is left:
+  1. Zero-copy GPU-resident NV12 -> RGBA: replace the CPU convert with a
+     `VkSamplerYcbcrConversion` compute pass writing an RGBA `VkImage` imported
+     into wgpu (`texture_from_raw`, as `cudawgpu`/`mediacodec_wgpu` do), pipelined
+     through a `RING_DEPTH` in-flight ring, so the frame never leaves the GPU.
+  2. Full DPB reference management: per-frame slice-header parse (frame_num, POC,
      idr_pic_id, slice_type), multi-slice pictures, and P/B-frame reference slots
-     (M489 hardcodes the lone-IDR `Std*` constants and one DPB slot).
-  2. Output `VkImage` -> `wgpu::Texture` (reuse `cudawgpu`/`dmabufwgpu`
-     `texture_from_raw`) + the NV12 -> RGBA `VkSamplerYcbcrConversion` pass
-     (`mediacodec_wgpu`), pipelined through a `RING_DEPTH` in-flight ring, instead
-     of the M489 CPU luma readback.
+     (M489/M490 hardcode the lone-IDR `Std*` constants and one DPB slot).
   3. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
      properties, `output_domains = {WgpuTexture}`), re-emitting parameters on
      mid-stream SPS/PPS change via `CapsChanged`.
