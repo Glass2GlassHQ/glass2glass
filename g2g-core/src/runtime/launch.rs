@@ -537,6 +537,24 @@ const DECODEBIN_MAX_DEPTH: usize = 6;
 /// element (chain head, or after a bare `name.` reference) is a loud error,
 /// since it has nothing to take its input caps from.
 fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+    // Names referenced as `name.` somewhere: a `decodebin name=d` with such refs is
+    // a FAN-OUT node (M482), not the inline linear case, so it is left unexpanded
+    // here and handled by the decodebin-select path in `build_graph` (which probes
+    // the file, demuxes, and decodes each requested port). Only the unreferenced
+    // inline `... ! decodebin ! ...` expands to a linear decode chain below.
+    let mut referenced: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
+    for chain in &chains {
+        for item in chain {
+            if let Item::Ref { name, .. } = item {
+                referenced.insert(name.clone());
+            }
+        }
+    }
+    let is_fanout_decodebin = |spec: &ElementSpec| {
+        is_decodebin(&spec.name)
+            && spec.instance.as_deref().map(|n| referenced.contains(n)).unwrap_or(false)
+    };
+
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
@@ -547,6 +565,12 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
         let mut upstream: Option<(String, Vec<(String, String)>)> = None;
         for item in chain {
             match item {
+                // A fan-out `decodebin name=d` is left for `build_graph`'s
+                // decodebin-select path; it is not linearly expandable.
+                Item::Element(spec) if is_fanout_decodebin(&spec) => {
+                    upstream = Some((spec.name.clone(), spec.props.clone()));
+                    new_chain.push(Item::Element(spec));
+                }
                 Item::Element(spec) if is_decodebin(&spec.name) => {
                     let (pred, props) = upstream.as_ref().ok_or(ParseError::DecodebinNoUpstream)?;
                     let caps = resolve_upstream_caps(registry, pred, props)?;
@@ -887,6 +911,34 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             }
         }
     }
+    // `decodebin name=d` fan-out (M482): a `decodebin` node left unexpanded (it has
+    // named refs) with a file source upstream probes the file, builds the
+    // multi-output demuxer (stored like a demux-select node so it fans out on its
+    // own pads), and records each port's elementary caps so the wiring below splices
+    // a decoder onto every port (the decode-per-port that makes it `decodebin`, not a
+    // bare demuxer). Declining hooks leave it unbuilt (a loud error at node build).
+    let mut decode_fanout_caps: Vec<Option<Vec<Caps>>> = (0..specs.len()).map(|_| None).collect();
+    if !registry.decodebin_select_hooks().is_empty() {
+        for ei in 0..specs.len() {
+            if !is_decodebin(&specs[ei].name) || out_deg[ei] == 0 || prebuilt[ei].is_some() {
+                continue;
+            }
+            let Some(location) = links
+                .iter()
+                .find(|(_, d, _)| *d == ei)
+                .and_then(|(s, _, _)| prop(&specs[*s], "location"))
+            else {
+                continue;
+            };
+            for hook in registry.decodebin_select_hooks() {
+                if let Some((demux, caps)) = hook(location, &demux_pads[ei]) {
+                    demux_select_node[ei] = Some(demux);
+                    decode_fanout_caps[ei] = Some(caps);
+                    break;
+                }
+            }
+        }
+    }
     let is_select: Vec<bool> = demux_select_node.iter().map(|d| d.is_some()).collect();
     // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
@@ -1045,6 +1097,24 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         } else {
             PadId::from(node_d)
         };
+        // `decodebin` fan-out (M482): splice a decoder between the demux port and the
+        // branch consumer instead of a bare link, so each `d.video_0` / `d.audio_0`
+        // branch receives DECODED (raw) frames. A text port carries `Text{Utf8}`
+        // already, so it links straight through (no codec).
+        if let Some(caps) = &decode_fanout_caps[s] {
+            let port = src.index as usize;
+            let kind = demux_pads[s].get(port).map(|r| r.kind).unwrap_or(PadKind::Any);
+            if !matches!(kind, PadKind::Text) {
+                let target: &dyn Fn(&Caps) -> bool = match kind {
+                    PadKind::Audio => &is_raw_audio,
+                    _ => &is_raw_video,
+                };
+                registry
+                    .decodebin(&mut graph, src, dst, &caps[port], target, DECODEBIN_MAX_DEPTH)
+                    .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{:?}", caps[port])))?;
+                continue;
+            }
+        }
         graph.link_with(src, dst, policy)?;
     }
 

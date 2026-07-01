@@ -769,6 +769,19 @@ mod factory {
     pub type DemuxSelectHook =
         fn(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>>;
 
+    /// A `decodebin` fan-out hook (M482): the decode-per-port sibling of
+    /// [`DemuxSelectHook`], for `filesrc location=x.mkv ! decodebin name=d
+    /// d.video_0 ! ...  d.audio_0 ! ...`. Unlike the demux-select hook it is NOT
+    /// keyed by an element name (a `decodebin` names no container): each registered
+    /// hook probes the file and returns `Some` only for the container it parses, so
+    /// the parser tries them in turn. It returns the multi-output demuxer plus each
+    /// selected port's elementary caps, so the parser can auto-plug a decoder chain
+    /// onto every port (the demuxer emits elementary streams; `decodebin` decodes
+    /// them to raw). `None` declines (a different container, an unreadable file, or
+    /// an unsatisfiable request). Registered via [`Registry::register_decodebin_select`].
+    pub type DecodebinSelectHook =
+        fn(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)>;
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory").field("name", &self.desc.name).finish_non_exhaustive()
@@ -806,6 +819,11 @@ mod factory {
         /// (`None`) a container it does not parse. Empty (the default) leaves a
         /// demux element single-stream (its M114/M180 launch registration).
         demux_select: Vec<DemuxSelectHook>,
+        /// `decodebin` fan-out hooks (M482): the decode-per-port sibling of
+        /// `demux_select`. A `decodebin name=d` with several `d.` refs and a file
+        /// upstream tries each until one parses the container, returning the
+        /// demuxer + per-port caps so the parser splices a decoder onto each port.
+        decodebin_select: Vec<DecodebinSelectHook>,
         /// Optional parser injector (M421): given a decode-chain input caps,
         /// returns a parser element to splice in just before the decoder (e.g. an
         /// access-unit-re-framing `h264parse` for `CompressedVideo { H264, .. }`),
@@ -893,6 +911,22 @@ mod factory {
         /// declines a container it does not parse. Returns `&mut self` to chain.
         pub fn register_demux_select(&mut self, hook: DemuxSelectHook) -> &mut Self {
             self.demux_select.push(hook);
+            self
+        }
+
+        /// The `decodebin` fan-out hooks (M482), tried in order by
+        /// [`parse_launch`](crate::runtime::parse_launch) for a `decodebin name=d`
+        /// with several `d.` references and a file source upstream.
+        pub fn decodebin_select_hooks(&self) -> &[DecodebinSelectHook] {
+            &self.decodebin_select
+        }
+
+        /// Register a `decodebin` fan-out hook (M482): a `decodebin name=d` fed by a
+        /// file source tries the registered hooks until one parses the container,
+        /// returning the multi-output demuxer + per-port caps so the parser splices
+        /// a decoder onto each port. One per container type. Returns `&mut self`.
+        pub fn register_decodebin_select(&mut self, hook: DecodebinSelectHook) -> &mut Self {
+            self.decodebin_select.push(hook);
             self
         }
 
@@ -1455,9 +1489,9 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, DemuxFactory, DemuxSelectHook, ElementFactory,
-    LaunchFactory, MuxerFactory, PadKind, PadRequest, PlaybinGraphError, PlaybinHook, PlaybinPort,
-    PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
+    ElementFactory, LaunchFactory, MuxerFactory, PadKind, PadRequest, PlaybinGraphError, PlaybinHook,
+    PlaybinPort, PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

@@ -57,6 +57,22 @@ one per output-pad reference. Pad names select by media kind the GStreamer way:
 network source still uses `playbin`. Subtitle pads work for `matroskademux` and
 `qtdemux` (MPEG-TS carries no demuxer subtitle track).
 
+**`decodebin name=d` fans out and decodes** each branch for you (the gst idiom):
+`filesrc location=movie.mp4 ! decodebin name=d  d.video_0 ! videoconvert !
+autovideosink  d.audio_0 ! audioconvert ! autoaudiosink` probes the file and
+auto-plugs a demuxer plus a decoder per requested pad, so each `d.` branch gets raw
+frames without naming the parser/decoder. Same `d.video_0` / `d.audio_0` / `d.` pad
+grammar as the raw demuxer fan-out above; the difference is `decodebin` decodes,
+`matroskademux`/`qtdemux` hand you the elementary stream. (g2g resolves the pads by
+probing at parse time rather than gst's runtime `pad-added`, so it's file sources
+feeding a multi-stream container.)
+
+**Named input / request pads** let a fan-in reference its inputs by name in any
+order: `d.video_0 ! ... ! o.video   d.text_0 ! o.text   textoverlay name=o ! ...`
+and `... ! m.video_0   ... ! m.audio_0   matroskamux name=m ! ...`. Bare `m.`
+inputs stay positional (by reference order). The muxer defines the pad scheme, so
+`textoverlay`'s video always lands on its primary pad regardless of write order.
+
 **Subtitle overlay** uses `textoverlay` as a fan-in, the analog of GStreamer's
 `textoverlay` text_sink request pad: link a video branch and a text branch into
 one named `textoverlay` (video first, then text), and it paints the cues onto the

@@ -711,14 +711,13 @@ fn resolve_pads(kinds: &[PadKind], pads: &[PadRequest]) -> Option<Vec<usize>> {
         .collect()
 }
 
-/// `matroskademux` explicit fan-out (M476): probe the file, select the requested
-/// streams, and build a [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) with one port per
-/// pad. Declines a non-Matroska file or an unsatisfiable request.
+/// Probe a Matroska file and build a [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) with
+/// one port per pad request, returning the demuxer plus each selected port's
+/// elementary caps (M482). Shared by `matroskademux` demux-select (M476, drops the
+/// caps) and `decodebin` fan-out (M482, keeps them to auto-plug a decoder per port).
+/// Declines a non-Matroska file or an unsatisfiable request.
 #[cfg(feature = "std")]
-pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    if name != "matroskademux" {
-        return None;
-    }
+fn mkv_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::matroska::MatroskaDemuxer::new();
     demux.push_data(&prefix);
@@ -737,16 +736,31 @@ pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Opti
     }
     let sel = resolve_pads(&kinds, pads)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
-    Some(Box::new(crate::mkvdemux::MkvDemuxN::new(streams)))
+    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
+    Some((Box::new(crate::mkvdemux::MkvDemuxN::new(streams)), caps))
 }
 
-/// `tsdemux` explicit fan-out (M476): probe the PMT, select the requested streams,
-/// and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN). Declines a non-MPEG-TS file.
+/// `matroskademux` explicit fan-out (M476): build the multi-output demuxer,
+/// dropping the per-port caps (each branch names its own decode chain).
 #[cfg(feature = "std")]
-pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    if name != "tsdemux" {
-        return None;
-    }
+pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "matroskademux").then(|| mkv_select(location, pads).map(|(d, _)| d)).flatten()
+}
+
+/// `decodebin` fan-out over a Matroska file (M482): the demuxer + per-port caps.
+#[cfg(feature = "std")]
+pub fn mkv_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    mkv_select(location, pads)
+}
+
+/// Probe an MPEG-TS file and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN) with
+/// the requested streams + their caps (M482). Shared by `tsdemux` demux-select and
+/// `decodebin` fan-out. Declines a non-MPEG-TS file.
+#[cfg(feature = "std")]
+fn ts_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     let mut demux = crate::mpegts::TsDemuxer::new();
     let mut off = 0;
@@ -766,17 +780,30 @@ pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Optio
         infos.iter().map(|i| if i.video { PadKind::Video } else { PadKind::Audio }).collect();
     let sel = resolve_pads(&kinds, pads)?;
     let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
-    Some(Box::new(crate::tsdemux::TsDemuxN::new(streams)))
+    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
+    Some((Box::new(crate::tsdemux::TsDemuxN::new(streams)), caps))
 }
 
-/// `qtdemux` explicit fan-out (M476): probe the `moov`, select the requested
-/// tracks, and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN). Declines a
-/// non-MP4 file (or one whose `moov` is past the probe window).
+/// `tsdemux` explicit fan-out (M476).
 #[cfg(feature = "std")]
-pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
-    if name != "qtdemux" {
-        return None;
-    }
+pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "tsdemux").then(|| ts_select(location, pads).map(|(d, _)| d)).flatten()
+}
+
+/// `decodebin` fan-out over an MPEG-TS file (M482): the demuxer + per-port caps.
+#[cfg(feature = "std")]
+pub fn ts_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    ts_select(location, pads)
+}
+
+/// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
+/// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
+/// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).
+#[cfg(feature = "std")]
+fn mp4_select(location: &str, pads: &[PadRequest]) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
     // tracks (M477), so a `d.text_0` request maps to the container's text track.
@@ -793,11 +820,27 @@ pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Opti
         return None;
     }
     let sel = resolve_pads(&kinds, pads)?;
+    let caps: Vec<Caps> = sel.iter().map(|&i| infos[i].caps.clone()).collect();
     let ports: Vec<_> = sel
         .iter()
         .map(|&i| crate::mp4demuxn::Mp4Port { track_id: infos[i].track_id, caps: infos[i].caps.clone() })
         .collect();
-    Some(Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)))
+    Some((Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)), caps))
+}
+
+/// `qtdemux` explicit fan-out (M476).
+#[cfg(feature = "std")]
+pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "qtdemux").then(|| mp4_select(location, pads).map(|(d, _)| d)).flatten()
+}
+
+/// `decodebin` fan-out over an MP4 file (M482): the demuxer + per-port caps.
+#[cfg(feature = "std")]
+pub fn mp4_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    mp4_select(location, pads)
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for
