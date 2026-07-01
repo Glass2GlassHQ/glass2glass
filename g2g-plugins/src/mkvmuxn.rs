@@ -38,7 +38,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
 use crate::matroska::{MatroskaMuxer, MkvCodec, MkvTrackConfig, MkvTrackSpec};
@@ -82,6 +82,11 @@ pub struct MkvMuxN {
     emitted: u64,
     /// Set once the EOS `Cues` index has been flushed, so it is emitted only once.
     cues_emitted: bool,
+    /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
+    /// seek index normally appended at EOS, matching the single-input
+    /// [`crate::mkvmux::MkvMux`]. A live sink cannot hold cluster positions to the
+    /// end, so `streamable` drops the index.
+    streamable: bool,
 }
 
 impl MkvMuxN {
@@ -96,7 +101,14 @@ impl MkvMuxN {
             mux: None,
             emitted: 0,
             cues_emitted: false,
+            streamable: false,
         }
+    }
+
+    /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
+    pub fn with_streamable(mut self, streamable: bool) -> Self {
+        self.streamable = streamable;
+        self
     }
 
     pub fn emitted(&self) -> u64 {
@@ -317,6 +329,33 @@ impl MultiInputElement for MkvMuxN {
         Ok(Self::output_caps_value())
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "streamable",
+            PropKind::Bool,
+            "live mode: omit the seekable Cues index written at EOS",
+        )
+        .with_default("false")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "streamable" => {
+                self.streamable = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "streamable" => Some(PropValue::Bool(self.streamable)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
@@ -358,8 +397,9 @@ impl MultiInputElement for MkvMuxN {
             }
             // Once every track has ended and drained, flush the Cues index after
             // the last Cluster so the stream is seekable on a read-to-end (M375).
+            // In `streamable` (live) mode the index is suppressed.
             if self.agg.is_drained() && !self.cues_emitted {
-                if let Some(mux) = self.mux.as_ref() {
+                if let Some(mux) = self.mux.as_ref().filter(|_| !self.streamable) {
                     let cues = mux.finish();
                     if !cues.is_empty() {
                         let out_frame = Frame::new(
@@ -485,6 +525,48 @@ mod tests {
             "CodecPrivate element present"
         );
         assert!(mux.emitted() >= 4, "all four access units muxed");
+    }
+
+    /// The `streamable` knob is honored on the fan-in muxer (the `name=m` shape),
+    /// the same as the single-track `MkvMux`: no `Cues` seek index is appended at
+    /// EOS. Set via `set_property`, the path `parse_launch` uses.
+    #[tokio::test]
+    async fn streamable_property_omits_cues_on_the_fan_in_muxer() {
+        let mut mux = MkvMuxN::new(2);
+        mux.set_property("streamable", PropValue::Bool(true)).unwrap();
+        assert_eq!(mux.get_property("streamable"), Some(PropValue::Bool(true)));
+        mux.configure_pipeline(0, &video_caps()).unwrap();
+        mux.configure_pipeline(1, &audio_caps()).unwrap();
+
+        let mut sink = CaptureSink::default();
+        mux.process(0, frame(h264_idr(), 0), &mut sink).await.unwrap();
+        mux.process(1, frame(aac_adts(), 0), &mut sink).await.unwrap();
+        mux.process(0, frame(h264_idr(), 33_000_000), &mut sink).await.unwrap();
+        mux.process(1, frame(aac_adts(), 21_000_000), &mut sink).await.unwrap();
+        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink).await.unwrap();
+
+        // Cues element id is 0x1C53BB6B; it must not appear in streamable mode.
+        assert!(
+            !sink.bytes.windows(4).any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
+            "no Cues index written in streamable mode"
+        );
+
+        // A non-streamable mux of the same input does write the Cues index.
+        let mut plain = MkvMuxN::new(2);
+        plain.configure_pipeline(0, &video_caps()).unwrap();
+        plain.configure_pipeline(1, &audio_caps()).unwrap();
+        let mut sink2 = CaptureSink::default();
+        plain.process(0, frame(h264_idr(), 0), &mut sink2).await.unwrap();
+        plain.process(1, frame(aac_adts(), 0), &mut sink2).await.unwrap();
+        plain.process(0, frame(h264_idr(), 33_000_000), &mut sink2).await.unwrap();
+        plain.process(1, frame(aac_adts(), 21_000_000), &mut sink2).await.unwrap();
+        plain.process(0, PipelinePacket::Eos, &mut sink2).await.unwrap();
+        plain.process(1, PipelinePacket::Eos, &mut sink2).await.unwrap();
+        assert!(
+            sink2.bytes.windows(4).any(|w| w == [0x1C, 0x53, 0xBB, 0x6B]),
+            "default mode writes the Cues index"
+        );
     }
 
     #[test]

@@ -77,24 +77,41 @@ impl SourceLoop for AuSrc {
     }
 }
 
+/// Prefix each NAL with a 4-byte Annex-B start code.
+fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for n in nals {
+        v.extend_from_slice(&[0, 0, 0, 1]);
+        v.extend_from_slice(n);
+    }
+    v
+}
+
 fn build_h264() -> Box<dyn DynSourceLoop> {
-    // Video AUs at 0/40/80 ms (3 frames).
+    // Video AUs at 0/40/80 ms (3 frames). The first is a real keyframe carrying
+    // SPS (type 7) + PPS (type 8) + IDR (type 5), so the MP4 / Matroska muxers can
+    // build their per-track init (their avcC / CodecPrivate needs the parameter
+    // sets); the rest are P-slices.
+    let key = annexb(&[&[0x67, 0x42, 0x00, 0x1E, 0x88], &[0x68, 0xCE, 0x3C, 0x80], &[0x65, 0x11]]);
     Box::new(AuSrc {
         caps: h264_caps(),
         aus: vec![
-            (vec![0u8, 0, 0, 1, 0x65, 0x11], 0),
-            (vec![0u8, 0, 0, 1, 0x41, 0x22], 40_000_000),
-            (vec![0u8, 0, 0, 1, 0x41, 0x33], 80_000_000),
+            (key, 0),
+            (annexb(&[&[0x41, 0x22]]), 40_000_000),
+            (annexb(&[&[0x41, 0x33]]), 80_000_000),
         ],
         configured: false,
     })
 }
 
 fn build_aac() -> Box<dyn DynSourceLoop> {
-    // Audio AUs at 20/60 ms (2 frames), interleaving the video timeline.
+    // Audio AUs at 20/60 ms (2 frames), interleaving the video timeline. A full
+    // 7-byte ADTS header (LC, 48 kHz, stereo) + payload, so the MP4 / Matroska
+    // muxers can synthesise the AudioSpecificConfig from the first frame.
+    let adts = |tail: u8| vec![0xFFu8, 0xF1, 0x4C, 0x80, 0x00, 0x1F, 0xFC, tail];
     Box::new(AuSrc {
         caps: aac_caps(),
-        aus: vec![(vec![0xFFu8, 0xF1, 0xAA], 20_000_000), (vec![0xFFu8, 0xF1, 0xBB], 60_000_000)],
+        aus: vec![(adts(0xAA), 20_000_000), (adts(0xBB), 60_000_000)],
         configured: false,
     })
 }
@@ -178,4 +195,57 @@ async fn single_input_mpegtsmux_stays_a_transform() {
     let vg = graph.finish().expect("valid graph");
     let has_muxer = vg.topo().iter().any(|&n| matches!(vg.kind(n), NodeKind::Muxer(_)));
     assert!(!has_muxer, "single-input mpegtsmux is a transform, not a muxer node");
+}
+
+// M470: the fan-in muxer shape (`name=m`) now accepts the same properties as its
+// single-input sibling. Before, the N-input variants had an empty `properties()`,
+// so `apply_muxer_props` rejected the knob with `UnknownProperty`; these assert the
+// parse path applies it (the behavior each knob drives is unit-tested in the
+// tsmuxn / mp4muxn / mkvmuxn modules).
+
+#[tokio::test]
+async fn mpegtsmux_fan_in_accepts_pat_interval() {
+    let reg = registry_with_av_sources();
+    // pat-interval on the two-input muxer parses and runs (baseline registry).
+    let graph = parse_launch(
+        &reg,
+        "h264src ! m.   aacsrc ! m.   mpegtsmux name=m pat-interval=10 ! anysink",
+    )
+    .expect("fan-in mpegtsmux accepts pat-interval");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
+    assert_eq!(stats.frames_consumed, 5, "all five AUs muxed with periodic PSI");
+
+    // An unknown property on the fan-in muxer is still rejected (no silent accept).
+    assert!(
+        parse_launch(&reg, "h264src ! m.   aacsrc ! m.   mpegtsmux name=m bogus=1 ! anysink").is_err(),
+        "an unknown muxer property is rejected"
+    );
+}
+
+#[cfg(feature = "std")]
+#[tokio::test]
+async fn mp4mux_fan_in_accepts_fragment_duration() {
+    let reg = registry_with_av_sources();
+    let graph = parse_launch(
+        &reg,
+        "h264src ! m.   aacsrc ! m.   mp4mux name=m fragment-duration=500 ! anysink",
+    )
+    .expect("fan-in mp4mux accepts fragment-duration");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
+    // Batched: the 5 AUs (all within one 500 ms fragment) flush at EOS, so fewer
+    // byte frames than the per-AU default, but every AU is preserved as a sample.
+    assert!(stats.frames_consumed >= 1, "batched mp4 fragments emitted");
+}
+
+#[cfg(feature = "std")]
+#[tokio::test]
+async fn matroskamux_fan_in_accepts_streamable() {
+    let reg = registry_with_av_sources();
+    let graph = parse_launch(
+        &reg,
+        "h264src ! m.   aacsrc ! m.   matroskamux name=m streamable=true ! anysink",
+    )
+    .expect("fan-in matroskamux accepts streamable");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
+    assert_eq!(stats.frames_consumed, 5, "all five AUs muxed in streamable mode");
 }

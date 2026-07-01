@@ -35,7 +35,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, VideoCodec,
 };
 
 use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
@@ -93,6 +93,34 @@ pub struct Mp4MuxN {
     /// Global moof sequence number (1-based, increasing across the movie).
     sequence: u64,
     emitted: u64,
+    /// Target fragment duration in milliseconds (`0` = one `moof`+`mdat` fragment
+    /// per access unit, the default). Batches a track's access units into a
+    /// multi-sample fragment closed at the next sync sample once the target is
+    /// reached, matching the single-track [`crate::mp4mux::Mp4Mux`].
+    fragment_duration_ms: u64,
+    /// Per-track fragment being accumulated in batched mode (empty in per-AU mode).
+    pending: Vec<PendingFragment>,
+}
+
+/// One buffered sample of an in-progress fragment (batched mode).
+#[derive(Debug, Clone)]
+struct PendingSample {
+    bytes: Vec<u8>,
+    /// Sample duration in the track's timescale.
+    duration: u32,
+    is_sync: bool,
+}
+
+/// A track's in-progress `moof`+`mdat` fragment: the samples buffered so far, the
+/// decode time at the fragment's first sample (its `tfdt`), and the accumulated
+/// media duration (track timescale) used to decide when the target is reached.
+#[derive(Debug, Clone, Default)]
+struct PendingFragment {
+    samples: Vec<PendingSample>,
+    base_decode_time: u64,
+    /// PTS (ns) of the fragment's first sample, carried on the emitted byte frame.
+    base_pts_ns: u64,
+    accum_ticks: u64,
 }
 
 impl Mp4MuxN {
@@ -109,7 +137,16 @@ impl Mp4MuxN {
             header_written: false,
             sequence: 0,
             emitted: 0,
+            fragment_duration_ms: 0,
+            pending: alloc::vec![PendingFragment::default(); inputs],
         }
+    }
+
+    /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
+    /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
+    pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
+        self.fragment_duration_ms = ms;
+        self
     }
 
     pub fn emitted(&self) -> u64 {
@@ -207,8 +244,10 @@ impl Mp4MuxN {
         }
     }
 
-    /// Emit one access unit as a `moof`+`mdat` fragment for its track, prepending
-    /// the `ftyp`+`moov` init segment on the first fragment.
+    /// Buffer one access unit for its track. In per-AU mode (`fragment-duration`
+    /// = 0) it is flushed immediately as its own `moof`+`mdat` fragment; in
+    /// batched mode it accumulates into the track's pending fragment, which is
+    /// closed at the next sync sample once the target duration is reached.
     async fn emit_au(&mut self, input: usize, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let MemoryDomain::System(slice) = &frame.domain else {
             return Err(G2gError::UnsupportedDomain);
@@ -216,13 +255,6 @@ impl Mp4MuxN {
         let au = slice.as_slice();
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_sync) = self.sample_for(input, au);
-
-        let mut bytes = Vec::new();
-        if !self.header_written {
-            bytes.extend_from_slice(&ftyp());
-            bytes.extend_from_slice(&av_moov(&self.inits));
-            self.header_written = true;
-        }
 
         let track = &self.inits[input];
         let timescale = track.as_ref().map(TrackInit::timescale).unwrap_or(VIDEO_TIMESCALE);
@@ -239,21 +271,80 @@ impl Mp4MuxN {
             _ => default_dur_ns,
         };
         self.prev_pts_ns[input] = Some(pts_ns);
-        let duration = ns_to_ts(dur_ns, timescale);
+        let duration = ns_to_ts(dur_ns, timescale) as u32;
 
-        // track_ID is the 1-based pad index.
+        // Batched mode closes the open fragment before starting a new one at a sync
+        // sample once the target duration is reached, so every fragment begins on a
+        // keyframe (audio access units are all sync, so they close on the target).
+        let target = self.frag_target_ticks(input, timescale);
+        if target > 0
+            && is_sync
+            && !self.pending[input].samples.is_empty()
+            && self.pending[input].accum_ticks >= target
+        {
+            self.flush_track(input, out).await?;
+        }
+
+        let pend = &mut self.pending[input];
+        if pend.samples.is_empty() {
+            pend.base_decode_time = self.decode_time[input];
+            pend.base_pts_ns = pts_ns;
+        }
+        pend.samples.push(PendingSample { bytes: sample, duration, is_sync });
+        pend.accum_ticks += duration as u64;
+        self.decode_time[input] += duration as u64;
+
+        // Per-AU mode (target 0): flush immediately, one fragment per access unit.
+        if target == 0 {
+            self.flush_track(input, out).await?;
+        }
+        Ok(())
+    }
+
+    /// The fragment-duration target in a track's timescale (`0` = per-AU mode).
+    fn frag_target_ticks(&self, _input: usize, timescale: u32) -> u64 {
+        if self.fragment_duration_ms == 0 {
+            return 0;
+        }
+        ns_to_ts(self.fragment_duration_ms.saturating_mul(1_000_000), timescale)
+    }
+
+    /// Write a track's pending fragment as one `moof`+`mdat` (a multi-sample
+    /// `trun`), prepending the `ftyp`+`moov` init segment on the first fragment. A
+    /// no-op when the track has no buffered samples.
+    async fn flush_track(&mut self, input: usize, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.pending[input].samples.is_empty() {
+            return Ok(());
+        }
+        let pend = core::mem::take(&mut self.pending[input]);
+
+        let mut bytes = Vec::new();
+        if !self.header_written {
+            bytes.extend_from_slice(&ftyp());
+            bytes.extend_from_slice(&av_moov(&self.inits));
+            self.header_written = true;
+        }
+
+        // track_ID is the 1-based pad index; PTS of the first buffered sample.
         let track_id = (input + 1) as u32;
         self.sequence += 1;
-        bytes.extend_from_slice(&av_fragment(track_id, self.sequence, self.decode_time[input], duration as u32, &sample, is_sync));
-        self.decode_time[input] += duration;
+        bytes.extend_from_slice(&av_fragment(track_id, self.sequence, pend.base_decode_time, &pend.samples));
 
         let out_frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-            FrameTiming { pts_ns, ..FrameTiming::default() },
+            FrameTiming { pts_ns: pend.base_pts_ns, ..FrameTiming::default() },
             self.emitted,
         );
         self.emitted += 1;
         out.push(PipelinePacket::DataFrame(out_frame)).await?;
+        Ok(())
+    }
+
+    /// Flush every track's pending fragment (batched mode, at EOS), in track order.
+    async fn flush_all(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        for input in 0..self.inputs {
+            self.flush_track(input, out).await?;
+        }
         Ok(())
     }
 }
@@ -297,6 +388,33 @@ impl MultiInputElement for Mp4MuxN {
         Ok(Self::output_caps_value())
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[PropertySpec::new(
+            "fragment-duration",
+            PropKind::Uint,
+            "target fragment duration, milliseconds (0 = one fragment per access unit)",
+        )
+        .with_default("0")];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "fragment-duration" => {
+                self.fragment_duration_ms = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "fragment-duration" => Some(PropValue::Uint(self.fragment_duration_ms)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
@@ -329,6 +447,11 @@ impl MultiInputElement for Mp4MuxN {
             // Release AUs now safe to emit, in global PTS order.
             while let Some((track, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
                 self.emit_au(track, frame, out).await?;
+            }
+            // At EOS (every input ended and drained), close any open batched
+            // fragments so the last AUs are written; a no-op in per-AU mode.
+            if self.agg.is_drained() {
+                self.flush_all(out).await?;
             }
             Ok(())
         })
@@ -592,34 +715,151 @@ fn trak(track_id: u32, init: &TrackInit) -> Vec<u8> {
     mp4_box(b"trak", &[tkhd, mdia].concat())
 }
 
-/// One `moof`+`mdat` fragment holding a single sample for `track_id`.
-fn av_fragment(track_id: u32, sequence: u64, decode_time: u64, duration: u32, sample: &[u8], is_sync: bool) -> Vec<u8> {
-    let sample_flags: u32 = if is_sync { 0x0200_0000 } else { 0x0101_0000 };
+/// One `moof`+`mdat` fragment holding `samples` for `track_id`, with a
+/// multi-sample `trun` (a single sample in the default per-AU mode). `tfdt` is the
+/// track's decode time at the first sample.
+fn av_fragment(track_id: u32, sequence: u64, base_decode_time: u64, samples: &[PendingSample]) -> Vec<u8> {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
         let tfhd = full_box(b"tfhd", 0, 0x020000, &track_id.to_be_bytes()); // default-base-is-moof
-        let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
+        let tfdt = full_box(b"tfdt", 1, 0, &base_decode_time.to_be_bytes());
         let trun = {
             let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes()); // sample count
+            p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample count
             p.extend_from_slice(&data_offset.to_be_bytes());
-            p.extend_from_slice(&duration.to_be_bytes());
-            p.extend_from_slice(&(sample.len() as u32).to_be_bytes());
-            p.extend_from_slice(&sample_flags.to_be_bytes());
-            full_box(b"trun", 0, 0x000701, &p) // data-offset | duration | size | flags
+            for s in samples {
+                let flags: u32 = if s.is_sync { 0x0200_0000 } else { 0x0101_0000 };
+                p.extend_from_slice(&s.duration.to_be_bytes());
+                p.extend_from_slice(&(s.bytes.len() as u32).to_be_bytes());
+                p.extend_from_slice(&flags.to_be_bytes());
+            }
+            full_box(b"trun", 0, 0x000701, &p) // data-offset | duration | size | flags (per sample)
         };
         let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
         mp4_box(b"moof", &[mfhd, traf].concat())
     };
     let moof_len = build_moof(0).len() as u32;
     let moof = build_moof(moof_len + 8);
-    let mdat = mp4_box(b"mdat", sample);
+    let mut mdat_payload = Vec::new();
+    for s in samples {
+        mdat_payload.extend_from_slice(&s.bytes);
+    }
+    let mdat = mp4_box(b"mdat", &mdat_payload);
     [moof, mdat].concat()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::future::Future;
+    use core::pin::Pin;
+
+    #[derive(Default)]
+    struct CaptureSink {
+        bytes: Vec<u8>,
+    }
+    impl OutputSink for CaptureSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    if let MemoryDomain::System(s) = &f.domain {
+                        self.bytes.extend_from_slice(s.as_slice());
+                    }
+                }
+                Ok(g2g_core::PushOutcome::Accepted)
+            })
+        }
+    }
+
+    fn annexb(nals: &[&[u8]]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for n in nals {
+            v.extend_from_slice(&[0, 0, 0, 1]);
+            v.extend_from_slice(n);
+        }
+        v
+    }
+
+    fn frame(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            FrameTiming { pts_ns, ..FrameTiming::default() },
+            0,
+        ))
+    }
+
+    fn h264_caps(w: u32, h: u32) -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+        }
+    }
+
+    /// Count `moof` fragment boxes and sum every `trun`'s sample count.
+    fn moof_and_sample_count(bytes: &[u8]) -> (usize, u64) {
+        let moofs = bytes.windows(4).filter(|w| *w == b"moof").count();
+        let mut samples = 0u64;
+        for (i, w) in bytes.windows(4).enumerate() {
+            if w == b"trun" {
+                let off = i + 8; // [..'trun'][version+flags:4][sample_count:4]
+                if off + 4 <= bytes.len() {
+                    samples += u32::from_be_bytes([
+                        bytes[off],
+                        bytes[off + 1],
+                        bytes[off + 2],
+                        bytes[off + 3],
+                    ]) as u64;
+                }
+            }
+        }
+        (moofs, samples)
+    }
+
+    /// The `fragment-duration` knob is honored on the fan-in muxer (the `name=m`
+    /// shape), the same as the single-track `Mp4Mux`: access units batch into
+    /// keyframe-aligned multi-sample fragments, versus one fragment per AU by
+    /// default. Set via `set_property`, the path `parse_launch` uses.
+    #[tokio::test]
+    async fn fragment_duration_property_batches_on_the_fan_in_muxer() {
+        let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
+        let pps = [0x68u8, 0xce, 0x3c, 0x80];
+        let idr = [0x65u8, 0x88, 0x84, 0x00];
+        let key = annexb(&[&sps, &pps, &idr]);
+        let inter = || annexb(&[&[0x41u8, 0x9a, 0x00]]);
+        let aus = [key.clone(), inter(), inter(), inter(), inter(), key.clone()];
+
+        // Batched: a 10 ms target (frames are ~33 ms) closes the fragment at the
+        // next IDR, so AU0..AU4 form one fragment and AU5 the next (flushed at EOS).
+        let mut mux = Mp4MuxN::new(1);
+        mux.set_property("fragment-duration", PropValue::Uint(10)).unwrap();
+        assert_eq!(mux.get_property("fragment-duration"), Some(PropValue::Uint(10)));
+        mux.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink = CaptureSink::default();
+        for (i, au) in aus.iter().enumerate() {
+            mux.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink).await.unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+        let (moofs, samples) = moof_and_sample_count(&sink.bytes);
+        assert_eq!(moofs, 2, "six AUs batch into two keyframe-aligned fragments");
+        assert_eq!(samples, 6, "every access unit is preserved as a sample");
+
+        // Default (per-AU): one fragment per access unit, byte-for-byte as before.
+        let mut mux0 = Mp4MuxN::new(1);
+        mux0.configure_pipeline(0, &h264_caps(320, 240)).unwrap();
+        let mut sink0 = CaptureSink::default();
+        for (i, au) in aus.iter().enumerate() {
+            mux0.process(0, frame(au.clone(), i as u64 * 33_333_333), &mut sink0).await.unwrap();
+        }
+        mux0.process(0, PipelinePacket::Eos, &mut sink0).await.unwrap();
+        let (moofs0, samples0) = moof_and_sample_count(&sink0.bytes);
+        assert_eq!(moofs0, 6, "per-AU mode emits one fragment per access unit");
+        assert_eq!(samples0, 6);
+    }
 
     #[test]
     fn asc_from_adts_recovers_lc_params() {

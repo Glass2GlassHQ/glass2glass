@@ -30,7 +30,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
+    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::mpegts::TsMuxer;
@@ -48,6 +49,11 @@ pub struct TsMux {
     /// Per-input AU buffer; releases the globally earliest-PTS AU (M204).
     agg: InputAggregator<Frame>,
     emitted: u64,
+    /// PAT/PMT re-emission cadence in milliseconds (`0` = once up front), applied
+    /// to the inner `TsMuxer` when it is built. The PAT and PMT are emitted
+    /// together, so `pat-interval` and `pmt-interval` share this cadence, matching
+    /// the single-input [`crate::tsmux::TsMux`].
+    table_interval_ms: u64,
 }
 
 impl TsMux {
@@ -62,7 +68,14 @@ impl TsMux {
             mux: None,
             agg: InputAggregator::new(inputs),
             emitted: 0,
+            table_interval_ms: 0,
         }
+    }
+
+    /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
+    pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
+        self.table_interval_ms = ms;
+        self
     }
 
     /// Count of TS byte frames emitted.
@@ -119,6 +132,39 @@ impl MultiInputElement for TsMux {
         Ok(Self::output_caps_value())
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new("pat-interval", PropKind::Uint, "PAT/PMT re-emission interval, milliseconds (0 = once)")
+                .with_default("0"),
+            // The PAT and PMT are emitted as a pair, so this shares the cadence.
+            PropertySpec::new("pmt-interval", PropKind::Uint, "alias of pat-interval (the tables are emitted together)")
+                .with_default("0"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "pat-interval" | "pmt-interval" => {
+                self.table_interval_ms = value.as_uint().ok_or(PropError::Type)?;
+                // If the muxer is already built, update it in place; otherwise the
+                // build path applies the stored cadence.
+                if let Some(mux) = self.mux.as_mut() {
+                    mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+                }
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
@@ -149,7 +195,10 @@ impl MultiInputElement for TsMux {
                     return Ok(());
                 }
                 let types: Vec<u8> = self.stream_types.iter().map(|s| s.expect("all set")).collect();
-                self.mux = Some(TsMuxer::with_streams(&types));
+                let mut mux = TsMuxer::with_streams(&types);
+                // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
+                mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
+                self.mux = Some(mux);
             }
 
             // Drain every AU now safe to emit, in global PTS order, writing each
@@ -174,5 +223,89 @@ impl MultiInputElement for TsMux {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use g2g_core::{Dim, PropValue, PushOutcome, Rate, VideoCodec};
+
+    #[derive(Default)]
+    struct CaptureSink {
+        bytes: Vec<u8>,
+    }
+    impl OutputSink for CaptureSink {
+        fn push<'a>(
+            &'a mut self,
+            packet: PipelinePacket,
+        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+            Box::pin(async move {
+                if let PipelinePacket::DataFrame(f) = packet {
+                    if let MemoryDomain::System(s) = &f.domain {
+                        self.bytes.extend_from_slice(s.as_slice());
+                    }
+                }
+                Ok(PushOutcome::Accepted)
+            })
+        }
+    }
+
+    fn h264_caps() -> Caps {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Any,
+        }
+    }
+
+    fn h264_frame(au: Vec<u8>, pts_ns: u64) -> PipelinePacket {
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(au.into_boxed_slice())),
+            FrameTiming { pts_ns, ..FrameTiming::default() },
+            0,
+        ))
+    }
+
+    /// Count TS packets carrying PID 0 (the PAT) across all output bytes. A TS
+    /// packet is 188 bytes, sync 0x47, PID = ((b1 & 0x1F) << 8) | b2.
+    fn pat_packet_count(bytes: &[u8]) -> usize {
+        bytes
+            .chunks(188)
+            .filter(|p| p.len() == 188 && p[0] == 0x47 && (((p[1] & 0x1F) as u16) << 8 | p[2] as u16) == 0)
+            .count()
+    }
+
+    /// The `pat-interval` knob is honored on the fan-in muxer (the `name=m` shape),
+    /// the same as the single-input `TsMux`: the PAT/PMT are re-emitted at the
+    /// cadence instead of only once. Set via `set_property`, the path
+    /// `parse_launch` uses; `pmt-interval` shares the cadence.
+    #[tokio::test]
+    async fn pat_interval_property_re_emits_tables_on_the_fan_in_muxer() {
+        let au = |b: u8| alloc::vec![0u8, 0, 0, 1, b, 0xAA, 0xBB];
+
+        // 10 ms cadence, AUs at 0/20/40/60 ms: each AU past the first re-emits the
+        // tables, so the PAT appears more than once.
+        let mut mux = TsMux::new(1);
+        mux.set_property("pat-interval", PropValue::Uint(10)).unwrap();
+        assert_eq!(mux.get_property("pmt-interval"), Some(PropValue::Uint(10)));
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..4u64 {
+            mux.process(0, h264_frame(au(0x65), i * 20_000_000), &mut sink).await.unwrap();
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert!(pat_packet_count(&sink.bytes) > 1, "PAT re-emitted at the interval");
+
+        // Default (0): the PAT is emitted once up front.
+        let mut once = TsMux::new(1);
+        once.configure_pipeline(0, &h264_caps()).unwrap();
+        let mut sink0 = CaptureSink::default();
+        for i in 0..4u64 {
+            once.process(0, h264_frame(au(0x65), i * 20_000_000), &mut sink0).await.unwrap();
+        }
+        once.process(0, PipelinePacket::Eos, &mut sink0).await.unwrap();
+        assert_eq!(pat_packet_count(&sink0.bytes), 1, "PAT emitted once by default");
     }
 }
