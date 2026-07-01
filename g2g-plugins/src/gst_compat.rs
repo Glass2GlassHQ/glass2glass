@@ -89,17 +89,61 @@ fn registry_has(registry: &Registry, name: &str) -> bool {
 /// The result of linting a `gst-launch` line for g2g portability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintReport {
-    /// True when the line parses against `registry` (it is portable as written).
+    /// True when the line is portable as written (every element resolves and it
+    /// parses against `registry`).
     pub ok: bool,
-    /// Porting guidance, one per issue. Empty when `ok`. The authoritative parser
-    /// stops at the first error, so this reports one issue at a time
-    /// (fix-and-rerun).
+    /// Porting guidance, one per issue. Empty when `ok`. Unportable elements are
+    /// reported together (every renamed / unsupported / unknown element in the
+    /// line, not just the first), so a port is one pass rather than
+    /// fix-one-rerun; a structural / property error is reported on its own once
+    /// the element names all resolve.
     pub findings: Vec<String>,
 }
 
-/// Lint a `gst-launch` line for g2g portability: parse it, and on failure turn
-/// the error into a gst->g2g porting suggestion.
+/// Every element name a `gst-launch` line references, best-effort: the first
+/// token of each `!`-separated segment, skipping inline caps filters
+/// (`video/x-raw,...`, which contain `/`), tee branch references (`t.`), and
+/// stray `key=value` tokens. Good enough for a portability scan; the
+/// authoritative element set is whatever [`parse_launch`] builds.
+fn element_names(line: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    for segment in line.split('!') {
+        let Some(first) = segment.split_whitespace().next() else { continue };
+        // Inline caps filter (media/type,fields) or a branch reference (`t.`) or
+        // a bare property token, none of which is an element to look up.
+        if first.contains('/') || first.ends_with('.') || first.contains('=') {
+            continue;
+        }
+        names.push(first);
+    }
+    names
+}
+
+/// Lint a `gst-launch` line for g2g portability. First scans every element name
+/// and collects guidance for all that are not portable as-is (renamed,
+/// unsupported, or unknown); if all elements resolve, runs the authoritative
+/// [`parse_launch`] and, on failure, explains that structural / property error.
 pub fn lint_launch(registry: &Registry, line: &str) -> LintReport {
+    let mut findings = Vec::new();
+    for name in element_names(line) {
+        match gst_equivalent(registry, name) {
+            GstEquivalent::Available => {}
+            GstEquivalent::Renamed(g) => findings.push(format!(
+                "`{name}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)"
+            )),
+            GstEquivalent::Unsupported(hint) => {
+                findings.push(format!("`{name}` has no g2g element: {hint}"))
+            }
+            GstEquivalent::Unknown => findings.push(format!(
+                "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
+            )),
+        }
+    }
+    if !findings.is_empty() {
+        return LintReport { ok: false, findings };
+    }
+    // Elements all resolve: let the parser catch caps / property / topology
+    // issues (one authoritative error).
     match parse_launch(registry, line) {
         Ok(_) => LintReport { ok: true, findings: Vec::new() },
         Err(e) => LintReport { ok: false, findings: Vec::from([explain(registry, &e)]) },
@@ -178,6 +222,44 @@ mod tests {
     fn renamed_element_maps_to_g2g_name() {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "jpegdec"), GstEquivalent::Renamed("mjpegdec"));
+    }
+
+    #[test]
+    fn reports_every_unportable_element_not_just_the_first() {
+        let reg = default_registry();
+        // Two unsupported encoders (feature-independent) in one line: both must
+        // appear, so a port is one pass rather than fix-one-rerun.
+        let r = lint_launch(&reg, "videotestsrc ! theoraenc ! x265enc ! fakesink");
+        assert!(!r.ok);
+        assert_eq!(r.findings.len(), 2, "both flagged: {:?}", r.findings);
+        assert!(r.findings.iter().any(|m| m.contains("theoraenc")), "{:?}", r.findings);
+        assert!(r.findings.iter().any(|m| m.contains("x265enc")), "{:?}", r.findings);
+    }
+
+    #[test]
+    fn renamed_element_in_a_line_is_flagged_with_its_g2g_name() {
+        let reg = default_registry();
+        let r = lint_launch(&reg, "filesrc location=x ! jpegdec ! fakesink");
+        assert!(!r.ok);
+        assert_eq!(r.findings.len(), 1, "{:?}", r.findings);
+        assert!(
+            r.findings[0].contains("jpegdec") && r.findings[0].contains("mjpegdec"),
+            "{:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn caps_filters_and_tee_branches_are_not_mistaken_for_elements() {
+        let reg = default_registry();
+        // Inline caps filter and a tee branch ref must not be linted as unknown
+        // elements; this well-formed line is portable.
+        let r = lint_launch(
+            &reg,
+            "videotestsrc ! video/x-raw,width=320,height=240 ! tee name=t \
+             ! queue ! fakesink t. ! queue ! fakesink",
+        );
+        assert!(r.ok, "findings: {:?}", r.findings);
     }
 
     #[test]
