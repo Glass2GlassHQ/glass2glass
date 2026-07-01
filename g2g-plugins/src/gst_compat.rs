@@ -280,9 +280,6 @@ fn explain(registry: &Registry, e: &ParseError) -> String {
         ParseError::BadValue { element, key, value } => {
             format!("`{element}` property `{key}` rejects `{value}`; check its type with `g2g-inspect {element}`")
         }
-        ParseError::FanOutWithoutTee(n) => {
-            format!("`{n}` feeds several branches; g2g needs an explicit `tee` (gst auto-inserts one, g2g does not)")
-        }
         ParseError::NotAMuxer(n) => {
             format!("`{n}` has several inputs but is not a registered muxer; use a g2g muxer (`funnel`, `audiomixer`, `mpegtsmux`, ...)")
         }

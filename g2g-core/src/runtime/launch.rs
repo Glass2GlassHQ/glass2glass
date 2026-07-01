@@ -71,9 +71,6 @@ pub enum ParseError {
     UnknownReference(String),
     /// Two elements share the same `name=` handle.
     DuplicateName(String),
-    /// A non-`tee` element's output links more than once: a pad peers with one
-    /// other pad, so an explicit `tee` must express the fan-out.
-    FanOutWithoutTee(String),
     /// More than one link feeds an element's input, but it names no registered
     /// muxer: fan-in needs a [`MuxerFactory`](crate::runtime::MuxerFactory).
     NotAMuxer(String),
@@ -130,9 +127,6 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::UnknownReference(n) => write!(f, "reference to undeclared element name: {n}"),
             ParseError::DuplicateName(n) => write!(f, "duplicate element name: {n}"),
-            ParseError::FanOutWithoutTee(n) => {
-                write!(f, "{n}: output fans out to more than one consumer; insert a 'tee' to branch")
-            }
             ParseError::NotAMuxer(n) => {
                 write!(f, "{n}: more than one input links here, but it is not a registered muxer")
             }
@@ -761,10 +755,12 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     let is_demux = |ei: usize| {
         !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name)
     };
+    // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
+    // several consumers gets an implicit `tee` spliced in below, so a gst-launch
+    // line that omits the explicit tee still builds. `tee` and registered demuxers
+    // fan out on their own pads and are left alone.
+    let needs_tee = |ei: usize| !is_tee(ei) && !is_demux(ei) && out_deg[ei] > 1;
     for ei in 0..specs.len() {
-        if !is_tee(ei) && !is_demux(ei) && out_deg[ei] > 1 {
-            return Err(ParseError::FanOutWithoutTee(specs[ei].name.clone()));
-        }
         if is_muxer(ei) && out_deg[ei] == 0 {
             return Err(ParseError::MuxerWithoutOutput(specs[ei].name.clone()));
         }
@@ -838,6 +834,21 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         node_of.push(Some(node));
     }
 
+    // Auto-tee (M473): for each fan-out node that is not itself a tee/demux, splice
+    // an implicit `tee` onto its output. The node's single output pad feeds the
+    // tee (a plain blocking link); the tee's `out_deg` pads feed the consumers,
+    // which the edge loop below sources from the tee instead of the node.
+    let mut implicit_tee: Vec<Option<NodeId>> = alloc::vec![None; specs.len()];
+    for ei in 0..specs.len() {
+        if needs_tee(ei) {
+            if let Some(src_node) = node_of[ei] {
+                let tee = graph.add_tee(out_deg[ei] as u8).node();
+                graph.link_with(PadId::from(src_node), PadId::from(tee), LinkPolicy::Block)?;
+                implicit_tee[ei] = Some(tee);
+            }
+        }
+    }
+
     // Wire edges. Each tee or demux branch takes a distinct output pad (0..n) and
     // each muxer input a distinct input pad (0..n); every other output and input
     // is pad 0. A queue's `leaky=` rides along as the edge's `LinkPolicy`.
@@ -846,7 +857,12 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     for &(s, d, policy) in &links {
         let node_s = node_of[s].expect("contracted link source is a real node");
         let node_d = node_of[d].expect("contracted link destination is a real node");
-        let src = if is_tee(s) || is_demux(s) {
+        let src = if let Some(tee) = implicit_tee[s] {
+            // The fan-out node's consumers source from its spliced-in tee's pads.
+            let index = tee_next[s];
+            tee_next[s] += 1;
+            PadId { node: tee, index }
+        } else if is_tee(s) || is_demux(s) {
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: node_s, index }
@@ -1058,12 +1074,7 @@ mod tests {
         assert_eq!(err, ParseError::DuplicateName("x".to_string()));
     }
 
-    #[test]
-    fn fan_out_without_tee_is_reported() {
-        let reg = Registry::new();
-        // `s` is not a tee, yet it feeds the inline sink and the `s.` branch.
-        let err =
-            parse_launch(&reg, "videotestsrc name=s ! fakesink s. ! fakesink").unwrap_err();
-        assert_eq!(err, ParseError::FanOutWithoutTee("videotestsrc".to_string()));
-    }
+    // Auto-tee (M473): fan-out without an explicit `tee` no longer errors; the
+    // parser splices one in. Covered end to end (build + run + topology) in
+    // g2g-plugins/tests/m118_launch_branching.rs, where real elements exist.
 }

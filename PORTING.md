@@ -66,7 +66,6 @@ The same guidance is available programmatically via
 | Symptom | Why | Fix |
 | :--- | :--- | :--- |
 | `x264enc` unknown | software H.264 encode is behind the `ffmpeg` feature | build `g2g-plugins` with `--features ffmpeg` (libx264); `nvh264enc`→`nvenc` (NVIDIA); `mfencode` (Windows); or AV1/VP8/VP9 via `av1enc`/`vpxenc` |
-| `FanOutWithoutTee` | g2g doesn't auto-insert a tee | add an explicit `tee` before the branches |
 | property value has spaces or `!` | needs quoting | wrap it in double quotes: `filesrc location="/my video.ts"`, `gstwrap element="x264enc bitrate=4000"` |
 | container source won't decode | `bytestream-format` isn't auto-sniffed everywhere | set it explicitly, e.g. `filesrc location=x bytestream-format=mpegts` |
 | `autovideosink` etc. | resolved to an available backend | works; resolves Wayland→KMS→fake on Linux |
@@ -90,9 +89,11 @@ so this list stays honest as the DSL evolves. Swap `gst-launch-1.0` for
 | `tee` fan-out (explicit) | `videotestsrc ! tee name=t ! queue ! fakesink t. ! queue ! videoconvert ! fakesink` |
 | Audio chain | `audiotestsrc ! volume volume=0.5 ! audioconvert ! audioresample ! fakesink` |
 
-Two departures from GStreamer habit: g2g does **not** auto-insert a `tee` (write
-one explicitly before branches), and `queue`/`queue2` map to a per-edge
-backpressure policy rather than a distinct element node. See the negotiated caps
+One convenience beyond GStreamer habit: a `tee` is optional. If an element's
+output fans out to several branches (`... name=s ! sinkA  s. ! sinkB`) without an
+explicit `tee`, g2g splices a broadcast tee in for you (GStreamer would need the
+explicit `tee`). Also note `queue`/`queue2` map to a per-edge backpressure policy
+rather than a distinct element node. See the negotiated caps
 of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 
 ---

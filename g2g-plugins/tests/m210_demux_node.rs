@@ -151,7 +151,8 @@ async fn gst_launch_demux_fans_out() {
     reg.register_demux(DemuxFactory::new("paritydemux", build_parity_demux));
 
     // A demux node `d`: one input from the source, two outputs (the `d.` refs).
-    // Without `register_demux`, two outbound links would be a FanOutWithoutTee.
+    // `register_demux` makes the two outbound links distinct demux pads; without
+    // it, the fan-out would instead splice in a broadcast `tee` (M473).
     let graph = parse_launch(
         &reg,
         "videotestsrc num-buffers=4 ! paritydemux name=d   d. ! anysink   d. ! anysink",
@@ -163,9 +164,11 @@ async fn gst_launch_demux_fans_out() {
 }
 
 #[test]
-fn unregistered_fan_out_still_needs_a_tee() {
-    // A non-tee, non-demux node with two outputs is still rejected, so the demux
-    // exemption is scoped to registered demuxers only.
+fn unregistered_fan_out_gets_a_broadcast_tee() {
+    // A non-tee, non-demux node with two outputs is spliced with a broadcast tee
+    // (M473), distinct from a registered demux which routes on its own pads: the
+    // demux exemption only changes *which* fan-out primitive is used, not whether
+    // fan-out is allowed.
     let mut reg = Registry::new();
     reg.register_source(g2g_core::runtime::SourceFactory::new("videotestsrc", rgba(), || {
         Box::new(VideoTestSrc::new(8, 8, 30, 4))
@@ -175,9 +178,14 @@ fn unregistered_fan_out_still_needs_a_tee() {
     reg.register_launch(LaunchFactory::new("identity", std::vec::Vec::new(), || {
         Box::new(g2g_plugins::identity::IdentityTransform::new())
     }));
-    let err = parse_launch(
+    let graph = parse_launch(
         &reg,
         "videotestsrc num-buffers=2 ! identity name=d   d. ! anysink   d. ! anysink",
-    );
-    assert!(err.is_err(), "a non-demux fan-out without a tee must be rejected");
+    )
+    .expect("non-demux fan-out auto-inserts a tee");
+    let vg = graph.finish().expect("valid graph");
+    // A broadcast Tee was spliced in (not a demux routing node).
+    let tees =
+        vg.topo().iter().filter(|&&n| matches!(vg.kind(n), g2g_core::NodeKind::Tee(2))).count();
+    assert_eq!(tees, 1, "the identity fan-out is served by one broadcast tee");
 }
