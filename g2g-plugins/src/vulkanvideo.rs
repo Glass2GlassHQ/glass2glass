@@ -25,6 +25,13 @@ use ash::vk;
 
 use g2g_core::VideoCodec;
 
+/// Compiled SPIR-V for the YCbCr -> RGBA compute shader, shared with the Android
+/// `mediacodec-wgpu` path (`shaders/mediacodec_ycbcr.comp`): it samples a
+/// combined image sampler carrying a `VkSamplerYcbcrConversion` (so the YUV math
+/// happens in the sampler) and writes RGBA to a storage image, which is codec
+/// and source agnostic.
+const YCBCR_COMP_SPV: &[u8] = include_bytes!("shaders/mediacodec_ycbcr.comp.spv");
+
 /// Which coded video format a Vulkan decode profile describes. Mirrors the
 /// codec set `VulkanVideoDec` will accept; only the codecs Vulkan Video defines
 /// a decode profile for.
@@ -107,6 +114,9 @@ pub enum VulkanVideoError {
     NoDecodeQueue,
     /// The access unit carried no decodable slice (no IDR slice NAL).
     NoDecodableSlice,
+    /// No distinct compute queue was available for the GPU-resident NV12 -> RGBA
+    /// pass; the caller should use the CPU-convert path instead.
+    NoComputeQueue,
     /// A Vulkan call failed (capability query, session/image/buffer creation, or
     /// the decode submission).
     QueryFailed(vk::Result),
@@ -781,6 +791,12 @@ pub struct VulkanVideoDevice {
     sync2_fns: ash::khr::synchronization2::Device,
     decode_queue: vk::Queue,
     decode_queue_family: u32,
+    /// A compute-capable queue for the GPU-resident NV12 -> RGBA pass. `None`
+    /// if no distinct compute family was available (the RGBA path then stays on
+    /// the CPU convert). Its family may equal the decode family only when that
+    /// family also advertises compute (it usually does not).
+    compute_queue: Option<vk::Queue>,
+    compute_queue_family: u32,
     caps: VulkanVideoDecodeCaps,
 }
 
@@ -813,20 +829,32 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
         .await
         .map_err(|_| VulkanVideoError::NoVulkanAdapter)?;
 
-    // Probe first (also yields the decode queue family we must request).
-    // SAFETY: the guard holds the adapter's live handles for the probe call.
-    let caps = unsafe {
+    // Probe first (also yields the decode queue family we must request), and
+    // pick a compute family for the GPU-resident NV12 -> RGBA pass.
+    // SAFETY: the guard holds the adapter's live handles for the calls.
+    let (caps, compute_family) = unsafe {
         let hal_adapter = adapter
             .as_hal::<wgpu_hal::api::Vulkan>()
             .ok_or(VulkanVideoError::NoVulkanAdapter)?;
         let shared = hal_adapter.shared_instance();
-        probe_physical_device(
-            shared.entry(),
-            shared.raw_instance(),
-            hal_adapter.raw_physical_device(),
-            codec,
-        )
-    }?;
+        let raw_instance = shared.raw_instance();
+        let phys = hal_adapter.raw_physical_device();
+        let caps = probe_physical_device(shared.entry(), raw_instance, phys, codec)?;
+        let families = raw_instance.get_physical_device_queue_family_properties(phys);
+        // Prefer a dedicated compute family (COMPUTE without GRAPHICS) distinct
+        // from wgpu's family 0 and the decode family, so we own a clean queue.
+        let compute = families
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                *i as u32 != caps.decode_queue_family
+                    && *i != 0
+                    && p.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            })
+            .min_by_key(|(_, p)| p.queue_flags.contains(vk::QueueFlags::GRAPHICS) as u8)
+            .map(|(i, _)| i as u32);
+        (caps, compute)
+    };
 
     let decode_family = caps.decode_queue_family;
     let exts = decode_device_extensions(codec);
@@ -852,15 +880,24 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
                         for e in exts {
                             args.extensions.push(e);
                         }
-                        // wgpu opens family 0; add the decode family only if it
-                        // is distinct (Vulkan forbids two create-infos per
-                        // family).
+                        // wgpu opens family 0; add the decode family (and a
+                        // distinct compute family) only if distinct (Vulkan
+                        // forbids two create-infos per family).
                         if decode_family != 0 {
                             args.queue_create_infos.push(
                                 vk::DeviceQueueCreateInfo::default()
                                     .queue_family_index(decode_family)
                                     .queue_priorities(&priorities),
                             );
+                        }
+                        if let Some(cf) = compute_family {
+                            if cf != 0 && cf != decode_family {
+                                args.queue_create_infos.push(
+                                    vk::DeviceQueueCreateInfo::default()
+                                        .queue_family_index(cf)
+                                        .queue_priorities(&priorities),
+                                );
+                            }
                         }
                     },
                 )),
@@ -895,6 +932,15 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
         (raw_device, phys, mem_props, video_fns, decode_fns, sync2_fns, decode_queue)
     };
 
+    // The dedicated compute queue, if a distinct compute family was requested.
+    let (compute_queue, compute_queue_family) = match compute_family {
+        Some(cf) if cf != 0 && cf != decode_family => {
+            // SAFETY: cf was requested in the device create callback above.
+            (Some(unsafe { raw_device.get_device_queue(cf, 0) }), cf)
+        }
+        _ => (None, 0),
+    };
+
     Ok(VulkanVideoDevice {
         wgpu_device,
         wgpu_queue,
@@ -908,6 +954,8 @@ pub async fn open_h264_decode_device() -> Result<VulkanVideoDevice, VulkanVideoE
         sync2_fns,
         decode_queue,
         decode_queue_family: decode_family,
+        compute_queue,
+        compute_queue_family,
         caps,
     })
 }
@@ -1694,6 +1742,533 @@ impl VulkanVideoDevice {
         out
     }
 
+    /// Submit a lone-IDR decode into `image` (via `decode_view`) on the decode
+    /// queue and wait; leaves `image` decoded, in `VIDEO_DECODE_DPB_KHR` layout.
+    /// The bitstream buffer + command pool are transient and freed here.
+    fn submit_idr_decode_into(
+        &self,
+        session: &H264DecodeSession,
+        slice: &[u8],
+        image: vk::Image,
+        decode_view: vk::ImageView,
+        w: u32,
+        h: u32,
+    ) -> Result<(), VulkanVideoError> {
+        let dev = &self.raw_device;
+        let prof = h264_profile();
+
+        let size_align = self.caps.min_bitstream_buffer_size_alignment.max(1);
+        let buf_size = round_up(slice.len() as u64, size_align);
+        let mut buf_profile_list =
+            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(&prof.profile));
+        let buf_ci = vk::BufferCreateInfo::default()
+            .size(buf_size)
+            .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut buf_profile_list);
+        // SAFETY: valid create info; chained profile list outlives the call.
+        let bitstream =
+            unsafe { dev.create_buffer(&buf_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh buffer; allocate host-visible memory, bind, map, fill.
+        let bitstream_mem = unsafe {
+            let breq = dev.get_buffer_memory_requirements(bitstream);
+            let bt = find_memory_type(
+                &self.mem_props,
+                breq.memory_type_bits,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .ok_or(VulkanVideoError::ExtensionUnsupported)?;
+            let bai =
+                vk::MemoryAllocateInfo::default().allocation_size(breq.size).memory_type_index(bt);
+            let m = dev.allocate_memory(&bai, None).map_err(VulkanVideoError::QueryFailed)?;
+            dev.bind_buffer_memory(bitstream, m, 0).map_err(VulkanVideoError::QueryFailed)?;
+            let ptr = dev
+                .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
+                .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
+            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            dev.unmap_memory(m);
+            m
+        };
+
+        let pool_ci =
+            vk::CommandPoolCreateInfo::default().queue_family_index(self.decode_queue_family);
+        // SAFETY: valid; freed below.
+        let pool =
+            unsafe { dev.create_command_pool(&pool_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
+        let cb_ai = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        // SAFETY: valid allocate.
+        let cb = unsafe { dev.allocate_command_buffers(&cb_ai) }
+            .map_err(VulkanVideoError::QueryFailed)?[0];
+
+        // SAFETY: bitfield POD valid all-zero.
+        let mut pic_flags: vk::native::StdVideoDecodeH264PictureInfoFlags =
+            unsafe { core::mem::zeroed() };
+        pic_flags.set_is_intra(1);
+        pic_flags.set_IdrPicFlag(1);
+        pic_flags.set_is_reference(1);
+        let std_pic = vk::native::StdVideoDecodeH264PictureInfo {
+            flags: pic_flags,
+            seq_parameter_set_id: 0,
+            pic_parameter_set_id: 0,
+            reserved1: 0,
+            reserved2: 0,
+            frame_num: 0,
+            idr_pic_id: 0,
+            PicOrderCnt: [0, 0],
+        };
+        let slice_offsets = [0u32];
+        let mut h264_pic = vk::VideoDecodeH264PictureInfoKHR::default()
+            .std_picture_info(&std_pic)
+            .slice_offsets(&slice_offsets);
+        let picres = vk::VideoPictureResourceInfoKHR::default()
+            .coded_offset(vk::Offset2D { x: 0, y: 0 })
+            .coded_extent(vk::Extent2D { width: w, height: h })
+            .base_array_layer(0)
+            .image_view_binding(decode_view);
+        let begin_slot =
+            vk::VideoReferenceSlotInfoKHR::default().slot_index(-1).picture_resource(&picres);
+        let setup_slot =
+            vk::VideoReferenceSlotInfoKHR::default().slot_index(0).picture_resource(&picres);
+        let begin_info = vk::VideoBeginCodingInfoKHR::default()
+            .video_session(session.session)
+            .video_session_parameters(session.parameters)
+            .reference_slots(core::slice::from_ref(&begin_slot));
+        let control_info =
+            vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
+        let end_info = vk::VideoEndCodingInfoKHR::default();
+        let decode_info = vk::VideoDecodeInfoKHR::default()
+            .src_buffer(bitstream)
+            .src_buffer_offset(0)
+            .src_buffer_range(buf_size)
+            .dst_picture_resource(picres)
+            .setup_reference_slot(&setup_slot)
+            .push_next(&mut h264_pic);
+
+        // SAFETY: all handles valid and outlive the waited submission.
+        let r = unsafe {
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            dev.begin_command_buffer(cb, &begin).map_err(VulkanVideoError::QueryFailed)?;
+            let to_dpb = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                .dst_stage_mask(vk::PipelineStageFlags2::VIDEO_DECODE_KHR)
+                .dst_access_mask(vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(color_range());
+            let dep =
+                vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_dpb));
+            (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep);
+            (self.video_fns.fp().cmd_begin_video_coding_khr)(cb, &begin_info);
+            (self.video_fns.fp().cmd_control_video_coding_khr)(cb, &control_info);
+            (self.decode_fns.fp().cmd_decode_video_khr)(cb, &decode_info);
+            (self.video_fns.fp().cmd_end_video_coding_khr)(cb, &end_info);
+            dev.end_command_buffer(cb).map_err(VulkanVideoError::QueryFailed)?;
+            let fence = dev
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(VulkanVideoError::QueryFailed)?;
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            let r = dev
+                .queue_submit(self.decode_queue, core::slice::from_ref(&submit), fence)
+                .and_then(|_| dev.wait_for_fences(&[fence], true, u64::MAX));
+            dev.destroy_fence(fence, None);
+            r
+        };
+
+        // SAFETY: transient decode inputs, freed once, after the wait.
+        unsafe {
+            dev.destroy_command_pool(pool, None);
+            dev.destroy_buffer(bitstream, None);
+            dev.free_memory(bitstream_mem, None);
+        }
+        r.map_err(VulkanVideoError::QueryFailed)
+    }
+
+    /// Decode a single IDR frame and hand back an RGBA `wgpu::Texture` produced
+    /// entirely on the GPU: the decoded NV12 image is converted to RGBA by a
+    /// Vulkan compute pass through a `VkSamplerYcbcrConversion` and the result
+    /// image is imported straight into wgpu, so the frame never round-trips
+    /// through system memory (unlike [`decode_idr_to_rgba_texture`]). Requires a
+    /// distinct compute queue; returns [`VulkanVideoError::NoComputeQueue`]
+    /// otherwise (caller falls back to the CPU path).
+    pub fn decode_idr_to_rgba_texture_gpu(
+        &self,
+        session: &H264DecodeSession,
+        idr_au: &[u8],
+    ) -> Result<wgpu::Texture, VulkanVideoError> {
+        let compute_queue = self.compute_queue.ok_or(VulkanVideoError::NoComputeQueue)?;
+        let (w, h) = session.coded_extent;
+        let slice = extract_first_idr_slice(idr_au).ok_or(VulkanVideoError::NoDecodableSlice)?;
+        let dev = &self.raw_device;
+        let prof = h264_profile();
+
+        // NV12 decode target, shared CONCURRENT between the decode and compute
+        // families so the compute pass samples it with no ownership transfer.
+        let families = [self.decode_queue_family, self.compute_queue_family];
+        let mut profile_list =
+            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(&prof.profile));
+        let nv12_ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(session.picture_format)
+            .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(
+                vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR
+                    | vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR
+                    | vk::ImageUsageFlags::SAMPLED,
+            )
+            .sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&families)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut profile_list);
+        // SAFETY: valid create info; chained profile list outlives the call.
+        let nv12 =
+            unsafe { dev.create_image(&nv12_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
+        // SAFETY: fresh image.
+        let nv12_mem =
+            unsafe { self.alloc_bind_image(nv12, vk::MemoryPropertyFlags::DEVICE_LOCAL) }?;
+        let decode_view_ci = vk::ImageViewCreateInfo::default()
+            .image(nv12)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(session.picture_format)
+            .subresource_range(color_range());
+        // SAFETY: nv12 valid.
+        let decode_view = unsafe { dev.create_image_view(&decode_view_ci, None) }
+            .map_err(VulkanVideoError::QueryFailed)?;
+
+        // Decode into the NV12 image (leaves it in DPB layout).
+        if let Err(e) = self.submit_idr_decode_into(session, &slice, nv12, decode_view, w, h) {
+            // SAFETY: destroy what we made on the error path.
+            unsafe {
+                dev.destroy_image_view(decode_view, None);
+                dev.destroy_image(nv12, None);
+                dev.free_memory(nv12_mem, None);
+            }
+            return Err(e);
+        }
+
+        // GPU-resident NV12 -> RGBA via a ycbcr-conversion compute pass. On
+        // success the RGBA image + memory are moved into the wgpu texture's drop
+        // callback; every other object is destroyed before returning.
+        // SAFETY: all handles are created from `dev` and destroyed exactly once
+        // (here or in the wgpu drop callback); the compute submission is waited
+        // on before teardown.
+        let result = unsafe { self.ycbcr_to_wgpu(nv12, compute_queue, w, h) };
+
+        // SAFETY: NV12 image + decode view are done with once the compute pass
+        // finished (inside ycbcr_to_wgpu); free them regardless of outcome.
+        unsafe {
+            dev.destroy_image_view(decode_view, None);
+            dev.destroy_image(nv12, None);
+            dev.free_memory(nv12_mem, None);
+        }
+        result
+    }
+
+    /// Convert a decoded NV12 image (in `VIDEO_DECODE_DPB_KHR` layout) to an
+    /// RGBA `wgpu::Texture` via a compute pass on `compute_queue`, importing the
+    /// RGBA image into wgpu with no CPU copy.
+    ///
+    /// # Safety
+    /// `nv12` must be a valid image on `self.raw_device`, decoded and idle
+    /// (the decode fence was waited), accessible from the compute family.
+    unsafe fn ycbcr_to_wgpu(
+        &self,
+        nv12: vk::Image,
+        compute_queue: vk::Queue,
+        w: u32,
+        h: u32,
+    ) -> Result<wgpu::Texture, VulkanVideoError> {
+        let dev = &self.raw_device;
+        let err = VulkanVideoError::QueryFailed;
+
+        // SAFETY: standard-format ycbcr conversion + immutable sampler + compute
+        // pipeline over the shared shader; every handle is created from `dev`,
+        // used while valid, and destroyed exactly once (here, or in the wgpu drop
+        // callback for the imported RGBA image); the compute submission is waited
+        // on a fence before any teardown.
+        unsafe {
+            let conv_ci = vk::SamplerYcbcrConversionCreateInfo::default()
+                .format(vk::Format::G8_B8R8_2PLANE_420_UNORM)
+                .ycbcr_model(vk::SamplerYcbcrModelConversion::YCBCR_601)
+                .ycbcr_range(vk::SamplerYcbcrRange::ITU_NARROW)
+                .components(vk::ComponentMapping::default())
+                .x_chroma_offset(vk::ChromaLocation::COSITED_EVEN)
+                .y_chroma_offset(vk::ChromaLocation::COSITED_EVEN)
+                .chroma_filter(vk::Filter::LINEAR);
+            let conversion = dev.create_sampler_ycbcr_conversion(&conv_ci, None).map_err(err)?;
+
+            let mut conv_s = vk::SamplerYcbcrConversionInfo::default().conversion(conversion);
+            let sampler_ci = vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .unnormalized_coordinates(false)
+                .push_next(&mut conv_s);
+            let sampler = dev.create_sampler(&sampler_ci, None).map_err(err)?;
+
+            let mut conv_v = vk::SamplerYcbcrConversionInfo::default().conversion(conversion);
+            let nv12_view_ci = vk::ImageViewCreateInfo::default()
+                .image(nv12)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::G8_B8R8_2PLANE_420_UNORM)
+                .subresource_range(color_range())
+                .push_next(&mut conv_v);
+            let nv12_view = dev.create_image_view(&nv12_view_ci, None).map_err(err)?;
+
+            // RGBA output, owned here until moved into the wgpu texture.
+            let rgba_ci = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(
+                    vk::ImageUsageFlags::STORAGE
+                        | vk::ImageUsageFlags::SAMPLED
+                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                )
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let rgba = dev.create_image(&rgba_ci, None).map_err(err)?;
+            let rgba_mem = self.alloc_bind_image(rgba, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+            let rgba_view_ci = vk::ImageViewCreateInfo::default()
+                .image(rgba)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .subresource_range(color_range());
+            let rgba_view = dev.create_image_view(&rgba_view_ci, None).map_err(err)?;
+
+            // Descriptor layout: binding 0 = immutable ycbcr sampler, 1 = storage.
+            let immutable = [sampler];
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                    .immutable_samplers(&immutable),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            ];
+            let dsl_ci = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+            let dsl = dev.create_descriptor_set_layout(&dsl_ci, None).map_err(err)?;
+            let set_layouts = [dsl];
+            let pl_ci = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+            let pipeline_layout = dev.create_pipeline_layout(&pl_ci, None).map_err(err)?;
+
+            let code = ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV)).map_err(|_| {
+                VulkanVideoError::QueryFailed(vk::Result::ERROR_INITIALIZATION_FAILED)
+            })?;
+            let sm_ci = vk::ShaderModuleCreateInfo::default().code(&code);
+            let shader = dev.create_shader_module(&sm_ci, None).map_err(err)?;
+            let entry = c"main";
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(shader)
+                .name(entry);
+            let cp_ci =
+                vk::ComputePipelineCreateInfo::default().stage(stage).layout(pipeline_layout);
+            let pipeline = dev
+                .create_compute_pipelines(vk::PipelineCache::null(), &[cp_ci], None)
+                .map_err(|(_, e)| err(e))?[0];
+
+            let pool_sizes = [
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1),
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(1),
+            ];
+            let dp_ci =
+                vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes);
+            let desc_pool = dev.create_descriptor_pool(&dp_ci, None).map_err(err)?;
+            let ds_ai = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(desc_pool)
+                .set_layouts(&set_layouts);
+            let set = dev.allocate_descriptor_sets(&ds_ai).map_err(err)?[0];
+            let in_desc = [vk::DescriptorImageInfo::default()
+                .sampler(sampler)
+                .image_view(nv12_view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+            let out_desc = [vk::DescriptorImageInfo::default()
+                .image_view(rgba_view)
+                .image_layout(vk::ImageLayout::GENERAL)];
+            let writes = [
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&in_desc),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&out_desc),
+            ];
+            dev.update_descriptor_sets(&writes, &[]);
+
+            let cp_pool_ci =
+                vk::CommandPoolCreateInfo::default().queue_family_index(self.compute_queue_family);
+            let cmd_pool = dev.create_command_pool(&cp_pool_ci, None).map_err(err)?;
+            let cb = dev.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(cmd_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )
+            .map_err(err)?[0];
+
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            dev.begin_command_buffer(cb, &begin).map_err(err)?;
+            // NV12 DPB -> shader-read; RGBA undefined -> general (classic barrier:
+            // no video stages here, and the decode already completed on a fence).
+            let to_read = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .old_layout(vk::ImageLayout::VIDEO_DECODE_DPB_KHR)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(nv12)
+                .subresource_range(color_range());
+            let to_general = vk::ImageMemoryBarrier::default()
+                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(rgba)
+                .subresource_range(color_range());
+            dev.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_read, to_general],
+            );
+            dev.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, pipeline);
+            dev.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                0,
+                &[set],
+                &[],
+            );
+            dev.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
+            // RGBA general -> shader-read for wgpu sampling.
+            let to_sampled = vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(rgba)
+                .subresource_range(color_range());
+            dev.cmd_pipeline_barrier(
+                cb,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_sampled],
+            );
+            dev.end_command_buffer(cb).map_err(err)?;
+
+            let fence = dev.create_fence(&vk::FenceCreateInfo::default(), None).map_err(err)?;
+            let cbs = [cb];
+            let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+            let submit_r = dev
+                .queue_submit(compute_queue, core::slice::from_ref(&submit), fence)
+                .and_then(|_| dev.wait_for_fences(&[fence], true, u64::MAX));
+            dev.destroy_fence(fence, None);
+
+            // Tear down everything except the RGBA image + memory (moved to wgpu).
+            dev.destroy_command_pool(cmd_pool, None);
+            dev.destroy_descriptor_pool(desc_pool, None);
+            dev.destroy_pipeline(pipeline, None);
+            dev.destroy_shader_module(shader, None);
+            dev.destroy_pipeline_layout(pipeline_layout, None);
+            dev.destroy_descriptor_set_layout(dsl, None);
+            dev.destroy_image_view(rgba_view, None);
+            dev.destroy_image_view(nv12_view, None);
+            dev.destroy_sampler(sampler, None);
+            dev.destroy_sampler_ycbcr_conversion(conversion, None);
+
+            if let Err(e) = submit_r {
+                dev.destroy_image(rgba, None);
+                dev.free_memory(rgba_mem, None);
+                return Err(err(e));
+            }
+
+            // Import the RGBA image into wgpu (no copy). The drop callback frees
+            // the image + memory once wgpu is done with the texture.
+            let hal_device = self
+                .wgpu_device
+                .as_hal::<wgpu_hal::api::Vulkan>()
+                .ok_or(VulkanVideoError::NoVulkanAdapter)?;
+            let raw_for_drop = dev.clone();
+            let drop_cb: wgpu_hal::DropCallback = alloc::boxed::Box::new(move || {
+                raw_for_drop.destroy_image(rgba, None);
+                raw_for_drop.free_memory(rgba_mem, None);
+            });
+            let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            let hal_desc = wgpu_hal::TextureDescriptor {
+                label: Some("vulkan-video-rgba"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+                memory_flags: wgpu_hal::MemoryFlags::empty(),
+                view_formats: alloc::vec::Vec::new(),
+            };
+            let hal_tex = hal_device.texture_from_raw(
+                rgba,
+                &hal_desc,
+                Some(drop_cb),
+                wgpu_hal::vulkan::TextureMemory::External,
+            );
+            let wgpu_desc = wgpu::TextureDescriptor {
+                label: Some("vulkan-video-rgba"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            };
+            Ok(self
+                .wgpu_device
+                .create_texture_from_hal::<wgpu_hal::api::Vulkan>(hal_tex, &wgpu_desc))
+        }
+    }
+
     /// Destroy the one-shot decode objects (fence already destroyed inline).
     /// # Safety
     /// Every handle must have been created from `self.raw_device` and not yet
@@ -1782,6 +2357,18 @@ fn session_sps_id(_session: &H264DecodeSession) -> u8 {
 
 fn round_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align).saturating_mul(align)
+}
+
+/// The full-color single-mip single-layer subresource range used for the decode
+/// / conversion images.
+fn color_range() -> vk::ImageSubresourceRange {
+    vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    }
 }
 
 /// Extract the first IDR slice NAL (nal_unit_type 5) from an Annex-B / AVCC

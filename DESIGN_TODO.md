@@ -152,17 +152,23 @@ leverage first:
   DONE (M490, validated on the 3060): `decode_idr_to_rgba_texture` lands a decoded
   frame in an `Rgba8Unorm` `wgpu::Texture` on the decode device (the wedge
   payload), via a full-NV12 readback + CPU BT.601 conversion; `m490` reads the
-  texture back through wgpu and asserts real content. What is left:
-  1. Zero-copy GPU-resident NV12 -> RGBA: replace the CPU convert with a
-     `VkSamplerYcbcrConversion` compute pass writing an RGBA `VkImage` imported
-     into wgpu (`texture_from_raw`, as `cudawgpu`/`mediacodec_wgpu` do), pipelined
-     through a `RING_DEPTH` in-flight ring, so the frame never leaves the GPU.
+  texture back through wgpu and asserts real content.
+  DONE (M491, validated on the 3060): zero-copy GPU-resident NV12 -> RGBA.
+  `decode_idr_to_rgba_texture_gpu` decodes into a CONCURRENT NV12 image; a compute
+  pass on a dedicated compute queue converts it through a `VkSamplerYcbcrConversion`
+  (reusing the `mediacodec_wgpu` shader) to an RGBA `VkImage` imported into wgpu via
+  `texture_from_raw`, no CPU round-trip; read-back matches the M490 CPU convert. The
+  vendor-neutral hardware-decode-into-wgpu-texture path now works end to end. Left:
+  1. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
+     properties, `output_domains = {WgpuTexture}`, driving the decode per frame),
+     re-emitting parameters on mid-stream SPS/PPS change via `CapsChanged`.
   2. Full DPB reference management: per-frame slice-header parse (frame_num, POC,
      idr_pic_id, slice_type), multi-slice pictures, and P/B-frame reference slots
-     (M489/M490 hardcode the lone-IDR `Std*` constants and one DPB slot).
-  3. The `VulkanVideoDec` `AsyncElement` wrapper (negotiation via the probe caps,
-     properties, `output_domains = {WgpuTexture}`), re-emitting parameters on
-     mid-stream SPS/PPS change via `CapsChanged`.
+     (M489-M491 hardcode the lone-IDR `Std*` constants + one DPB slot, so only
+     all-intra streams decode past the first frame today). The gate to a useful
+     element.
+  3. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M491
+     fence-wait each submission; fine one-shot, not for throughput).
   4. Hardening: PSNR-vs-ffmpeg reference comparison; then H.265 and AV1 (+1 each,
      mostly their parameter mapping).
   Top risks: the `Std*` structs / DPB management (where Vulkan Video decoders
