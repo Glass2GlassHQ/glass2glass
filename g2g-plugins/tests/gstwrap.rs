@@ -16,10 +16,21 @@
 use g2g_core::element::BoxFuture;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome};
+use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::{
+    AsyncElement, G2gError, OutputSink, PipelineClock, PipelinePacket, PropValue, PushOutcome,
+};
 
 use g2g_plugins::capsfilter::parse_caps;
 use g2g_plugins::gstwrap::GstWrap;
+use g2g_plugins::registry::default_registry;
+
+struct ZeroClock;
+impl PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
 
 /// Collects the bytes of every `DataFrame` the element emits.
 #[derive(Default)]
@@ -74,4 +85,19 @@ async fn hosts_a_real_gstreamer_videoflip() {
         vec![0x10, 0x20, 0x30, 0x40, 0xFF, 0xFF, 0xFF, 0xFF],
         "pixels came back horizontally flipped by the real GStreamer videoflip"
     );
+}
+
+/// The quote-aware launch tokenizer carries a multi-word element description into
+/// `gstwrap` from a gst-launch line, so a hosted GStreamer element runs straight
+/// from `g2g-launch` (not only via the programmatic API).
+#[tokio::test]
+async fn runs_from_a_launch_line_with_a_spaced_property() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 ! gstwrap element=\"videoflip method=horizontal-flip\" ! fakesink",
+    )
+    .expect("quoted gstwrap line parses and builds");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("pipeline runs");
+    assert_eq!(stats.frames_consumed, 3, "all frames flowed through the hosted GStreamer element");
 }

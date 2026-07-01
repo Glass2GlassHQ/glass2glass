@@ -301,10 +301,11 @@ graph.add_transform({
 It drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline internally;
 system-memory frames flow in and out (a copy each way in v1). Built behind the
 `gstreamer` feature (needs the gstreamer-1.0 + gstreamer-app-1.0 dev packages).
-**Caveat:** the launch DSL v1 can't carry a quoted property value with spaces, so
-from `g2g-launch` a single-token `gstwrap element=videoflip` works but a
-multi-word `element="x264enc bitrate=4000"` needs the programmatic API above
-until the tokenizer learns quoting (§8).
+It works from `g2g-launch` too, since the launch tokenizer is quote-aware:
+
+```sh
+g2g-launch 'videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! fakesink'
+```
 
 ---
 
@@ -321,10 +322,6 @@ until the tokenizer learns quoting (§8).
   *server*, and RTP RTX. Catalogued in DESIGN_TODO.md.
 - Other structural gaps (e.g. allocation re-cascade) are catalogued in
   DESIGN_TODO.md.
-- No quoted property values with spaces in the launch DSL (v1). This also caps
-  `gstwrap` from the CLI: `gstwrap element=videoflip` parses but
-  `gstwrap element="x264enc bitrate=4000"` needs the programmatic API (§7d). A
-  tokenizer that honours quotes would lift both.
 - No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
 - Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
   and host must share the same `g2g-core` version, `rustc`, and layout features.
@@ -349,7 +346,8 @@ until the tokenizer learns quoting (§8).
   *inside* a g2g graph (`appsrc ! <element> ! appsink` on GStreamer's own
   threads), so g2g can be the top-level framework during a migration. Behind the
   `gstreamer` feature; v1 is system-memory (a copy each way), dma-buf zero-copy
-  through it is future work. CLI use is limited by the DSL-quoting gap above.
+  through it is future work. Usable from `g2g-launch` (the tokenizer is
+  quote-aware, so `gstwrap element="x264enc bitrate=4000"` parses).
 - `g2g-launch -v` reports wiring but not yet per-pad negotiated caps.
 
 ---

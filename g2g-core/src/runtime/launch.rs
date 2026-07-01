@@ -238,6 +238,43 @@ fn consume_element<'a, I: Iterator<Item = &'a str>>(
     Ok(spec)
 }
 
+/// Split a pipeline string into tokens, honoring double-quoted property values.
+/// Outside quotes, whitespace separates tokens and `!` is a standalone token;
+/// inside a `"..."` region both are literal, so a value may contain spaces (and
+/// even `!`), e.g. `element="x264enc bitrate=4000"` or `location="/my file.ts"`.
+/// The surrounding quotes are kept on the token; [`consume_element`] strips them
+/// from the value. An unterminated quote runs to end of input (best-effort; the
+/// property parse then reports any resulting malformed token).
+fn tokenize(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quote = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                in_quote = !in_quote;
+                cur.push(c);
+            }
+            '!' if !in_quote => {
+                if !cur.is_empty() {
+                    tokens.push(core::mem::take(&mut cur));
+                }
+                tokens.push("!".to_string());
+            }
+            c if c.is_whitespace() && !in_quote => {
+                if !cur.is_empty() {
+                    tokens.push(core::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
 /// Split a `gst-launch` pipeline string into chains: runs of nodes linked by `!`,
 /// with branches expressed as separate chains joined through `name=` / `t.`.
 fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
@@ -245,10 +282,10 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
     if trimmed.is_empty() {
         return Err(ParseError::Empty);
     }
-    // Make every `!` a standalone token regardless of surrounding spaces, then
-    // split on whitespace. (A value containing spaces is the documented v1 gap.)
-    let spaced = trimmed.replace('!', " ! ");
-    let mut tokens = spaced.split_whitespace().peekable();
+    // Tokenize quote-aware so a `!` (a standalone token) and whitespace inside a
+    // quoted value are literal, letting a property value carry spaces.
+    let toks = tokenize(trimmed);
+    let mut tokens = toks.iter().map(String::as_str).peekable();
 
     #[derive(Clone, Copy)]
     enum St {
@@ -926,11 +963,39 @@ mod tests {
 
     #[test]
     fn parse_chains_strips_quoted_values() {
-        // A double-quoted value (no spaces) has its quotes stripped. Values with
-        // spaces are a known v1 gap (the whitespace tokenizer would split them).
+        // A double-quoted value has its quotes stripped.
         let chains = parse_chains("filesrc location=\"file.mp4\" ! fakesink").unwrap();
         let Item::Element(src) = &chains[0][0] else { panic!("element") };
         assert_eq!(src.props[0], ("location".to_string(), "file.mp4".to_string()));
+    }
+
+    #[test]
+    fn parse_chains_keeps_spaces_in_quoted_values() {
+        // The quote-aware tokenizer keeps spaces inside a value, so a nested
+        // element description (the `gstwrap` case) survives as one property.
+        let chains =
+            parse_chains("gstwrap element=\"x264enc bitrate=4000\" ! fakesink").unwrap();
+        assert_eq!(item_names(&chains[0]), ["gstwrap", "fakesink"]);
+        let Item::Element(w) = &chains[0][0] else { panic!("element") };
+        assert_eq!(w.props[0], ("element".to_string(), "x264enc bitrate=4000".to_string()));
+    }
+
+    #[test]
+    fn parse_chains_keeps_bang_inside_quotes() {
+        // A `!` inside a quoted value is literal, not a stage separator: one
+        // element with one property, not two chained nodes.
+        let chains = parse_chains("gstwrap element=\"a ! b\" ! fakesink").unwrap();
+        assert_eq!(item_names(&chains[0]), ["gstwrap", "fakesink"]);
+        let Item::Element(w) = &chains[0][0] else { panic!("element") };
+        assert_eq!(w.props[0], ("element".to_string(), "a ! b".to_string()));
+    }
+
+    #[test]
+    fn tokenize_treats_quoted_region_as_one_token() {
+        assert_eq!(
+            tokenize("gstwrap element=\"x y\" ! sink"),
+            ["gstwrap", "element=\"x y\"", "!", "sink"]
+        );
     }
 
     #[test]
