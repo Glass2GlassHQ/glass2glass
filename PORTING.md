@@ -42,9 +42,18 @@ g2g-launch videotestsrc num-buffers=30 ! videoconvert ! fakesink
 `g2g-launch` parses the GStreamer DSL ([g2g-core/src/runtime/launch.rs](g2g-core/src/runtime/launch.rs))
 and runs it against the standard registry. Supported syntax: linear chains,
 `element key=value`, `tee name=t` fan-out with `t.` branch refs, muxer fan-in
-(`src ! m.  src ! m.  funnel name=m ! sink`), inline caps filters
-(`! video/x-raw,format=NV12,width=640 !`), `queue`/`queue2` (mapped to a per-edge
-backpressure policy), `decodebin` / `uridecodebin` / `playbin`.
+(`src ! m.  src ! m.  funnel name=m ! sink`), demuxer fan-out with named pads
+(`filesrc location=movie.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`),
+inline caps filters (`! video/x-raw,format=NV12,width=640 !`), `queue`/`queue2`
+(mapped to a per-edge backpressure policy), `decodebin` / `uridecodebin` / `playbin`.
+
+A **demuxer fan-out** (`matroskademux` / `tsdemux` / `qtdemux` fed by a file
+source) probes the file at parse time and splits it into its elementary streams,
+one per output-pad reference. Pad names select by media kind the GStreamer way:
+`d.video_0` is the first video stream, `d.audio_0` the first audio, `d.src_2` the
+third stream overall (a bare `d.` is positional). Each branch names its own
+downstream (`d.video_0 ! h264parse ! avdec_h264 ! autovideosink`). File sources
+only; a network source still uses `playbin`.
 
 **When it doesn't parse, you get a porting hint**, not just an error:
 

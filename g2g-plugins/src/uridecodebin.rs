@@ -22,6 +22,8 @@
 use alloc::boxed::Box;
 
 use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSourceFactory};
+#[cfg(feature = "std")]
+use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
 use g2g_core::{Caps, Dim, Rate, VideoCodec};
 
 /// H.264 at any geometry: the media type the H.264 sources declare. Real
@@ -672,6 +674,111 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
         }
     }
     build_av_fanout(reg, Box::new(source), crate::mp4demuxn::Mp4DemuxN::new(demux_ports), &av).map(Some)
+}
+
+// ---- Explicit-demux fan-out hooks (M476) --------------------------------
+//
+// The `matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...` path: unlike the
+// lone `playbin`, the demux sits inside a user-authored line, so the hook does not
+// build a whole graph. It probes the upstream file, maps each pad request to a
+// forwardable stream, and returns the multi-output demuxer with one port per pad
+// (in reference order); the core parser wires the user's branches to the ports.
+
+/// Read up to the probe limit from a plain file path (the demux hook receives a
+/// `filesrc location=`, a bare path, not a `file://` URI).
+#[cfg(feature = "std")]
+fn read_prefix(path: &str) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut prefix = Vec::new();
+    let f = std::fs::File::open(path).ok()?;
+    f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
+    Some(prefix)
+}
+
+/// Resolve each output-pad request to a forwardable-stream index (M476), given the
+/// per-stream video flags in forwardable order. `video_k` picks the k-th video
+/// stream, `audio_k` the k-th audio, `src_k` / a bare `d.` the k-th stream overall.
+/// `None` if any request is unsatisfiable (out of range, or a text pad, which the
+/// A/V fan-out does not carry yet), declining the whole hook.
+#[cfg(feature = "std")]
+fn resolve_pads(video: &[bool], pads: &[PadRequest]) -> Option<Vec<usize>> {
+    pads.iter()
+        .map(|req| match req.kind {
+            PadKind::Any => (req.index < video.len()).then_some(req.index),
+            PadKind::Video => video.iter().enumerate().filter(|(_, v)| **v).nth(req.index).map(|(i, _)| i),
+            PadKind::Audio => video.iter().enumerate().filter(|(_, v)| !**v).nth(req.index).map(|(i, _)| i),
+            PadKind::Text => None,
+        })
+        .collect()
+}
+
+/// `matroskademux` explicit fan-out (M476): probe the file, select the requested
+/// streams, and build a [`MkvDemuxN`](crate::mkvdemux::MkvDemuxN) with one port per
+/// pad. Declines a non-Matroska file or an unsatisfiable request.
+#[cfg(feature = "std")]
+pub fn mkv_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    if name != "matroskademux" {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::matroska::MatroskaDemuxer::new();
+    demux.push_data(&prefix);
+    let infos = crate::mkvdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return None;
+    }
+    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
+    let sel = resolve_pads(&video, pads)?;
+    let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
+    Some(Box::new(crate::mkvdemux::MkvDemuxN::new(streams)))
+}
+
+/// `tsdemux` explicit fan-out (M476): probe the PMT, select the requested streams,
+/// and build a [`TsDemuxN`](crate::tsdemux::TsDemuxN). Declines a non-MPEG-TS file.
+#[cfg(feature = "std")]
+pub fn ts_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    if name != "tsdemux" {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let mut demux = crate::mpegts::TsDemuxer::new();
+    let mut off = 0;
+    while off + 188 <= prefix.len() {
+        if prefix[off] == 0x47 {
+            demux.push_packet(&prefix[off..off + 188]);
+        }
+        off += 188;
+    }
+    let infos = crate::tsdemux::forwardable_streams(&demux);
+    if infos.is_empty() {
+        return None;
+    }
+    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
+    let sel = resolve_pads(&video, pads)?;
+    let streams: Vec<_> = sel.iter().map(|&i| infos[i].stream).collect();
+    Some(Box::new(crate::tsdemux::TsDemuxN::new(streams)))
+}
+
+/// `qtdemux` explicit fan-out (M476): probe the `moov`, select the requested
+/// tracks, and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN). Declines a
+/// non-MP4 file (or one whose `moov` is past the probe window).
+#[cfg(feature = "std")]
+pub fn mp4_demux_select(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>> {
+    if name != "qtdemux" {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    if infos.is_empty() {
+        return None;
+    }
+    let video: Vec<bool> = infos.iter().map(|i| i.video).collect();
+    let sel = resolve_pads(&video, pads)?;
+    let ports: Vec<_> = sel
+        .iter()
+        .map(|&i| crate::mp4demuxn::Mp4Port { track_id: infos[i].track_id, caps: infos[i].caps.clone() })
+        .collect();
+    Some(Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)))
 }
 
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for

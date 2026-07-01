@@ -44,7 +44,9 @@ use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
 use crate::property::PropValue;
-use crate::runtime::autoplug::{is_raw_audio, is_raw_video, Registry, UriError};
+use crate::runtime::autoplug::{
+    is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, UriError,
+};
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
 /// Why [`parse_launch`] could not build a graph.
@@ -167,7 +169,11 @@ struct ElementSpec {
 /// in directly rather than built by name.
 enum Item {
     Element(ElementSpec),
-    Ref(String),
+    /// A `t.` / `d.video_0` reference to a named element. `pad` is the suffix after
+    /// the dot (`""` for a bare `t.`, `"video_0"` for `d.video_0`), used by the
+    /// explicit-demux fan-out (M476) to select which stream a branch reads; ignored
+    /// for a tee (positional).
+    Ref { name: String, pad: String },
     Prebuilt(PrebuiltNode),
 }
 
@@ -194,14 +200,47 @@ fn is_caps_token(tok: &str) -> bool {
     }
 }
 
-/// A pad reference (`t.` or `t.src_0`): a name, a `.`, and no `=` / `/`. Returns
-/// the referenced element name; the pad suffix is ignored (pads are positional).
-fn as_ref_name(tok: &str) -> Option<&str> {
+/// A pad reference (`t.`, `t.src_0`, `d.video_0`): a name, a `.`, and no `=` / `/`.
+/// Returns the referenced element name and the pad suffix after the first dot
+/// (`""` for a bare `t.`). The suffix drives the explicit-demux fan-out (M476);
+/// a tee ignores it (positional).
+fn split_pad_ref(tok: &str) -> Option<(&str, &str)> {
     if tok.contains('=') || tok.contains('/') || !tok.contains('.') {
         return None;
     }
-    let name = tok.split('.').next().unwrap_or("");
-    (!name.is_empty()).then_some(name)
+    let (name, pad) = tok.split_once('.').unwrap_or((tok, ""));
+    (!name.is_empty()).then_some((name, pad))
+}
+
+/// The referenced element name of a pad reference (the suffix dropped); the
+/// token-boundary test in [`consume_element`].
+fn as_ref_name(tok: &str) -> Option<&str> {
+    split_pad_ref(tok).map(|(name, _)| name)
+}
+
+/// Parse a demux output-pad suffix into a [`PadRequest`] (M476): `"video_0"` ->
+/// `{ Video, 0 }`, `"audio_1"` -> `{ Audio, 1 }`, `"text_0"` / `"subtitle_0"` ->
+/// `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
+/// unrecognized prefix is `{ Any, ordinal }`, i.e. positional by reference order.
+fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
+    let (prefix, index) = match pad.rsplit_once('_') {
+        Some((p, n)) => (p, n.parse::<usize>().ok()),
+        None => (pad, None),
+    };
+    let kind = match prefix {
+        "video" => PadKind::Video,
+        "audio" => PadKind::Audio,
+        "text" | "subtitle" => PadKind::Text,
+        _ => PadKind::Any,
+    };
+    // `src_N` and unrecognized prefixes select the Nth forwardable stream; a bare
+    // `d.` has no index, so it takes the positional ordinal.
+    let index = match kind {
+        PadKind::Any if prefix == "src" || prefix.is_empty() => index.unwrap_or(ordinal),
+        PadKind::Any => ordinal,
+        _ => index.unwrap_or(0),
+    };
+    PadRequest { kind, index }
 }
 
 /// Consume an element's `key=value` properties from the token stream, stopping at
@@ -312,8 +351,8 @@ fn parse_chains(pipeline: &str) -> Result<Vec<Chain>, ParseError> {
                         instance: None,
                     }));
                     st = St::AfterNode;
-                } else if let Some(name) = as_ref_name(tok) {
-                    cur.push(Item::Ref(name.to_string()));
+                } else if let Some((name, pad)) = split_pad_ref(tok) {
+                    cur.push(Item::Ref { name: name.to_string(), pad: pad.to_string() });
                     if after_bang {
                         // Tail ref (`! t.`): links the upstream node into the
                         // named element and ends the chain.
@@ -514,9 +553,9 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                     upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
-                Item::Ref(name) => {
+                Item::Ref { name, pad } => {
                     upstream = None;
-                    new_chain.push(Item::Ref(name));
+                    new_chain.push(Item::Ref { name, pad });
                 }
                 // A pre-built node (from `uridecodebin` / `playbin`) carries no
                 // name to take declared caps from, so a `decodebin` cannot follow
@@ -622,7 +661,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     // unresolved reference by name.
     enum Endpoint {
         Element(usize),
-        Ref(String),
+        Ref { name: String, pad: String },
     }
 
     let mut specs: Vec<ElementSpec> = Vec::new();
@@ -661,7 +700,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                     prebuilt.push(Some(node));
                     eps.push(Endpoint::Element(ei));
                 }
-                Item::Ref(name) => eps.push(Endpoint::Ref(name)),
+                Item::Ref { name, pad } => eps.push(Endpoint::Ref { name, pad }),
             }
         }
         chain_eps.push(eps);
@@ -671,22 +710,48 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
         return Err(ParseError::TooFewStages);
     }
 
-    // Resolve references and collect the directed links (by element index).
+    // Resolve references, collect the directed links (by element index), and
+    // record each demux output-pad request (M476): a head-ref `d.video_0` that
+    // sources a link contributes a `PadRequest` to `demux_pads[d]`, in link (port)
+    // order, so a demux-select hook can map port i to the requested stream.
     let mut raw_links: Vec<(usize, usize)> = Vec::new();
+    let mut demux_pads: Vec<Vec<PadRequest>> = alloc::vec![Vec::new(); specs.len()];
     for eps in &chain_eps {
         let mut idxs: Vec<usize> = Vec::with_capacity(eps.len());
+        // The pad suffix of each endpoint that is a reference (`None` for a
+        // concrete element), parallel to `idxs`.
+        let mut pads: Vec<Option<&str>> = Vec::with_capacity(eps.len());
         for ep in eps {
-            idxs.push(match ep {
-                Endpoint::Element(ei) => *ei,
-                Endpoint::Ref(name) => names
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .map(|(_, i)| *i)
-                    .ok_or_else(|| ParseError::UnknownReference(name.clone()))?,
-            });
+            match ep {
+                Endpoint::Element(ei) => {
+                    idxs.push(*ei);
+                    pads.push(None);
+                }
+                Endpoint::Ref { name, pad } => {
+                    let i = names
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, i)| *i)
+                        .ok_or_else(|| ParseError::UnknownReference(name.clone()))?;
+                    idxs.push(i);
+                    pads.push(Some(pad.as_str()));
+                }
+            }
         }
-        for w in idxs.windows(2) {
-            raw_links.push((w[0], w[1]));
+        for w in 0..idxs.len().saturating_sub(1) {
+            let (s, d) = (idxs[w], idxs[w + 1]);
+            raw_links.push((s, d));
+            // Record the source's output-pad request in port order: a pad-ref
+            // source (`d.video_0`) carries a named request; an inline output
+            // (`d ! x`) takes the positional Nth-forwardable-stream request. Only
+            // consulted for an explicit-demux fan-out node (M476); harmless noise
+            // for a normal element or a tee.
+            let ordinal = demux_pads[s].len();
+            let req = match pads[w] {
+                Some(pad) => parse_pad_request(pad, ordinal),
+                None => PadRequest { kind: PadKind::Any, index: ordinal },
+            };
+            demux_pads[s].push(req);
         }
     }
 
@@ -755,11 +820,41 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
     let is_demux = |ei: usize| {
         !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name)
     };
+    // Explicit-demux fan-out (M476): a non-tee, non-registered-demux element that
+    // fans out to several pads and is fed by a file source is built by a registered
+    // demux-select hook, which probes the file (`location=`) and returns a
+    // multi-output demuxer with one port per pad request (in reference order). This
+    // is how `matroskademux` / `tsdemux` / `qtdemux` in a launch line split a file
+    // into its elementary streams, honoring `d.video_0` / `d.audio_0` selection.
+    let mut demux_select_node: Vec<Option<Box<dyn crate::runtime::DynMultiOutputElement>>> =
+        (0..specs.len()).map(|_| None).collect();
+    if !registry.demux_select_hooks().is_empty() {
+        for ei in 0..specs.len() {
+            if is_tee(ei) || is_demux(ei) || out_deg[ei] <= 1 || prebuilt[ei].is_some() {
+                continue;
+            }
+            // The upstream file location (the source linking into this demux).
+            let Some(location) = links
+                .iter()
+                .find(|(_, d, _)| *d == ei)
+                .and_then(|(s, _, _)| prop(&specs[*s], "location"))
+            else {
+                continue;
+            };
+            for hook in registry.demux_select_hooks() {
+                if let Some(demux) = hook(&specs[ei].name, location, &demux_pads[ei]) {
+                    demux_select_node[ei] = Some(demux);
+                    break;
+                }
+            }
+        }
+    }
+    let is_select: Vec<bool> = demux_select_node.iter().map(|d| d.is_some()).collect();
     // Auto-tee (M473): a non-tee, non-demux node whose single output fans out to
     // several consumers gets an implicit `tee` spliced in below, so a gst-launch
-    // line that omits the explicit tee still builds. `tee` and registered demuxers
-    // fan out on their own pads and are left alone.
-    let needs_tee = |ei: usize| !is_tee(ei) && !is_demux(ei) && out_deg[ei] > 1;
+    // line that omits the explicit tee still builds. `tee`, registered demuxers,
+    // and explicit-demux fan-out nodes fan out on their own pads and are left alone.
+    let needs_tee = |ei: usize| !is_tee(ei) && !is_demux(ei) && !is_select[ei] && out_deg[ei] > 1;
     for ei in 0..specs.len() {
         if is_muxer(ei) && out_deg[ei] == 0 {
             return Err(ParseError::MuxerWithoutOutput(specs[ei].name.clone()));
@@ -812,6 +907,11 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
                 .ok_or_else(|| ParseError::NotAMuxer(spec.name.clone()))?;
             apply_muxer_props(&mut mux, &spec.name, &spec.props)?;
             graph.add_muxer(GraphNodeRef::Muxer(mux), in_deg[ei] as u8).node()
+        } else if is_select[ei] {
+            // M476: a demux-select hook already built the multi-output demuxer
+            // (probing the upstream file); splice it in with one port per pad.
+            let demux = demux_select_node[ei].take().expect("select demux built above");
+            graph.add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8).node()
         } else if is_demux(ei) {
             let mut demux = registry
                 .make_demux(&spec.name, out_deg[ei])
@@ -862,7 +962,7 @@ fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNod
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: tee, index }
-        } else if is_tee(s) || is_demux(s) {
+        } else if is_tee(s) || is_demux(s) || is_select[s] {
             let index = tee_next[s];
             tee_next[s] += 1;
             PadId { node: node_s, index }
@@ -954,7 +1054,7 @@ mod tests {
             .iter()
             .map(|i| match i {
                 Item::Element(s) => s.name.as_str(),
-                Item::Ref(n) => n.as_str(),
+                Item::Ref { name, .. } => name.as_str(),
                 Item::Prebuilt(_) => "(prebuilt)",
             })
             .collect()
@@ -1038,7 +1138,7 @@ mod tests {
         let Item::Element(tee) = &chains[0][1] else { panic!("element") };
         assert_eq!(tee.instance.as_deref(), Some("t"));
         assert!(tee.props.is_empty(), "name= is the handle, not a property");
-        assert!(matches!(&chains[1][0], Item::Ref(n) if n == "t"));
+        assert!(matches!(&chains[1][0], Item::Ref { name, .. } if name == "t"));
     }
 
     #[test]

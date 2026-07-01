@@ -734,6 +734,41 @@ mod factory {
     pub type PlaybinHook =
         fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
+    /// The media kind a demux output-pad reference names (M476): `video_0` ->
+    /// [`Video`](PadKind::Video), `audio_1` -> [`Audio`](PadKind::Audio), a bare
+    /// `d.` or `src_2` -> [`Any`](PadKind::Any) (the nth forwardable stream).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PadKind {
+        Video,
+        Audio,
+        Text,
+        Any,
+    }
+
+    /// A parsed demux output-pad reference from a `gst-launch` line (M476), e.g.
+    /// `d.video_0` -> `{ Video, 0 }`, `d.audio_1` -> `{ Audio, 1 }`, `d.src_2` or a
+    /// bare `d.` -> `{ Any, n }`. Handed (in reference order) to a
+    /// [`DemuxSelectHook`] so it can map each request to a container stream and
+    /// build the multi-output demuxer with one port per request.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PadRequest {
+        pub kind: PadKind,
+        pub index: usize,
+    }
+
+    /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
+    /// named demux element inside a user-authored line
+    /// (`filesrc location=x.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`).
+    /// Given the demux element name, its upstream file location, and the ordered
+    /// output-pad requests the line makes, the hook probes the file and builds the
+    /// multi-output demuxer with one port per request (in request order), or
+    /// returns `None` to decline (a different hook's container, an unreadable file,
+    /// or an unsatisfiable request). Cross-crate by design: the DSL lives in core,
+    /// the container probing in `g2g-plugins`. Registered via
+    /// [`Registry::register_demux_select`].
+    pub type DemuxSelectHook =
+        fn(name: &str, location: &str, pads: &[PadRequest]) -> Option<Box<dyn DynMultiOutputElement>>;
+
     impl core::fmt::Debug for ElementFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("ElementFactory").field("name", &self.desc.name).finish_non_exhaustive()
@@ -765,6 +800,12 @@ mod factory {
         /// does not parse, so one hook per container type coexists (MKV, TS, ...).
         /// Empty (the default) leaves `playbin` as the M196 single-stream pipeline.
         playbin: Vec<PlaybinHook>,
+        /// Explicit-demux fan-out hooks (M476): a named demux element with several
+        /// output-pad references and a file source upstream tries each in order
+        /// until one builds the multi-output demuxer (`Some`); each declines
+        /// (`None`) a container it does not parse. Empty (the default) leaves a
+        /// demux element single-stream (its M114/M180 launch registration).
+        demux_select: Vec<DemuxSelectHook>,
         /// Optional parser injector (M421): given a decode-chain input caps,
         /// returns a parser element to splice in just before the decoder (e.g. an
         /// access-unit-re-framing `h264parse` for `CompressedVideo { H264, .. }`),
@@ -835,6 +876,23 @@ mod factory {
         /// parse. Returns `&mut self` to chain calls.
         pub fn register_playbin(&mut self, hook: PlaybinHook) -> &mut Self {
             self.playbin.push(hook);
+            self
+        }
+
+        /// The registered explicit-demux fan-out hooks (M476), tried in order by
+        /// [`parse_launch`](crate::runtime::parse_launch) for a named demux element
+        /// with several output-pad references and a file source upstream.
+        pub fn demux_select_hooks(&self) -> &[DemuxSelectHook] {
+            &self.demux_select
+        }
+
+        /// Register an explicit-demux fan-out hook (M476): a named demux element
+        /// (`matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`) fed by a file
+        /// source tries the registered hooks in order until one probes the file and
+        /// builds the multi-output demuxer. Register one per container type; each
+        /// declines a container it does not parse. Returns `&mut self` to chain.
+        pub fn register_demux_select(&mut self, hook: DemuxSelectHook) -> &mut Self {
+            self.demux_select.push(hook);
             self
         }
 
@@ -1397,9 +1455,9 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, DemuxFactory, ElementFactory, LaunchFactory,
-    MuxerFactory, PlaybinGraphError, PlaybinHook, PlaybinPort, PlaybinError, Registry, SourceFactory,
-    Uri, UriError, UriSourceFactory,
+    declared_source_caps, DecodebinError, DemuxFactory, DemuxSelectHook, ElementFactory,
+    LaunchFactory, MuxerFactory, PadKind, PadRequest, PlaybinGraphError, PlaybinHook, PlaybinPort,
+    PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]

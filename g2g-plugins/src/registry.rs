@@ -440,6 +440,12 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::mkv_playbin);
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
+    // Explicit-demux fan-out (M476): a named `matroskademux` / `tsdemux` / `qtdemux`
+    // fed by a file source, with several output-pad refs (`d.video_0`, `d.audio_0`),
+    // probes its file and builds the multi-output demuxer honoring the selection.
+    reg.register_demux_select(crate::uridecodebin::mkv_demux_select);
+    reg.register_demux_select(crate::uridecodebin::ts_demux_select);
+    reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
