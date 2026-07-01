@@ -80,7 +80,10 @@ byte source must announce its type up front, but you rarely name it by hand: a b
 `filesrc location=subs.vtt ! subparse` and `filesrc location=movie.mkv !
 matroskademux name=d ...` run with no hint. For a mis-named or extensionless file,
 `bytestream-format=auto` sniffs the header content instead (containers by magic,
-subtitles by their signature). An explicit `bytestream-format=` always overrides.
+subtitles by their signature) and works through `decodebin` too, so a `.mp4`
+wrongly named `.ts` still decodes with `filesrc location=movie.ts
+bytestream-format=auto ! decodebin`. An explicit `bytestream-format=` always
+overrides; a mislabeled file *without* `auto` is trusted by its extension.
 A progressive (whole-file) `.mp4` decodes through `decodebin` too
 (`filesrc location=X.mp4 ! decodebin ! …`, or explicitly `! qtdemux ! h264parse
 ! …`); the streaming fragmented form (CMAF, from HLS / DASH) stays on `fmp4demux`.

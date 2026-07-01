@@ -192,6 +192,18 @@ impl SourceLoop for FileSrc {
         (!self.auto_detect).then(|| self.caps.clone())
     }
 
+    /// Parse-time caps for `decodebin` (M480): sniff a `bytestream-format=auto`
+    /// header now (reading the file), so the demuxer is picked from the real
+    /// content rather than a possibly-wrong extension. A sniff failure (unreadable
+    /// or unrecognized) leaves `auto` unresolved and returns `None`, falling back
+    /// to the declared default.
+    fn probe_output_caps(&mut self) -> Option<Caps> {
+        if self.auto_detect {
+            self.resolve_auto_caps().ok()?;
+        }
+        self.configured_output_caps()
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {

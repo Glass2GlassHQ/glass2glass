@@ -188,6 +188,17 @@ pub trait SourceLoop: ElementBound {
         None
     }
 
+    /// Like [`configured_output_caps`](Self::configured_output_caps) but permitted
+    /// to do I/O to determine the type (M480): the auto-plug `decodebin` parser
+    /// calls this once, at parse time, to pick the demuxer. A `bytestream-format=
+    /// auto` source overrides it to sniff the file header now (so a mislabeled
+    /// `.ts` that is really an MP4 still auto-plugs the right demuxer, the way
+    /// GStreamer's runtime `typefind` would), where `configured_output_caps`
+    /// returns `None` because it may not read. Default: the no-I/O caps.
+    fn probe_output_caps(&mut self) -> Option<Caps> {
+        self.configured_output_caps()
+    }
+
     /// The runtime properties this source type exposes (M104), the GObject
     /// property-spec analog. Default: none. A source overrides this (and
     /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))

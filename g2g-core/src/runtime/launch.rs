@@ -575,10 +575,11 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
 /// The caps a `decodebin` predecessor produces, used as the auto-plug input
 /// (M195). For a registered source, build it and apply its properties so a
 /// property that re-types the output (a `filesrc`'s `bytestream-format`) is
-/// reflected via [`SourceLoop::configured_output_caps`]; fall back to the
-/// registry's declared caps (a fixed source, or a transform's source-pad
-/// template). `bytestream-format=auto` returns `None` from `configured_output_caps`
-/// (the container is only known after a run-time header sniff), so it too falls
+/// reflected via [`SourceLoop::probe_output_caps`]; fall back to the registry's
+/// declared caps (a fixed source, or a transform's source-pad template).
+/// `probe_output_caps` also sniffs a `bytestream-format=auto` source's header at
+/// parse time (M480), so `decodebin` picks the demuxer from the real content even
+/// when the file extension is wrong; only an unreadable / unrecognized file falls
 /// back to the declared default.
 fn resolve_upstream_caps(
     registry: &Registry,
@@ -587,7 +588,10 @@ fn resolve_upstream_caps(
 ) -> Result<Caps, ParseError> {
     if let Some(mut src) = registry.make_source(name) {
         apply_source_props(&mut src, name, props)?;
-        if let Some(caps) = src.configured_output_caps() {
+        // `probe_output_caps` may sniff the header (a `bytestream-format=auto`
+        // source), so `decodebin` picks the demuxer from the real content, not a
+        // mislabeled extension; it falls back to the no-I/O caps otherwise.
+        if let Some(caps) = src.probe_output_caps() {
             return Ok(caps);
         }
     }
