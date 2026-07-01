@@ -86,11 +86,15 @@ pub use graph_runner::{
     GraphTemplate,
 };
 
+// `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait
+// (`MultiInputElement::input_pad_index`) references them (M481).
+pub use autoplug::{PadKind, PadRequest};
+
 #[cfg(feature = "std")]
 pub use autoplug::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
     ElementFactory,
-    LaunchFactory, MuxerFactory, PadKind, PadRequest, PlaybinGraphError, PlaybinHook, PlaybinPort,
+    LaunchFactory, MuxerFactory, PlaybinGraphError, PlaybinHook, PlaybinPort,
     PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 

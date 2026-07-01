@@ -313,6 +313,32 @@ pub fn find_chain_with(
     None
 }
 
+/// The media kind a demux output-pad / muxer input-pad reference names (M476,
+/// input side M481): `video_0` -> [`Video`](PadKind::Video), `audio_1` ->
+/// [`Audio`](PadKind::Audio), a bare `d.` / `m.` or `src_2` / `sink_2` ->
+/// [`Any`](PadKind::Any). Defined outside the std-gated `factory` module because
+/// the `no_std` fan-in trait ([`MultiInputElement::input_pad_index`]) uses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadKind {
+    Video,
+    Audio,
+    Text,
+    Any,
+}
+
+/// A parsed pad reference from a `gst-launch` line (M476 output / M481 input),
+/// e.g. `d.video_0` -> `{ Video, 0 }`, `m.audio_1` -> `{ Audio, 1 }`, a bare `d.`
+/// -> `{ Any, n }`. Handed to a [`DemuxSelectHook`] (output) or
+/// [`MultiInputElement::input_pad_index`] (input) to map each request to a stream
+/// or input index.
+///
+/// [`MultiInputElement::input_pad_index`]: crate::MultiInputElement::input_pad_index
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PadRequest {
+    pub kind: PadKind,
+    pub index: usize,
+}
+
 #[cfg(feature = "std")]
 mod factory {
     use super::*;
@@ -734,27 +760,6 @@ mod factory {
     pub type PlaybinHook =
         fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
-    /// The media kind a demux output-pad reference names (M476): `video_0` ->
-    /// [`Video`](PadKind::Video), `audio_1` -> [`Audio`](PadKind::Audio), a bare
-    /// `d.` or `src_2` -> [`Any`](PadKind::Any) (the nth forwardable stream).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum PadKind {
-        Video,
-        Audio,
-        Text,
-        Any,
-    }
-
-    /// A parsed demux output-pad reference from a `gst-launch` line (M476), e.g.
-    /// `d.video_0` -> `{ Video, 0 }`, `d.audio_1` -> `{ Audio, 1 }`, `d.src_2` or a
-    /// bare `d.` -> `{ Any, n }`. Handed (in reference order) to a
-    /// [`DemuxSelectHook`] so it can map each request to a container stream and
-    /// build the multi-output demuxer with one port per request.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct PadRequest {
-        pub kind: PadKind,
-        pub index: usize,
-    }
 
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
     /// named demux element inside a user-authored line
@@ -1490,7 +1495,7 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementFactory, LaunchFactory, MuxerFactory, PadKind, PadRequest, PlaybinGraphError, PlaybinHook,
+    ElementFactory, LaunchFactory, MuxerFactory, PlaybinGraphError, PlaybinHook,
     PlaybinPort, PlaybinError, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
