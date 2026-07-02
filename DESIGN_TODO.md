@@ -197,10 +197,15 @@ leverage first:
   `VulkanVideoDec::gpu_context` expose the decode device as a `GpuContext` so a
   `WgpuSink` shares it; the `gpu` module is built for `vulkan-video`.
   `m494_vulkan_video_dpb_texture` decodes to 10 GPU textures; `m495` runs the full
-  `VulkanVideoDec -> WgpuSink::offscreen` wedge with no GPU->CPU readback. Left:
-  1. Auto-plug: a `CapabilityDescriptor` rank so `decodebin` picks it (currently
-     launch-only, referenced by explicit `vulkanvideodec` name).
-  2. On-screen `WgpuSink::with_surface` example (needs an app-owned window +
+  `VulkanVideoDec -> WgpuSink::offscreen` wedge with no GPU->CPU readback.
+  DONE (M496): auto-plug. `vulkanvideodec` is registered in
+  `register_autoplug_candidates` tagged `produces(WgpuTexture)` + `hardware()`, so
+  a WgpuTexture-preferring `decodebin`/`playbin` search picks it (domain match
+  dominates), while System auto-plug is unchanged (domain mismatch, like NvDec's
+  Cuda); a valid System fallback when it is the only H.264 decoder. Its source pad
+  template advertises `Nv12` + `Rgba8`. `m496_vulkan_video_autoplug` (GPU-free)
+  covers the selection. Left:
+  1. On-screen `WgpuSink::with_surface` example (needs an app-owned window +
      event loop, so an example rather than a self-checking test).
   3. Mid-stream SPS/PPS re-config (rebuild the session, re-emit `CapsChanged`);
      the element builds the session once from the first keyframe AU.

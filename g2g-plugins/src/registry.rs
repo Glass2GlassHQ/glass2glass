@@ -609,6 +609,19 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             .produces(g2g_core::MemoryDomainKind::Cuda)
             .hardware(),
     );
+    // Vendor-neutral Vulkan Video H.264 hardware decode (M493), the wgpu-texture
+    // analog of NvDec: tagged `produces(WgpuTexture)`, so a WgpuTexture-preferring
+    // domain-aware search picks it for a wgpu consumer (the copy-free wedge into a
+    // game engine / visualization viewer), while a plain (System) `decodebin` is
+    // unchanged (a WgpuTexture producer is a domain mismatch there, as Cuda is).
+    #[cfg(feature = "vulkan-video")]
+    reg.register(
+        ElementFactory::of::<crate::vulkanvideo::VulkanVideoDec>("vulkanvideodec", |_| {
+            Box::new(crate::vulkanvideo::VulkanVideoDec::new())
+        })
+        .produces(g2g_core::MemoryDomainKind::WgpuTexture)
+        .hardware(),
+    );
     // Android hardware video decode via the NDK MediaCodec (M219/M302); one
     // factory per codec (the MIME is fixed at construction). Reachable from
     // g2g-launch on-device; the gst analog is `amcviddec-<component>`.
@@ -849,8 +862,10 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
     }));
     // Vendor-neutral Vulkan Video H.264 hardware decoder (M493): H.264 in, NV12
-    // system-memory out, on the same Vulkan device wgpu runs (AMD/NVIDIA/Intel).
-    // Launch-only for now (no auto-plug rank yet).
+    // system memory or (zero-copy) RGBA WgpuTexture out, on the same Vulkan device
+    // wgpu runs (AMD/NVIDIA/Intel). The launch name; it is also an auto-plug
+    // candidate (registered in `register_autoplug_candidates`, preferred for a
+    // WgpuTexture consumer).
     #[cfg(feature = "vulkan-video")]
     reg.register_launch(LaunchFactory::of::<crate::vulkanvideo::VulkanVideoDec>(
         "vulkanvideodec",

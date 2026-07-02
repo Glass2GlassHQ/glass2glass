@@ -3730,6 +3730,12 @@ impl VulkanVideoDec {
 
 impl PadTemplates for VulkanVideoDec {
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
+        let raw = |format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
         alloc::vec::Vec::from([
             PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::H264,
@@ -3737,12 +3743,13 @@ impl PadTemplates for VulkanVideoDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
             })),
-            PadTemplate::source(CapsSet::one(Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            })),
+            // Both outputs the element can produce: system NV12 or, on the
+            // zero-copy `WgpuTexture` path, RGBA (the `.produces(WgpuTexture)`
+            // auto-plug tag steers a GPU consumer to the latter).
+            PadTemplate::source(CapsSet::from_alternatives(alloc::vec::Vec::from([
+                raw(RawVideoFormat::Nv12),
+                raw(RawVideoFormat::Rgba8),
+            ]))),
         ])
     }
 }
