@@ -675,6 +675,10 @@ critical-section = { version = "1", features = ["std"] }
 # `platform-std` backend runs the executor's task scheduler on a host thread, so
 # spawned tasks (not just block_on-joined futures) are verifiable without hardware.
 embassy-executor = { version = "0.10", features = ["platform-std", "executor-thread"] }
+# Window + event loop for the on-screen wgpu present example
+# (vulkan_video_on_screen). rwh 0.6 matches wgpu 29. Only built when that example
+# is (its required-features gate it), so the default no_std test build skips it.
+winit = "0.30"
 
 # gst-launch / gst-inspect analogs over the standard registry (M107). Both need
 # the std-only registry + wall clock, so they are gated on `std`; the no_std
@@ -701,6 +705,11 @@ required-features = ["std"]
 [[example]]
 name = "vulkan_video_smoke"
 required-features = ["vulkan-video"]
+
+# On-screen live present of the Vulkan Video wedge (decode -> WgpuSink surface).
+[[example]]
+name = "vulkan_video_on_screen"
+required-features = ["vulkan-video", "wgpu-sink"]
 
 # M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
 [[test]]

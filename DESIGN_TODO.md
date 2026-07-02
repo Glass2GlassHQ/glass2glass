@@ -205,8 +205,6 @@ leverage first:
   Cuda); a valid System fallback when it is the only H.264 decoder. Its source pad
   template advertises `Nv12` + `Rgba8`. `m496_vulkan_video_autoplug` (GPU-free)
   covers the selection. Left:
-  1. On-screen `WgpuSink::with_surface` example (needs an app-owned window +
-     event loop, so an example rather than a self-checking test).
   3. Mid-stream SPS/PPS re-config (rebuild the session, re-emit `CapsChanged`);
      the element builds the session once from the first keyframe AU.
   4. Pipeline the per-frame path through a `RING_DEPTH` in-flight ring (M489-M495
