@@ -1,0 +1,15 @@
+# Native WebSocket test source for the browser demo: streams an H.264 Annex-B
+# fixture, one access unit per WebSocket binary message, on a timer, looping.
+# Standalone (own Cargo.lock, excluded from the g2g workspace) so its tokio /
+# tokio-tungstenite deps never enter the normal build. Run:
+#   cargo run --release -- [bind_addr] [fixture.h264] [fps]
+[package]
+name = "ws-fixture-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

@@ -1,0 +1,23 @@
+# Portability showcase: the SHARED processing core proving "one graph, many
+# targets". Holds the detection-overlay transform chain (a synthetic-detection
+# stage + the analytics box-overlay) as a single `overlay_transforms()`
+# definition, built from portable g2g elements (g2g-ml DetectionPostprocess +
+# g2g-plugins AnalyticsOverlay). BOTH the native runner (portability-native) and
+# the browser build (g2g-web) construct their processing stages from this exact
+# function; only the source (capture/decode) and sink (present) differ per target.
+#
+# Compiles for native AND wasm32 (no tokio, no OS-coupled elements). Workspace-
+# excluded (own Cargo.lock) so its std + analytics feature selection never
+# perturbs the no_std `--workspace` baseline's feature resolution.
+[package]
+name = "portability-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+g2g-core = { path = "../../g2g-core", features = ["runtime"] }
+# DetectionPostprocess (YOLOv8 channel-major decode + NMS); pure Rust, no engine.
+g2g-ml = { path = "../../g2g-ml", default-features = false, features = ["std", "analytics"] }
+# AnalyticsOverlay (CPU RGBA box draw) + the metadata frame graph.
+g2g-plugins = { path = "../../g2g-plugins", default-features = false, features = ["std", "analytics"] }

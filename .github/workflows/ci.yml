@@ -1,0 +1,375 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Cross-platform baseline: the default-feature (no_std + alloc) build and the
+  # default test suite on all three OSes. No system libraries: everything here is
+  # pure Rust, so it is the safety net that must stay green everywhere.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check (no_std default build)
+        run: cargo check --workspace --locked
+      - name: test (default features)
+        run: cargo test --workspace --locked
+
+  # Lints, default features, Linux. Not run with `-D warnings`: the workspace is
+  # hand-formatted and carries some intentional warnings, so CI fails only on
+  # clippy errors, not warnings. (No `cargo fmt --check`: the repo is deliberately
+  # not rustfmt-clean, see feedback in AGENTS.md / project memory.)
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked
+
+  # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
+  # that build with stable, apt-installable system libraries. Intentionally
+  # omitted (need version-pinned or proprietary deps, add separately):
+  #   ffmpeg (libav* version-sensitive), vaapi (libva + GBM + bindgen),
+  #   pipewire (libpipewire version-sensitive), vpx (env-libvpx-sys ships
+  #   bindings only for specific libvpx versions, needs its `generate` feature +
+  #   clang against the system libvpx), cuda / cuda-gl (NVIDIA driver),
+  #   ort (downloads ONNX Runtime binaries at build).
+  features-linux:
+    name: features (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libasound2-dev libpulse-dev \
+            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev
+      - name: check g2g-plugins (linux feature set)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,alsa-sink,pulse-sink,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai
+      - name: check g2g-ml (wgpu + burn)
+        run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+      # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
+      # StaticLendRing DMA capture ring, and a 3-task pipeline on a real Embassy
+      # executor (platform-std, run_until) all run on the host without a HAL time
+      # driver, so CI guards the embedded story (M45 / M260 / M264).
+      - name: test g2g-plugins (embassy-link, no-alloc embedded path)
+        run: cargo test -p g2g-plugins --locked --features embassy-link --test m45_embassy_link --test m260_dma_ring --test m264_embassy_multitask
+      # Static element model runtime zero-alloc proof (M624): a counting allocator
+      # observes the source->transform->sink runner make 0 allocations over 100k
+      # frames.
+      - name: test g2g-plugins (static-pipeline zero-alloc)
+        run: cargo test -p g2g-plugins --locked --test m624_static_pipeline_noalloc
+      # Link-time no-heap proof (M625) + panic-free proof (M626): build a full
+      # static pipeline for a bare Cortex-M target with `g2g-core`
+      # default-features=false (no `alloc` crate) and no global allocator, and
+      # assert the archive references no allocator symbols and no panic
+      # machinery; then run the same pipeline on the host via a C harness. The
+      # machine-checkable form of the heap-free + panic-free MCU guarantee.
+      - name: link-time no-heap + panic-free proof (thumbv7em)
+        run: bash tools/noalloc-check.sh
+      # Build-time worst-case RAM/stack/ROM report (M627): link the no-alloc
+      # pipeline into a gc-sectioned ELF and report ROM / static RAM /
+      # worst-case stack (computed from the disassembly call graph, covering
+      # the capture ring + pipeline state machine in the entry frame), with
+      # regression budgets. The numbers are published to the job summary.
+      - name: heap-free pipeline footprint report (thumbv7em)
+        run: bash tools/footprint-report.sh
+      # MCU peripheral elements (M629): standalone test exercises the no-alloc
+      # dependency config (g2g-core with no features), and the thumb check
+      # proves the crate stays no_std/no-alloc cross-compilable.
+      - name: test g2g-mcu (standalone, no-alloc dep config + thumb cross)
+        run: |
+          cargo test -p g2g-mcu --locked
+          cargo check -p g2g-mcu --locked --target thumbv7em-none-eabihf
+      # Emulated Cortex-M execution proof (M628): boot the exact g2g-noalloc
+      # pipeline (linked as an rlib into a bare-metal cortex-m-rt binary) on
+      # QEMU's MPS2-AN386 Cortex-M4 and assert the on-target checksum via the
+      # semihosting exit code + banner. Upgrades "links for thumbv7em" to
+      # "executes on the Cortex-M ISA".
+      - name: emulated Cortex-M execution proof (qemu mps2-an386)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q qemu-system-arm
+          bash tools/qemu-check.sh
+      # Timing / jitter report (M645): the flagship audio graph's per-frame
+      # execution cost measured under QEMU icount (deterministic virtual
+      # time), budget-enforced and published like the footprint numbers.
+      - name: flagship audio graph timing report (qemu icount)
+        run: bash tools/timing-report.sh
+      # Host graph-compiler proof (M646): regenerate the flagship graph from
+      # its YAML document with g2g-mcugen and assert (a) the checked-in
+      # generated file is current and deterministic, (b) the generated graph
+      # builds heap-free for thumb, and (c) its RTP wire output matches the
+      # hand-written reference byte-for-byte.
+      - name: host graph-compiler proof (g2g-mcugen)
+        run: bash tools/mcugen-check.sh
+      # C seam ABI proof (M650): the inverse of the freertos integration below.
+      # C code IS the peripheral (capture/send callbacks) driving a g2g pipeline
+      # one frame at a time. Asserts the C-seam path links heap-free and
+      # data-panic-free for thumb, then runs a real C caller (harness.c) that
+      # steps the pipeline and matches the Rust reference wire byte-for-byte.
+      - name: C seam ABI proof (g2g-cffi)
+        run: bash tools/cffi-check.sh
+      # FreeRTOS executor proof (M633): the same pipeline staticlib linked
+      # into a FreeRTOS application (static allocation only) with the
+      # arm-none-eabi C toolchain, booted on the same QEMU machine, checksum
+      # verified on-target. The C-shop integration path.
+      - name: FreeRTOS executor proof (qemu mps2-an386)
+        run: |
+          sudo apt-get install -y -q gcc-arm-none-eabi libnewlib-arm-none-eabi
+          bash tools/freertos-check.sh
+      # Zephyr executor proof (M637): the same pipeline staticlib (built for
+      # thumbv7m to match the board) linked into a Zephyr application via
+      # Zephyr's CMake package (pinned tree + CMSIS modules, no west
+      # workspace), booted on QEMU's lm3s6965evb Cortex-M3 (qemu_cortex_m3),
+      # checksum verified on-target. Completes the executor matrix
+      # (bare / Embassy / FreeRTOS / Zephyr). Reuses the qemu + arm-gcc
+      # installs from the two steps above.
+      - name: Zephyr executor proof (qemu_cortex_m3)
+        run: |
+          sudo apt-get install -y -q ninja-build
+          pip3 install -q pyelftools pyyaml packaging pykwalify
+          bash tools/zephyr-check.sh
+      # Requirements traceability (M655): assert every safety requirement in
+      # docs/safety/REQUIREMENTS.md is backed by evidence that exists here (a
+      # proof script wired into CI, a named test, a CI job), so the safety
+      # matrix cannot drift from the code that satisfies it.
+      - name: requirements traceability check
+        run: bash tools/traceability-check.sh
+      # ONVIF SOAP/WS-Discovery is hand-rolled, so guard the deterministic
+      # parts (envelope build, password digest, response parsing) in CI. The
+      # live discovery / resolve tests are #[ignore] (need a camera on the LAN).
+      - name: test g2g-plugins (onvif, offline)
+        run: cargo test -p g2g-plugins --locked --features onvif --lib onvif --test onvif_smoke
+      # Scripting surface (declarative JSON/YAML graphs + Rhai builder +
+      # scriptelement + scriptrouter): the m578 suite builds text / scripts into
+      # real graphs and runs them (including the scriptrouter -> appsink egress
+      # and multicast paths), and the lib unit tests cover the elements. Both are
+      # gated on the scripting features, so a default `cargo test` skips them.
+      - name: test g2g-plugins (scripting)
+        run: |
+          cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --test m578_scripting
+          cargo test -p g2g-plugins --locked --features script-rhai,declarative-yaml --lib script::
+
+  # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
+  # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no
+  # system-library install is needed.
+  features-windows:
+    name: features (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (windows feature set)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets --features
+          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src
+
+  # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
+  # ML path on the Metal backend. The objc2 crates link the system frameworks
+  # present on the runner, so no install is needed. This is the job that actually
+  # compiles the VtDecode VideoToolbox FFI (the dev host is Linux and cannot).
+  features-macos:
+    name: features (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (vtdecode + vtencode)
+        run: cargo check -p g2g-plugins --locked --all-targets --features vtdecode,vtencode
+      - name: check g2g-ml (wgpu + burn, Metal)
+        run: cargo check -p g2g-ml --locked --all-targets --features wgpu,burn
+
+  # Android platform build. There is no native Android runner, so this is a
+  # cross-compile check (aarch64-linux-android): it compiles the NDK MediaCodec
+  # element (the same compiler feedback the macOS job gives VtDecode). ndk-sys
+  # ships pregenerated bindings, so `cargo check` needs only the rustup target,
+  # not a full NDK install (linking / running on a device is validated
+  # separately). Mirrors the macOS decode track for Android.
+  features-android:
+    name: features (android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-plugins (mediacodec)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features mediacodec
+      # M304: the MediaCodec -> wgpu/Vulkan zero-copy bridge (pulls wgpu + the raw
+      # Vulkan escape hatch). Cross-check the bridge module and the on-device
+      # probe test; running it is validated on a device separately.
+      - name: check g2g-plugins (mediacodec-wgpu)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features mediacodec-wgpu
+      # M304: WgpuPreprocess consumes the RGBA WgpuTexture MediaCodecDec emits
+      # (the decode -> preprocess loop on GPU). Cross-check the consume path + the
+      # on-device chain test; running it is validated on a device separately.
+      - name: check g2g-ml (mediacodec-wgpu)
+        run: >
+          cargo check -p g2g-ml --locked --all-targets
+          --target aarch64-linux-android --features mediacodec-wgpu
+      # M306/M307/M308: MediaCodec encode + AAudio + Camera2 capture. Cross-check
+      # each element and its on-device probe; running them is validated on a device
+      # separately. Encode rides the `mediacodec` feature above; build the audio /
+      # camera features here.
+      - name: check g2g-plugins (aaudio)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features aaudio
+      - name: check g2g-plugins (camera2)
+        run: >
+          cargo check -p g2g-plugins --locked --all-targets
+          --target aarch64-linux-android --features camera2
+
+  # Language bindings: the g2g-pyapi maturin wheel and the in-tree C / Python
+  # example programs (M326/M327). Guards that the bindings keep building and the
+  # examples keep running, the language-neutral waist on top of g2g-capi.
+  bindings:
+    name: bindings (pyapi wheel + C/Python examples)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The g2g-pyapi tests drive the bindings through an embedded interpreter
+      # (pyo3 auto-initialize), so they need libpython at build + run time.
+      - name: test g2g-pyapi (embedded interpreter)
+        run: cargo test -p g2g-pyapi --locked --features python
+      # Build the redistributable abi3 wheel (one cp311-abi3 wheel covers every
+      # CPython >= 3.11), install it, and run the Python example end to end. The
+      # wheel build enables pyo3/extension-module, so it does not link libpython.
+      - name: build + run the Python example
+        run: |
+          python -m pip install --upgrade maturin numpy
+          maturin build --release -m g2g-pyapi/Cargo.toml
+          python -m pip install target/wheels/g2g-*.whl
+          python g2g-pyapi/examples/appsink_numpy.py
+      # The C example links the g2g-capi staticlib (the C ABI) and drives an
+      # appsrc!appsink pipeline; `make run` exits non-zero unless all 3 frames
+      # round-trip.
+      - name: build + run the C example
+        run: make -C examples/g2g-c-example run
+
+  # Conformance matrix (validation-first, M614/M615/M619): run the resource-owning
+  # conformance oracles against a real ffmpeg peer, accumulating peer-tagged
+  # `Oracle` evidence in a shared log ($G2G_CONFORMANCE_LOG), then publish the
+  # derived maturity per element. The point is honesty: a row reaches
+  # `interop-tested` only because a named external implementation validated it in
+  # *this* run, never by hand. `Hardware` rows (GPU decode on the RTX 3060) are
+  # appended to the same log by a self-hosted GPU runner, not here (hosted runners
+  # have no GPU), so this job shows the interop tier only.
+  conformance:
+    name: conformance matrix (ffmpeg oracles + maturity)
+    runs-on: ubuntu-latest
+    env:
+      G2G_CONFORMANCE_LOG: ${{ github.workspace }}/g2g-conformance.tsv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install ffmpeg (the reference peer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -protocols 2>/dev/null | grep -q srt && echo "ffmpeg has SRT" || echo "ffmpeg lacks SRT (SRT oracle will skip)"
+      - name: start from a fresh evidence log
+        run: rm -f "$G2G_CONFORMANCE_LOG"
+      # Deterministic reference-demuxer oracles (required): the native fMP4 and
+      # MPEG-TS muxers validated by ffprobe. These self-skip cleanly if ffprobe is
+      # absent, so a green run here means real interop evidence was produced.
+      - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
+        run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
+      # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
+      # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:
+      # encode + decode + cross-decode of a full-range signal); appends
+      # Oracle evidence. Self-skips without ffmpeg like the muxer oracles.
+      - name: MCU codec oracles (g2g-mcu vs ffmpeg)
+        run: cargo test -p g2g-mcu --locked --test m638_g711 --test m639_adpcm -- --nocapture
+      # Live-transport interop (best-effort): the depayloader / SRT / RTMP paths
+      # driven by a real ffmpeg peer over a local socket. Timing-sensitive
+      # (ffmpeg's caller/publisher races the g2g listener), so a miss must not fail
+      # the job; when they pass they append peer-tagged Oracle evidence.
+      - name: transport interop vs ffmpeg (best-effort)
+        continue-on-error: true
+        run: |
+          cargo test -p g2g-plugins --locked --features udp-ingress --test udp_ffmpeg_rtp_interop -- --ignored
+          cargo test -p g2g-plugins --locked --features rtmp --test rtmp_ffmpeg_interop -- --ignored
+          cargo test -p g2g-plugins --locked --features srt --test srt_ffmpeg_interop -- --ignored
+          cargo test -p g2g-mcu --locked --test m643_rtp -- --ignored
+      # Publish the derived maturity: fold the accumulated Oracle evidence into the
+      # in-process batteries and render the table to the job summary + an artifact.
+      - name: publish derived maturity
+        run: |
+          echo '## Conformance maturity' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cargo run -q -p g2g-plugins --locked --features std --bin g2g-inspect -- --maturity | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: upload evidence log
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-evidence
+          path: ${{ env.G2G_CONFORMANCE_LOG }}
+          if-no-files-found: ignore
+
+  # The no_std + wasm pillar: the core builds for the browser target. (A bare-
+  # metal target like thumbv7em needs the critical-section feature + a CS impl, so
+  # it is left to a dedicated embedded job.)
+  wasm:
+    name: wasm (g2g-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # `runtime` pulls `spin` (the core's no-feature build can't compile log.rs
+      # without it); it builds on wasm32. Verified locally for the target.
+      - run: cargo check -p g2g-core --locked --target wasm32-unknown-unknown --features runtime
+      # The scripting surface is pure Rust (Rhai, no C toolchain), so it must
+      # reach the browser like the core does. Guards the portability claim: the
+      # scriptelement / scriptrouter path (atomics + the guarded FrameBuf pointer)
+      # compiles for wasm32. Lib only; the m578 test's dev-dep tokio uses `net`,
+      # which does not build for this target.
+      - run: cargo check -p g2g-plugins --lib --locked --target wasm32-unknown-unknown --features script-rhai

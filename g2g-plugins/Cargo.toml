@@ -1,0 +1,981 @@
+[package]
+name = "g2g-plugins"
+description = "Standard source, sink, and transform elements for the glass2glass framework."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Convenience bundle: every element that builds on a Linux desktop with the
+# usual `-devel` packages present (ffmpeg, VAAPI, ALSA / Pulse / PipeWire,
+# libvpx, libopus, Wayland / DRM, OpenSSL). The meson "build everything for this
+# platform" analog. It ASSUMES those system libs are installed; a missing one
+# fails the build on that feature. For an auto-detecting install that probes and
+# skips whatever is absent (and adds the NVIDIA stack when present), use
+# `cargo xtask install-launch` instead. Deliberately excludes the
+# Windows / macOS / Android / wasm features (other platforms), the proprietary
+# NVIDIA Video Codec stack (needs the SDK + hardware: add `nvenc,nvdec,cuda,...`
+# explicitly), and the no_std `embassy*` RTOS backends.
+linux-full = [
+    "multi-thread", "plugin-loader",
+    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc", "remote", "remote-ws",
+    "http-src", "hls", "dash",
+    "ffmpeg", "vaapi", "v4l2",
+    "opus", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
+    "alsa-sink", "pulse-sink", "pipewire",
+    "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
+    "declarative-yaml", "script-rhai",
+]
+std = ["g2g-core/std", "dep:tokio"]
+multi-thread = ["g2g-core/multi-thread"]
+# Declarative graph format (M578): load a `Graph` from a JSON document
+# (`declarative::from_json`), the structured sibling of the `gst-launch` text
+# parser. Pulls serde + serde_json; implies std (the Registry + loader are std).
+declarative = ["std", "dep:serde", "dep:serde_json"]
+# YAML front-end for the declarative format (`declarative::from_yaml`). Adds
+# serde_yaml on top of `declarative`; the shared spec model is format-agnostic.
+declarative-yaml = ["declarative", "dep:serde_yaml"]
+# Embedded Rhai scripting (M579/M580): a pure-Rust script engine that BUILDS a
+# graph (script control flow emits the `declarative` spec model, then the shared
+# builder runs it) and backs the `scriptelement` runtime transform (a per-frame
+# Rhai `process(frame)`). rhai is pure Rust (no C, works on the no_std/wasm
+# targets the core reaches); `sync` makes its values Send so `scriptelement` runs
+# under the multi-thread runner too. Implies `declarative` (shares the builder).
+script-rhai = ["declarative", "dep:rhai"]
+# Dynamic plugin loader (M201): `dlopen`s third-party `cdylib` plugins built
+# with the `g2g-plugin` SDK and registers their elements into a `Registry`.
+# Pulls `libloading`; implies std (the Registry is std-only). A packaged
+# `g2g-launch` / `g2g-inspect` is built with this so `--plugin` / $G2G_PLUGIN_PATH
+# extend it without a rebuild.
+plugin-loader = ["std", "dep:libloading"]
+# RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
+rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
+# RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
+# serving RTP over UDP to a connecting player. The sans-IO `rtspserver` responder
+# is always compiled; only the tokio TCP/UDP element needs this. Implies std + tokio.
+rtsp-server = ["std", "tokio/net", "tokio/io-util"]
+# SRT transport: SrtSink (caller, egress) + SrtSrc (listener, ingress) carrying an
+# MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
+# `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
+# elements need this. Implies std + tokio net.
+srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:sha1", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
+# UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
+# the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
+# implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
+udp-egress = ["std", "tokio/net"]
+# RTMP ingest source (RtmpSrc): accepts one RTMP publisher (ffmpeg/OBS) over TCP
+# and streams the demuxed FLV byte stream for `flvdemux`. The `rtmp` sans-IO
+# protocol module is pure no_std and always compiled; only the tokio TCP element
+# needs this feature. Implies std + tokio net/io-util.
+rtmp = ["std", "tokio/net", "tokio/io-util", "dep:sha2", "dep:hmac", "dep:getrandom"]
+# UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
+# depayloads H.264 to Annex-B access units. Raw RTP (no RTSP/SDP); implies std
+# and adds tokio's net feature. Receive-side jitter buffer / RTCP are owed.
+udp-ingress = ["std", "tokio/net"]
+# Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
+# RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
+# via g2g-core's wire codec and ship it over TCP, so any graph edge can be cut
+# and the downstream subgraph run in another process / on another machine. The
+# codec is media-agnostic (any Caps / CPU frame); the elements are the tokio TCP
+# I/O around it. Implies std + tokio net/io-util.
+remote = ["std", "tokio/net", "tokio/io-util"]
+# Distributed-graph transport over WebSocket (M554): the WebSocket sibling of the
+# `remote` TCP pair. RemoteWsSink (WebSocket client) + RemoteWsSrc (WebSocket
+# server) carry the same g2g-core wire-codec PipelinePacket stream, one packet per
+# binary WebSocket message (WebSocket already message-frames, so no u32 length
+# prefix). This lets a browser g2g-web peer, which can speak only WebSocket, join
+# the same distributed primitive as a native peer, generalizing the bespoke M549
+# browser->detect-server shim into the media-agnostic edge cut. Pulls
+# tokio-tungstenite (0.24, the version the detect-server demo already uses) +
+# futures-util's Sink/Stream adapters; implies std + tokio net/io-util.
+remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futures-util/sink"]
+# Native WebRTC egress sink (WebRtcSink): publishes a pipeline's encoded H.264 to
+# a WHIP server over a str0m-driven PeerConnection (ICE / DTLS / SRTP). str0m is a
+# sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
+# UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
+# system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
+# tokio. NOTE: str0m 0.20 needs a rustc newer than the workspace MSRV 1.75; this
+# feature is off by default, so the no_std baseline and MSRV floor are unaffected
+# (same situation noted for AudioResample / rubato).
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5"]
+# ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
+# WS-Discovery Probe (UDP multicast) and the two media SOAP calls
+# (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
+# Reuses reqwest for the SOAP HTTP POST, roxmltree to read the responses, sha1
+# for the password digest, getrandom for the nonce, and base64. Resolves a URI
+# then delegates to RtspSrc (so it implies the `rtsp` feature). Implies std.
+onvif = ["std", "rtsp", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:sha1", "dep:getrandom", "dep:base64"]
+# Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
+# MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
+mf-decode = ["std", "dep:windows"]
+# macOS hardware H.264 decode via VideoToolbox (VTDecompressionSession). Pulls the
+# objc2 VideoToolbox / Core Media / Core Video / Core Foundation bindings;
+# macOS-only (the deps live under [target.'cfg(target_os = "macos")']), implies
+# std. The macOS counterpart of mf-decode; first element of the macOS platform
+# track. See DESIGN_TODO.md "Platform: macOS".
+vtdecode = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-video-toolbox",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+]
+# macOS hardware H.264 encode via VideoToolbox (VTCompressionSession); same objc2
+# framework deps as vtdecode, plus the compression-session bindings.
+vtencode = [
+    "std",
+    "dep:objc2",
+    "dep:objc2-video-toolbox",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-foundation",
+]
+# Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
+# `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
+# "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
+# first element of the Android platform track. See DESIGN_TODO.md "Platform:
+# Android".
+mediacodec = ["std", "dep:ndk"]
+# Android AAudio PCM render (AAudioSink) + capture (AAudioSrc) (M307), via the
+# `ndk` crate's `audio` module (AAudioStream). `ndk/audio` implies api-level-26.
+# Android-only (the ndk dep is target-gated), implies std. The Android analog of
+# the WASAPI / ALSA / PulseAudio audio elements.
+aaudio = ["std", "dep:ndk", "ndk/audio"]
+# Android camera capture (Camera2Src) (M308) via the NDK Camera2 API
+# (libcamera2ndk) through ndk-sys, capturing YUV_420_888 into a safe ndk
+# ImageReader and packing NV12. Android-only, implies std. The Android analog of
+# v4l2src / avfvideosrc. `ndk/api-level-24` gives ImageReader.
+camera2 = ["std", "dep:ndk", "dep:ndk-sys", "ndk/api-level-24"]
+# Android zero-copy decode -> GPU (M304): keep MediaCodec output on the GPU by
+# importing the decoded AImage's AHardwareBuffer into wgpu/Vulkan
+# (VK_ANDROID_external_memory_android_hardware_buffer), then a device-local copy
+# into a plain wgpu texture WgpuPreprocess samples, no CPU readback. The Android
+# analog of the `cuda-wgpu` FD bridge; pulls wgpu + the raw Vulkan escape hatch
+# (wgpu-hal + ash). Android-only, implies `mediacodec`. `ndk/api-level-26` is
+# required: `AImage_getHardwareBuffer` and the whole `AHardwareBuffer` ref API
+# are NDK API 26+, so the ndk crate gates them behind that feature. Build the
+# on-device probe with cargo-ndk `--platform 26`. Pulls in `wgpu-sink` (M305): the
+# decoded RGBA WgpuTexture is presented on-screen by `WgpuSink::with_surface`,
+# fed an Android `ANativeWindow` surface via `mediacodec_wgpu::create_android_surface`.
+mediacodec-wgpu = ["mediacodec", "wgpu-sink", "ndk/api-level-26", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Windows H.264 encode via the Media Foundation H.264 Encoder MFT
+# (CLSID_MSH264EncoderMFT). NV12 in, Annex-B H.264 out; low-latency mode on.
+# Pulls the windows crate; Windows-only, implies std.
+mf-encode = ["std", "dep:windows"]
+# Windows AAC audio encode/decode via Media Foundation MFTs (M35/M36):
+# MfAacEncode (PCM->AAC, enumerated encoder) and MfAacDecode (AAC->PCM via
+# CLSID_MSAACDecMFT). Pulls the windows crate; Windows-only, implies std.
+mf-aac = ["std", "dep:windows"]
+# Windows WASAPI render sink (M29): plays interleaved PCM (PcmS16Le/PcmF32Le)
+# on the default audio endpoint via WASAPI shared mode. The audible-output end
+# of the M25 audio path. Pulls the windows crate; Windows-only, implies std.
+wasapi-sink = ["std", "dep:windows"]
+# Windows WASAPI capture source (M32): captures interleaved PCM from the
+# default audio capture endpoint (shared mode), the input mirror of
+# WasapiSink. Pulls the windows crate; Windows-only, implies std.
+wasapi-src = ["std", "dep:windows"]
+# Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
+# frames in a Win32 window via a DXGI swapchain + D3D11 video processor
+# (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
+# implies std. Pairs with MfDecode::with_d3d11().
+d3d11-sink = ["std", "dep:windows"]
+# Linux hardware H.264 decode via VAAPI through the `cros-codecs` crate.
+# Pulls cros-codecs (+ libva + GBM bindings); Linux-only, implies std.
+vaapi = ["std", "dep:cros-codecs"]
+# ffmpeg/libavcodec H.264 decode (software baseline; VAAPI hwaccel deferred).
+# Pulls ffmpeg-next + ffmpeg-sys; Linux-only, implies std. Needs system libav*
+# (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev libavformat-dev
+# libavutil-dev). This is the production-ready Linux decode path while the
+# `vaapi` feature is blocked on cros-codecs GBM/NV12 surface allocation.
+ffmpeg = ["std", "dep:ffmpeg-next"]
+# V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
+# /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
+# dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture
+# thread feeding the async run loop over a channel.
+v4l2 = ["std", "dep:v4l"]
+# libcamera capture source (LibCameraSrc): captures NV12 (else YUYV) frames from
+# a camera via the libcamera stack, the modern Linux camera path (handles UVC
+# webcams through libcamera's uvcvideo pipeline handler, plus CSI/ISP cameras
+# V4L2 alone can't). Links system libcamera via the `libcamera` crate (needs
+# libcamera-devel + libclang at build); Linux-only, implies std. Blocking
+# libcamera I/O runs on a dedicated capture thread feeding the async run loop.
+libcamera = ["std", "dep:libcamera"]
+# Embassy RTOS clock backend (M43): EmbassyClock over embassy-time, the no_std
+# analog of WallClock. The tick rate is selected here; a HAL provides the time
+# driver at link. The embassy-futures block_on executor primitive (dev-dep)
+# runs pipelines, verified in m43_embassy.rs.
+embassy = ["dep:embassy-time", "embassy-time/tick-hz-1_000_000"]
+# Embassy zero-alloc inter-task packet channel (M45): PacketChannel over
+# embassy-sync, the §6.2 stack-channel link. Separate from `embassy` so the host
+# test links without embassy-time's HAL driver.
+embassy-link = ["dep:embassy-sync"]
+# CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
+# `Backend::NvdecCuda` `MemoryDomain::Cuda` NV12 frame back to system memory
+# (device->host `cuMemcpy2D`) so the decode path reaches the existing CPU
+# sinks for bring-up. Hand-rolled FFI linking `libcuda` directly (no crate
+# dep); Linux + NVIDIA only, implies std. See DESIGN-C3-cuda.md §3.4, §4.
+cuda = ["std"]
+# Local zero-copy IPC over CUDA IPC memory handles (`localipc`, M556): share a
+# device allocation with another process on the same machine + GPU without a
+# device->host->device round trip. `cuIpcGetMemHandle` exports a 64-byte handle
+# (plain bytes, so it rides any transport, unlike a DMABUF fd); the peer
+# `cuIpcOpenMemHandle`s it to read the same VRAM. The graph elements
+# (LocalCudaSink/Src) carry a MemoryDomain::Cuda NV12 frame across a Unix socket,
+# so this also needs tokio net/io-util. Linux + NVIDIA only, implies `cuda` (std).
+# CI-excluded like the rest of the CUDA stack (GPU-local).
+local-ipc = ["cuda", "tokio/net", "tokio/io-util"]
+# Vendor-neutral local zero-copy transport (`localdmabuf`, M557): the DMABUF
+# analog of `local-ipc`, carrying a MemoryDomain::DmaBuf frame to a same-machine
+# peer over a Unix socket. Unlike a CUDA IPC handle (plain bytes), a dma-buf is a
+# file descriptor, so the fd is passed as SCM_RIGHTS ancillary data (hand-rolled
+# sendmsg/recvmsg FFI, no crate dep). The kernel refcounts the underlying buffer
+# across both processes' fds, so the transfer is naturally lifetime-decoupled and
+# needs no per-frame ack. GPU-agnostic (the transport moves any dma-buf); pair
+# with `dmabuf-wgpu` on the receive side to import into a wgpu buffer. Linux only,
+# implies std + tokio net/io-util. CI-excluded (needs a real dma-buf provider).
+local-dmabuf = ["std", "tokio/net", "tokio/io-util"]
+# Native NVENC H.264 encode (`NvEnc`, M269): zero-copy, device-resident
+# encode of a CUDA NV12 surface (the NVDEC hwframe domain) via the NVIDIA Video
+# Codec SDK, the encode-side mirror of the `cuda-wgpu` import bridge. Hand-rolled
+# FFI linking `libnvidia-encode` + `libcuda` directly (no crate dep), struct
+# layouts asserted against the installed `nvEncodeAPI.h`. Linux + NVIDIA only,
+# implies std (via `cuda`). CI-excluded like `ffmpeg` (no NVENC runtime in CI).
+nvenc = ["cuda"]
+# Native NVDEC H.264 decode (`NvDec`, M270): the decode half of the gst-`nvcodec`
+# pair, mirror of `NvEnc`. Drives the NVCUVID parser+decoder API directly (no
+# libavcodec), emitting CUDA NV12 surfaces (`MemoryDomain::Cuda`). Hand-rolled FFI
+# linking `libnvcuvid` + `libcuda`, struct layouts asserted against cuviddec.h /
+# nvcuvid.h. Linux + NVIDIA only, implies std (via `cuda`). CI-excluded.
+nvdec = ["cuda"]
+# CUDA-GL zero-copy-ish display sink (`CudaGlSink`, C3 Phase 3 step 2). Keeps
+# decoded NV12 on the GPU and presents via CUDA-GL interop (device->texture
+# copy + NV12->RGB fragment shader) on a Wayland EGL surface, removing the
+# PCIe round-trip and CPU colour convert. Pulls khronos-egl (EGL), glow (GL
+# ES), wayland-egl (wl_egl_window), and SCTK (windowing). Linux + NVIDIA only.
+cuda-gl = ["cuda", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
+# CUDA-GL display sink on DRM/KMS (`CudaKmsSink`, M255): the tty / no-compositor
+# counterpart of cuda-gl. Same CUDA-GL interop + NV12->RGB shader, but EGL on a
+# GBM surface presented via DRM page-flips (no Wayland). Pulls khronos-egl, glow,
+# gbm (surface, no drm-support so it stays on our drm), drm + drm-fourcc.
+# Requires DRM master (tty / DRM lease). Linux + NVIDIA only.
+cuda-kms = ["cuda", "dep:khronos-egl", "dep:glow", "dep:gbm", "dep:drm", "dep:drm-fourcc"]
+# CUDA<->wgpu zero-copy interop (M220, the GPU keep-on-GPU pillar). `CudaToWgpu`
+# imports a Vulkan external-memory image into CUDA, copies the NVDEC NV12 planes
+# device->device into it, and hands it downstream as MemoryDomain::WgpuTexture
+# for WgpuPreprocess's surface-import path, so decode -> preprocess -> infer stay
+# on the GPU with no PCIe round-trip. Needs raw Vulkan: wgpu-hal (to get a device
+# with VK_KHR_external_memory_fd and wrap a self-allocated VkImage) + ash. Linux
+# + NVIDIA only, implies std.
+cuda-wgpu = ["cuda", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Zero-copy libcamera -> GPU feasibility (the Linux analog of cuda-wgpu /
+# mediacodec-wgpu): query whether a discrete GPU can import a libcamera
+# FrameBuffer dma-buf via VK_EXT_external_memory_dma_buf. Needs raw Vulkan
+# (wgpu-hal + ash). Linux only, implies the libcamera source. The full
+# import-to-wgpu-texture element is gated on this probe succeeding on real
+# hardware (a USB camera's CPU-backed dma-buf cannot be mapped by a dGPU).
+libcamera-dmabuf = ["libcamera", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Zero-copy DMABUF -> wgpu buffer import element (`dmabuftowgpu`). Same GPU deps
+# as the libcamera probe but without the libcamera dependency, so a bridge /
+# GStreamer dma-buf feed can be imported to the GPU on its own.
+dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# Vendor-neutral GPU-resident hardware video decode via Vulkan Video
+# (`VK_KHR_video_queue` + `VK_KHR_video_decode_*`), decoding into a wgpu texture
+# on the same Vulkan device wgpu runs, the cross-vendor analog of the CUDA-locked
+# NvDec -> CudaToWgpu path (AMD/RADV, NVIDIA, Intel/ANV). See DESIGN.md 4.11.6.
+vulkan-video = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
+# HDR swapchain present (M575): `VulkanHdrSink` presents a decoded HDR texture to
+# an on-screen swapchain with an HDR colour space (`COLOR_SPACE_HDR10_ST2084_EXT`
+# PQ, falling back to `EXTENDED_SRGB_LINEAR` scRGB, then SDR) + `VkHdrMetadataEXT`.
+# wgpu 29 cannot express a swapchain colour space, so the swapchain is a raw ash
+# `VK_KHR_swapchain` on the decode device's `VkInstance` (zero-copy with the decode
+# output). Needs `raw-window-handle` for the surface. Implies `vulkan-video` (the
+# decode device) + `wgpu-sink` (the texture producer path). Linux/Windows only.
+hdr-present = ["vulkan-video", "wgpu-sink", "dep:raw-window-handle"]
+# Reverse GStreamer bridge (`gstwrap`): host an unported GStreamer element inside
+# a g2g graph. The element drives `appsrc ! <element> ! appsink` in a real
+# GStreamer pipeline (a small C helper over the gstreamer-1.0 / gstreamer-app-1.0
+# C API, built by build.rs via pkg-config + cc, mirroring g2g-bridge's shell).
+# The incremental-migration path in the g2g-as-top-framework direction: adopt g2g
+# now, keep unported GStreamer stages running until they are ported. Implies std;
+# needs the gstreamer-1.0 + gstreamer-app-1.0 dev packages. Linux-primary (the C
+# API is portable; only build.rs's pkg-config probe is host-specific).
+gstreamer = ["std"]
+# KMS/DRM video sink: NV12 dumb-buffer scanout via the primary plane on the
+# active CRTC. Pulls `drm` (libdrm bindings) + `drm-fourcc`; Linux-only,
+# implies std. Requires DRM master (drop to tty or run with a DRM lease);
+# usually conflicts with a running Wayland/X11 compositor. NV12 input only —
+# pair with `FfmpegH264Dec::with_output_format(OutputFormat::Nv12)`.
+kms-sink = ["std", "dep:drm", "dep:drm-fourcc"]
+# Wayland display sink: NV12 in, software-converted to XRGB8888 in a
+# `wl_shm` pool, attached to an `xdg_toplevel` window. Linux-only, implies
+# std. Pulls smithay-client-toolkit (which transitively brings wayland-*).
+# This is the desktop-dev convenience sink; KmsSink is the production
+# low-latency path.
+wayland-sink = ["std", "dep:smithay-client-toolkit"]
+# Browser / WebAssembly target (DESIGN.md §6.3). Wasm-gated elements: WasmClock
+# (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
+# browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures
+# (target-gated to wasm32); implies std. Build:
+# cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web.
+web = ["std", "dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:wasm-bindgen-futures"]
+# WebCodecs hardware video decode (M40): WebCodecsDecode wraps the browser
+# VideoDecoder, H.264 Annex-B -> RGBA (System). Adds the unstable web-sys
+# WebCodecs bindings; the BUILD REQUIRES RUSTFLAGS="--cfg=web_sys_unstable_apis".
+# Build: RUSTFLAGS=--cfg=web_sys_unstable_apis cargo check
+#   --target wasm32-unknown-unknown -p g2g-plugins --features web-codecs
+web-codecs = [
+    "web",
+    "web-sys/VideoDecoder",
+    "web-sys/VideoDecoderInit",
+    "web-sys/VideoDecoderConfig",
+    "web-sys/EncodedVideoChunk",
+    "web-sys/EncodedVideoChunkInit",
+    "web-sys/EncodedVideoChunkType",
+    "web-sys/VideoFrame",
+    "web-sys/VideoFrameCopyToOptions",
+    # VideoFrame::visible_rect() returns a DomRectReadOnly; used to announce the
+    # visible pixel dims (matching the copied RGBA buffer) rather than the
+    # SAR-corrected display dims.
+    "web-sys/DomRectReadOnly",
+    "web-sys/VideoPixelFormat",
+    "web-sys/PlaneLayout",
+    # WebCodecs encode (M542): VideoEncoder + config + VideoFrame-from-buffer.
+    "web-sys/VideoEncoder",
+    "web-sys/VideoEncoderInit",
+    "web-sys/VideoEncoderConfig",
+    "web-sys/VideoFrameBufferInit",
+    # Camera capture (M544): getUserMedia + MediaStreamTrackProcessor -> VideoFrame.
+    "web-sys/Navigator",
+    "web-sys/MediaDevices",
+    "web-sys/MediaStream",
+    "web-sys/MediaStreamTrack",
+    "web-sys/MediaStreamConstraints",
+    "web-sys/MediaStreamTrackProcessor",
+    "web-sys/MediaStreamTrackProcessorInit",
+    "web-sys/ReadableStream",
+    "web-sys/ReadableStreamDefaultReader",
+]
+# WebGPU zero-copy presentation (M541): WebGpuCanvasSink imports a decoded
+# VideoFrame (WebCodecsDecode's WebGPUExternalTexture output) as a GPUExternalTexture
+# and samples it in a render pass to a <canvas> WebGPU context, with no CPU readback
+# (the browser analog of the native Vulkan Video -> wgpu texture wedge). Implies
+# web-codecs (needs the VideoFrame + external-texture decode output). Same unstable
+# cfg. Adds the full web-sys WebGPU render surface.
+web-gpu = [
+    "web-codecs",
+    "web-sys/Navigator",
+    "web-sys/Gpu",
+    "web-sys/GpuAdapter",
+    "web-sys/GpuRequestAdapterOptions",
+    "web-sys/GpuPowerPreference",
+    "web-sys/GpuDevice",
+    "web-sys/GpuUncapturedErrorEvent",
+    "web-sys/GpuError",
+    "web-sys/GpuQueue",
+    "web-sys/GpuCanvasContext",
+    "web-sys/GpuCanvasConfiguration",
+    "web-sys/GpuCanvasAlphaMode",
+    "web-sys/GpuTextureFormat",
+    "web-sys/GpuTexture",
+    "web-sys/GpuTextureView",
+    "web-sys/GpuExternalTexture",
+    "web-sys/GpuExternalTextureDescriptor",
+    "web-sys/GpuExternalTextureBindingLayout",
+    "web-sys/GpuShaderModule",
+    "web-sys/GpuShaderModuleDescriptor",
+    "web-sys/gpu_shader_stage",
+    "web-sys/GpuVertexState",
+    "web-sys/GpuFragmentState",
+    "web-sys/GpuColorTargetState",
+    "web-sys/GpuPrimitiveState",
+    "web-sys/GpuPrimitiveTopology",
+    "web-sys/GpuRenderPipeline",
+    "web-sys/GpuRenderPipelineDescriptor",
+    "web-sys/GpuPipelineLayout",
+    "web-sys/GpuPipelineLayoutDescriptor",
+    "web-sys/GpuBindGroup",
+    "web-sys/GpuBindGroupDescriptor",
+    "web-sys/GpuBindGroupEntry",
+    "web-sys/GpuBindGroupLayout",
+    "web-sys/GpuBindGroupLayoutDescriptor",
+    "web-sys/GpuBindGroupLayoutEntry",
+    "web-sys/GpuSampler",
+    "web-sys/GpuSamplerBindingLayout",
+    "web-sys/GpuSamplerBindingType",
+    "web-sys/GpuCommandEncoder",
+    "web-sys/GpuCommandBuffer",
+    "web-sys/GpuRenderPassEncoder",
+    "web-sys/GpuRenderPassDescriptor",
+    "web-sys/GpuRenderPassColorAttachment",
+    "web-sys/GpuLoadOp",
+    "web-sys/GpuStoreOp",
+]
+# Per-frame typed metadata (M406): enables g2g-core's `metadata` feature, so
+# frames carry a `FrameMetaSet`. Off by default (ZST baseline). Lets `SubParse`
+# attach `TextCueMeta` (cue placement) that `TextOverlayN` reads, and is implied
+# by `analytics` (the detection graph needs the same container).
+metadata = ["g2g-core/metadata"]
+# TrueType text overlay (M409): gives `TextOverlay` a real font backend so it
+# renders CJK / accented Latin / mixed-case (the 8x8 ASCII bitmap baseline paints
+# none of those). Loads a `.ttf` / `.ttc` (e.g. Noto Sans CJK) via `fontdue` and
+# rasterizes glyphs onto the RGBA8 frame, horizontal and vertical (`vertical:rl`).
+# std (file loading); the no_std baseline keeps the bitmap font.
+truetype-overlay = ["std", "dep:fontdue"]
+# Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
+# onto a raw RGBA8 frame (the detector -> overlay visible end). Pulls in the
+# `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
+# Vello GPU backend is the separate `vello-overlay` feature (M102).
+analytics = ["metadata"]
+# Vello GPU analytics overlay (M102): VelloAnalyticsOverlay renders the
+# AnalyticsMeta detection boxes with the Vello GPU 2D renderer (wgpu) into a
+# wgpu texture, output as MemoryDomain::WgpuTexture (kept on GPU, no readback).
+# Pulls vello (+ wgpu 29); implies std + analytics. The CPU AnalyticsOverlay is
+# the no_std baseline; this is the HD / many-box GPU companion. Pulls wgpu
+# directly too (the same crate vello uses) so it shares the GpuContext / sink.
+vello-overlay = ["std", "analytics", "dep:vello", "dep:wgpu"]
+# GPU presentation sink (M103): WgpuSink presents MemoryDomain::WgpuTexture
+# frames (eg from VelloAnalyticsOverlay) by blitting onto a target on the *same*
+# shared wgpu device (a wgpu texture is device-bound, so producer and sink must
+# share a GpuContext for the handoff to be copy-free). Target is an offscreen
+# texture (render-to-texture / screenshot, testable headless) or a caller-built
+# wgpu::Surface (on-screen). Pulls wgpu 29; implies std.
+wgpu-sink = ["std", "dep:wgpu"]
+# AV1 encode via the pure-Rust `rav1e` encoder (Av1Enc, I420 -> CompressedVideo{Av1}).
+# default-features = false drops rav1e's NASM asm, CLI `binaries`, and `threading`
+# features, so it builds with no system deps (no NASM) as a portable software
+# encoder. Cross-platform, implies std. Verified by round-tripping the output
+# through `av1parse` (M136).
+av1-encode = ["std", "dep:rav1e"]
+# AV1 decode via libdav1d (the C decoder, hand-written assembly) through the
+# `dav1d` crate's safe bindings (Dav1dDec, CompressedVideo{Av1} -> RawVideo{I420}).
+# NOT pure Rust: it links the system `libdav1d` (Debian/Ubuntu: `libdav1d-dev`;
+# Fedora: `libdav1d-devel`) via pkg-config, so it is gated here and excluded from
+# pure-Rust / no_std builds. Implies std. For a pure-Rust AV1 decoder (no system
+# libdav1d, no NASM) use the `rav1d` feature below instead.
+dav1d = ["std", "dep:dav1d"]
+# AV1 decode via `re_rav1d`, the pure-Rust port of dav1d (Rav1dDec, same caps as
+# Dav1dDec: CompressedVideo{Av1} -> RawVideo{I420}). `re_rav1d` re-exports dav1d-rs's
+# safe API, so the element is Dav1dDec with the backend swapped from libdav1d (FFI)
+# to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
+# bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
+# the libdav1d path cannot. Implies std; the decoder needs alloc + threads. NOTE:
+# re_rav1d's MSRV is 1.79 (above the workspace 1.75), so this feature raises the
+# build floor to 1.79; the no_std baseline stays at 1.75.
+rav1d = ["std", "dep:re_rav1d"]
+# VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
+# vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
+# bindgen (needs clang/LLVM) at build, so it is gated here and excluded from
+# pure-Rust / no_std builds. Cross-platform but requires libvpx installed
+# (Windows: vcpkg `libvpx`; Debian/Ubuntu: `libvpx-dev`; Fedora: `libvpx-devel`).
+# Implies std.
+vpx = ["std", "dep:vpx-encode"]
+# Motion-JPEG decode via the pure-Rust `zune-jpeg` decoder (MjpegDec,
+# CompressedVideo{Mjpeg} -> RawVideo{Rgba8}). No system deps; the MJPEG output
+# of cheap UVC webcams (pairs with v4l2src / mfvideosrc). Implies std (zune's
+# SIMD paths use runtime feature detection); the decoder is otherwise no_std.
+mjpeg = ["std", "dep:zune-jpeg"]
+# Motion-JPEG encode via the pure-Rust `jpeg-encoder` crate (MjpegEnc,
+# RawVideo{Rgba8|I420} -> CompressedVideo{Mjpeg}). The jpegenc analog: intra-only
+# JPEG per frame for snapshot / thumbnail / low-latency capture. No system deps.
+mjpeg-encode = ["std", "dep:jpeg-encoder"]
+# Opus audio encode + decode (OpusEnc / OpusDec) via libopus through the
+# `audiopus` crate. The WebRTC default audio codec; pairs with `opusparse` (M133).
+# NOT pure Rust: links libopus (system or the bundled source built with cmake),
+# so it is gated and excluded from pure-Rust / no_std builds. Implies std. v1 is
+# 48 kHz mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
+opus = ["std", "dep:audiopus"]
+# HTTP(S) byte-stream source (HttpSrc) via the `reqwest` async client: a single
+# GET streamed downstream as a `Caps::ByteStream` (or declared codec), the
+# souphttpsrc analog and the fetch layer under HLS/DASH. Implies std + tokio.
+# Uses reqwest default-tls (SChannel on Windows, SecureTransport on macOS; Linux
+# needs system OpenSSL dev headers, like the other native-backed features).
+http-src = ["std", "dep:reqwest"]
+# HLS source (HlsSrc): fetches an .m3u8 playlist, selects a variant (simple ABR),
+# and streams its MPEG-TS media segments downstream as a `Caps::ByteStream` for
+# `tsdemux`. Builds on the http-src fetch layer. The playlist parser (`hls`) is
+# pure no_std and always compiled; only the fetching element needs this feature.
+# aes/cbc decrypt AES-128 `#EXT-X-KEY` segments.
+hls = ["http-src", "dep:aes", "dep:cbc"]
+# MPEG-CENC (cbcs) decryption for the multi-track MP4 demuxer (Mp4DemuxN): decrypt
+# clear-key encrypted fragmented MP4 with an app-supplied key. Shares the cbcs
+# primitive with `hls`; standalone so a plain MP4 build need not pull HLS.
+mp4-cenc = ["std", "dep:aes", "dep:cbc"]
+# DASH source (DashSrc): parses an MPD manifest (roxmltree), selects a
+# Representation (simple ABR), and streams its fMP4 init + media segments as a
+# `Caps::ByteStream{IsoBmff}` for `fmp4demux`. Builds on the http-src fetch layer.
+dash = ["http-src", "dep:roxmltree"]
+# Linux ALSA render sink (AlsaSink): plays interleaved PCM (PcmS16Le / PcmF32Le)
+# on an ALSA PCM device (`default` by default) via libasound. The Linux analog of
+# WasapiSink; blocking writes run on a dedicated worker thread. Pulls the `alsa`
+# crate (links system libasound: alsa-lib-devel / libasound2-dev). Linux-only,
+# implies std.
+alsa-sink = ["std", "dep:alsa"]
+# ST 2110 network elements (M597): AsyncElement sink / SourceLoop source wrapping
+# the sans-IO ST 2110-30 / -40 cores over UDP, RTP timestamps off the PTP media
+# clock. std (UdpSocket). The sans-IO cores themselves are always compiled.
+st2110 = ["std"]
+# JPEG XS encode / decode (SvtJpegXsEnc / SvtJpegXsDec, M605): the ST 2110-22
+# compressed essence. Hand-rolled FFI to Intel's SVT-JPEG-XS (libSvtJpegxs, ISO/IEC
+# 21122), struct layouts asserted against SvtJpegxs*.h. build.rs links the library
+# via pkg-config (Fedora: build+install github.com/OpenVisualCloud/SVT-JPEG-XS, which
+# ships an `SvtJpegxs.pc`). Linux-only, implies std. CI-excluded (no SVT-JPEG-XS in CI).
+jpegxs = ["std"]
+# PTP system clock (PtpSystemClock, M593 phase C): reads the OS PTP-disciplined
+# CLOCK_TAI (disciplined by linuxptp / phc2sys) on a worker thread and feeds a
+# g2g-core PtpClock, so a PTP-synced host offers a grandmaster clock to election.
+# Linux-only (CLOCK_TAI); implies std; pulls libc for clock_gettime.
+ptp = ["std", "dep:libc"]
+# Linux PulseAudio render sink (PulseSink): plays interleaved PCM on the default
+# PulseAudio / PipeWire-pulse server via the blocking libpulse "simple" API on a
+# worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
+# Linux-only, implies std.
+pulse-sink = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
+# Linux PipeWire audio render sink + capture source (PipeWireSink / PipeWireSrc):
+# the modern Linux media layer. Drives a pw::stream on a pw::main_loop worker,
+# negotiating an SPA audio format pod. Pulls the `pipewire` crate (libpipewire-0.3
+# + libspa via bindgen; needs clang). Linux-only, implies std. Video / screen
+# capture is a follow-up on the same elements.
+pipewire = ["std", "dep:pipewire"]
+# Windows Media Foundation camera capture source (MfVideoSrc): enumerates video
+# capture devices and drains frames via an IMFSourceReader (NV12 / YUY2 to system
+# memory), the video sibling of WasapiSrc. Pulls the windows crate; Windows-only,
+# implies std.
+mf-video-src = ["std", "dep:windows"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core", features = ["runtime"] }
+# no_std mutex for the appsrc/appsink named-channel globals (the app<->element
+# bridge). Same crate the core's runtime channel uses.
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+# CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level
+# optional (builds on all platforms); the module using it is Linux + `ptp` gated.
+libc = { version = "0.2", optional = true }
+# Dynamic plugin loader (plugin-loader feature): cross-platform `dlopen`/`dlsym`
+# over the loaded `cdylib`. The host keeps each `Library` alive for the process
+# lifetime (dropping it unmaps the code the registered elements run from).
+libloading = { version = "0.8", optional = true }
+# Declarative graph format (declarative / declarative-yaml features, M578). serde
+# derive for the spec model; serde_json / serde_yaml are the two front-ends. All
+# std-gated. serde_yaml 0.9 is the last (archived) release but builds clean and
+# parses YAML 1.1 as needed here; deps compile with cap-lints so it never trips
+# the workspace -Werror.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+# Embedded Rhai script engine (script-rhai feature, M579/M580). Pure Rust, no
+# system deps. default-features off keeps it lean; `std` for the std build,
+# `sync` so `Engine`/`AST`/`Dynamic` are Send (the `scriptelement` element holds
+# a compiled script and must satisfy the multi-thread runner's `Send` bound).
+rhai = { version = "1", optional = true, default-features = false, features = ["std", "sync"] }
+# Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
+# NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.75).
+rav1e = { version = "0.8", optional = true, default-features = false }
+# libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
+# which links the system libdav1d (pkg-config) at build.
+dav1d = { version = "0.11", optional = true }
+# Pure-Rust AV1 decoder (rav1d feature): the Rust port of dav1d, re-exporting
+# dav1d-rs's safe API. default-features = false drops the NASM asm; bitdepth_8 /
+# bitdepth_16 keep 8- and 10/12-bit decode (parity with libdav1d). No system deps.
+re_rav1d = { version = "0.1", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+# libvpx VP8/VP9 encoder wrapper (vpx feature). The `vp9` feature enables the VP9
+# codec alongside VP8. `ffi-generate` forwards to env-libvpx-sys's bindgen path so
+# the FFI is generated against the installed libvpx headers: that crate only ships
+# pre-generated bindings through 1.13.0, so without this a newer system libvpx
+# (e.g. Fedora's 1.15) fails the build. Needs clang at build time (bindgen).
+vpx-encode = { version = "0.6", optional = true, features = ["vp9", "ffi-generate"] }
+# Pure-Rust JPEG decoder (mjpeg feature). Default features keep the x86/neon SIMD
+# paths and std; no system dependency.
+zune-jpeg = { version = "0.5", optional = true }
+# Pure-Rust JPEG encoder (mjpeg-encode feature). No system dependency.
+jpeg-encoder = { version = "0.7", optional = true }
+# libopus encode + decode wrapper (opus feature) for OpusEnc / OpusDec. Not pure
+# Rust (there is no mature pure-Rust Opus codec): `audiopus` wraps libopus via
+# `audiopus_sys`. It prefers a pkg-config-discovered system libopus, so install
+# the dev package like the other native features (Fedora: opus-devel; Debian:
+# libopus-dev; macOS: brew opus; Windows: vcpkg opus). Without pkg-config it
+# falls back to building the bundled libopus source with cmake, but that fallback
+# mis-locates the lib on multiarch lib64 layouts, so the dev package is the
+# supported path. Gated + std-only, excluded from no_std builds.
+audiopus = { version = "0.3.0-rc.0", optional = true }
+# Async HTTP client for HttpSrc (http-src feature). Default features keep
+# default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
+# used. Runs on the caller's tokio runtime.
+reqwest = { version = "0.12", optional = true }
+# str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
+# the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
+# Drives the native WebRtcSink (the `webrtc` feature).
+str0m = { version = "0.20", optional = true, default-features = false, features = ["rust-crypto"] }
+# Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
+# xmlparser), no system deps.
+roxmltree = { version = "0.21", optional = true }
+# Pure-Rust AES + CBC for HLS AES-128 segment decryption (`#EXT-X-KEY`, hls
+# feature). Pinned to the cipher-0.4 line (aes 0.8 / cbc 0.1, MSRV 1.56): cbc 0.2
+# / aes 0.9 need rustc 1.85, above the workspace MSRV 1.75.
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+# SRT encryption (srt feature): AES-CTR payload cipher, a passphrase-derived KEK
+# (PBKDF2-HMAC-SHA1), and RFC 3394 AES key wrap for the stream key exchanged in
+# the KM handshake extension. Same cipher-0.4 line as the HLS aes/cbc above.
+ctr = { version = "0.9", optional = true }
+sha1 = { version = "0.10", optional = true }
+# SHA-256 for the RTMP "genuine FMS/FP" digest handshake (rtmp feature): the
+# C1/S1 HMAC-SHA256 digest + the C2 signature strict CDNs require.
+sha2 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+pbkdf2 = { version = "0.12", optional = true, default-features = false }
+# MD5 for the TURN long-term credential key MD5(username:realm:password) (RFC
+# 5766/8656), used by the webrtc feature's TURN client. RustCrypto `md-5` (lib
+# name `md5`), distinct from the unrelated `md5` 0.7 crate elsewhere in the tree.
+md-5 = { version = "0.10", optional = true }
+aes-kw = { version = "0.2", optional = true, features = ["alloc"] }
+# OS RNG for the random stream key + salt the SRT caller generates, and the
+# WS-Security nonce the ONVIF UsernameToken digest needs.
+getrandom = { version = "0.2", optional = true }
+# Base64 for the ONVIF WS-Security nonce + PasswordDigest (onvif feature).
+base64 = { version = "0.22", optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
+retina = { version = "0.4", optional = true, default-features = false }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["std", "async-await"] }
+# WebSocket transport for the distributed-graph primitive (remote-ws feature).
+# 0.24 matches tools/wasm-demo/detect-server so the workspace resolves a single
+# tungstenite version. Default features (connect + handshake, no TLS) suffice: the
+# pair speaks plain ws:// (wrap in a TLS terminator for wss://).
+tokio-tungstenite = { version = "0.24", optional = true }
+url = { version = "2", optional = true }
+bytes = { version = "1", optional = true }
+# TrueType font parser + rasterizer (truetype-overlay feature, M409). Pure-Rust,
+# itself no_std; loads a .ttf / .ttc and rasterizes glyphs to coverage bitmaps.
+fontdue = { version = "0.9", optional = true }
+# Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
+# into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
+vello = { version = "0.9", optional = true }
+# wgpu for the GpuContext + WgpuSink (and shared with vello, which re-exports the
+# same crate). Optional; pulled by vello-overlay / wgpu-sink.
+wgpu = { version = "29", optional = true }
+# Raw Vulkan escape hatch for CUDA<->wgpu interop (cuda-wgpu feature, M220). The
+# Vulkan backend of wgpu, used to create a device with VK_KHR_external_memory_fd
+# and to wrap a self-allocated, externally-shared VkImage as a wgpu texture
+# (texture_from_raw + TextureMemory::External). ash is the Vulkan FFI; its
+# version is pinned to the one wgpu-hal 29 links so vk::Image handles match.
+wgpu-hal = { version = "29", optional = true, default-features = false, features = ["vulkan"] }
+ash = { version = "0.38", optional = true }
+# Window/display handles for the HDR swapchain surface (hdr-present feature). Only
+# the handle enums are needed (the app owns the window, e.g. via winit); the
+# surface is created from them with the raw ash `VK_KHR_*_surface` extensions.
+# Version matched to wgpu 29's (rwh 0.6), which is already in the tree.
+raw-window-handle = { version = "0.6", optional = true }
+# Embassy RTOS clock backend (embassy feature, M43). no_std; embassy-time needs
+# a HAL-provided time driver registered at link (owed to hardware).
+embassy-time = { version = "0.5", optional = true, default-features = false }
+# Embassy zero-alloc packet channel (embassy-link feature, M45). no_std.
+embassy-sync = { version = "0.8", optional = true }
+
+# Media Foundation bindings are Windows-only; target-gate so other platforms
+# never attempt to resolve or build the windows crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+    # WASAPI render sink (wasapi-sink): Core Audio endpoint enumeration +
+    # IAudioClient/IAudioRenderClient shared-mode render. StructuredStorage is
+    # needed for the PROPVARIANT type in IMMDevice::Activate's signature.
+    "Win32_Media_Audio",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    # DXVA / D3D11 zero-copy decode output (W1): D3D11 device + texture types,
+    # the D3D_DRIVER_TYPE enum, and DXGI (adapter type in D3D11CreateDevice's
+    # signature; DXGI_FORMAT for the texture domain).
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # D3D11 present sink (d3d11-sink): Win32 window + message loop.
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Gdi",
+] }
+
+# VideoToolbox / Core Media / Core Video bindings are macOS-only; target-gate so
+# other platforms never attempt to resolve the objc2 framework crates (which link
+# the Apple frameworks). Drives the `vtdecode` element. Feature flags select only
+# the symbols the decoder uses; they may need adjusting on the first on-device
+# build (this Linux dev host cannot compile the macOS target). objc2 0.6, the
+# framework crates 0.3.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-video-toolbox = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-core-media",
+    "objc2-core-video",
+    "VTBase",
+    "VTErrors",
+    "VTDecompressionSession",
+    "VTCompressionSession",
+    "VTCompressionProperties",
+    "VTSession",
+] }
+objc2-core-media = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-core-video",
+    "CMBase",
+    "CMTime",
+    "CMFormatDescription",
+    "CMFormatDescriptionBridge",
+    "CMBlockBuffer",
+    "CMSampleBuffer",
+] }
+objc2-core-video = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "objc2",
+    "CVBase",
+    "CVReturn",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+] }
+objc2-core-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFString",
+    "CFNumber",
+    "CFDictionary",
+] }
+
+# NDK MediaCodec bindings are Android-only; target-gate so other platforms never
+# attempt to resolve the ndk crate. Drives the `mediacodec` element. The `media`
+# feature pulls AMediaCodec / AMediaFormat; `api-level-24` enables AImageReader
+# (Android 7+), the Surface the decoder renders into (ndk-sys ships pregenerated
+# bindings, so a cross-compile `cargo check` needs only the rustup target, no NDK).
+[target.'cfg(target_os = "android")'.dependencies]
+ndk = { version = "0.9", optional = true, default-features = false, features = ["media", "api-level-24"] }
+# Raw NDK Camera2 bindings (libcamera2ndk) for the `camera2` element (M308). The
+# safe `ndk` crate wraps MediaCodec / ImageReader / AAudio but not Camera2, so
+# Camera2Src calls ACameraManager / ACameraDevice / ACameraCaptureSession through
+# ndk-sys directly (the same ndk-sys the `ndk` crate already pulls; the camera
+# symbols are not behind a feature). It captures into a safe ndk `ImageReader`.
+ndk-sys = { version = "0.6", optional = true }
+
+# VAAPI / GBM bindings are Linux-only; target-gate so other platforms never try
+# to resolve cros-codecs (which pulls libva-sys, gbm-sys, drm-sys via bindgen).
+[target.'cfg(target_os = "linux")'.dependencies]
+cros-codecs = { version = "0.0.6", optional = true, default-features = false, features = ["vaapi"] }
+drm = { version = "0.15", optional = true }
+drm-fourcc = { version = "2", optional = true }
+# GBM surface for the CUDA-GL-on-KMS sink (`cuda-kms`). default-features = false
+# drops gbm's `drm-support` (which pulls an older drm 0.12, incompatible with our
+# drm 0.15); we build the DRM framebuffer from the bo's gem handle ourselves.
+gbm = { version = "0.15", optional = true, default-features = false }
+# Pure-Rust V4L2 bindings (v4l2-sys-mit, no libv4l). Drives the `v4l2` capture
+# source. Linux-only target-gate; the V4L2 ioctl ABI is Linux-specific.
+v4l = { version = "0.14", optional = true }
+# Safe bindings to the system libcamera (links libcamera via pkg-config, bindgen
+# needs libclang). Drives the `libcamera` capture source. Linux-only; libcamera
+# is a Linux camera stack. Known to build against libcamera >= 0.4.
+libcamera = { version = "0.7", optional = true }
+# ffmpeg-next links against system libavcodec/libavformat/libavutil/libswscale.
+# Linux-only target-gate keeps Windows/Wasm/RTOS builds from trying to resolve
+# it (the underlying pkg-config probe doesn't fit those targets).
+ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
+smithay-client-toolkit = { version = "0.20", optional = true }
+# CUDA-GL sink (cuda-gl feature). khronos-egl `static` links libEGL at build;
+# glow is the GL ES wrapper; wayland-egl turns a wl_surface into an EGL window.
+khronos-egl = { version = "6", optional = true, features = ["static"] }
+glow = { version = "0.17", optional = true }
+wayland-egl = { version = "0.32", optional = true }
+# Linux audio output / capture backends. All link system libraries via
+# pkg-config and are Linux-only.
+# ALSA render sink (alsa-sink): the `alsa` crate over libasound.
+alsa = { version = "0.9", optional = true }
+# PulseAudio render sink (pulse-sink): the blocking "simple" API + the binding.
+libpulse-binding = { version = "2", optional = true, default-features = false }
+libpulse-simple-binding = { version = "2", optional = true, default-features = false }
+# PipeWire src/sink (pipewire): the high-level pipewire-rs crate (re-exports spa
+# as pipewire::spa). Links libpipewire-0.3 + libspa via bindgen (needs clang).
+pipewire = { version = "0.8", optional = true }
+
+# Browser / WebAssembly bindings (web feature). wasm32-only target gate so
+# native builds never resolve them. wasm-bindgen-futures drives the runner
+# future on the browser event loop; web-sys features cover performance.now,
+# the WebSocket ingest API, and setTimeout (Window).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Performance",
+    "console",
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "Event",
+    "CloseEvent",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "RtcDataChannel",
+    "RtcDataChannelType",
+] }
+
+# Build the `gstwrap` C helper (csrc/gstwrap_host.c) when the `gstreamer` feature
+# is on. Unconditionally present (like g2g-bridge's), but build.rs no-ops without
+# the feature, so a default no_std build compiles nothing here.
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
+# Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
+# integration test only. Feature unification keeps the lib build at `runtime`.
+g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
+embassy-futures = "0.1.2"
+# AES-128-CBC encryptor as the ciphertext fixture for the m161 HLS decryption
+# test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+# critical-section impl for host tests of embassy-sync (embassy-link): it calls
+# critical_section::with, which needs an impl at link. The std impl suffices.
+critical-section = { version = "1", features = ["std"] }
+# Real Embassy executor for the M264 multi-task integration test: the
+# `platform-std` backend runs the executor's task scheduler on a host thread, so
+# spawned tasks (not just block_on-joined futures) are verifiable without hardware.
+embassy-executor = { version = "0.10", features = ["platform-std", "executor-thread"] }
+# Window + event loop for the on-screen wgpu present examples
+# (vulkan_video_on_screen / vulkan_video_scrubber). rwh 0.6 matches wgpu 29.
+# Gated off Android: those examples are desktop-only (they need a windowing
+# system and the `vulkan-video` + `wgpu-sink` features, never built for Android),
+# and on Android `winit` pulls in `android-activity`, which fails to compile
+# without a backend feature. The android CI `cargo check --all-targets` would
+# otherwise build this dev-dependency and break. Only built when an example that
+# needs it is (its required-features gate it), so the default test build skips it.
+[target.'cfg(not(target_os = "android"))'.dev-dependencies]
+winit = "0.30"
+
+# gst-launch / gst-inspect analogs over the standard registry (M107). Both need
+# the std-only registry + wall clock, so they are gated on `std`; the no_std
+# baseline build skips them rather than failing to resolve.
+[[bin]]
+name = "g2g-launch"
+required-features = ["std"]
+
+[[bin]]
+name = "g2g-inspect"
+required-features = ["std"]
+
+[[bin]]
+name = "g2g-docgen"
+required-features = ["std"]
+
+# Porting reference: a third-party element registered and run via the launcher.
+[[example]]
+name = "third_party_element"
+required-features = ["std"]
+
+# Turnkey closed-caption authoring: subtitle file -> embedded CEA-608 -> muxed file.
+[[example]]
+name = "cc_author"
+required-features = ["std"]
+
+# M584: live appsink egress. A scriptrouter splits one stream onto two appsink
+# pull channels, drained live while the pipeline runs (real pull() timing).
+[[example]]
+name = "scriptrouter_appsink_egress"
+required-features = ["script-rhai"]
+
+# Cross-process CUDA IPC zero-copy validation (M556): two processes map the same
+# VRAM, only the 64-byte handle crosses. NVIDIA GPU required; run locally.
+[[example]]
+name = "cuda_ipc_smoke"
+required-features = ["local-ipc"]
+
+# Cross-process NV12 CUDA frame transport via the LocalCudaSink/Src elements
+# (M556 phase 2): two processes move frames GPU->GPU with no PCIe round trip.
+[[example]]
+name = "local_cuda_transport"
+required-features = ["local-ipc"]
+
+# Cross-process vendor-neutral dma-buf transport via the DmaBufSink/Src elements
+# (M557): two processes share a udmabuf by passing its fd as SCM_RIGHTS ancillary
+# data (no copy, no GPU). Needs /dev/udmabuf access; run locally.
+[[example]]
+name = "local_dmabuf_transport"
+required-features = ["local-dmabuf"]
+
+# End-to-end zero-copy GPU frame egress across a process boundary (M559):
+# WgpuToDmaBuf -> DmaBufSink -> [process] -> DmaBufSrc -> DmaBufToWgpu. Only a
+# dma-buf fd crosses; frames stay GPU-resident both sides. Needs a GPU + Vulkan
+# dma-buf export/import; run locally.
+[[example]]
+name = "gpu_dmabuf_ipc"
+required-features = ["dmabuf-wgpu", "local-dmabuf"]
+
+# Visual smoke test: decode an H.264 stream via Vulkan Video and dump PPM frames.
+[[example]]
+name = "vulkan_video_smoke"
+required-features = ["vulkan-video"]
+
+# On-screen live present of the Vulkan Video wedge (decode -> WgpuSink surface).
+[[example]]
+name = "vulkan_video_on_screen"
+required-features = ["vulkan-video", "wgpu-sink"]
+
+# M575: on-screen HDR10 present (decode -> raw VulkanHdrSink swapchain).
+[[example]]
+name = "vulkan_video_hdr_on_screen"
+required-features = ["hdr-present"]
+
+# M498: interactive random-access scrubber (pull frame_at) over Vulkan Video.
+[[example]]
+name = "vulkan_video_scrubber"
+required-features = ["vulkan-video", "wgpu-sink"]
+
+# M500: decoded frames consumed by an application-owned wgpu render pipeline.
+[[example]]
+name = "vulkan_video_engine_embed"
+required-features = ["vulkan-video"]
+
+# M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
+[[test]]
+name = "m495_vulkan_video_wgpu_sink"
+required-features = ["vulkan-video", "wgpu-sink"]
+
+# M578/M579/M580: a declarative graph, a Rhai builder script, and the
+# `scriptelement` runtime transform each built and RUN to completion. Needs the
+# scripting + YAML features (default `cargo test` skips it).
+[[test]]
+name = "m578_scripting"
+required-features = ["script-rhai", "declarative-yaml"]
+
+# M201: builds the out-of-tree example plugin cdylib and dlopens it. Needs the
+# loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
+[[test]]
+name = "plugin_loader_dlopen"
+required-features = ["plugin-loader"]
+
+# M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu
+# device. Needs the overlay producer and the wgpu present sink.
+[[test]]
+name = "m214_gpu_fanout"
+required-features = ["vello-overlay", "wgpu-sink"]
+
+# M466: `gstwrap` hosts a real GStreamer element inside a g2g graph. Needs host
+# GStreamer runtime + dev libs; run locally, not in CI (like the bridge smokes).
+[[test]]
+name = "gstwrap"
+required-features = ["gstreamer"]
+
+[lints]
+workspace = true

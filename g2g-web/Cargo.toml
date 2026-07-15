@@ -1,0 +1,43 @@
+# g2g-web: the deployable WebAssembly cdylib for the browser pipeline.
+#
+# EXCLUDED from the workspace (like `examples/bevy-g2g-stream` and the plugin
+# example) so its cdylib crate-type, `std`, and wasm-bindgen deps never enter a
+# native `--workspace` build or perturb the no_std baseline's feature resolution.
+# Built only for wasm32, via `tools/wasm-demo/build.sh` (wasm-pack) or:
+#   RUSTFLAGS=--cfg=web_sys_unstable_apis \
+#     cargo build -p g2g-web --target wasm32-unknown-unknown --release
+[package]
+name = "g2g-web"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "glass2glass browser (WebAssembly) pipeline entry points."
+
+[lib]
+# cdylib for the .wasm artifact wasm-bindgen post-processes; rlib so the entry
+# points stay unit-testable / referenceable.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core", default-features = false, features = ["runtime"] }
+# `analytics` pulls the CPU AnalyticsOverlay (box draw) + the `metadata` frame
+# graph; the browser detection chain (decode -> WebDetect -> overlay -> canvas)
+# needs both.
+g2g-plugins = { path = "../g2g-plugins", default-features = false, features = ["web-gpu", "analytics"] }
+# Detection post-processing (YOLOv8 channel-major decode + NMS). Pure Rust, no
+# inference engine; `analytics` enables g2g-core's `metadata`. WebDetect reuses
+# its `DetectionPostprocess` so the browser decodes model output the same way the
+# native chain does. g2g-ml is std (not no_std), so pull `std` too.
+g2g-ml = { path = "../g2g-ml", default-features = false, features = ["std", "analytics"] }
+# The portability showcase's SHARED processing core: the browser's synthetic
+# detect+overlay stages come from the exact same `overlay_stages()` the native
+# runner (examples/portability-native) uses. Proof that one graph definition runs
+# on CPU and WASM alike.
+portability-core = { path = "../examples/portability-core" }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["RtcDataChannel", "console"] }
+# Route Rust panics to console.error with a readable stack (browser DX).
+console_error_panic_hook = "0.1"

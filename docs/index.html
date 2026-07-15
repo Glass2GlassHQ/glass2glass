@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>glass2glass — Hardware-First Multimedia Framework in Rust</title>
+    <meta name="description" content="A next-generation, async, sans-IO multimedia graph framework in pure Rust. Hardware-first, no_std core where alloc is optional (heap-free on MCU), first-class ML.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0A0E14;
+            --bg-secondary: #11161E;
+            --bg-tertiary: #161C26;
+            --bg-card: #1A2230;
+            --bg-card-hover: #1F2937;
+            --border: #232D3D;
+            --border-hover: #38445A;
+            --accent: #22D3EE;
+            --accent-dim: rgba(34, 211, 238, 0.15);
+            --accent-glow: rgba(34, 211, 238, 0.3);
+            --blue: #60A5FA;
+            --purple: #A78BFA;
+            --amber: #FBBF24;
+            --rose: #FB7185;
+            --green: #34D399;
+            --text-primary: #F1F5F9;
+            --text-secondary: #94A3B8;
+            --text-tertiary: #64748B;
+            --text-muted: #475569;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-secondary);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        code, pre { font-family: 'JetBrains Mono', monospace; }
+
+        /* ── NAV ── */
+        nav {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+            background: rgba(10, 14, 20, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+        }
+        .nav-inner {
+            max-width: 1280px; margin: 0 auto;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 32px; height: 64px;
+        }
+        .nav-logo {
+            display: flex; align-items: center; gap: 10px;
+            text-decoration: none; color: var(--text-primary);
+            font-weight: 700; font-size: 1.15rem;
+        }
+        .nav-logo svg { width: 28px; height: 28px; }
+        .nav-links { display: flex; align-items: center; gap: 8px; list-style: none; }
+        .nav-links a {
+            color: var(--text-secondary); text-decoration: none;
+            font-size: 0.875rem; font-weight: 500;
+            padding: 8px 14px; border-radius: 8px;
+            transition: all 0.15s;
+        }
+        .nav-links a:hover { color: var(--text-primary); background: var(--bg-tertiary); }
+        .nav-btn-ghost {
+            color: var(--text-primary) !important;
+            border: 1px solid var(--border);
+            background: transparent;
+        }
+        .nav-btn-ghost:hover { border-color: var(--border-hover) !important; background: var(--bg-tertiary) !important; }
+        .nav-btn-accent {
+            background: linear-gradient(135deg, #06B6D4, #22D3EE) !important;
+            color: #0A0E14 !important; font-weight: 700 !important;
+        }
+        .nav-btn-accent:hover { opacity: 0.9; }
+        .nav-hamburger {
+            display: none; background: none; border: none;
+            color: var(--text-primary); font-size: 1.5rem;
+            cursor: pointer; padding: 4px;
+        }
+
+        /* ── HERO ── */
+        .hero {
+            padding: 160px 32px 80px;
+            text-align: center; position: relative; overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+            width: 900px; height: 600px;
+            background: radial-gradient(ellipse, rgba(34, 211, 238, 0.10) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .hero-content { position: relative; z-index: 1; max-width: 880px; margin: 0 auto; }
+        .hero-badge {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 6px 16px 6px 10px; border-radius: 100px;
+            border: 1px solid var(--border); background: var(--bg-secondary);
+            font-size: 0.8rem; font-weight: 500; color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+        .hero-badge .badge-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent-glow);
+            animation: dotPulse 2s ease-in-out infinite;
+        }
+        @keyframes dotPulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+            50% { opacity: 0.5; box-shadow: 0 0 4px var(--accent-glow); }
+        }
+        .hero-badge span { color: var(--accent); }
+        .hero h1 {
+            font-size: clamp(2.5rem, 5.5vw, 4rem);
+            font-weight: 800; color: var(--text-primary);
+            line-height: 1.1; letter-spacing: -0.03em;
+            margin-bottom: 24px;
+        }
+        .hero h1 em { font-style: normal; color: var(--accent); }
+        .hero-sub {
+            font-size: 1.15rem; color: var(--text-secondary);
+            max-width: 640px; margin: 0 auto 40px;
+            line-height: 1.7;
+        }
+        .hero-actions {
+            display: flex; gap: 12px; justify-content: center;
+            flex-wrap: wrap; margin-bottom: 48px;
+        }
+
+        /* ── BUTTONS ── */
+        .btn {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 12px 24px; border-radius: 10px;
+            font-size: 0.9rem; font-weight: 600;
+            text-decoration: none; border: none;
+            cursor: pointer; transition: all 0.15s;
+            font-family: inherit;
+        }
+        .btn-accent {
+            background: linear-gradient(135deg, #06B6D4, #22D3EE);
+            color: #0A0E14;
+            box-shadow: 0 4px 20px rgba(34, 211, 238, 0.3);
+        }
+        .btn-accent:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 6px 24px rgba(34, 211, 238, 0.4); }
+        .btn-outline {
+            background: transparent; color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        .btn-outline:hover { border-color: var(--border-hover); background: var(--bg-tertiary); }
+
+        /* ── HERO DEMO ── */
+        .hero-demo {
+            max-width: 760px; margin: 0 auto;
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; overflow: hidden;
+        }
+        .demo-header {
+            display: flex; align-items: center;
+            padding: 14px 20px; border-bottom: 1px solid var(--border); gap: 8px;
+        }
+        .demo-dots { display: flex; gap: 6px; }
+        .demo-dots span { width: 10px; height: 10px; border-radius: 50%; }
+        .demo-dots span:nth-child(1) { background: #FF5F57; }
+        .demo-dots span:nth-child(2) { background: #FEBC2E; }
+        .demo-dots span:nth-child(3) { background: #28C840; }
+        .demo-title { flex: 1; text-align: center; font-size: 0.75rem; color: var(--text-tertiary); }
+        .demo-body {
+            padding: 24px;
+            font-size: 0.8rem; line-height: 1.9;
+            text-align: left;
+            white-space: pre; overflow-x: auto;
+        }
+        .demo-body .kw { color: var(--purple); }
+        .demo-body .fn { color: var(--blue); }
+        .demo-body .str { color: var(--green); }
+        .demo-body .cmt { color: var(--text-muted); }
+        .demo-body .num { color: var(--amber); }
+        .demo-body .ty { color: var(--accent); }
+
+        /* ── STATS ── */
+        .stats-row {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 1px; background: var(--border);
+            border-radius: 16px; overflow: hidden;
+            margin-top: 64px;
+        }
+        .stat-cell { background: var(--bg-secondary); padding: 32px 24px; text-align: center; }
+        .stat-cell h3 {
+            font-size: 2rem; font-weight: 800;
+            background: linear-gradient(135deg, #22D3EE, #60A5FA);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 4px;
+        }
+        .stat-cell p { font-size: 0.82rem; color: var(--text-tertiary); }
+
+        /* ── TRUST BAR ── */
+        .trust-bar {
+            padding: 48px 32px;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+        }
+        .trust-bar p {
+            font-size: 0.8rem; text-transform: uppercase;
+            letter-spacing: 0.12em; color: var(--text-muted);
+            font-weight: 600; margin-bottom: 28px;
+        }
+        .trust-logos {
+            display: flex; align-items: center; justify-content: center;
+            gap: 48px; flex-wrap: wrap; opacity: 0.5;
+        }
+        .trust-logos span {
+            font-size: 1.05rem; font-weight: 700;
+            color: var(--text-secondary); letter-spacing: 0.02em;
+        }
+
+        /* ── SECTIONS ── */
+        section { padding: 120px 32px; }
+        .section-inner { max-width: 1200px; margin: 0 auto; }
+        .section-label {
+            display: inline-flex; align-items: center; gap: 8px;
+            font-size: 0.8rem; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.1em;
+            color: var(--accent); margin-bottom: 16px;
+        }
+        .section-label::before { content: ''; width: 20px; height: 1px; background: var(--accent); }
+        .section-title {
+            font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+            font-weight: 800; color: var(--text-primary);
+            letter-spacing: -0.02em; margin-bottom: 16px; line-height: 1.2;
+        }
+        .section-desc {
+            font-size: 1.05rem; color: var(--text-secondary);
+            max-width: 640px; line-height: 1.7; margin-bottom: 56px;
+        }
+
+        /* ── PILLARS ── */
+        #pillars { border-bottom: 1px solid var(--border); }
+        .pillars-grid {
+            display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px;
+        }
+        .pillar-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 32px;
+            transition: all 0.2s;
+        }
+        .pillar-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+        .pillar-card .num {
+            display: inline-block; padding: 4px 10px;
+            border-radius: 6px; background: var(--accent-dim);
+            color: var(--accent); font-size: 0.75rem;
+            font-weight: 700; margin-bottom: 16px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .pillar-card h3 { font-size: 1.15rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .pillar-card p { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.6; }
+
+        /* ── CRATES ── */
+        #crates { border-bottom: 1px solid var(--border); }
+        .crates-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .crate-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 28px; transition: all 0.2s;
+        }
+        .crate-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+        .crate-card .crate-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem; font-weight: 700;
+            color: var(--accent); margin-bottom: 6px;
+        }
+        .crate-card .crate-tag {
+            display: inline-block; padding: 2px 8px;
+            border-radius: 4px; background: var(--bg-tertiary);
+            color: var(--text-tertiary); font-size: 0.7rem;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 14px;
+        }
+        .crate-card p { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; }
+
+        /* ── FEATURES ── */
+        #features { border-bottom: 1px solid var(--border); }
+        .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .feature-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 28px 24px;
+            transition: all 0.2s;
+        }
+        .feature-card:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+        .feature-card .f-icon { font-size: 1.5rem; margin-bottom: 14px; display: block; }
+        .feature-card h3 { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .feature-card p { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; }
+        /* A short lead line above the chips. */
+        .feature-card .f-lead { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.55; }
+        /* Element names as airy tag chips under a small label, so a card scans
+           as a set of tokens instead of a dense comma-separated paragraph. */
+        .chip-group { margin-top: 13px; }
+        .chip-label {
+            display: block; font-size: 0.64rem; font-weight: 700;
+            letter-spacing: 0.07em; text-transform: uppercase;
+            color: var(--text-tertiary); margin-bottom: 8px;
+        }
+        .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+        .chip {
+            font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+            padding: 4px 9px; border-radius: 6px; white-space: nowrap;
+            background: var(--bg-tertiary); border: 1px solid var(--border);
+            color: var(--text-secondary);
+        }
+        /* CLI / launch commands as a code block (the markdown ``` equivalent). */
+        .card-cmd {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem; line-height: 1.6;
+            background: var(--bg-tertiary); border: 1px solid var(--border);
+            border-radius: 8px; padding: 12px 14px; margin-top: 12px;
+            color: var(--text-secondary); white-space: pre; overflow-x: auto;
+        }
+        .card-cmd .cmt  { color: var(--text-muted); }
+        .card-cmd .str  { color: var(--green); }
+        .card-cmd .flag { color: var(--accent); }
+        .card-cmd .kw   { color: var(--purple); }
+        .feature-tag {
+            display: inline-block; margin-top: 12px;
+            padding: 3px 10px; border-radius: 100px;
+            font-size: 0.65rem; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.06em;
+        }
+        .tag-core   { background: var(--accent-dim); color: var(--accent); }
+        .tag-gpu    { background: rgba(167, 139, 250, 0.15); color: var(--purple); }
+        .tag-ml     { background: rgba(96, 165, 250, 0.15); color: var(--blue); }
+        .tag-rtos   { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+        .tag-web    { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+
+        /* ── TARGETS ── */
+        #targets { border-bottom: 1px solid var(--border); }
+        .targets-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        .target-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 16px; padding: 32px;
+            transition: all 0.2s;
+        }
+        .target-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+        .target-card .t-icon { font-size: 2rem; margin-bottom: 16px; }
+        .target-card h3 { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+        .target-card p { font-size: 0.88rem; color: var(--text-secondary); line-height: 1.6; }
+        .target-card code {
+            background: var(--bg-tertiary); padding: 2px 6px;
+            border-radius: 4px; font-size: 0.78rem;
+            color: var(--accent);
+        }
+
+        /* ── QUICKSTART / TABS ── */
+        #quickstart { border-bottom: 1px solid var(--border); }
+        .code-block { max-width: 880px; }
+        .tab-row {
+            display: flex; gap: 2px;
+            background: var(--bg-tertiary);
+            border-radius: 12px 12px 0 0;
+            padding: 4px; overflow-x: auto;
+        }
+        .tab-btn {
+            padding: 10px 18px; border: none; background: none;
+            cursor: pointer; font-size: 0.82rem; font-weight: 600;
+            color: var(--text-tertiary); border-radius: 8px;
+            transition: all 0.15s; font-family: inherit; white-space: nowrap;
+        }
+        .tab-btn.active { background: var(--bg-card); color: var(--accent); }
+        .tab-btn:hover:not(.active) { color: var(--text-secondary); }
+        .tab-body {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-top: none; border-radius: 0 0 12px 12px;
+            padding: 24px; overflow-x: auto;
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        .tab-panel pre {
+            font-size: 0.82rem; line-height: 1.8;
+            color: var(--text-secondary); white-space: pre;
+        }
+        .tab-panel pre .kw  { color: var(--purple); }
+        .tab-panel pre .fn  { color: var(--blue); }
+        .tab-panel pre .str { color: var(--green); }
+        .tab-panel pre .cmt { color: var(--text-muted); }
+        .tab-panel pre .num { color: var(--amber); }
+        .tab-panel pre .ty  { color: var(--accent); }
+
+        /* ── CTA ── */
+        .cta-section { padding: 120px 32px; text-align: center; position: relative; overflow: hidden; }
+        .cta-section::before {
+            content: '';
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 600px; height: 400px;
+            background: radial-gradient(ellipse, rgba(34, 211, 238, 0.10) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .cta-content { position: relative; z-index: 1; }
+        .cta-section h2 {
+            font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+            font-weight: 800; color: var(--text-primary);
+            margin-bottom: 16px; letter-spacing: -0.02em;
+        }
+        .cta-section > .cta-content > p {
+            color: var(--text-secondary); font-size: 1.05rem; margin-bottom: 32px;
+        }
+        .cta-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+        /* ── FOOTER ── */
+        footer { border-top: 1px solid var(--border); padding: 48px 32px; }
+        .footer-inner {
+            max-width: 1200px; margin: 0 auto;
+            display: flex; justify-content: space-between;
+            align-items: center; flex-wrap: wrap; gap: 24px;
+        }
+        .footer-inner p { font-size: 0.82rem; color: var(--text-muted); }
+        .footer-links { display: flex; gap: 20px; }
+        .footer-links a {
+            color: var(--text-tertiary); text-decoration: none;
+            font-size: 0.82rem; transition: color 0.15s;
+        }
+        .footer-links a:hover { color: var(--accent); }
+
+        /* ── RESPONSIVE ── */
+        @media (max-width: 1024px) {
+            .features-grid, .crates-grid, .targets-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .nav-hamburger { display: block; }
+            .nav-links.show {
+                display: flex; flex-direction: column;
+                position: absolute; top: 64px; left: 0; right: 0;
+                background: var(--bg-primary);
+                border-bottom: 1px solid var(--border);
+                padding: 16px 24px; gap: 4px;
+            }
+            .pillars-grid, .features-grid, .crates-grid, .targets-grid { grid-template-columns: 1fr; }
+            .hero { padding: 120px 20px 60px; }
+            section { padding: 80px 20px; }
+            .stats-row { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ═══ NAV ═══ -->
+<nav>
+    <div class="nav-inner">
+        <a href="#" class="nav-logo">
+            <svg viewBox="0 0 28 28" fill="none">
+                <rect x="2" y="2" width="24" height="24" rx="6" stroke="#22D3EE" stroke-width="2"/>
+                <path d="M8 14 L14 8 L20 14 L14 20 Z" fill="#22D3EE" fill-opacity="0.3" stroke="#22D3EE" stroke-width="1.5"/>
+                <circle cx="14" cy="14" r="2" fill="#22D3EE"/>
+            </svg>
+            glass2glass
+        </a>
+        <ul class="nav-links">
+            <li><a href="#pillars">Pillars</a></li>
+            <li><a href="#crates">Crates</a></li>
+            <li><a href="#features">Features</a></li>
+            <li><a href="#targets">Portability</a></li>
+            <li><a href="#quickstart">Quickstart</a></li>
+            <li><a href="elements.html">Elements</a></li>
+            <li><a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md" class="nav-btn-ghost">Spec</a></li>
+            <li><a href="https://github.com/Glass2GlassHQ/glass2glass" class="nav-btn-accent">GitHub</a></li>
+        </ul>
+        <button class="nav-hamburger" onclick="document.querySelector('.nav-links').classList.toggle('show')" aria-label="Toggle menu">&#9776;</button>
+    </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero">
+    <div class="hero-content">
+        <div class="hero-badge">
+            <div class="badge-dot"></div>
+            <span>Pre-release &middot; 0.2.0</span>
+        </div>
+        <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
+        <p class="hero-sub">
+            One typed pipeline, five targets: <strong>MCU &middot; RTOS &middot; CPU &middot; GPU &middot; WASM</strong>.
+            A pure-Rust
+            <code style="color: var(--accent); background: var(--bg-tertiary); padding: 1px 6px; border-radius: 4px; font-size: 0.85em;">no_std</code>
+            core where <strong>alloc is optional</strong> &mdash; heap-free on a
+            bare-metal MCU. Zero-copy by design. ML on the graph.
+        </p>
+        <div class="hero-actions">
+            <a href="#quickstart" class="btn btn-accent">Quickstart &rarr;</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass" class="btn btn-outline">View on GitHub</a>
+        </div>
+
+        <div style="margin-bottom: 44px;">
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml">
+                <img src="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml/badge.svg" alt="CI status" style="height: 20px; vertical-align: middle;">
+            </a>
+            <span style="font-size: 0.8rem; color: var(--text-tertiary); margin-left: 12px;">CI green across Linux &middot; Windows &middot; macOS &middot; Android &middot; wasm</span>
+        </div>
+
+        <div class="hero-demo">
+            <div class="demo-header">
+                <div class="demo-dots"><span></span><span></span><span></span></div>
+                <div class="demo-title">main.rs &mdash; RTSP &rarr; NVDEC &rarr; CUDA-GL</div>
+                <div style="width: 38px;"></div>
+            </div>
+            <div class="demo-body"><span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
+
+<span class="cmt">// Zero PCIe round-trip: NVDEC keeps NV12 in CUDA device memory,</span>
+<span class="cmt">// CUDA-GL interop hands it straight to the GL fragment shader.</span>
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(<span class="str">"rtsp://camera.local/stream"</span>);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">with_backend</span>(<span class="ty">Backend</span>::<span class="ty">NvdecCuda</span>);
+<span class="kw">let</span> sink = <span class="ty">CudaGlSink</span>::<span class="fn">new</span>();
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stat-cell"><h3>MCU&rarr;WASM</h3><p>one pipeline</p></div>
+            <div class="stat-cell"><h3>120+</h3><p>Elements</p></div>
+            <div class="stat-cell"><h3>5</h3><p>Target profiles</p></div>
+            <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ TRUST BAR ═══ -->
+<div class="trust-bar">
+    <p>Open source &middot; LGPL v2.1+ &middot; one core, portable across</p>
+    <div class="trust-logos">
+        <span>MCU</span>
+        <span>RTOS</span>
+        <span>CPU</span>
+        <span>GPU</span>
+        <span>WASM</span>
+    </div>
+</div>
+
+<!-- ═══ PILLARS ═══ -->
+<section id="pillars">
+    <div class="section-inner">
+        <span class="section-label">Pillars</span>
+        <h2 class="section-title">Four non-negotiable design pillars.</h2>
+        <p class="section-desc">
+            The architecture optimizes for a single metric: <strong>glass-to-glass latency</strong> &mdash;
+            the time between photon capture and hardware presentation. Every design
+            decision serves that target.
+        </p>
+
+        <div class="pillars-grid">
+            <div class="pillar-card">
+                <span class="num">01</span>
+                <h3>Asynchronous execution</h3>
+                <p>Every element is a cooperative <code>Future</code>. No internal OS thread management; runtime-agnostic. Tokio on servers, Embassy on RTOS, <code>wasm-bindgen-futures</code> in the browser.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">02</span>
+                <h3>Hardware-first &amp; zero-copy</h3>
+                <p>Buffers stay in DMABUF, Vulkan, CUDA, D3D11, or WebGPU memory domains. CPU memory copies are treated as system faults, not as the default.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">03</span>
+                <h3>no_std, alloc-optional, sans-IO</h3>
+                <p>The same pipeline shape runs on a bare-metal Cortex-M with <strong>no heap</strong>, an RTOS (Embassy / FreeRTOS / Zephyr), a multi-threaded server, a GPU-resident pipeline, or wasm32. <code>alloc</code> is an optional feature; the no-alloc build links no allocator at all. Network and protocol parsers are pure sans-IO.</p>
+            </div>
+            <div class="pillar-card">
+                <span class="num">04</span>
+                <h3>First-class ML</h3>
+                <p>Tensor allocation, reshaping, and pipeline batching are part of graph orchestration. ML elements negotiate <code>Caps::Tensor</code> the same way video elements negotiate <code>Caps::RawVideo</code>.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ CRATES ═══ -->
+<section id="crates">
+    <div class="section-inner">
+        <span class="section-label">Workspace</span>
+        <h2 class="section-title">Ten crates. Clean boundaries.</h2>
+        <p class="section-desc">
+            A cargo workspace, MSRV 1.75, edition 2021. OS-coupled elements live
+            behind cargo features so the baseline compiles for bare-metal targets.
+            A C ABI and Python bindings drive the same graphs from any language.
+        </p>
+
+        <div class="crates-grid">
+            <div class="crate-card">
+                <div class="crate-name">g2g-core</div>
+                <div class="crate-tag">no_std, alloc optional</div>
+                <p>Traits (<code>AsyncElement</code>, <code>SourceLoop</code>), the static element model, <code>Frame</code>/<code>PipelinePacket</code>, <code>Caps</code> algebra, buffer pools, the pipeline clock, the CSP solver, and the runner. <code>alloc</code> (with the dynamic graph + solver + tooling) is an optional feature. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-mcu</div>
+                <div class="crate-tag">no_std, no alloc</div>
+                <p>Heap-free MCU peripheral elements over <code>embedded-hal</code> trait seams (host-tested against the datasheet with mocks): <code>SpiDisplaySink</code> (ST7789 / ILI9341, whole-frame or banded streaming for large panels), <code>GrabberSrc</code> (DCMI/CSI camera), <code>PcmSink</code> (I2S/SAI), the fixed-point G.711 / IMA ADPCM codecs, the hardware <code>HwJpegDec</code> / <code>HwH264Enc</code> codec seams, <code>YuyvToI420</code> (camera-4:2:2 &rarr; encoder-4:2:0 convert), and <code>RtpSink</code>. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-mcugen</div>
+                <div class="crate-tag">std, host tool</div>
+                <p>Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) compiles to a monomorphized static pipeline (heap-free Rust) with every ring sized from the graph's frame geometry. Develop on Linux, ship a bounded static build to the MCU. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-plugin</div>
+                <div class="crate-tag">no_std + alloc</div>
+                <p>SDK for dynamically loadable plugins: the <code>declare_plugin!</code> macro + an ABI version tag, loaded at runtime via <code>--plugin</code> / <code>$G2G_PLUGIN_PATH</code>. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-plugins</div>
+                <div class="crate-tag">mixed</div>
+                <p class="f-lead">The element library.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Ingest</span>
+                    <div class="chip-row"><span class="chip">RTSP</span><span class="chip">RTP</span><span class="chip">HLS</span><span class="chip">DASH</span><span class="chip">RTMP</span><span class="chip">V4L2</span><span class="chip">PipeWire</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Codecs</span>
+                    <div class="chip-row"><span class="chip">ffmpeg</span><span class="chip">VAAPI</span><span class="chip">MF</span><span class="chip">VideoToolbox</span><span class="chip">MediaCodec</span><span class="chip">AV1</span><span class="chip">MJPEG</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Mux / sink / more</span>
+                    <div class="chip-row"><span class="chip">MP4 / TS / MKV</span><span class="chip">Wayland / KMS</span><span class="chip">wgpu</span><span class="chip">Opus</span><span class="chip">gst-launch</span><span class="chip">scripting</span></div>
+                </div>
+                <p class="f-lead" style="margin-top: 10px;">LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-ml</div>
+                <div class="crate-tag">std</div>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-bridge</div>
+                <div class="crate-tag">std, cdylib</div>
+                <p>C-FFI dynamic library to embed g2g sub-graphs inside legacy GStreamer pipelines. <code>libgstglass2glass.so</code>. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-python</div>
+                <div class="crate-tag">std</div>
+                <p>Hosts <code>gst-python-ml</code> elements as first-class g2g elements via embedded CPython (pyo3): transform / source / aggregator, zero-copy frames, GIL offload, analytics metadata. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-capi</div>
+                <div class="crate-tag">std, cdylib</div>
+                <p>C ABI (<code>include/g2g.h</code>) to drive whole pipelines from any language: <code>parse_launch</code> + run + bus poll, plus <code>appsrc</code> / <code>appsink</code> buffer I/O with a zero-copy lend. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card">
+                <div class="crate-name">g2g-pyapi</div>
+                <div class="crate-tag">std, pyo3</div>
+                <p>Python bindings (the inverse of g2g-python): <code>g2g.Pipeline(desc)</code> runs a graph on a background thread, <code>AppSrc.push</code> / <code>AppSink.pull</code> feed and drain it, <code>bus_poll</code> watches it. LGPL v2.1+.</p>
+            </div>
+            <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
+                <div class="crate-name" style="color: var(--text-primary);">typed by construction</div>
+                <div class="crate-tag">architecture</div>
+                <p>Statically-typed graphs instead of runtime string-keyed factories. CSP caps negotiation with structured failures. Per-link memory-domain policies.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ FEATURES ═══ -->
+<section id="features">
+    <div class="section-inner">
+        <span class="section-label">Capabilities</span>
+        <h2 class="section-title">Built for production multimedia.</h2>
+        <p class="section-desc">
+            Receive, decode, transform, infer, encode, and egress &mdash; with the
+            memory-domain handoffs you'd expect from a hardware-first stack.
+            <br><a href="elements.html" style="color: var(--accent);">Browse the full element reference &rarr;</a>
+            &mdash; searchable, generated from the registry (the <code>g2g-inspect</code> data on the web).
+        </p>
+
+        <div class="features-grid">
+            <div class="feature-card">
+                <span class="f-icon">&#127909;</span>
+                <h3>Receive</h3>
+                <p class="f-lead">Every ingest a production stack needs, each a real element.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Streaming</span>
+                    <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">UdpSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Adaptive</span>
+                    <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">HttpSrc</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Local &amp; browser</span>
+                    <div class="chip-row"><span class="chip">V4l2Src</span><span class="chip">FileSrc</span><span class="chip">Mp4Src</span><span class="chip">WebSocketSrc</span><span class="chip">WebRtcSrc</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128268;</span>
+                <h3>Decode + encode</h3>
+                <p class="f-lead">H.264/265, VP8/9, AV1 across every platform backend; native <code>NvDec</code>&nbsp;/&nbsp;<code>NvEnc</code> keep frames in CUDA.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Decoders</span>
+                    <div class="chip-row"><span class="chip">FfmpegVideoDec</span><span class="chip">NvDec</span><span class="chip">MfDecode</span><span class="chip">VtDecode</span><span class="chip">MediaCodecDec</span><span class="chip">WebCodecsDecode</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Encoders</span>
+                    <div class="chip-row"><span class="chip">NvEnc</span><span class="chip">Av1Enc</span><span class="chip">VpxEnc</span><span class="chip">MjpegEnc</span><span class="chip">VtEncode</span><span class="chip">MfEncode</span></div>
+                </div>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128194;</span>
+                <h3>Display</h3>
+                <p class="f-lead">Desktop, tty / production, and zero-copy NVDEC presentation.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Sinks</span>
+                    <div class="chip-row"><span class="chip">WaylandSink</span><span class="chip">KmsSink</span><span class="chip">D3D11Sink</span><span class="chip">CudaGlSink</span></div>
+                </div>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#129504;</span>
+                <h3>Inference</h3>
+                <p class="f-lead">Pixels never leave the GPU between preprocess and infer &mdash; the same branch runs on Android.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Engines</span>
+                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">BurnInference</span><span class="chip">TensorBatcher</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Keep-on-GPU branch</span>
+                    <div class="chip-row"><span class="chip">WgpuPreprocess</span><span class="chip">WgpuInference</span></div>
+                </div>
+                <span class="feature-tag tag-ml">ML</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128226;</span>
+                <h3>Egress</h3>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto).</p>
+                <div class="chip-group">
+                    <span class="chip-label">RTP / UDP</span>
+                    <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">WebRTC</span>
+                    <div class="chip-row"><span class="chip">WebRtcSink</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128225;</span>
+                <h3>RTP resilience</h3>
+                <p class="f-lead">Reorder + bounded-latency loss handling, SR/RR + Generic NACK; the loop recovers loss end to end.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">RtpJitterBuffer</span><span class="chip">rtcp</span><span class="chip">UdpSrc</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127916;</span>
+                <h3>Compositor</h3>
+                <p class="f-lead">Overlays N RGBA8 inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Element</span>
+                    <div class="chip-row"><span class="chip">Compositor</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128230;</span>
+                <h3>Containers</h3>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Demux</span>
+                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Mux</span>
+                    <div class="chip-row"><span class="chip">mp4sink</span><span class="chip">mpegtsmux</span><span class="chip">matroskamux</span><span class="chip">flvmux</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128250;</span>
+                <h3>Adaptive streaming</h3>
+                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs), RTMP publisher ingest.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Sources</span>
+                    <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128209;</span>
+                <h3>Parsers + transforms</h3>
+                <div class="chip-group">
+                    <span class="chip-label">Parsers &mdash; feed negotiation</span>
+                    <div class="chip-row"><span class="chip">h264parse</span><span class="chip">h265parse</span><span class="chip">aacparse</span><span class="chip">opusparse</span><span class="chip">av1parse</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Video</span>
+                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">alpha</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Audio</span>
+                    <div class="chip-row"><span class="chip">audioconvert</span><span class="chip">audioresample</span><span class="chip">audiomixer</span><span class="chip">volume</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128221;</span>
+                <h3>gst-launch DSL + introspection</h3>
+                <p>Build a runnable <code>Graph</code> from text against a <code>Registry</code> &mdash; properties, caps-filter grammar, <code>tee</code> branching, muxer fan-in. <code>inspect(name)</code> is the <code>gst-inspect</code> analog.</p>
+                <div class="card-cmd"><span class="cmt">// text &rarr; a runnable Graph</span>
+<span class="kw">parse_launch</span>(<span class="str">"rtspsrc location=… ! decodebin \</span>
+<span class="str">  ! videoconvert ! autovideosink"</span>)</div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128220;</span>
+                <h3>Scriptable graphs: declarative + Rhai</h3>
+                <p>Compute a pipeline instead of hard-coding it: a declarative <code>nodes</code>&nbsp;+&nbsp;<code>edges</code> document, or a Rhai builder with loops and conditionals &mdash; both reach the same <code>Graph</code>.</p>
+                <div class="card-cmd"><span class="cmt"># both build the same graph</span>
+g2g-launch <span class="flag">--graph</span> pipeline.yaml
+g2g-launch <span class="flag">--script</span> build.rhai</div>
+                <p><code>scriptelement</code> runs a per-frame <code>process(frame)</code> over a zero-copy buffer; <code>scriptrouter</code>'s <code>route(frame)</code> sends each buffer to one port &mdash; or an array to multicast &mdash; into an <code>appsink</code> your app pulls live. Rhai is pure Rust, so scripting reaches the browser and every std target.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#129513;</span>
+                <h3>Language bindings</h3>
+                <p class="f-lead">Drive graphs from C or Python over the launch DSL; <code>appsrc</code>&nbsp;/&nbsp;<code>appsink</code> feed and drain frames with a zero-copy lend.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Crates</span>
+                    <div class="chip-row"><span class="chip">g2g-capi</span><span class="chip">g2g-pyapi</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Boundary</span>
+                    <div class="chip-row"><span class="chip">appsrc</span><span class="chip">appsink</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127919;</span>
+                <h3>Per-frame metadata + analytics</h3>
+                <p class="f-lead">Typed <code>FrameMeta</code>&nbsp;/&nbsp;<code>AnalyticsMeta</code> relation graph (detection / classification / tracking) survives tee fan-out copy-on-write.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Produce</span>
+                    <div class="chip-row"><span class="chip">DetectionPostprocess</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Draw</span>
+                    <div class="chip-row"><span class="chip">AnalyticsOverlay</span><span class="chip">VelloAnalyticsOverlay</span></div>
+                </div>
+                <span class="feature-tag tag-ml">ML</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127932;</span>
+                <h3>Audio</h3>
+                <div class="chip-group">
+                    <span class="chip-label">Output</span>
+                    <div class="chip-row"><span class="chip">AlsaSink</span><span class="chip">PulseSink</span><span class="chip">PipeWireSink</span><span class="chip">WasapiSink</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Capture</span>
+                    <div class="chip-row"><span class="chip">PipeWireSrc</span><span class="chip">WasapiSrc</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Codecs</span>
+                    <div class="chip-row"><span class="chip">OpusEnc</span><span class="chip">OpusDec</span><span class="chip">MfAacEncode</span><span class="chip">Mp4AudioSink</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128279;</span>
+                <h3>CSP caps negotiation</h3>
+                <p class="f-lead">Arc consistency over the whole DAG with backtracking fixation (true diamonds); mid-stream re-solve. Memory-domain negotiation runs alongside &mdash; the runner settles a shared GPU-preferred domain or auto-plugs a converter.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Solver</span>
+                    <div class="chip-row"><span class="chip">solve_graph</span><span class="chip">solve_linear</span><span class="chip">CapsSet</span><span class="chip">NegotiationFailure</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#9889;</span>
+                <h3>Mid-stream allocation cascade</h3>
+                <p class="f-lead">A sink-side allocation proposal re-cascades N hops back to the source on a mid-stream <code>CapsChanged</code>, routed through a coordinator task (β).</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128218;</span>
+                <h3>Multi-element runner</h3>
+                <p class="f-lead">Drives any-length linear chains; pad templates are type-level metadata for pre-instantiation compatibility queries.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Runner</span>
+                    <div class="chip-row"><span class="chip">run_linear_chain</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127956;</span>
+                <h3>Fan-out / fan-in</h3>
+                <p class="f-lead"><code>tee</code>-to-display+recording with per-branch re-solve; <code>BranchSlot</code> hot-swaps a branch (immediate / drain-old / shadow-warm).</p>
+                <div class="chip-group">
+                    <span class="chip-label">Primitives</span>
+                    <div class="chip-row"><span class="chip">Router</span><span class="chip">Gate</span><span class="chip">Merger</span><span class="chip">BranchSlot</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128737;</span>
+                <h3>Dynamic graph reconfiguration</h3>
+                <p class="f-lead">Hot-swap elements with no pipeline stall &mdash; ReFixate, codec change at keyframe, bitrate switch at the next segment.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Mechanism</span>
+                    <div class="chip-row"><span class="chip">ElementSlot</span><span class="chip">arc_swap</span></div>
+                </div>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128247;</span>
+                <h3>Live clock + sync</h3>
+                <p class="f-lead">One reference clock; sources map their capture clocks to it. Backpressure-paced sync sinks preserve <code>capture_ns</code> end-to-end for honest latency measurement.</p>
+                <span class="feature-tag tag-core">Core</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128267;</span>
+                <h3>Heap-free MCU pipeline</h3>
+                <p class="f-lead"><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong> and is <strong>proven panic-free</strong>, with a budgeted ~KB footprint. A static element model (unboxed async, no <code>dyn</code>/<code>Box</code>) over const-generic lend rings. App code needs zero <code>unsafe</code>. Real <strong>interrupt/DMA-driven capture</strong>: a DMA-completion ISR fills a lock-free <code>SpscFrameRing</code> while the pipeline drains it on <code>wfi</code>, proven on a SysTick interrupt on emulated Cortex-M (lossless, in order, bounded back-pressure). A <strong>fault-recovery supervisor</strong> turns a returned peripheral fault into a bounded retry / degrade / reset / escalate action, re-arms the faulting stage through a <code>Recover</code> seam, and pets a hardware <strong>watchdog</strong> only on real progress, so a wedged pipeline resets the chip. The <strong>receive direction</strong> mirrors the sender: <code>RtpSrc</code> parses RTP (a bounds-checked header parser shared with the std depayloader) and a heap-free <code>JitterBuffer</code> absorbs arrival jitter and reorders by sequence, handling reorder / duplicate / late / loss countably, proven on Cortex-M by reconstructing an ordered PCM stream from a reordered wire. Beyond media, the catalog reaches the <strong>I2C sensor</strong> and <strong>UART</strong> control plane: a real SHT3x driver (datasheet command, CRC-8, conversion) feeds a UART telemetry egress, proven on Cortex-M. For the safety / cert market a <strong>checkable safety case</strong> ships too: a requirements traceability matrix whose every cited proof CI verifies still exists, a conditions-of-use safety manual, and a one-command qualification kit.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Peripherals (g2g-mcu, embedded-hal)</span>
+                    <div class="chip-row"><span class="chip">SpiDisplaySink</span><span class="chip">banded streaming</span><span class="chip">GrabberSrc</span><span class="chip">PcmSink</span><span class="chip">Sht3xSrc (I2C)</span><span class="chip">UartSink</span><span class="chip">G711Enc</span><span class="chip">HwH264Enc</span><span class="chip">RtpSink</span><span class="chip">RtpSrc</span><span class="chip">JitterBuffer</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Machine-checked in CI</span>
+                    <div class="chip-row"><span class="chip">0 alloc symbols</span><span class="chip">0 panic symbols</span><span class="chip">ROM / RAM / stack budget</span><span class="chip">QEMU Cortex-M run</span><span class="chip">ISR-driven capture</span><span class="chip">fault recovery + watchdog</span><span class="chip">RTP RX + jitter buffer</span><span class="chip">icount timing</span><span class="chip">checkable safety case</span><span class="chip">ARM + RISC-V</span></div>
+                </div>
+                <span class="feature-tag tag-rtos">MCU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#9881;&#65039;</span>
+                <h3>One graph, four executors</h3>
+                <p class="f-lead">The flagship deterministic-audio graph &mdash; <code>capture &rarr; convert &rarr; resample &rarr; mix &rarr; encode &rarr; RTP</code> as one static pipeline, fully fixed-point &mdash; runs <strong>bit-exact</strong> on every target. <code>g2g-mcugen</code> compiles a declarative YAML graph (audio or video/display) to the monomorphized static build; the generated wire matches the hand-written reference byte-for-byte. Integrates with an existing C codebase <strong>both directions</strong>: link the pipeline and call in, or let your C drivers be the peripheral (<code>cffi</code> capture/send callbacks + a frame-stepped <code>step_source_sink</code>) &mdash; zero Rust on the driver side.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Executors</span>
+                    <div class="chip-row"><span class="chip">bare-metal</span><span class="chip">Embassy</span><span class="chip">FreeRTOS</span><span class="chip">Zephyr module</span><span class="chip">C seam ABI</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Targets</span>
+                    <div class="chip-row"><span class="chip">thumbv7em-none-eabihf</span><span class="chip">thumbv7m-none-eabi</span><span class="chip">riscv32imafc-unknown-none-elf</span></div>
+                </div>
+                <span class="feature-tag tag-rtos">MCU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#127760;</span>
+                <h3>Browser / Wasm</h3>
+                <p class="f-lead">First in-browser glass-to-glass pipeline: WS &rarr; WebCodecs &rarr; Canvas.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">WasmClock</span><span class="chip">WebSocketSrc</span><span class="chip">WebCodecsDecode</span><span class="chip">CanvasSink</span></div>
+                </div>
+                <span class="feature-tag tag-web">Web</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128293;</span>
+                <h3>CUDA zero-copy track</h3>
+                <p class="f-lead">H.264/265 stay in <code>MemoryDomain::Cuda</code> end to end; converters auto-plug on a domain mismatch. Validated on an RTX 3060.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Codec</span>
+                    <div class="chip-row"><span class="chip">NvDec</span><span class="chip">NvEnc</span></div>
+                </div>
+                <div class="chip-group">
+                    <span class="chip-label">Bridge &amp; present</span>
+                    <div class="chip-row"><span class="chip">CudaToWgpu</span><span class="chip">WgpuToCuda</span><span class="chip">CudaUpload</span><span class="chip">CudaGlSink</span><span class="chip">CudaKmsSink</span></div>
+                </div>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+            <div class="feature-card">
+                <span class="f-icon">&#128241;</span>
+                <h3>Android zero-copy decode &rarr; GPU</h3>
+                <p class="f-lead">Decoded <code>AHardwareBuffer</code> &rarr; RGBA <code>wgpu::Texture</code> via a <code>VkSamplerYcbcrConversion</code> compute pass &mdash; the frame never touches the CPU. Validated on a Pixel 10a.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Path</span>
+                    <div class="chip-row"><span class="chip">MediaCodecDec::with_gpu_output</span><span class="chip">WgpuPreprocess</span></div>
+                </div>
+                <span class="feature-tag tag-gpu">GPU</span>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ TARGETS ═══ -->
+<section id="targets">
+    <div class="section-inner">
+        <span class="section-label">Portability</span>
+        <h2 class="section-title">One pipeline. MCU &rarr; RTOS &rarr; CPU &rarr; GPU &rarr; WASM.</h2>
+        <p class="section-desc">
+            Because the processing loop needs only <code>core</code> (<code>alloc</code>
+            is optional), the target changes purely by the deployment shell (which
+            executor, which hardware elements). The graph you write is identical on all five &mdash;
+            proven, not asserted: one detection-overlay pipeline whose processing
+            stages come from a single shared definition, reused verbatim by the
+            native (CPU) runner and the browser (WASM) build, with reproducible
+            evidence per target in
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTABILITY.md" style="color: var(--accent);">PORTABILITY.md</a>.
+            A sixth is a compile-verified spike: <strong>QNX</strong>, the safety-certified RTOS.
+        </p>
+
+        <div class="targets-grid">
+            <div class="target-card">
+                <div class="t-icon">&#128268;</div>
+                <h3>MCU (bare-metal, heap-free)</h3>
+                <p><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong>, is proven panic-free, and has a budgeted ~KB footprint (ROM / static RAM / worst-case stack). A static element model over const-generic lend rings; <code>g2g-mcu</code> peripheral elements over <code>embedded-hal</code>. Runs on QEMU Cortex-M in CI.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#9201;&#65039;</div>
+                <h3>RTOS (real-time)</h3>
+                <p>The same static pipeline runs bit-exact under <strong>bare-metal, Embassy, FreeRTOS, and Zephyr</strong> (a drop-in Zephyr module). Stack channels (<code>embassy-sync</code>), no heap churn. Features <code>embassy</code> / <code>embassy-link</code>.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#9729;&#65039;</div>
+                <h3>CPU (server &amp; edge)</h3>
+                <p>Tokio, multi-threaded on servers or current-thread on edge. The full element + protocol stack; per-OS hardware decode (Linux NVDEC/VAAPI, Windows MF, macOS VideoToolbox, Android MediaCodec). Pair with <code>OrtInference</code> for ML.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#9889;</div>
+                <h3>GPU (zero-copy)</h3>
+                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#127760;</div>
+                <h3>WASM (browser)</h3>
+                <p><code>wasm32</code>, single-threaded (no cross-origin isolation). WebSocket / WebRTC ingest, WebCodecs decode, Canvas / WebGPU present, in-browser or server-offloaded ML.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#128737;&#65039;</div>
+                <h3>QNX (safety-cert RTOS)</h3>
+                <p>The reference RTOS for ISO 26262 / IEC 62304 automotive &amp; medical, and the <code>std</code>-capable path (aarch64 / x86-64), not the MCU one. A <strong>Tier-0 portability spike</strong>, compile-checked, not yet run: <code>g2g-core</code> (no-alloc <em>and</em> full <code>alloc</code>&nbsp;+&nbsp;<code>runtime</code>), <code>g2g-mcu</code>, and the <code>g2g-plugins</code> <code>no_std</code> baseline compile for <code>nto-qnx800</code> with zero code changes &mdash; Linux HW is excluded by <code>target_os</code> gating, not pulled in.</p>
+            </div>
+            <div class="target-card">
+                <div class="t-icon">&#127919;</div>
+                <h3>One API across all five</h3>
+                <p>Same <code>AsyncElement</code> trait, same <code>Caps</code>, same negotiation, same runner primitives. Move a stage between browser, edge, and server by swapping one element.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ QUICKSTART ═══ -->
+<section id="quickstart">
+    <div class="section-inner">
+        <span class="section-label">Quickstart</span>
+        <h2 class="section-title">Six lines from clone to live pixels.</h2>
+        <p class="section-desc">
+            Pick a pipeline shape, enable the right cargo features, and run.
+            Detailed smoke-test recipes (RTSP feed, NVDEC, KMS, VAAPI, ML) in the
+            <a href="https://github.com/Glass2GlassHQ/glass2glass#running-smoke-tests" style="color: var(--accent);">README</a>.
+        </p>
+
+        <div class="code-block">
+            <div class="tab-row">
+                <button class="tab-btn active" data-tab="rtsp-wayland">RTSP &rarr; Wayland</button>
+                <button class="tab-btn" data-tab="nvdec-gl">NVDEC &rarr; CUDA-GL</button>
+                <button class="tab-btn" data-tab="ml-chain">RTSP &rarr; ML</button>
+                <button class="tab-btn" data-tab="rtp-egress">Camera &rarr; RTP egress</button>
+                <button class="tab-btn" data-tab="browser">Browser</button>
+                <button class="tab-btn" data-tab="scripting">Scripting</button>
+            </div>
+            <div class="tab-body">
+
+<div class="tab-panel active" id="rtsp-wayland"><pre><span class="cmt"># Cargo.toml</span>
+[dependencies]
+g2g-core    = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span> }
+g2g-plugins = { git = <span class="str">"https://github.com/Glass2GlassHQ/glass2glass"</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"wayland-sink"</span>] }
+
+<span class="cmt">// main.rs</span>
+<span class="kw">use</span> g2g_core::runtime::{<span class="fn">run_source_transform_sink</span>, <span class="ty">LatencyProfile</span>};
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">OutputFormat</span>}, <span class="ty">WaylandSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(<span class="str">"rtsp://localhost:8554/pattern"</span>);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">new</span>().<span class="fn">with_output_format</span>(<span class="ty">OutputFormat</span>::<span class="ty">Nv12</span>);
+<span class="kw">let</span> sink = <span class="ty">WaylandSink</span>::<span class="fn">new</span>();
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="nvdec-gl"><pre><span class="cmt"># Linux + NVIDIA; zero PCIe round-trip after decode.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>, <span class="str">"cuda"</span>, <span class="str">"cuda-gl"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">RtspSrc</span>, ffmpegdec::{<span class="ty">FfmpegH264Dec</span>, <span class="ty">Backend</span>}, <span class="ty">CudaGlSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(url);
+<span class="kw">let</span> dec  = <span class="ty">FfmpegH264Dec</span>::<span class="fn">with_backend</span>(<span class="ty">Backend</span>::<span class="ty">NvdecCuda</span>);  <span class="cmt">// MemoryDomain::Cuda</span>
+<span class="kw">let</span> sink = <span class="ty">CudaGlSink</span>::<span class="fn">new</span>();                          <span class="cmt">// EGL + NV12 shader</span>
+
+<span class="fn">run_source_transform_sink</span>(src, dec, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="ml-chain"><pre><span class="cmt"># RTSP -> decode -> GPU preprocess -> ORT (CUDA EP) -> classification.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"rtsp"</span>, <span class="str">"ffmpeg"</span>] }
+g2g-ml      = { git = <span class="str">"..."</span>, features = [<span class="str">"wgpu"</span>, <span class="str">"cuda"</span>] }
+
+<span class="kw">use</span> g2g_core::runtime::<span class="fn">run_linear_chain</span>;
+<span class="kw">use</span> g2g_ml::{<span class="ty">WgpuPreprocess</span>, <span class="ty">OrtInference</span>, <span class="ty">TensorPostprocess</span>};
+
+<span class="kw">let</span> src       = <span class="ty">RtspSrc</span>::<span class="fn">new</span>(url);
+<span class="kw">let</span> <span class="kw">mut</span> dec   = <span class="ty">FfmpegH264Dec</span>::<span class="fn">new</span>().<span class="fn">with_output_format</span>(<span class="ty">OutputFormat</span>::<span class="ty">Nv12</span>);
+<span class="kw">let</span> <span class="kw">mut</span> pre   = <span class="ty">WgpuPreprocess</span>::<span class="fn">new</span>(w, h);                       <span class="cmt">// NV12 -> f32 NCHW</span>
+<span class="kw">let</span> <span class="kw">mut</span> infer = <span class="ty">OrtInference</span>::<span class="fn">from_memory_with_cuda</span>(model)?;
+<span class="kw">let</span> <span class="kw">mut</span> post  = <span class="ty">TensorPostprocess</span>::<span class="fn">topk_classification</span>(<span class="num">5</span>);
+
+<span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> dec, &amp;<span class="kw">mut</span> pre, &amp;<span class="kw">mut</span> infer, &amp;<span class="kw">mut</span> post],
+                 <span class="ty">FakeSink</span>::<span class="fn">new</span>(), &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="rtp-egress"><pre><span class="cmt"># Loopback-verified; honors receive-side NACK by retransmit.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"udp-egress"</span>, <span class="str">"mf-encode"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
+
+<span class="kw">let</span> src  = <span class="ty">VideoTestSrc</span>::<span class="fn">new</span>(<span class="num">1920</span>, <span class="num">1080</span>, <span class="num">30</span>, <span class="num">0</span>);              <span class="cmt">// RGBA test pattern</span>
+<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new_low_latency</span>();                       <span class="cmt">// Windows; on Linux use the bridge</span>
+<span class="kw">let</span> sink = <span class="ty">UdpSink</span>::<span class="fn">new</span>(<span class="str">"239.0.0.1:5004"</span>.<span class="fn">parse</span>()?)
+            .<span class="fn">with_rtp</span>(<span class="num">96</span>, <span class="num">0x1234_5678</span>);                     <span class="cmt">// payload type, SSRC</span>
+
+<span class="fn">run_source_transform_sink</span>(src, enc, sink, &amp;clock, <span class="ty">LatencyProfile</span>::<span class="ty">Live</span>).<span class="kw">await</span>?;</pre></div>
+
+<div class="tab-panel" id="browser"><pre><span class="cmt"># wasm32-unknown-unknown; needs --cfg=web_sys_unstable_apis for WebCodecs.</span>
+[dependencies]
+g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="str">"web"</span>, <span class="str">"web-codecs"</span>] }
+
+<span class="kw">use</span> g2g_plugins::{<span class="ty">WebSocketSrc</span>, <span class="ty">H264Parse</span>, <span class="ty">WebCodecsDecode</span>, <span class="ty">CanvasSink</span>};
+
+<span class="cmt">// Browser glass-to-glass: WS bytes -> parse -> WebCodecs -> canvas.</span>
+<span class="kw">let</span> src    = <span class="ty">WebSocketSrc</span>::<span class="fn">connect</span>(<span class="str">"wss://feed.example.com/h264"</span>).<span class="kw">await</span>?;
+<span class="kw">let</span> parse  = <span class="ty">H264Parse</span>::<span class="fn">new</span>();
+<span class="kw">let</span> decode = <span class="ty">WebCodecsDecode</span>::<span class="fn">new</span>();
+<span class="kw">let</span> sink   = <span class="ty">CanvasSink</span>::<span class="fn">by_id</span>(<span class="str">"video-canvas"</span>);
+
+wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async</span> <span class="kw">move</span> {
+    <span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> parse, &amp;<span class="kw">mut</span> decode], sink, &amp;clock, profile)
+        .<span class="kw">await</span>.<span class="fn">unwrap</span>();
+});</pre></div>
+
+<div class="tab-panel" id="scripting"><pre><span class="cmt"># A declarative graph (JSON/YAML) or a Rhai builder script -> the same Graph.</span>
+g2g-launch --graph pipeline.yaml
+g2g-launch --script build.rhai
+
+<span class="cmt"># scriptrouter: route each buffer to your own code, per decision. route()</span>
+<span class="cmt"># returns one port, a negative to drop, or an array of ports to multicast.</span>
+g2g-launch videotestsrc num-buffers=8 ! \
+    scriptrouter name=r script=<span class="str">"fn route(f){ f.sequence % 2 }"</span> \
+    r. ! appsink channel=even   r. ! appsink channel=odd
+
+<span class="cmt">// Pull each channel live (Rust / C / Python) while the pipeline runs:</span>
+<span class="kw">let</span> even = <span class="fn">register_appsink_pull</span>(<span class="str">"even"</span>);
+<span class="kw">while let</span> <span class="ty">Some</span>(frame) = even.<span class="fn">pull</span>().<span class="kw">await</span> { <span class="cmt">/* feed your consumer */</span> }</pre></div>
+
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ CTA ═══ -->
+<section class="cta-section">
+    <div class="cta-content">
+        <h2>Start building <em style="color: var(--accent); font-style: normal;">glass to glass</em>.</h2>
+        <p>Read the spec, clone the repo, try the smoke tests.</p>
+        <div class="cta-actions">
+            <a href="https://github.com/Glass2GlassHQ/glass2glass" class="btn btn-accent">Clone on GitHub</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md" class="btn btn-outline">Read DESIGN.md</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/README.md" class="btn btn-outline">Sample pipelines</a>
+        </div>
+    </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer>
+    <div class="footer-inner">
+        <p>&copy; 2026 Aaron Boxer &middot; glass2glass &middot; LGPL v2.1+</p>
+        <div class="footer-links">
+            <a href="https://github.com/Glass2GlassHQ/glass2glass">GitHub</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/DESIGN.md">Spec</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/CHANGELOG.md">Changelog</a>
+            <a href="https://github.com/Glass2GlassHQ/glass2glass/issues">Issues</a>
+        </div>
+    </div>
+</footer>
+
+<script>
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const tab = btn.dataset.tab;
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById(tab).classList.add('active');
+        });
+    });
+</script>
+
+</body>
+</html>

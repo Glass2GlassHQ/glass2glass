@@ -1,0 +1,26 @@
+# Native detection server for the browser demo's Architecture B (server-side
+# inference, thin browser client). Receives decoded RGBA frames over a WebSocket,
+# runs the REAL native g2g detection chain (g2g-ml OrtInference -> ONNX Runtime ->
+# DetectionPostprocess) and returns the detections as JSON. The browser's
+# WebRemoteDetect element is a drop-in swap for the in-browser WebOrtDetect: same
+# graph, inference moved to the server.
+#
+# Standalone (own Cargo.lock, excluded from the g2g workspace) so its tokio + ort
+# (native ONNX Runtime, downloaded at build time) deps never enter the normal
+# build. Run:
+#   cargo run --release -- [bind_addr] [model.onnx]
+[package]
+name = "detect-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# runtime pulls g2g-core's spin dep (the AsyncElement machinery the elements use).
+g2g-core = { path = "../../../g2g-core", features = ["runtime"] }
+# The native detection chain: OrtInference (native ONNX Runtime) + DetectionPostprocess.
+g2g-ml = { path = "../../../g2g-ml", features = ["ort", "analytics"] }
+
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

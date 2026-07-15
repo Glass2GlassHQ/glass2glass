@@ -1,0 +1,30 @@
+# The flagship deterministic audio graph, as a declarative document: the same
+# capture -> convert -> resample -> mix -> encode -> RTP pipeline the
+# hand-written `noalloc-pipeline::audio` wires by hand. `g2g-mcugen` compiles
+# this into the monomorphized static MCU pipeline, and the `mcugen-audio`
+# proof asserts the generated graph's wire output matches the reference
+# byte-for-byte.
+name: flagship
+frame_ns: 10000000   # 10 ms frames
+frames: 50           # half a second
+
+nodes:
+  # Branch A: an 8 kHz S16 mic (the mix's implicit timing master).
+  - { id: cap_a, element: grabbersrc, props: { sample-rate: 8000, width: 2 } }
+  # Branch B: a 48 kHz capture delivering 24-bit-in-32 slots, converted to
+  # S16 and resampled down to 8 kHz to meet branch A.
+  - { id: cap_b, element: grabbersrc, props: { sample-rate: 48000, width: 4 } }
+  - { id: conv,  element: pcmconvert }
+  - { id: rs,    element: resample, props: { from: 48000, to: 8000 } }
+  # Mix the two branches at equal Q15 gain, encode mu-law, packetize.
+  - { id: mix,   element: mixer, props: { gain-a: 16384, gain-b: 16384 } }
+  - { id: enc,   element: g711enc, props: { law: mulaw } }
+  - { id: rtp,   element: rtpsink, props: { clock-rate: 8000, payload-type: 0, ssrc: 1734829927, sequence: 0 } }
+
+edges:
+  - { from: cap_a, to: mix }
+  - { from: cap_b, to: conv }
+  - { from: conv,  to: rs }
+  - { from: rs,    to: mix }
+  - { from: mix,   to: enc }
+  - { from: enc,   to: rtp }

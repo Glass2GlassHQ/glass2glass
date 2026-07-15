@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>glass2glass &mdash; browser pipeline demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #111; color: #eee; }
+    h1 { font-size: 1.25rem; }
+    canvas { background: #000; border: 1px solid #333; max-width: 100%; height: auto; image-rendering: pixelated; }
+    .row { margin: 0.75rem 0; }
+    code { background: #222; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    input { background: #222; color: #eee; border: 1px solid #444; padding: 0.3rem; width: 22rem; }
+    button { padding: 0.35rem 0.9rem; }
+    #log { white-space: pre-wrap; font-family: monospace; color: #9c9; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>glass2glass browser pipeline</h1>
+  <p>
+    <code>WebSocketSrc &rarr; WebCodecsDecode &rarr; CanvasSink</code> &mdash; a g2g graph
+    compiled to WebAssembly, decoding H.264 in the browser via WebCodecs (the browser's
+    own hardware decoder) and presenting to the canvas. Single-threaded; no
+    cross-origin-isolation headers needed.
+  </p>
+
+  <div class="row">
+    <label>WebSocket URL: <input id="url" value="ws://127.0.0.1:8080" /></label>
+    <label>Present via:
+      <select id="mode">
+        <option value="2d">Canvas 2D (readback)</option>
+        <option value="detect">Detect (synthetic box)</option>
+        <option value="ortdetect">Detect (real YOLOv8 / ort-web)</option>
+        <option value="remotedetect">Detect (server-side / remote)</option>
+        <option value="webgpu">WebGPU (zero-copy)</option>
+        <option value="webgpu-infer">WebGPU inference (classify)</option>
+        <option value="webgpu-cnn">WebGPU CNN (conv net)</option>
+      </select>
+    </label>
+    <button id="start">Start</button>
+  </div>
+
+  <p>
+    <b>Canvas 2D</b> copies the decoded frame out to system RGBA and paints it.
+    <b>WebGPU</b> imports the decoded <code>VideoFrame</code> as a
+    <code>GPUExternalTexture</code> and samples it in a render pass &mdash; no CPU
+    readback (the browser analog of the native Vulkan&nbsp;Video&rarr;wgpu wedge).
+  </p>
+  <p>
+    <b>Detect</b> modes add a detection stage to the linear chain
+    (<code>decode &rarr; detect &rarr; overlay &rarr; canvas</code>). <b>synthetic
+    box</b> plants a fixed box (no model); <b>real YOLOv8 / ort-web</b> runs a real
+    ONNX YOLOv8n via ONNX Runtime Web in the browser; <b>server-side / remote</b>
+    uses the generic <code>WsWireTransform</code> (the distributed-graph primitive)
+    to ship each decoded frame to the native <code>detect-server</code> (the real
+    g2g <code>OrtInference&nbsp;&rarr;&nbsp;DetectionPostprocess</code> chain) over
+    the g2g wire codec and draws the boxes it returns &mdash; the SAME graph,
+    inference moved off the browser by swapping one generic element
+    (Architecture&nbsp;B). The real/remote modes need the model + a sample
+    clip: run <code>tools/wasm-demo/get-detection-assets.sh</code> first, serve the
+    <code>models/bus_640.h264</code> fixture, and for remote also run
+    <code>detect-server</code> (<code>ws://127.0.0.1:8090</code>).
+  </p>
+
+  <!-- A canvas' context type is fixed on first use, so 2D and WebGPU each get one. -->
+  <canvas id="video" width="640" height="480"></canvas>
+  <canvas id="video-gpu" width="640" height="480"></canvas>
+
+  <h1 style="margin-top:2rem">Send (encode &rarr; egress)</h1>
+  <p>
+    <code>PatternSrc &rarr; WebCodecsEncode &rarr; WebSocketSink</code> &mdash; generate
+    an animated pattern, encode it to H.264 in the browser (WebCodecs
+    <code>VideoEncoder</code>), and stream it over a WebSocket. Run the
+    <code>ws-recv-server</code> and it saves a playable <code>received.h264</code>.
+  </p>
+  <div class="row">
+    <label>Send to URL: <input id="send-url" value="ws://127.0.0.1:8081" /></label>
+    <button id="send">Send pattern</button>
+    <button id="send-camera">Send camera</button>
+  </div>
+  <p>
+    <b>Send camera</b> swaps the synthetic <code>PatternSrc</code> for
+    <code>WebCameraSrc</code> (<code>getUserMedia</code> +
+    <code>MediaStreamTrackProcessor</code>) &mdash; a real webcam through the same
+    encode + egress path. Needs camera permission.
+  </p>
+
+  <div id="log"></div>
+
+  <script type="module">
+    import init, {
+      run_websocket_to_canvas,
+      run_websocket_detect_to_canvas,
+      run_websocket_ortdetect_to_canvas,
+      run_websocket_remotedetect_to_canvas,
+      run_websocket_to_webgpu_canvas,
+      run_websocket_to_webgpu_inference,
+      run_websocket_to_webgpu_cnn,
+      run_pattern_encode_to_websocket,
+      run_camera_encode_to_websocket,
+    } from "./pkg/g2g_web.js";
+
+    const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+
+    async function main() {
+      // Loads and instantiates the .wasm; the module's #[wasm_bindgen(start)]
+      // installs the panic hook.
+      await init();
+      log("wasm module initialized. WebGPU available: " + !!navigator.gpu);
+      document.getElementById("start").onclick = () => {
+        const url = document.getElementById("url").value;
+        const mode = document.getElementById("mode").value;
+        // Returns immediately; the g2g graph runs as a spawned task on the event loop.
+        if (mode === "webgpu-cnn") {
+          log("starting: " + url + " -> WebCodecsDecode(gpu) -> WebGpuCanvasSink(cnn)#video-gpu");
+          run_websocket_to_webgpu_cnn(url, "video-gpu");
+        } else if (mode === "webgpu-infer") {
+          log("starting: " + url + " -> WebCodecsDecode(gpu) -> WebGpuCanvasSink(infer)#video-gpu");
+          run_websocket_to_webgpu_inference(url, "video-gpu");
+        } else if (mode === "webgpu") {
+          log("starting: " + url + " -> WebCodecsDecode(gpu) -> WebGpuCanvasSink#video-gpu");
+          run_websocket_to_webgpu_canvas(url, "video-gpu");
+        } else if (mode === "detect") {
+          log("starting: " + url + " -> WebCodecsDecode -> WebDetect -> AnalyticsOverlay -> CanvasSink#video");
+          run_websocket_detect_to_canvas(url, "video");
+        } else if (mode === "ortdetect") {
+          const model = "models/yolov8n.onnx";
+          log("starting: " + url + " -> WebCodecsDecode -> WebOrtDetect(" + model + ") -> AnalyticsOverlay -> CanvasSink#video");
+          run_websocket_ortdetect_to_canvas(url, "video", model);
+        } else if (mode === "remotedetect") {
+          const detectUrl = "ws://127.0.0.1:8090";
+          log("starting: " + url + " -> WebCodecsDecode -> WsWireTransform(" + detectUrl + ") -> AnalyticsOverlay -> CanvasSink#video");
+          run_websocket_remotedetect_to_canvas(url, "video", detectUrl);
+        } else {
+          log("starting: " + url + " -> WebCodecsDecode -> CanvasSink#video");
+          run_websocket_to_canvas(url, "video");
+        }
+      };
+      document.getElementById("send").onclick = () => {
+        const url = document.getElementById("send-url").value;
+        log("sending: PatternSrc -> WebCodecsEncode -> WebSocketSink -> " + url);
+        run_pattern_encode_to_websocket(url);
+      };
+      document.getElementById("send-camera").onclick = () => {
+        const url = document.getElementById("send-url").value;
+        log("sending: WebCameraSrc(640x480) -> WebCodecsEncode -> WebSocketSink -> " + url);
+        run_camera_encode_to_websocket(url, 640, 480, 60);
+      };
+    }
+    main().catch((e) => log("error: " + e));
+  </script>
+</body>
+</html>

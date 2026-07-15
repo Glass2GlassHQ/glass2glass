@@ -1,0 +1,6 @@
+# Built on demand by gen.py (tools/detect-fixture.sh); not committed. The YOLO
+# model is tens of MB (repo fixtures are KB-scale); the rest is derived from it.
+# This dir tracks only gen.py + this .gitignore.
+model.onnx
+input_f32.bin
+sample.jpg

@@ -1,0 +1,18 @@
+# Portability showcase: the NATIVE (CPU) runner. Builds
+#   VideoTestSrc -> [portability-core overlay_transforms] -> FileSink
+# and writes one annotated RGBA frame. The processing stages come from the exact
+# same `overlay_transforms()` the browser build (g2g-web) uses; only the source
+# (a test pattern here vs a WebCodecs decode there) and the sink (a file here vs a
+# <canvas> there) differ. Workspace-excluded (own Cargo.lock, tokio) so it never
+# enters the no_std `--workspace` baseline.
+[package]
+name = "portability-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+portability-core = { path = "../portability-core" }
+g2g-core = { path = "../../g2g-core", features = ["runtime"] }
+g2g-plugins = { path = "../../g2g-plugins", default-features = false, features = ["std", "analytics"] }
+tokio = { version = "1", features = ["rt", "macros"] }

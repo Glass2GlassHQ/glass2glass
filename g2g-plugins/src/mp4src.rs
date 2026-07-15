@@ -1,0 +1,304 @@
+//! Fragmented-MP4 demuxer source (M28, HEVC in M31), the read-side counterpart
+//! of `Mp4Mux`: parses a single-video-track fMP4 and emits Annex-B H.264 or
+//! H.265 access units with their recovered timing, so a recording plays back
+//! through `MfDecode` / `FfmpegH264Dec` exactly like a live stream.
+//!
+//! Caps discovery is the M18 async-source path: `intercept_caps` reads the
+//! file's `ftyp`/`moov` (dims from `tkhd`, codec + parameter sets from the
+//! `avc1`/`avcC` or `hvc1`/`hvcC` sample entry, timescale from `mdhd`) before
+//! negotiation, so downstream solves against the real geometry. The fragment
+//! scan happens in `run`.
+//!
+//! Supported profile: what `Mp4Mux` writes and CMAF-style single-track
+//! files generally share: one video track, `trun` v0 with explicit sample
+//! sizes, `default-base-is-moof` data offsets landing on the following
+//! `mdat`'s payload. Anything else fails loud rather than emitting a
+//! corrupt bitstream. If the first sample carries no in-band parameter sets,
+//! the ones from the config record are prepended so a decoder can start.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use std::path::PathBuf;
+
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{SeekController, SourceLoop};
+use g2g_core::{
+    BusHandle, BusMessage, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, Rate, SeekFlags, Segment, Stream,
+    StreamCollection, StreamType,
+};
+
+use crate::filesink::io_err;
+use crate::fmp4::{
+    parse_fragments, parse_header, parse_progressive, starts_with_param_set, Header, Sample,
+};
+use crate::mp4box::{find_box, parse_ilst_tags};
+
+#[derive(Debug)]
+pub struct Mp4Src {
+    path: PathBuf,
+    header: Option<Header>,
+    configured: bool,
+    bus: Option<BusHandle>,
+    seek: Option<SeekController>,
+}
+
+impl Mp4Src {
+    /// The file is read during caps probing and `run`; construction has no
+    /// filesystem side effects.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            header: None,
+            configured: false,
+            bus: None,
+            seek: None,
+        }
+    }
+
+    /// Attach the pipeline bus so the file's `moov/udta/meta/ilst` metadata posts
+    /// as a [`BusMessage::Tag`] once read.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Make the source seekable: `run` polls `controller` between frames and, on a
+    /// flushing seek, emits `Flush`, repositions to the keyframe at or before the
+    /// target, emits the post-flush `Segment`, and resumes. A non-flushing seek
+    /// repositions and emits an accumulating `Segment` (no flush). A
+    /// `SeekFlags::SEGMENT` seek (M358) clips playback to the segment `stop` and,
+    /// at the boundary, reports segment-done (`notify_segment_done`) and parks for
+    /// the next loop seek or `shutdown` instead of running to `Eos`, so the app can
+    /// loop a clip gaplessly. The application keeps a clone of the controller to
+    /// drive scrubbing / editing / looping.
+    pub fn with_seek(mut self, controller: SeekController) -> Self {
+        self.seek = Some(controller);
+        self
+    }
+
+    fn probe(&mut self) -> Result<Caps, G2gError> {
+        if self.header.is_none() {
+            let data = std::fs::read(&self.path).map_err(io_err)?;
+            self.header = Some(parse_header(&data)?);
+        }
+        let h = self.header.as_ref().expect("just parsed");
+        Ok(Caps::CompressedVideo {
+            codec: h.codec,
+            width: Dim::Fixed(h.width),
+            height: Dim::Fixed(h.height),
+            // Advisory only: per-frame PTS (from each sample's `duration_ns`)
+            // carries the real timing. Advertise a Range, not `Any`, so the caps
+            // survive fixate when nothing downstream pins the rate (same pattern
+            // as `RtspSrc`); `Any` aborts negotiation with "cannot fixate".
+            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        })
+    }
+}
+
+impl SourceLoop for Mp4Src {
+    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    /// Header probe during negotiation (file I/O is synchronous, so a
+    /// ready future carries the result).
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(self.probe())
+    }
+
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(
+            self.probe()
+                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+        )
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// The movie duration parsed from `mdhd` (M203), known after the header
+    /// probe at negotiation. `None` for a file whose box reports `0`. The runner
+    /// publishes it on the progress handle and posts `DurationChanged`.
+    fn query_duration(&self) -> Option<u64> {
+        self.header.as_ref().and_then(|h| h.duration_ns)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            let data = std::fs::read(&self.path).map_err(io_err)?;
+            if self.header.is_none() {
+                self.header = Some(parse_header(&data)?);
+            }
+            // Surface the file's metadata once, before the samples flow.
+            if let Some(bus) = &self.bus {
+                if let Some(moov) = find_box(&data, b"moov") {
+                    let tags = parse_ilst_tags(moov);
+                    if !tags.is_empty() {
+                        bus.try_post(BusMessage::Tag(tags));
+                    }
+                }
+                // Announce the (single) video track as a StreamCollection (M386),
+                // the discovery half of the multi-stream model. Mp4Src is a
+                // single-video-track source, so the collection has one stream.
+                if let Some(h) = &self.header {
+                    let caps = Caps::CompressedVideo {
+                        codec: h.codec,
+                        width: Dim::Fixed(h.width),
+                        height: Dim::Fixed(h.height),
+                        framerate: Rate::Any,
+                    };
+                    let stream = Stream::new("mp4-track-0", StreamType::Video, caps);
+                    bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
+                        "mp4-0",
+                        Vec::from([stream]),
+                    )));
+                }
+            }
+            let header = self.header.as_ref().expect("parsed above");
+            // A `moof` marks a fragmented / CMAF file (the live-recording shape);
+            // its absence is the classic progressive `ftyp/moov/mdat` layout most
+            // tools write, parsed from the `moov` sample tables instead.
+            // No decryptor here: an encrypted (cbcs) file fails loud rather than
+            // emitting garbage. Decryption lives in `fmp4demux` (the HLS path).
+            let samples = if find_box(&data, b"moof").is_some() {
+                parse_fragments(&data, header.timescale, header.codec, header.cenc.as_ref(), None)?
+            } else {
+                parse_progressive(&data, header.timescale)?
+            };
+
+            let mut sequence = 0u64;
+            // The next emitted frame is a (re)start: prepend the out-of-band
+            // parameter sets if it lacks them, so a decoder can resume. Set again
+            // after every seek, since the landed keyframe also needs them.
+            let mut need_param_sets = true;
+            let mut i = 0usize;
+            // The active playback segment (M211/M358). Open-ended until a seek
+            // with a `stop` arrives; `segment_mode` tracks whether that seek
+            // asked for SEGMENT looping (segment-done at `stop` instead of Eos).
+            let mut segment = Segment::new();
+            let mut segment_mode = false;
+            // Stream-time playback has reached (last emitted PTS), so a
+            // non-flushing `accumulate_seek` anchors its running-time base.
+            let mut position = 0u64;
+            loop {
+                // Apply a pending seek before the next frame (GStreamer-style:
+                // upstream to the source, latest-wins). A flushing seek emits
+                // `Flush` + a reset segment; a non-flushing one accumulates the
+                // running-time base (no flush). Both snap to the keyframe at or
+                // before the target so a decoder resumes from a clean reference.
+                if let Some(seek) = self.seek.as_ref().and_then(|c| c.take_pending()) {
+                    let new_seg = if seek.is_flush() {
+                        out.push(PipelinePacket::Flush).await?;
+                        Segment::for_flush_seek(&seek, None)
+                    } else {
+                        // Anchor accumulation at the running time reached, clamped
+                        // to the segment stop (playback is clipped there).
+                        segment.position = segment.stop.map_or(position, |s| position.min(s));
+                        segment.accumulate_seek(&seek, None)
+                    };
+                    segment = new_seg;
+                    segment_mode = seek.flags.contains(SeekFlags::SEGMENT);
+                    position = new_seg.start;
+                    i = keyframe_index_for(&samples, seek.start);
+                    need_param_sets = true;
+                    out.push(PipelinePacket::Segment(new_seg)).await?;
+                    continue; // re-evaluate from the repositioned index
+                }
+
+                // End of the stream, or past the active segment's stop: a SEGMENT
+                // segment reports segment-done and parks for the next loop seek;
+                // anything else ends with Eos.
+                let at_end = i >= samples.len();
+                let past_stop =
+                    !at_end && segment.stop.is_some_and(|stop| samples[i].pts_ns > stop);
+                if at_end || past_stop {
+                    if segment_mode {
+                        if let Some(ctl) = self.seek.as_ref() {
+                            let done_pos = segment.stop.unwrap_or(position);
+                            // Anchor the next loop's accumulation at the segment
+                            // end, so a gapless loop advances base by a full span.
+                            position = done_pos;
+                            ctl.notify_segment_done(done_pos);
+                            // Park (wakefully) until the app loops or shuts down.
+                            loop {
+                                if ctl.has_pending() {
+                                    break; // the loop top applies it
+                                }
+                                if ctl.is_shutdown() {
+                                    out.push(PipelinePacket::Eos).await?;
+                                    return Ok(sequence);
+                                }
+                                ctl.wait_event().await;
+                            }
+                            continue;
+                        }
+                    }
+                    out.push(PipelinePacket::Eos).await?;
+                    return Ok(sequence);
+                }
+
+                let s = &samples[i];
+                let mut annexb = s.annexb.clone();
+                if need_param_sets && !starts_with_param_set(&annexb, header.codec) {
+                    // out-of-band parameter sets: prepend so a decoder can
+                    // start (our own writer keeps them in-band).
+                    let mut with_sets = Vec::new();
+                    for set in &header.param_sets {
+                        with_sets.extend_from_slice(&[0, 0, 0, 1]);
+                        with_sets.extend_from_slice(set);
+                    }
+                    with_sets.extend_from_slice(&annexb);
+                    annexb = with_sets;
+                }
+                need_param_sets = false;
+                position = s.pts_ns;
+                let frame = Frame {
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(
+                        annexb.into_boxed_slice(),
+                    )),
+                    timing: FrameTiming {
+                        pts_ns: s.pts_ns,
+                        dts_ns: s.pts_ns,
+                        duration_ns: s.duration_ns,
+                        capture_ns: s.pts_ns,
+                        arrival_ns: g2g_core::metrics::monotonic_ns(),
+                        keyframe: s.keyframe, // MP4 sync-sample (stss) table
+                    },
+                    sequence,
+                    meta: Default::default(),
+                };
+                sequence += 1;
+                i += 1;
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+        })
+    }
+}
+
+/// The index of the keyframe at or before `target_ns` (GStreamer `SNAP_BEFORE`,
+/// so a decoder can resume from a clean reference); 0 when none precedes it.
+fn keyframe_index_for(samples: &[Sample], target_ns: u64) -> usize {
+    samples
+        .iter()
+        .enumerate()
+        .rfind(|(_, s)| s.keyframe && s.pts_ns <= target_ns)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}

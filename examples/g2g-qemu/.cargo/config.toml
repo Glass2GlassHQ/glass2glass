@@ -1,0 +1,9 @@
+# Bare-metal Cortex-M4 build; cortex-m-rt's link.x pulls in our memory.x.
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+# `cargo run` boots the binary on QEMU's MPS2-AN386 with semihosting for the
+# banner + exit code (tools/qemu-check.sh drives this).
+runner = "qemu-system-arm -machine mps2-an386 -cpu cortex-m4 -nographic -semihosting-config enable=on,target=native -kernel"

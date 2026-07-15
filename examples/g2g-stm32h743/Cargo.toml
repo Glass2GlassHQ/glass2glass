@@ -1,0 +1,40 @@
+# STM32H743 (Cortex-M7) on-device harness: drive the heap-free flagship audio
+# graph and egress RTP over the H743's on-chip Ethernet via a pure-Rust
+# smoltcp/embassy-net stack. Not a workspace member (see root `exclude`); a
+# standalone bare-metal binary.
+#
+# STATUS: compiles for thumbv7em-none-eabihf (verified with the pinned versions
+# below); kept out of CI only for embassy's build weight, like other heavy
+# examples. What still needs the board is *runtime* config, not compilation: the
+# RCC/clock `Config` (Default compiles but will not clock the Ethernet MAC), the
+# RMII pin map, and the RTP destination, all marked `VERIFY` in src/main.rs.
+[package]
+name = "g2g-stm32h743"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The heap-free flagship audio graph; run_audio_with takes any PacketSender.
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+# The PacketSender seam + the RTP fixed-header length.
+g2g-mcu = { path = "../../g2g-mcu" }
+g2g-core = { path = "../../g2g-core", default-features = false }
+
+embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
+embassy-stm32 = { version = "0.2", features = ["stm32h743zi", "memory-x", "time-driver-any"] }
+# embassy-net 0.7 shares embassy-stm32 0.2's time-queue line; 0.5 pulls the old
+# embassy-time 0.3 and conflicts on the `embassy-time-queue` links key.
+embassy-net = { version = "0.7", features = ["proto-ipv4", "udp", "dhcpv4", "medium-ethernet"] }
+# Provides the critical-section impl the stack needs on a single-core M7.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+static_cell = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

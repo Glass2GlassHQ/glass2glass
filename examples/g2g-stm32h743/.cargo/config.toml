@@ -1,0 +1,12 @@
+# STM32H743 is a Cortex-M7 with FPU = thumbv7em-none-eabihf, the exact ISA the
+# no-alloc proofs and footprint budgets already target. embassy-stm32's
+# `memory-x` feature supplies the H743 memory layout; cortex-m-rt's link.x uses
+# it.
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+# Flash + RTT log over the on-board ST-LINK with probe-rs
+# (`cargo install probe-rs-tools`).
+runner = "probe-rs run --chip STM32H743ZITx"

@@ -1,0 +1,16 @@
+# Dev-command crate (M281): consolidates the bespoke build / test / size / wasm
+# invocations behind `cargo xtask <cmd>` (see `.cargo/config.toml` alias). It
+# only shells out to `cargo` and toolchain tools, so it pulls no dependencies.
+[package]
+name = "xtask"
+description = "glass2glass developer commands: ci, test --here, size, wasm."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+# Embassy executor proof (M632). Not a workspace member (see root `exclude`);
+# a standalone bare-metal binary for QEMU's MPS2-AN386 (Cortex-M4).
+#
+# It drives the same heap-free camera -> transform -> SPI-display pipeline the
+# symbol proofs cover (`noalloc-pipeline::run_async`) from a real RTOS
+# executor: an Embassy task awaits the pipeline future directly, which is
+# exactly how a production MCU deployment runs the static element model.
+# `tools/qemu-check.sh` boots it and asserts the on-target checksum.
+[package]
+name = "g2g-embassy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+# task-arena-size: the main task's future holds both proof pipelines by value
+# (the flagship audio graph alone is ~7 KB of state), so the default 4 KB
+# arena would panic at spawn.
+embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread", "task-arena-size-16384"] }
+# critical-section provider for the executor on a single-core M4.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

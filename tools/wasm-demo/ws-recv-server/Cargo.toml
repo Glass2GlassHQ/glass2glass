@@ -1,0 +1,15 @@
+# Native WebSocket receiver for the browser SEND demo: accepts the browser's
+# encoded H.264 Annex-B stream (one access unit per binary message) and appends it
+# to a file, so it can be played back (ffplay / vlc). Standalone (own Cargo.lock,
+# excluded from the g2g workspace). Run:
+#   cargo run --release -- [bind_addr=127.0.0.1:8081] [out=received.h264]
+[package]
+name = "ws-recv-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
