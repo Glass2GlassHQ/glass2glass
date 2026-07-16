@@ -1,0 +1,27 @@
+# Footprint-measurement harness (not a workspace member; see root `exclude`).
+# A `no_std` staticlib that exercises a minimal embedded slice of g2g-core, built
+# size-optimized for Cortex-M, so `size` on the linked archive reports the real
+# code footprint after dead-code elimination.
+[package]
+name = "g2g-size"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# `runtime` pulls the bounded channel + linear runner (the realistic embedded
+# baseline); no std, no heavy deps.
+g2g-core = { path = "../../g2g-core", default-features = false, features = ["runtime"] }
+
+# Size-optimised, dead-code-eliminated: the levers an embedded build pulls.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

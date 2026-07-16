@@ -1,0 +1,14 @@
+# ESP32-P4 is RISC-V (rv32imafc), the same ISA the M656 footprint / no-alloc
+# proofs target. esp-hal supplies the linker script (linkall.x) and the RISC-V
+# runtime via `#[esp_hal::main]`.
+[build]
+target = "riscv32imafc-unknown-none-elf"
+
+[target.riscv32imafc-unknown-none-elf]
+rustflags = ["-C", "link-arg=-Tlinkall.x"]
+# Flash + open the console with espflash (`cargo install espflash`). The panel
+# is the real output; the console shows the boot log.
+runner = "espflash flash --monitor"
+
+[env]
+ESP_LOG = "info"

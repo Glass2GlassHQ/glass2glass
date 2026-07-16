@@ -1,0 +1,19 @@
+# The flagship display graph, as a declarative document: the same camera ->
+# panel pipeline the hand-written `noalloc-pipeline` wires by hand (minus its
+# byte no-op pass-through transform). `g2g-mcugen` compiles this into the
+# monomorphized static MCU pipeline, and the `mcugen-graphs` proof asserts the
+# generated graph's wire output to the panel matches the reference
+# byte-for-byte. This is the video / display catalog: `g2g-mcugen` is a general
+# MCU graph compiler, audio was only its first catalog.
+name: display
+frame_ns: 33333333   # ~30 fps
+frames: 64
+
+nodes:
+  # A 4x4 RGBA8888 capture (one ring slot is exactly one 64-byte frame).
+  - { id: cam, element: grabbersrc, props: { width-px: 4, height-px: 4, format: rgba8888 } }
+  # An ST7789-family SPI panel of the same geometry (RGBA in, RGB565 on wire).
+  - { id: disp, element: spidisplaysink, props: { driver: st7789, width-px: 4, height-px: 4 } }
+
+edges:
+  - { from: cam, to: disp }

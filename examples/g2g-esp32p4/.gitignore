@@ -1,0 +1,3 @@
+/target
+# Cargo.lock is generated on first build (needs network for the esp-hal git dep).
+/Cargo.lock

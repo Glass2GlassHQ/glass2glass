@@ -1,0 +1,34 @@
+# ESP32-P4 (RISC-V) on-device Tier-1 harness. Not a workspace member (see root
+# `exclude`); a standalone bare-metal binary that drives the heap-free g2g
+# display pipeline onto the ESP32-P4-EYE's ST7789 panel via esp-hal.
+#
+# NOT built in CI: esp-hal's `esp32p4` chip support is on the esp-hal git `main`
+# branch only (no published crate exposes an `esp32p4` feature as of esp-hal
+# 1.1.1), and cargo validates that feature eagerly, so it cannot enter the
+# normal build. When esp-hal ships a released esp32p4, replace the git
+# dependency below with the version. See README.md.
+[package]
+name = "g2g-esp32p4"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The board-agnostic display pipeline (camera -> transform -> SpiDisplaySink),
+# the same graph every heap-free proof covers, driven here over real esp-hal
+# peripherals instead of the proof stub bus.
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+# esp-hal: git `main` until a release ships `esp32p4`. Pin `rev = "..."` for a
+# reproducible build. `unstable` gates the SPI/GPIO master drivers in 1.x.
+esp-hal = { git = "https://github.com/esp-rs/esp-hal", branch = "main", features = ["esp32p4", "unstable"] }
+# embedded-hal 1.0 SpiDevice = SPI bus + CS pin + inter-transfer delay; this is
+# how SpiDisplaySink's `SpiDevice` seam is satisfied from a raw SPI bus.
+embedded-hal-bus = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

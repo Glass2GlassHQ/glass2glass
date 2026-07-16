@@ -1,0 +1,30 @@
+# MCU peripheral elements (M629+): heap-free static elements
+# (`g2g_core::staticelem`) over portable HAL trait seams (`embedded-hal` 1.0),
+# so the elements' real logic (framing, format conversion, command sequences)
+# is host-testable with mock peripherals, and a board port is only a thin HAL
+# adapter. `no_std`, no `alloc`: part of the heap-free MCU subset.
+[package]
+name = "g2g-mcu"
+description = "MCU peripheral elements (SPI display, capture seams) for the glass2glass multimedia framework."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The heap-free data-plane subset only: no `alloc`, so these elements stay
+# linkable on targets with no allocator (the g2g-noalloc guarantee).
+g2g-core = { path = "../g2g-core", default-features = false }
+# The portable peripheral trait seam (SpiDevice / OutputPin / DelayNs); a pure
+# trait crate, `no_std`.
+embedded-hal = "1"
+
+[dev-dependencies]
+# Host-test only (the ffmpeg conformance oracle persists Oracle evidence via
+# the shared mechanism); does not touch the no-alloc claim above.
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+
+[lints]
+workspace = true

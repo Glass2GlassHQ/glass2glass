@@ -1,0 +1,70 @@
+[package]
+name = "g2g-python"
+description = "Host gst-python-ml elements as first-class glass2glass elements (embedded CPython via pyo3)."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+# `runtime` pulls the async runner + `spin` (g2g-core's `log` module needs it);
+# hosting an element in a graph wants it anyway.
+std = ["g2g-core/std", "g2g-core/runtime"]
+# Embed CPython and host gst-python-ml element shells in-process via pyo3
+# (DESIGN.md, the Python-element track). OS-coupled: needs libpython at build
+# and run time, so it is off the no_std / RTOS baseline and implies std. The
+# default build negotiates caps but cannot run frames (the per-frame Python
+# call lives behind this feature).
+python = ["std", "dep:pyo3"]
+# Route the hosted element's detections into the frame's typed metadata graph.
+# A `g2g.MetaSink` passed to `g2g_process` collects add_object / add_classification
+# calls (the `AnalyticsBackend` mirror); the host materializes them into
+# `Frame::meta` as an `AnalyticsMeta`. Pulls g2g-core's `metadata` feature (so
+# `FrameMetaSet` is the real typed container, not the ZST) and implies `python`.
+analytics = ["python", "g2g-core/metadata"]
+# Build the `g2g-launch-py` binary: a `gst-launch` analog that registers the
+# g2g-plugins elements PLUS the hosted Python elements (`pyelement` / `pysrc` /
+# `pyaggregator`), so a single text pipeline can run a gst-python-ml detector ->
+# `analyticsoverlay` -> `autovideosink` end to end in pure g2g. Pulls g2g-plugins
+# (a normal, no longer dev-only edge; g2g-plugins still does not depend on us, so
+# it stays acyclic) with the host Linux media features, plus a tokio runtime.
+launch = [
+    "analytics",
+    "dep:tokio",
+    "dep:g2g-plugins",
+    "g2g-plugins/ffmpeg",
+    "g2g-plugins/v4l2",
+    "g2g-plugins/wayland-sink",
+    "g2g-plugins/analytics",
+]
+
+[[bin]]
+name = "g2g-launch-py"
+required-features = ["launch"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+# Embedded CPython bridge (python feature). `auto-initialize` starts the
+# interpreter on first GIL acquisition. 0.26+ supports CPython 3.14 (the Fedora
+# 43 system Python). Zero-copy frame access uses the Python buffer protocol, so
+# the host hands Python a writable buffer and Python's own numpy consumes it via
+# `np.frombuffer`, no Rust-side numpy crate needed.
+pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
+# The `launch` feature only (the `g2g-launch-py` binary). g2g-plugins supplies
+# `default_registry` + `WallClock`; tokio drives the run loop. Both optional so
+# the library / host build keeps its lean dependency set.
+tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
+g2g-plugins = { path = "../g2g-plugins", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+# `default_registry` + the videotestsrc / videoconvert / fakesink elements the
+# `pyelement` launch-registry test parses a pipeline around. g2g-plugins does not
+# depend on g2g-python, so this dev-only edge is acyclic (same pattern as g2g-ml).
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+
+[lints]
+workspace = true

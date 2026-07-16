@@ -1,0 +1,15 @@
+# Fetched / derived on demand by fetch.py (tools/mobilenet-fixture.sh); not
+# committed. The model is 3.6 MB (repo fixtures are KB-scale) and the rest is
+# derived from it, so this dir tracks only fetch.py + this .gitignore.
+model.onnx
+input_f32.bin
+expected.txt
+sample.jpg
+imagenet_classes.txt
+# Device (Edge TPU) phase artifacts, built by gen_u8in.py.
+mobilenetv2-12-float.onnx
+mn_fixed.onnx
+mn_qdq.onnx
+mn_u8in.onnx
+mn_input_f32.bin
+u8in_quant.txt

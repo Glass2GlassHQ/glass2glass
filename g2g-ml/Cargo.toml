@@ -1,0 +1,128 @@
+[package]
+name = "g2g-ml"
+description = "ML inference elements for glass2glass: burn (embedded/Wasm) and ort (server) backends."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = ["g2g-core/std"]
+# Detection post-processing + the per-frame analytics metadata graph. Decodes a
+# model output tensor into AnalyticsMeta detections (no inference engine needed);
+# enables g2g-core's `metadata` feature so frames carry the typed graph.
+analytics = ["g2g-core/metadata"]
+# Pure-Rust Burn backend with wgpu (DESIGN.md §5.2): BurnInference runs a
+# deterministic linear-layer inference on the GPU through burn's wgpu backend,
+# no C++ engine. Targets embedded / Wasm / RTOS / server alike.
+burn = ["std", "dep:burn"]
+# Inline GPU tensor preprocessing (DESIGN.md §5.1): WgpuPreprocess converts an
+# NV12 frame to a normalized f32 NCHW RGB tensor in a wgpu compute shader.
+# Pulls wgpu (any D3D12/Vulkan/Metal GPU); implies std.
+wgpu = ["std", "dep:wgpu"]
+# CUDA->wgpu zero-copy bridge element (CudaToWgpu, M220). Joins NVDEC CUDA NV12
+# to WgpuPreprocess's surface-import path via g2g-plugins's Vulkan/CUDA
+# external-memory interop, no PCIe round-trip. Implies wgpu; pulls
+# g2g-plugins/cuda-wgpu (wgpu-hal + ash + libcuda FFI). Linux + NVIDIA only.
+cuda-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/cuda-wgpu"]
+# Android zero-copy decode -> preprocess (M304): WgpuPreprocess consumes the RGBA
+# MemoryDomain::WgpuTexture that MediaCodecDec emits in GPU-output mode, sampling
+# it straight into the tensor with no CPU round-trip. The Android analog of
+# cuda-wgpu; pulls g2g-plugins/mediacodec-wgpu for the WgpuRgbaTexture keep-alive.
+# Android only. Implies wgpu.
+mediacodec-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/mediacodec-wgpu"]
+# libcamera capture -> GPU preprocess (M315): chain LibCameraSrc (Linux libcamera
+# capture) through VideoConvert into WgpuPreprocess, a camera-to-NCHW-tensor path
+# on the GPU. Pulls g2g-plugins/libcamera (needs libcamera-devel + libclang).
+# Linux only. Implies wgpu.
+libcamera-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/libcamera"]
+# ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
+# ort's default features download the platform's ONNX Runtime binaries at
+# build time (network required on the first build).
+ort = ["std", "dep:ort"]
+# DirectML execution provider (Windows, any D3D12 GPU). Downloads a
+# DirectML-enabled ONNX Runtime build; registration falls back to CPU at
+# runtime when no device is available.
+directml = ["ort", "ort/directml"]
+# CUDA execution provider (NVIDIA GPU, Linux/Windows). Downloads a CUDA-enabled
+# ONNX Runtime build; registration is best-effort and falls back to CPU at
+# runtime when no CUDA device/runtime is present, like the directml EP. NOT
+# verifiable without an NVIDIA device: the in-tree test confirms the EP wires,
+# registers, and runs (on CUDA where present, else CPU), not that CUDA executed.
+cuda = ["ort", "ort/cuda"]
+# NNAPI execution provider (Android NPU / GPU / DSP via the system
+# NeuralNetworks API). Android-target only: it links the Android ONNX Runtime
+# build's NNAPI symbol, which a host ORT does not carry (unlike `cuda`, the
+# `nnapi` feature does not select a different prebuilt), so enabling it on a
+# non-Android target link-fails. Cross-compile with cargo-ndk
+# (`--features nnapi`); never enable it in a host build / CI.
+nnapi = ["ort", "ort/nnapi"]
+# XNNPACK execution provider (ARM-optimized CPU): the Android CPU-side companion
+# to `nnapi` (the accelerator-then-CPU pair, the MediaPipe delegate-with-fallback
+# shape). Like `nnapi` it links a symbol a host ORT may lack, so treat it as an
+# Android-target feature.
+xnnpack = ["ort", "ort/xnnpack"]
+# QNN execution provider (Qualcomm AI Engine Direct: Hexagon NPU / Adreno GPU on
+# Snapdragon). Qualcomm's own NPU stack, the alternative to reaching the Hexagon
+# via NNAPI. Like `nnapi` it links a symbol only the Qualcomm ORT build carries,
+# so it is a Snapdragon-target feature, never enabled in a host build / CI.
+qnn = ["ort", "ort/qnn"]
+# CoreML execution provider (Apple Neural Engine / GPU on macOS / iOS). Like
+# `nnapi` it links a symbol only the Apple ORT build carries, so it is an
+# Apple-target feature, never enabled in a host (non-Apple) build / CI.
+coreml = ["ort", "ort/coreml"]
+# Live Android camera -> quantize -> Edge TPU inference chain (M443): pulls
+# g2g-plugins (Camera2Src capture + TensorConvert quantize) alongside the NNAPI /
+# XNNPACK EPs. Android-target only (it implies nnapi / xnnpack and g2g-plugins's
+# android-only camera2). Drives the `android_camera_tpu_probe` on-device test.
+camera2-tpu = ["nnapi", "xnnpack", "dep:g2g-plugins", "g2g-plugins/camera2"]
+# Live Wayland window for the detect_overlay example (Linux desktop). Adds the
+# wayland-sink display backend to the `examples/detect_overlay` graph; without it
+# the example writes a still PPM. Pulls g2g-plugins's wayland-sink + analytics.
+detect-overlay-live = ["ort", "analytics", "dep:g2g-plugins", "g2g-plugins/wayland-sink", "g2g-plugins/analytics"]
+# CUDA<->wgpu GPU keep-on-GPU end-to-end tests (M220; moved here from the
+# dissolved g2g-enterprise crate, M635). Forwards the decode side (g2g-plugins
+# libcuda FFI + ffmpeg NVDEC) alongside the inference side so
+# tests/cuda_wgpu_{scaffold,e2e}.rs can compose NvdecCuda -> CudaDownload ->
+# WgpuPreprocess -> WgpuInference. Linux + NVIDIA + a wgpu adapter.
+cuda-wgpu-e2e = ["cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core" }
+ort = { version = "2.0.0-rc.12", optional = true }
+# Inline GPU preprocessing (wgpu feature, §5.1). Default features pull the
+# native backend per platform (dx12 on Windows).
+wgpu = { version = "29", optional = true }
+# Pure-Rust Burn deep-learning framework, wgpu backend (burn feature, §5.2).
+burn = { version = "0.21", optional = true, default-features = false, features = ["std", "wgpu"] }
+# CUDA<->wgpu interop primitives (cuda-wgpu feature, M220). Optional NORMAL dep
+# (acyclic: g2g-plugins does not depend on g2g-ml) so the CudaToWgpu element can
+# reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally
+# pulls it (default features) for the end-to-end tests.
+g2g-plugins = { path = "../g2g-plugins", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+# The TensorBatcher integration test (tests/batcher.rs) drives the real
+# run_muxer_sink runner.
+g2g-core = { path = "../g2g-core", features = ["runtime", "std"] }
+# Native end-to-end ML pipeline test (M61): the source/transform/sink elements
+# (VideoTestSrc, VideoConvert, VideoScale, FakeSink) that the g2g-ml preprocess
+# and inference elements compose with. g2g-plugins does not depend on g2g-ml,
+# so this is dev-only and acyclic. `analytics` exposes AnalyticsOverlay for the
+# detect_overlay example's still (PPM) path.
+g2g-plugins = { path = "../g2g-plugins", features = ["analytics"] }
+
+[lints]
+workspace = true
+
+# Visual detector demo: real YOLO detections drawn back onto the frame (still PPM,
+# or a live Wayland window under `detect-overlay-live`). Needs ort + analytics; it
+# loads the gitignored YOLO fixture and skips when absent, so it is excluded from
+# the default build (like the gated GPU / Android tests).
+[[example]]
+name = "detect_overlay"
+required-features = ["ort", "analytics"]

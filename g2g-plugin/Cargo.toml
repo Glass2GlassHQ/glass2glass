@@ -1,0 +1,19 @@
+[package]
+name = "g2g-plugin"
+description = "SDK for building dynamically loadable glass2glass plugins (the declare_plugin! macro + ABI tag)."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# The plugin SDK exists to register elements into a `Registry`, which is the
+# std-only auto-plug layer; so the SDK pulls g2g-core with `std` + `runtime`.
+# A plugin author depends on this crate (for `declare_plugin!`) and on g2g-core
+# (for the element traits) against the same published versions the host uses.
+[dependencies]
+g2g-core = { path = "../g2g-core", features = ["std", "runtime"] }
+
+[lints]
+workspace = true

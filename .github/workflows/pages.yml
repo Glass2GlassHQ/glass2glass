@@ -1,0 +1,39 @@
+name: pages
+
+# Publish the static site in docs/ to GitHub Pages via an explicit Actions
+# workflow (build_type = "workflow"), replacing the deprecated legacy
+# branch-based build whose auto-generated pages-build-deployment run hung in
+# "deployment_queued" and timed out.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; let an in-flight deploy finish rather than cancel it
+# (cancelling mid-deploy is what leaves Pages deployments stuck).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4

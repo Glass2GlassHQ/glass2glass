@@ -1,0 +1,20 @@
+# The heap-free proof pipeline, as a plain no_std rlib so the two proof
+# harnesses share one definition: `g2g-noalloc` wraps it as a staticlib for the
+# link-time symbol proofs (M625/M626), and `g2g-qemu` boots it on an emulated
+# Cortex-M (M628). No panic handler here (each leaf binary/staticlib provides
+# its own); no allocator, no `alloc` crate (g2g-core default-features=false).
+[package]
+name = "noalloc-pipeline"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+g2g-core = { path = "../../g2g-core", default-features = false }
+# The real SPI display element (M629): the pipeline's sink is an
+# `SpiDisplaySink` over a stub bus, so every proof (no-alloc, panic-free,
+# footprint, QEMU execution) covers an actual peripheral element.
+g2g-mcu = { path = "../../g2g-mcu" }
+embedded-hal = "1"

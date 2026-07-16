@@ -1,0 +1,92 @@
+//! Identity transform: forwards every `DataFrame` downstream unchanged.
+//! Useful for validating transform plumbing and as a base for stat-collecting
+//! tee elements.
+//!
+//! Per the transform contract (see `run_source_transform_sink`), this element
+//! does NOT emit `Eos` itself — the runner forwards the EOS sentinel after
+//! `process(Eos)` returns.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
+};
+
+#[derive(Debug, Default)]
+pub struct IdentityTransform {
+    forwarded: u64,
+    configured: bool,
+}
+
+impl IdentityTransform {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn forwarded(&self) -> u64 {
+        self.forwarded
+    }
+}
+
+impl AsyncElement for IdentityTransform {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    /// M16 step 5h: wildcard pass-through transform. The native
+    /// `IdentityAny` variant couples input and output links without
+    /// constraining either by a set — exactly what a probe / metering /
+    /// tee element wants. Native chains containing this element pin
+    /// the in/out caps to whatever the surrounding endpoints settle on.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::IdentityAny
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        _absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(f) => {
+                    self.forwarded += 1;
+                    out.push(PipelinePacket::DataFrame(f)).await?;
+                }
+                PipelinePacket::CapsChanged(c) => {
+                    out.push(PipelinePacket::CapsChanged(c)).await?;
+                }
+                PipelinePacket::Flush => {
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                // Segment is control: forward unchanged.
+                PipelinePacket::Segment(seg) => {
+                    out.push(PipelinePacket::Segment(seg)).await?;
+                }
+                PipelinePacket::Eos => {}
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}

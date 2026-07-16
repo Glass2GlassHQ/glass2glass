@@ -1,0 +1,135 @@
+#version 450
+
+// M573/M574: 10-bit YCbCr -> RGBA GPU-texture path. The output storage image is
+// `rgba16f` (an `R16G16B16A16_SFLOAT` target) so a `G10X6` (10-bit) frame converts
+// to a 16-bit-float RGBA texture (HEVC Main 10, AV1 10-bit). The ycbcr conversion
+// (an immutable `VkSamplerYcbcrConversion`) applies the matrix + range in the
+// sampler, so `textureLod` returns nonlinear R'G'B' in [0, 1].
+//
+// M574 adds the HDR transfer stage, selected by the `xfer` push constant:
+//   0 = passthrough  : store the ycbcr result unchanged (SDR, or an HDR-encoded
+//                      float target for a future HDR swapchain). Default.
+//   1 = PQ (ST 2084) : tone-map HDR -> SDR.
+//   2 = HLG (B67)    : tone-map HDR -> SDR.
+// The HDR->SDR pipeline is: EOTF -> (HLG only: OOTF) -> BT.2390 EETF display
+// mapping in the PQ domain (maxRGB method, source peak 1000 nits -> SDR 100 nits)
+// -> BT.2020 -> BT.709 gamut -> BT.709 OETF. This is the fixed-function ycbcr
+// hardware's blind spot: it does matrix + range but NOT the transfer function.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D ycbcrTex;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outImg;
+
+layout(push_constant) uniform Pc {
+    uint xfer; // 0 passthrough, 1 PQ, 2 HLG
+} pc;
+
+// Source mastering peak and SDR target peak in nits (no mastering metadata is
+// parsed, so assume the HDR10 / HLG nominal 1000 nits; map to a 100-nit SDR peak).
+const float SRC_PEAK = 1000.0;
+const float DST_PEAK = 100.0;
+
+// --- PQ (SMPTE ST 2084), normalized so 1.0 == 10000 nits ---
+const float PQ_M1 = 0.1593017578125;
+const float PQ_M2 = 78.84375;
+const float PQ_C1 = 0.8359375;
+const float PQ_C2 = 18.8515625;
+const float PQ_C3 = 18.6875;
+
+float pq_eotf(float e) { // PQ signal [0,1] -> normalized linear [0,1]
+    float ep = pow(max(e, 0.0), 1.0 / PQ_M2);
+    float num = max(ep - PQ_C1, 0.0);
+    float den = PQ_C2 - PQ_C3 * ep;
+    return pow(num / max(den, 1e-6), 1.0 / PQ_M1);
+}
+
+float pq_oetf(float y) { // normalized linear [0,1] -> PQ signal [0,1]
+    float ym = pow(max(y, 0.0), PQ_M1);
+    return pow((PQ_C1 + PQ_C2 * ym) / (1.0 + PQ_C3 * ym), PQ_M2);
+}
+
+// --- HLG (ARIB STD-B67), inverse OETF: signal [0,1] -> scene linear [0,1] ---
+const float HLG_A = 0.17883277;
+const float HLG_B = 0.28466892; // 1 - 4a
+const float HLG_C = 0.55991073; // 0.5 - a*ln(4a)
+
+float hlg_inv_oetf(float e) {
+    if (e <= 0.5) return (e * e) / 3.0;
+    return (exp((e - HLG_C) / HLG_A) + HLG_B) / 12.0;
+}
+
+// BT.2390 EETF on a normalized PQ signal E, mapping a source with peak PQ value
+// `pq_w` down to a display peak PQ value `pq_max` (black at 0). Returns the
+// display PQ signal. A Hermite roll-off above the knee, identity below it.
+float bt2390_eetf(float e, float pq_w, float pq_max) {
+    float e1 = e / pq_w;               // normalize source range to [0,1]
+    float max_lum = pq_max / pq_w;     // target peak as a fraction of source
+    float ks = 1.5 * max_lum - 0.5;    // knee start
+    float e2 = e1;
+    if (e1 > ks && ks < 1.0) {
+        float t = (e1 - ks) / (1.0 - ks);
+        float t2 = t * t;
+        float t3 = t2 * t;
+        e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks
+           + (t3 - 2.0 * t2 + t) * (1.0 - ks)
+           + (-2.0 * t3 + 3.0 * t2) * max_lum;
+    }
+    return e2 * pq_w; // denormalize back to source-range PQ (black lift = 0)
+}
+
+// BT.2020 -> BT.709 gamut, linear RGB.
+vec3 bt2020_to_709(vec3 c) {
+    return vec3(
+        1.660491 * c.r - 0.587641 * c.g - 0.072850 * c.b,
+        -0.124550 * c.r + 1.132900 * c.g - 0.008349 * c.b,
+        -0.018151 * c.r - 0.100579 * c.g + 1.118730 * c.b);
+}
+
+// BT.709 OETF (gamma encode), linear [0,1] -> display signal [0,1].
+float bt709_oetf(float l) {
+    l = clamp(l, 0.0, 1.0);
+    return (l < 0.018) ? 4.5 * l : 1.099 * pow(l, 0.45) - 0.099;
+}
+
+// HDR (PQ or HLG) nonlinear R'G'B' -> display-ready SDR R'G'B'.
+vec3 tonemap_hdr(vec3 rgb) {
+    // Step 1: to a source PQ signal per channel (the domain the EETF works in).
+    if (pc.xfer == 2u) {
+        // HLG: inverse OETF -> scene linear, OOTF -> display linear, PQ-encode.
+        vec3 s = vec3(hlg_inv_oetf(rgb.r), hlg_inv_oetf(rgb.g), hlg_inv_oetf(rgb.b));
+        float yscene = 0.2627 * s.r + 0.6780 * s.g + 0.0593 * s.b;
+        vec3 disp = s * pow(max(yscene, 1e-6), 0.2); // OOTF, gamma 1.2
+        // display linear (1.0 == SRC_PEAK) -> normalized-to-10000 -> PQ signal.
+        rgb = vec3(pq_oetf(disp.r * SRC_PEAK / 10000.0),
+                   pq_oetf(disp.g * SRC_PEAK / 10000.0),
+                   pq_oetf(disp.b * SRC_PEAK / 10000.0));
+    }
+    // Step 2: BT.2390 EETF via maxRGB (preserves hue better than per-channel).
+    float pq_w = pq_oetf(SRC_PEAK / 10000.0);
+    float pq_max = pq_oetf(DST_PEAK / 10000.0);
+    float m = max(max(rgb.r, rgb.g), rgb.b);
+    if (m > 1e-6) {
+        float mt = bt2390_eetf(m, pq_w, pq_max);
+        rgb *= mt / m; // scale channels by the maxRGB mapping (PQ domain)
+    }
+    // Step 3: display PQ -> linear, normalized so the target peak is 1.0.
+    float norm = pq_eotf(pq_max); // == DST_PEAK/10000
+    vec3 lin = vec3(pq_eotf(rgb.r), pq_eotf(rgb.g), pq_eotf(rgb.b)) / max(norm, 1e-6);
+    // Step 4: gamut + gamma encode for an SDR (BT.709) consumer.
+    lin = bt2020_to_709(lin);
+    return vec3(bt709_oetf(lin.r), bt709_oetf(lin.g), bt709_oetf(lin.b));
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(outImg);
+    if (p.x >= sz.x || p.y >= sz.y) {
+        return;
+    }
+    vec2 uv = (vec2(p) + 0.5) / vec2(sz);
+    vec3 rgb = textureLod(ycbcrTex, uv, 0.0).rgb;
+    if (pc.xfer != 0u) {
+        rgb = tonemap_hdr(rgb);
+    }
+    imageStore(outImg, p, vec4(rgb, 1.0));
+}

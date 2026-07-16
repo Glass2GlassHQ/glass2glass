@@ -1,0 +1,9 @@
+# wasm-pack build output and the WS servers' build dirs (all regenerated).
+pkg/
+ws-fixture-server/target/
+ws-recv-server/target/
+detect-server/target/
+received.h264
+
+# Object-detection demo assets (large, fetched via get-detection-assets.sh).
+models/

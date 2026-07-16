@@ -1,0 +1,10 @@
+# g2g as a Zephyr module (M647): a Zephyr shop lists this directory in its
+# west manifest (or passes it via ZEPHYR_EXTRA_MODULES) and gets the g2g
+# static pipeline library and its C header wired into the build automatically,
+# with no hand-passed staticlib path. The Rust staticlib itself is built
+# out-of-band (Zephyr's CMake does not run cargo); see the module README for
+# the prebuilt recipe. Its path arrives as the CMake cache variable
+# G2G_STATICLIB, which this module imports and links into the Zephyr image.
+name: g2g
+build:
+  cmake: .

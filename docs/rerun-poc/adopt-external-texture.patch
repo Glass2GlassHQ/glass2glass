@@ -1,0 +1,253 @@
+diff --git a/crates/viewer/re_renderer/src/wgpu_resources/dynamic_resource_pool.rs b/crates/viewer/re_renderer/src/wgpu_resources/dynamic_resource_pool.rs
+index 9e699c5..21fb1ec 100644
+--- a/crates/viewer/re_renderer/src/wgpu_resources/dynamic_resource_pool.rs
++++ b/crates/viewer/re_renderer/src/wgpu_resources/dynamic_resource_pool.rs
+@@ -127,6 +127,36 @@ where
+         state.all_resources[handle].clone()
+     }
+ 
++    /// Register an externally-created resource, returning a real handle to it.
++    ///
++    /// Unlike [`Self::alloc`], this pool did not create the resource and does not
++    /// reuse it: the caller owns the underlying GPU object's lifetime (see
++    /// [`super::GpuTexturePool::adopt_external_texture`], which opts the resource out
++    /// of the pool's destroy hook). The handle is a genuine slot so the resource
++    /// resolves through [`Self::get_from_handle`], which bind-group creation needs.
++    /// Keep the returned handle alive while the resource is in use.
++    pub fn alloc_external(
++        &self,
++        desc: &Desc,
++        resource: Res,
++    ) -> Arc<DynamicResource<Handle, Desc, Res>> {
++        let mut state = self.state.write();
++        // Account for the size symmetrically with `begin_frame`'s reclaim, so the
++        // running total stays balanced if the resource is ever dropped + drained.
++        self.total_resource_size_in_bytes.fetch_add(
++            desc.resource_size_in_bytes(),
++            std::sync::atomic::Ordering::Relaxed,
++        );
++        let handle = state.all_resources.insert_with_key(|handle| {
++            Arc::new(DynamicResource {
++                inner: resource,
++                creation_desc: desc.clone(),
++                handle,
++            })
++        });
++        state.all_resources[handle].clone()
++    }
++
+     pub fn get_from_handle(
+         &self,
+         handle: Handle,
+@@ -360,6 +390,40 @@ mod tests {
+         pool.begin_frame(1235, |_| {});
+     }
+ 
++    // `alloc_external` registers a caller-owned resource as a real, resolvable slot
++    // (bind-group creation resolves via `get_from_handle`) and accounts its size,
++    // while still surfacing it to the reclaim hook once the handle drops. Whether to
++    // actually free the underlying GPU object is the caller's decision (see
++    // `GpuTexturePool::adopt_external_texture`, which skips `destroy()` for adopted
++    // textures).
++    #[test]
++    fn alloc_external_registers_resolvable_handle() {
++        let mut pool = Pool::default();
++        let size_before = pool.total_resource_size_in_bytes();
++
++        let external = pool.alloc_external(&ConcreteResourceDesc(7), ConcreteResource);
++        let handle = external.handle;
++
++        // A genuine slot: resolves by handle, holds the alloc invariant, counts size.
++        assert!(pool.get_from_handle(handle).is_ok());
++        assert_eq!(Arc::strong_count(&external), 2);
++        assert_eq!(
++            pool.total_resource_size_in_bytes(),
++            size_before + ConcreteResourceDesc(7).resource_size_in_bytes()
++        );
++
++        // Dropping the handle and running maintenance reclaims the slot and reaches the
++        // destroy hook (reuse-eligible: deferred one frame, then drained).
++        drop(external);
++        let mut called_destroy = false;
++        pool.begin_frame(1, |_| called_destroy = true);
++        assert!(!called_destroy);
++        pool.begin_frame(2, |_| called_destroy = true);
++        assert!(called_destroy);
++        assert!(pool.get_from_handle(handle).is_err());
++        assert_eq!(pool.total_resource_size_in_bytes(), size_before);
++    }
++
+     fn allocate_resources(
+         descs: &[u32],
+         pool: &DynamicResourcePool<ConcreteHandle, ConcreteResourceDesc, ConcreteResource>,
+diff --git a/crates/viewer/re_renderer/src/wgpu_resources/texture_pool.rs b/crates/viewer/re_renderer/src/wgpu_resources/texture_pool.rs
+index 85d3b17..3f81f75 100644
+--- a/crates/viewer/re_renderer/src/wgpu_resources/texture_pool.rs
++++ b/crates/viewer/re_renderer/src/wgpu_resources/texture_pool.rs
+@@ -15,6 +15,11 @@ pub struct GpuTextureInternal {
+     pub texture: wgpu::Texture,
+     pub default_view: wgpu::TextureView,
+     // TODO(andreas) What about custom views? Should probably have a separate resource manager for it!
++    /// True for a texture adopted via [`GpuTexturePool::adopt_external_texture`]:
++    /// this pool did not create it and must NOT `destroy()` it on reclaim (the
++    /// external owner frees it via wgpu's own reference counting). False for a
++    /// pool-created texture.
++    pub external: bool,
+ }
+ 
+ #[derive(Clone, Hash, PartialEq, Eq, Debug)]
+@@ -124,14 +129,52 @@ impl GpuTexturePool {
+             GpuTextureInternal {
+                 texture,
+                 default_view: view,
++                external: false,
+             }
+         })
+     }
+ 
++    /// Adopt an externally-created [`wgpu::Texture`] (e.g. a hardware-decoded video
++    /// frame, created on the SAME wgpu device) as a [`GpuTexture`] this pool can hand
++    /// to renderers, WITHOUT taking ownership of its GPU memory. The pool never calls
++    /// `destroy()` on it (doing so would double-free a texture `re_renderer` does not
++    /// own); the underlying image is released only when the source and this handle
++    /// both drop, via wgpu's own reference counting. The texture must already carry
++    /// `TEXTURE_BINDING` usage. Keep the returned handle alive for as long as it is
++    /// referenced in a draw.
++    pub fn adopt_external_texture(&self, texture: wgpu::Texture, label: Label) -> GpuTexture {
++        let default_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
++        let creation_desc = TextureDesc {
++            label,
++            size: wgpu::Extent3d {
++                width: texture.width(),
++                height: texture.height(),
++                depth_or_array_layers: texture.depth_or_array_layers(),
++            },
++            mip_level_count: texture.mip_level_count(),
++            sample_count: texture.sample_count(),
++            dimension: texture.dimension(),
++            format: texture.format(),
++            usage: texture.usage(),
++        };
++        self.pool.alloc_external(
++            &creation_desc,
++            GpuTextureInternal {
++                texture,
++                default_view,
++                external: true,
++            },
++        )
++    }
++
+     /// Called by `RenderContext` every frame. Updates statistics and may free unused textures.
+     pub fn begin_frame(&mut self, frame_index: u64) {
+-        self.pool
+-            .begin_frame(frame_index, |res| res.texture.destroy());
++        self.pool.begin_frame(frame_index, |res| {
++            // Never destroy an adopted external texture: its owner frees it.
++            if !res.external {
++                res.texture.destroy();
++            }
++        });
+     }
+ 
+     /// Method to retrieve a resource from a weak handle (used by [`super::GpuBindGroupPool`])
+@@ -147,3 +190,99 @@ impl GpuTexturePool {
+         self.pool.total_resource_size_in_bytes()
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use crate::RenderContext;
++
++    /// Adopting an external texture must (a) flag it `external`, (b) resolve through
++    /// the pool by its handle (bind-group creation relies on this), and (c) leave the
++    /// underlying GPU texture intact when the pool reclaims the handle: the external
++    /// owner frees it, not the pool. If `begin_frame` wrongly called `destroy()` on
++    /// it, the GPU write on the retained owner clone below would raise a wgpu
++    /// validation error.
++    #[test]
++    fn adopt_external_texture_resolves_and_survives_reclaim() {
++        re_log::setup_logging();
++        let mut ctx = RenderContext::new_test();
++
++        let external = ctx.device.create_texture(&wgpu::TextureDescriptor {
++            label: Some("external_source"),
++            size: wgpu::Extent3d {
++                width: 16,
++                height: 16,
++                depth_or_array_layers: 1,
++            },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: wgpu::TextureDimension::D2,
++            format: wgpu::TextureFormat::Rgba8Unorm,
++            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
++            view_formats: &[],
++        });
++        // Stand in for the external owner (e.g. a hardware video decoder) that keeps
++        // the texture alive independently of the pool.
++        let owner_clone = external.clone();
++
++        let adopted = ctx
++            .gpu_resources
++            .textures
++            .adopt_external_texture(external, "adopted".into());
++        let handle = adopted.handle;
++
++        assert!(adopted.external, "adopted texture must be flagged external");
++        assert!(
++            ctx.gpu_resources.textures.get_from_handle(handle).is_ok(),
++            "adopted texture must resolve through the pool"
++        );
++
++        // Drop our handle and run the pool's frame maintenance until it reclaims the
++        // slot (reuse-eligible resources take two frames: deferred one frame, then
++        // drained). This drives the pool's own destroy hook, the external-skip path
++        // under test.
++        drop(adopted);
++        for frame_index in 1..=3 {
++            ctx.gpu_resources.textures.begin_frame(frame_index);
++        }
++        assert!(
++            ctx.gpu_resources.textures.get_from_handle(handle).is_err(),
++            "reclaimed handle should no longer resolve"
++        );
++
++        // The pool must NOT have destroyed the external texture: a GPU write on the
++        // owner's retained clone still succeeds. A destroyed texture would trip the
++        // validation error scope.
++        let error_scope = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
++        ctx.queue.write_texture(
++            wgpu::TexelCopyTextureInfo {
++                texture: &owner_clone,
++                mip_level: 0,
++                origin: wgpu::Origin3d::ZERO,
++                aspect: wgpu::TextureAspect::All,
++            },
++            &[0u8; 16 * 16 * 4],
++            wgpu::TexelCopyBufferLayout {
++                offset: 0,
++                bytes_per_row: Some(16 * 4),
++                rows_per_image: Some(16),
++            },
++            wgpu::Extent3d {
++                width: 16,
++                height: 16,
++                depth_or_array_layers: 1,
++            },
++        );
++        ctx.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
++        ctx.device
++            .poll(wgpu::PollType::Wait {
++                submission_index: None,
++                timeout: Some(std::time::Duration::from_secs(10)),
++            })
++            .expect("Failed to wait for GPU work to finish");
++        let err = pollster::block_on(error_scope.pop());
++        assert!(
++            err.is_none(),
++            "pool destroyed the adopted external texture: {err:?}"
++        );
++    }
++}

@@ -1,0 +1,41 @@
+# Emulated Cortex-M execution proof (M628). Not a workspace member (see root
+# `exclude`); a standalone `no_std` bare-metal binary for QEMU's MPS2-AN386
+# board (Cortex-M4).
+#
+# It links the exact `g2g-noalloc` pipeline the link-time no-heap / panic-free
+# symbol proofs run on (as an rlib, same code, same panic handler) and executes
+# it on the emulated Cortex-M, reporting the checksum over semihosting. This
+# upgrades "links for thumbv7em" to "executes on the Cortex-M ISA": real
+# Thumb-2 code, real 32-bit pointers, no host stand-in. `tools/qemu-check.sh`
+# runs it and asserts the exit code + banner.
+[package]
+name = "g2g-qemu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The same pipeline definition the g2g-noalloc proof archive wraps.
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+# The ISR-driven capture proof (src/bin/isr_capture.rs, M651) uses the SPSC
+# capture ring + source from core and the G.711 encoder from g2g-mcu, both
+# no-alloc; no `alloc` crate is pulled.
+g2g-core = { path = "../../g2g-core", default-features = false }
+g2g-mcu = { path = "../../g2g-mcu" }
+# Vector table + reset handler, and semihosting for the banner + exit code.
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+# SysTick access for the timing binary (src/bin/timing.rs, M645) and the
+# SysTick interrupt / WFI in the ISR-capture proof (M651).
+cortex-m = "0.7"
+# The I2C trait seam for the sensor -> UART proof (src/bin/sensor.rs, M654);
+# the mock bus impls `embedded_hal::i2c::I2c`.
+embedded-hal = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,71 @@
+[package]
+name = "g2g-core"
+description = "Core traits, frame types, caps, and clock model for the glass2glass multimedia framework."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# `alloc` is on by default, so every existing consumer (all of which enable
+# `runtime` / `std` / `dyn-slot`, each implying `alloc`) is unchanged. The
+# heap-free MCU / safety build is the default (`[]`): it links no allocator,
+# carrying only the data-plane subset (Frame, Caps, System/Foreign memory, the
+# const-generic StaticLendRing, time/clock traits) and none of the dynamic graph,
+# negotiation, launch, or tooling layer, which all live behind `alloc`. Host /
+# desktop consumers opt into `alloc` (usually transitively via `runtime` / `std`).
+default = []
+# Permit heap allocation (`extern crate alloc`). Gates the dynamic / build-time
+# layer: the caps solver, autoplug, parse_launch, dynamic `Graph`, plus the
+# `dyn` element traits, conformance, copyplan, dot, wire, tag, pool, property,
+# stream, aggregator, log. The MCU data path does not need any of these. Pulls
+# `spin` (a `no_std` crate, so no std leak): the heap-tier modules (log / clock /
+# pool and the runtime channel) lock with `spin::Mutex`.
+alloc = ["dep:spin"]
+std = ["alloc"]
+multi-thread = []
+# Reserve the per-frame `FrameMetaSet` side-channel as a real (non-ZST)
+# container of typed `FrameMeta` trait objects. Off by default so the no_std /
+# RTOS baseline keeps `Frame::meta` a zero-sized unit and pays nothing.
+metadata = ["alloc"]
+# Minimal async runtime: bounded channel + simple linear pipeline runner.
+# Sufficient for M1 smoke tests; will grow into a graph builder in M2. `alloc`
+# already provides `spin`.
+runtime = ["alloc"]
+# Lock-free atomic-swap container for `Box<dyn DynAsyncElement>`. Powers
+# the dynamic graph layer (M8 piece 6); implies std + multi-thread + runtime.
+dyn-slot = ["std", "multi-thread", "runtime", "dep:arc-swap"]
+# Enable portable-atomic's critical-section fallback so the metrics histogram's
+# 64-bit atomics work on targets without native 64-bit atomics (Cortex-M,
+# RISC-V32). The embedded app provides the critical-section impl.
+critical-section = ["portable-atomic/critical-section"]
+# Bridge the (M179) logging facade to the `tracing` ecosystem: a `TracingSink`
+# that forwards each g2g `LogRecord` to `tracing::event!`, so a host on
+# `tracing-subscriber` (fmt / journald / OTLP / Jaeger / tokio-console) receives
+# g2g's logs. std-only (the tracing global dispatcher is); the no_std baseline
+# keeps its own sinks. Does not touch the hot path.
+tracing = ["std", "dep:tracing"]
+
+[dependencies]
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
+arc-swap = { version = "1", optional = true }
+# The `tracing` facade (tracing feature). default-features off keeps it to the
+# event! macro + the std global dispatcher (no proc-macro attributes pulled).
+tracing = { version = "0.1", optional = true, default-features = false, features = ["std"] }
+# 64-bit atomics for the metrics histogram on targets without native AtomicU64
+# (Cortex-M, RISC-V32). Native where available (x86_64, aarch64); the default
+# `fallback` provides a lock-based AtomicU64 elsewhere, which the
+# `critical-section` feature makes interrupt-safe on real hardware.
+portable-atomic = { version = "1" }
+
+# On wasm32, std's `Instant::now()` panics ("time not implemented on this
+# platform"). web-time is a drop-in `Instant` backed by `performance.now()`, used
+# by the browser metrics clock (`metrics::monotonic_ns`). Target-gated so the
+# native / no_std baseline never pulls it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
+[lints]
+workspace = true

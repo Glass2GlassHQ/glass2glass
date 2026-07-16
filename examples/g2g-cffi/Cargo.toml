@@ -1,0 +1,35 @@
+# C seam ABI proof (M650): the inverse of examples/g2g-freertos. There a C app
+# calls into the g2g static library; here C code IS the peripheral, registered
+# as capture/send function pointers and driving a real g2g pipeline one frame at
+# a time from its own superloop. Not a workspace member (see root `exclude`); a
+# standalone `no_std` staticlib built for a bare Cortex-M target with `g2g-core`
+# default-features=false (no `alloc` crate) and no global allocator, so the
+# C-seam path inherits the heap-free + panic-free guarantees (asserted by
+# tools/cffi-check.sh), then run on the host from harness.c (a real C caller).
+[package]
+name = "g2g-cffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# staticlib ONLY: adding `rlib` here silently disables fat LTO on the archive,
+# which un-eliminates core's panic/fmt machinery and fails the symbol checks and
+# the footprint budget (the M628 gotcha).
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The C seam adapters (`cffi`), the peripheral elements, and the static element
+# model. `g2g-mcu` pulls `g2g-core` default-features=false, so no `alloc` crate
+# is a dependency: a heap use anywhere on the reachable path is a build error.
+g2g-core = { path = "../../g2g-core", default-features = false }
+g2g-mcu = { path = "../../g2g-mcu" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

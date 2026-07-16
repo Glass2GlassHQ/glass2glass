@@ -1,0 +1,39 @@
+# Link-time no-heap proof (M625) + panic-free proof (M626), Phases 3-4 of the
+# alloc-optional core. Not a workspace member (see root `exclude`); a standalone
+# `no_std` staticlib built for a bare Cortex-M target.
+#
+# The proof: `g2g-core` is depended on with `default-features = false`, so the
+# `alloc` crate is never pulled, and this crate defines NO `#[global_allocator]`.
+# It builds a real source -> transform -> sink pipeline with the static element
+# model (`g2g_core::staticelem`) over a `StaticLendRing` and drives it to
+# completion. If any reachable code path touched the heap, the build would fail
+# (no allocator / no `alloc` crate). That it compiles and links for
+# `thumbv7em-none-eabihf` is the machine-checkable guarantee that a whole g2g
+# pipeline runs with zero heap.
+[package]
+name = "g2g-noalloc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+# staticlib ONLY: adding `rlib` here silently disables fat LTO on the archive,
+# which un-eliminates core's panic/fmt machinery and fails both symbol checks
+# and the ROM budget. `g2g-qemu` shares the pipeline through the
+# `noalloc-pipeline` rlib instead.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The shared pipeline definition; it pulls `g2g-core` with
+# default-features = false => no `alloc` feature => the `alloc` crate is not a
+# dependency. Only the heap-free data-plane + static element model are available.
+noalloc-pipeline = { path = "../noalloc-pipeline" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

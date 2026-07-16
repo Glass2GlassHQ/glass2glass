@@ -1,0 +1,33 @@
+[package]
+name = "g2g-example-plugin"
+description = "Out-of-tree example: a third-party g2g element built as a dynamically loadable cdylib."
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Stand-alone: this example is built by itself (as a third party would), not as
+# part of the g2g workspace. The empty table makes it its own workspace root so
+# `cargo build` here does not adopt the parent workspace.
+[workspace]
+
+# A loadable plugin is a C-ABI dynamic library. `cargo build --release` here
+# produces `libg2g_example_plugin.{so,dylib,dll}`, which `g2g-launch --plugin`
+# (or the plugin_loader integration test) `dlopen`s.
+[lib]
+crate-type = ["cdylib"]
+
+# Passthrough features so this plugin can be built against the SAME
+# layout-affecting g2g-core feature set as the host that will load it. The ABI
+# tag folds these in, so a plugin and host must agree. A normal third-party
+# build picks whichever match its target host; the integration test sets them
+# from the host's own ABI tag.
+[features]
+metadata = ["g2g-core/metadata"]
+multi-thread = ["g2g-core/multi-thread"]
+
+# Path deps stand in for the published `g2g-core` / `g2g-plugin` crates the
+# `g2g-devel` package would provide. Four levels up reaches the workspace root:
+# example-plugin -> fixtures -> tests -> g2g-plugins -> (root).
+[dependencies]
+g2g-core = { path = "../../../../g2g-core", features = ["std", "runtime"] }
+g2g-plugin = { path = "../../../../g2g-plugin" }

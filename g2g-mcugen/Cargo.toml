@@ -1,0 +1,24 @@
+[package]
+name = "g2g-mcugen"
+description = "Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) to a monomorphized static pipeline (heap-free Rust) plus its ring-memory budget."
+license = "LGPL-2.1-or-later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# A host developer tool: it reads a graph document and emits `no_std` Rust for
+# the MCU. It never runs on the target, so its own std dependencies (serde) do
+# not touch the heap-free guarantee of the code it generates.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+[[bin]]
+name = "g2g-mcugen"
+path = "src/main.rs"
+
+[lints]
+workspace = true
