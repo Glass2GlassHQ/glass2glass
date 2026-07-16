@@ -3089,20 +3089,23 @@ dependencies = [
 
 [[package]]
 name = "g2g-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "portable-atomic",
  "spin 0.9.8",
+ "web-time",
 ]
 
 [[package]]
 name = "g2g-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ash",
+ "cc",
  "g2g-core",
  "hmac",
  "md-5",
+ "pkg-config",
  "reqwest",
  "sha1",
  "spin 0.9.8",
