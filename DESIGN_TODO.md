@@ -692,8 +692,6 @@ Phased plan:
 
 ## Parsers
 
-- `H265Parse`: framerate from VUI `timing_info`; validate against a real H.265
-  elementary stream.
 - `AacParse`: LATM / LOAS framing; AudioSpecificConfig synthesis; validate
   against a real ADTS stream.
 - `OpusParse`: multichannel (family 1, count in `OpusHead`).
