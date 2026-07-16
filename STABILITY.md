@@ -151,9 +151,9 @@ The type tiers above translate to per-crate promises:
    marked experimental. (The macOS-unbuilt worry is resolved: CI compiles VtDecode
    on macOS - see the Tier 3 correction above. What remains is labelling the
    host-/device-only-*runtime*-validated items as experimental.)
-4. **One real external adopter** — the Rerun/`re_video` upstream (currently a
-   fork) or a bindings/embedded design partner. 1.0 without a consumer is a
-   promise nobody asked for.
+4. **One real external adopter** — a downstream project (bindings, embedded, or a
+   wgpu-viewer/game-engine consumer) that ships on g2g. 1.0 without a consumer is
+   a promise nobody asked for.
 5. ~~**Intermediate release first**: tag `0.2`.~~ **DONE (0.2.0)** — tagged
    in-repo (not yet published to crates.io); the crates carry publish metadata
    (description/license) and are crates.io-ready when an adopter warrants it.
@@ -161,5 +161,5 @@ The type tiers above translate to per-crate promises:
 
 Realistic read: the codebase is capability-rich and the traits have converged, so
 1.0 is gated on *policy + extensibility + adoption*, not features. With gates 1, 2,
-and 5 closed, the nearest concrete path is now: land the Rerun upstream (or
-equivalent adopter) → `g2g-core` 1.0.
+and 5 closed, the nearest concrete path is now: land a real external adopter →
+`g2g-core` 1.0.

@@ -814,8 +814,8 @@ CRA (M587 discards its RASL) rather than decoding from the leading IDR. A leadin
 picture (a CRA's RASL / RADL, whose POC precedes its CRA) instead seeks from the
 random-access point before that CRA and decodes continuously through it, so its
 references exist (`m588`).
-The pull model is the timeline-scrubber a wgpu visualization viewer (e.g. Rerun,
-whose native decode is CPU software plus a GPU upload copy) needs; the
+The pull model is the timeline-scrubber a wgpu visualization viewer (whose native
+decode is typically CPU software plus a GPU upload copy) needs; the
 `vulkan_video_scrubber` example drives it interactively. The player forward-
 continues (a forward seek within reach keeps decoding rather than re-decoding
 from the keyframe, so linear playback is O(n) coded pictures, not O(n^2)) and
@@ -827,7 +827,7 @@ within a GOP is free (`set_cache_traversed`). Decoded frames are consumable by a
 application-owned wgpu render pipeline, not just `WgpuSink`: the imported RGBA
 texture carries `TEXTURE_BINDING`, so a foreign pipeline on the shared decode
 device samples it zero-copy (`m500_vulkan_video_embed` + the
-`vulkan_video_engine_embed` example), the integration primitive a Rerun / Bevy
+`vulkan_video_engine_embed` example), the integration primitive a Bevy
 `re_renderer`-style consumer builds on.
 
 **H.265.** The HEVC parameter-set parse + `Std*` mapping and the
