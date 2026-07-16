@@ -1691,14 +1691,27 @@ The FLV demuxer is the fourth, on `Caps::ByteStream{Flv}`.
 `g2g-plugins::flv::FlvDemuxer` parses the flat FLV tag stream (the "FLV" header,
 then `PreviousTagSize` / tag pairs, each tag's 11-byte header framing its body),
 and `FlvDemux` forwards the H.264 (AVC) video and AAC audio media access units
-with their millisecond timestamps, selected per `FlvStream` (h264 | aac, default
-h264) like `TsDemux`. The sequence-header tags (codec config) and the
-`onMetaData` script tag are skipped. The container is auto-detectable (`typefind`
-"FLV", `filesrc bytestream-format=auto`). The FLV muxer (`flvmux`:
-`g2g-plugins::flv::FlvMuxer` + the `FlvMux` element) is the inverse path,
-wrapping one elementary stream's access units back into FLV tags (media frames
-only). With MP4 (`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV,
-the demux/mux coverage spans the major containers.
+with their millisecond timestamps (PTS from the video tag's signed
+composition-time offset, DTS from the tag header), selected per `FlvStream`
+(h264 | aac, default h264) like `TsDemux`. The sequence-header tags are the
+codec-config side channel (M662): the parser retains the
+`AVCDecoderConfigurationRecord` / `AudioSpecificConfig`, and the element uses
+them the way the MP4 demuxers do, re-framing the AVCC access units to Annex-B
+(honouring the `avcC` NAL length-prefix width) with the SPS/PPS prepended
+in-band to the first access unit, ADTS-framing the raw AAC so the audio is
+self-describing, and announcing the concrete channel layout / sample rate via
+`CapsChanged`, so both extracted elementary streams decode standalone
+(ffmpeg-oracle-validated, both directions, in the CI conformance job). The
+`onMetaData` script tag posts as bus tags. The container is auto-detectable
+(`typefind` "FLV", `filesrc bytestream-format=auto`). The FLV muxer (`flvmux`:
+`g2g-plugins::flv::FlvMuxer` + the `FlvMux` element) is the inverse path: like
+`FlvMuxN` it captures the decoder config in-band from the first access unit
+(parameter sets from the IDR / the first ADTS header) and writes it as the
+track's sequence-header tag, re-framing video Annex-B -> AVCC (keyframes
+flagged from the IDR NAL) and audio de-ADTS'd, so a single-track `flvmux`
+output is a playable FLV (what `RtmpSink` publishes). With MP4
+(`Mp4Src`/`Mp4Sink`), MPEG-TS, Matroska/WebM, Ogg, and FLV, the demux/mux
+coverage spans the major containers.
 
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to

@@ -636,30 +636,10 @@ pub(crate) fn parse_hvcc(hvcc: &[u8]) -> Result<Vec<Vec<u8>>, G2gError> {
     Ok(sets)
 }
 
-/// First SPS and PPS out of an `avcC` payload.
-pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
-    // 5 fixed bytes, then SPS count (low 5 bits).
-    let sps_count = avcc.get(5).map(|b| b & 0x1F).ok_or(G2gError::CapsMismatch)?;
-    if sps_count == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    let sps_len = u16::from_be_bytes(
-        avcc.get(6..8).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
-    ) as usize;
-    let sps = avcc.get(8..8 + sps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
-    let mut at = 8 + sps_len;
-    let pps_count = *avcc.get(at).ok_or(G2gError::CapsMismatch)?;
-    if pps_count == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    at += 1;
-    let pps_len = u16::from_be_bytes(
-        avcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
-    ) as usize;
-    at += 2;
-    let pps = avcc.get(at..at + pps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
-    Ok((sps, pps))
-}
+// The avcC / parameter-set helpers moved to the ungated `annexb` module (M662,
+// the no_std FLV demuxer shares them); re-exported so this module's users keep
+// their import path.
+pub(crate) use crate::annexb::{parse_avcc, prepend_param_sets, starts_with_param_set};
 
 /// Walk the `moof`+`mdat` pairs in `data` and split every sample out of its
 /// `mdat`, converting AVCC framing back to Annex-B. `codec` selects the IDR NAL
@@ -1067,47 +1047,6 @@ fn avcc_to_annexb(avcc: &[u8]) -> Result<Vec<u8>, G2gError> {
         at += len;
     }
     Ok(out)
-}
-
-/// Whether the access unit already opens with a parameter-set NAL (so the
-/// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32).
-pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
-    if codec == VideoCodec::Mpeg4Part2 {
-        // MPEG-4 Visual uses 3-byte start codes; its config opens with the visual
-        // object sequence start code (0xB0) or a video object layer (0x20..=0x2F).
-        return match annexb {
-            [0, 0, 1, sc, ..] => *sc == 0xB0 || (0x20..=0x2F).contains(sc),
-            _ => false,
-        };
-    }
-    if annexb.len() <= 4 || annexb[..4] != [0, 0, 0, 1] {
-        return false;
-    }
-    match codec {
-        VideoCodec::H265 => (annexb[4] >> 1) & 0x3F == 32,
-        _ => annexb[4] & 0x1F == 7,
-    }
-}
-
-/// Prepend the out-of-band config-record parameter sets to `annexb` (the first
-/// access unit). H.264/H.265 sets are raw NAL bodies, so each gets a 4-byte
-/// Annex-B start code; MPEG-4 Part 2's single set is the esds VOL header, which
-/// already carries its own 3-byte start codes and is prepended verbatim. Shared
-/// by the progressive and fragmented MP4 demuxers.
-pub(crate) fn prepend_param_sets(
-    annexb: &[u8],
-    param_sets: &[Vec<u8>],
-    codec: VideoCodec,
-) -> Vec<u8> {
-    let mut out = Vec::new();
-    for set in param_sets {
-        if codec != VideoCodec::Mpeg4Part2 {
-            out.extend_from_slice(&[0, 0, 0, 1]);
-        }
-        out.extend_from_slice(set);
-    }
-    out.extend_from_slice(annexb);
-    out
 }
 
 /// Whether an Annex-B access unit contains an IDR picture (the keyframe a seek

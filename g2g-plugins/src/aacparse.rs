@@ -30,10 +30,71 @@ use g2g_core::{
 
 /// ADTS sampling-frequency-index table (ISO/IEC 14496-3). Indices 13/14 are
 /// reserved and 15 (explicit rate) is forbidden in ADTS, so only 0..=12 map.
-const SAMPLE_RATES: [u32; 13] = [
+pub(crate) const SAMPLE_RATES: [u32; 13] = [
     96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
     7_350,
 ];
+
+/// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
+pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
+    if au.len() < 7 || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
+        return None;
+    }
+    let object_type = ((au[2] >> 6) & 0x03) + 1; // profile + 1
+    let sr_index = (au[2] >> 2) & 0x0F;
+    let channel_config = ((au[2] & 0x01) << 2) | ((au[3] >> 6) & 0x03);
+    Some([
+        (object_type << 3) | (sr_index >> 1),
+        ((sr_index & 1) << 7) | (channel_config << 3),
+    ])
+}
+
+/// Strip the ADTS header (7 bytes, or 9 with CRC) from an AAC access unit.
+pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
+    if au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0 {
+        let header = if au[1] & 0x01 == 0 { 9 } else { 7 }; // protection_absent==0 -> CRC
+        au.get(header..).unwrap_or(&[])
+    } else {
+        au
+    }
+}
+
+/// Build an ADTS-framed AAC access unit from the track's 2-byte
+/// AudioSpecificConfig and the raw access unit: a 7-byte ADTS header (no CRC)
+/// derived from the ASC's audio-object-type, sampling-frequency index, and
+/// channel configuration, then the AU. The inverse of the muxers' de-ADTS write,
+/// so the demuxed audio is self-describing. `None` when the ASC is too short, the
+/// rate index / channel config is out of range, or the frame exceeds the 13-bit
+/// ADTS length (then the AU is forwarded raw). Shared by the MP4 and FLV
+/// demuxers (M662).
+pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
+    if asc.len() < 2 {
+        return None;
+    }
+    let aot = asc[0] >> 3; // audio object type (5 bits)
+    let sr_index = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
+    let channel_config = (asc[1] >> 3) & 0x0F;
+    if sr_index > 12 || channel_config == 0 {
+        return None; // reserved/explicit rate or "config in stream": not ADTS-able
+    }
+    let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
+    let frame_len = au.len() + 7;
+    if frame_len > 0x1FFF {
+        return None; // ADTS frame_length is 13 bits
+    }
+    let mut out = Vec::with_capacity(frame_len);
+    out.extend_from_slice(&[
+        0xFF,
+        0xF1, // syncword | MPEG-4 | layer 0 | protection_absent (no CRC)
+        (profile << 6) | (sr_index << 2) | ((channel_config >> 2) & 1),
+        ((channel_config & 3) << 6) | ((frame_len >> 11) & 3) as u8,
+        ((frame_len >> 3) & 0xFF) as u8,
+        (((frame_len & 7) << 5) as u8) | 0x1F, // buffer fullness (top bits)
+        0xFC, // buffer fullness (low) | num_raw_data_blocks = 0
+    ]);
+    out.extend_from_slice(au);
+    Some(out)
+}
 
 #[derive(Debug, Default)]
 pub struct AacParse {

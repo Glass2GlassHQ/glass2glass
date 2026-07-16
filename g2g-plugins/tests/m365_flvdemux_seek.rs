@@ -78,12 +78,14 @@ impl OutputSink for Chain<'_> {
 
 #[tokio::test]
 async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
+    // Valid AVCC payloads (4-byte length prefix); the element re-frames them
+    // Annex-B on the way out (M662).
     let flv = make_flv(&[
-        (0, true, vec![0x01]),
-        (40, false, vec![0x02]),
-        (80, false, vec![0x03]),
-        (120, true, vec![0x04]),
-        (160, false, vec![0x05]),
+        (0, true, vec![0, 0, 0, 2, 0x65, 0x01]),
+        (40, false, vec![0, 0, 0, 2, 0x41, 0x02]),
+        (80, false, vec![0, 0, 0, 2, 0x41, 0x03]),
+        (120, true, vec![0, 0, 0, 2, 0x65, 0x04]),
+        (160, false, vec![0, 0, 0, 2, 0x41, 0x05]),
     ]);
     let path = temp_path("seek");
     std::fs::write(&path, &flv).unwrap();
@@ -117,7 +119,7 @@ async fn flvdemux_seeks_to_the_target_keyframe_over_filesrc() {
     assert!(capture.segments >= 1, "a resume segment was emitted");
     assert_eq!(
         capture.frames,
-        vec![vec![0x04u8], vec![0x05u8]],
+        vec![vec![0, 0, 0, 1, 0x65, 0x04], vec![0, 0, 0, 1, 0x41, 0x05]],
         "resumed from the 120 ms keyframe to the end, pre-target frames discarded"
     );
     let _ = std::fs::remove_file(&path);

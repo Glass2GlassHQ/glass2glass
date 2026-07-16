@@ -319,6 +319,10 @@ jobs:
       # absent, so a green run here means real interop evidence was produced.
       - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
         run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # FLV both ways (M662): flvdemux's extracted elementary streams decoded
+      # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
+      - name: FLV oracles (flvmux + flvdemux vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std --test m662_flv_config_interop -- --nocapture
       # MCU-fit codec oracles (M638 G.711 + M639 IMA ADPCM): the g2g-mcu
       # fixed-point codecs checked bit-exact against ffmpeg (G.711: the full
       # domain, 65536 encoder inputs + 256 decoder codes, both laws; ADPCM:

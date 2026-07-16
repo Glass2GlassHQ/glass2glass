@@ -52,11 +52,12 @@ fn aac_raw(frame: &[u8]) -> Vec<u8> {
 }
 
 /// An FLV stream: header, then one audio + two video access units interleaved.
+/// Video payloads are valid AVCC (4-byte length prefix per NAL).
 fn synthetic_flv() -> Vec<u8> {
     let tags = [
-        tag(9, 0, &avc_nalu(&[0x65, 0x11, 0x22])),
+        tag(9, 0, &avc_nalu(&[0, 0, 0, 3, 0x65, 0x11, 0x22])),
         tag(8, 0, &aac_raw(&[0x33, 0x44])),
-        tag(9, 33, &avc_nalu(&[0x41, 0x55])),
+        tag(9, 33, &avc_nalu(&[0, 0, 0, 2, 0x41, 0x55])),
     ];
     let mut s = b"FLV".to_vec();
     s.push(1); // version
