@@ -176,6 +176,11 @@ impl NvEnc {
         self
     }
 
+    /// Force the next encoded picture to be an IDR with in-band SPS/PPS.
+    pub fn force_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
     /// The NVENC encode GUID for the selected codec.
     fn encode_guid(&self) -> ffi::Guid {
         match self.codec {

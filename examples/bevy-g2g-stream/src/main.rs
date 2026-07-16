@@ -30,7 +30,10 @@
 //! a `RenderTarget::Image`, drive the loop with `ScheduleRunnerPlugin`, no
 //! `WinitPlugin`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 use bevy::{
@@ -58,7 +61,7 @@ use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_linear_chain, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, MemoryDomain, OutputSink, PipelineClock, PipelinePacket,
-    PropValue, PushOutcome, RawVideoFormat, Rate,
+    PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
 use g2g_plugins::cudawgpu::{create_interop_device_full, WgpuToCuda};
@@ -69,6 +72,7 @@ use g2g_plugins::webrtcsink::WebRtcSink;
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
 const FPS: u32 = 60;
+const KEYFRAME_INTERVAL: u64 = FPS as u64;
 /// Render this many frames, then exit (a demo run, not an endless server).
 const FRAMES: u32 = 240;
 /// AppSrc feed channel name shared with the sink thread.
@@ -80,8 +84,14 @@ const OUT_PATH: &str = "bevy_g2g.h264";
 /// bytes and their presentation timestamp (ns).
 type EncodedAu = (Vec<u8>, u64);
 
+enum RenderMessage {
+    AccessUnit(EncodedAu),
+    Fatal(String),
+}
+
 fn main() {
-    let (tx, rx) = crossbeam_channel::unbounded::<EncodedAu>();
+    let (tx, rx) = crossbeam_channel::unbounded::<RenderMessage>();
+    let failed = Arc::new(AtomicBool::new(false));
 
     // The g2g sink pipeline runs on its own thread, fed the encoded H.264 access
     // units through this push handle (claimed by the AppSrc inside the chain by
@@ -115,6 +125,7 @@ fn main() {
         .insert_resource(FrameReceiver(rx))
         .insert_resource(FrameCount(0))
         .insert_resource(MaxFrames(max_frames))
+        .insert_resource(RunFailed(failed.clone()))
         .insert_resource(EncodeFeed(feed))
         .add_plugins(
             DefaultPlugins
@@ -140,7 +151,9 @@ fn main() {
                 // window is never created and winit would only panic here.
                 .disable::<WinitPlugin>(),
         )
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / FPS as f64)))
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / FPS as f64,
+        )))
         .add_plugins(EncodePlugin { sender: tx })
         .add_systems(Startup, setup)
         .add_systems(Update, (spin_cube, drain_frames));
@@ -151,7 +164,7 @@ fn main() {
     let ok = match sink.join() {
         Ok(Ok(frames)) => {
             info!("sink pipeline finished: {frames} access units");
-            true
+            !failed.load(Ordering::Relaxed)
         }
         Ok(Err(e)) => {
             error!("sink pipeline failed: {e:?}");
@@ -238,11 +251,11 @@ struct RenderTargetImage(Handle<Image>);
 
 /// Main-world end of the render-world -> main-world access-unit channel.
 #[derive(Resource)]
-struct FrameReceiver(Receiver<EncodedAu>);
+struct FrameReceiver(Receiver<RenderMessage>);
 
 /// Render-world end of that channel.
 #[derive(Resource, Clone)]
-struct FrameSender(Sender<EncodedAu>);
+struct FrameSender(Sender<RenderMessage>);
 
 /// Push handle into the g2g sink pipeline (the AppSrc feed).
 #[derive(Resource)]
@@ -255,6 +268,9 @@ struct FrameCount(u32);
 /// watch in a browser). From `G2G_FRAMES`, default `FRAMES`.
 #[derive(Resource)]
 struct MaxFrames(u32);
+
+#[derive(Resource, Clone)]
+struct RunFailed(Arc<AtomicBool>);
 
 /// The render-world zero-copy encoder, behind a `Mutex` so it satisfies the
 /// `Send + Sync` resource bound (`NvEnc` is `Send` but not `Sync`; the system
@@ -278,40 +294,40 @@ struct EncodeState {
 }
 
 impl EncodeState {
-    /// Build the bridge + encoder on `device` (Bevy's interop device). Returns
-    /// `None` if the interop bridge or NVENC is unavailable on this host.
-    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Option<Self> {
+    /// Build the bridge + encoder on `device` (Bevy's interop device).
+    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Result<Self, G2gError> {
         // SAFETY: `device` is the VK_KHR_external_memory_fd interop device created
         // by `create_interop_device_full` and handed to Bevy, so the bridge's
         // exportable-image allocation and CUDA import are valid on it.
-        let bridge = unsafe { WgpuToCuda::new(device, queue, WIDTH, HEIGHT) }.ok()?;
+        let bridge = unsafe { WgpuToCuda::new(device, queue, WIDTH, HEIGHT) }?;
         let mut nvenc = NvEnc::new();
         // Disambiguate: both AsyncElement and DynAsyncElement (imported for the
         // sink chain) are in scope.
-        AsyncElement::configure_pipeline(&mut nvenc, &rgba_caps()).ok()?;
-        Some(Self { bridge, nvenc, frame_no: 0 })
+        AsyncElement::configure_pipeline(&mut nvenc, &rgba_caps())?;
+        Ok(Self {
+            bridge,
+            nvenc,
+            frame_no: 0,
+        })
     }
 
     /// Copy `texture` (Bevy's just-rendered target) into the bridge's CUDA surface
     /// and encode it, returning any ready H.264 access units. No device->host copy.
-    fn encode(&mut self, texture: &wgpu::Texture) -> Vec<EncodedAu> {
+    fn encode(&mut self, texture: &wgpu::Texture) -> Result<Vec<EncodedAu>, G2gError> {
         let pts_ns = self.frame_no * 1_000_000_000 / FPS as u64;
-        self.frame_no += 1;
-        if self.bridge.ingest_texture(texture).is_err() {
-            return Vec::new();
+        if self.frame_no % KEYFRAME_INTERVAL == 0 {
+            self.nvenc.force_keyframe();
         }
-        let frame = match self.bridge.to_cuda_frame(pts_ns) {
-            Ok(f) => f,
-            Err(_) => return Vec::new(),
-        };
+        self.frame_no += 1;
+        self.bridge.ingest_texture(texture)?;
+        let frame = self.bridge.to_cuda_frame(pts_ns)?;
         let mut cap = CaptureAus::default();
         // NVENC sync-mode encode; the capture sink resolves immediately, so the
         // block_on returns this frame's access unit without a reactor.
-        let fut = AsyncElement::process(&mut self.nvenc, PipelinePacket::DataFrame(frame), &mut cap);
-        if pollster::block_on(fut).is_err() {
-            return Vec::new();
-        }
-        cap.aus
+        let fut =
+            AsyncElement::process(&mut self.nvenc, PipelinePacket::DataFrame(frame), &mut cap);
+        pollster::block_on(fut)?;
+        Ok(cap.aus)
     }
 }
 
@@ -376,7 +392,10 @@ fn setup(
         Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
     ));
     commands.spawn((
-        PointLight { shadow_maps_enabled: true, ..default() },
+        PointLight {
+            shadow_maps_enabled: true,
+            ..default()
+        },
         Transform::from_xyz(4.0, 8.0, 4.0),
     ));
     commands.spawn((
@@ -401,10 +420,20 @@ fn drain_frames(
     receiver: Res<FrameReceiver>,
     feed: Res<EncodeFeed>,
     max: Res<MaxFrames>,
+    failed: Res<RunFailed>,
     mut count: ResMut<FrameCount>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    while let Ok((au, pts_ns)) = receiver.0.try_recv() {
+    while let Ok(message) = receiver.0.try_recv() {
+        let RenderMessage::AccessUnit((au, pts_ns)) = message else {
+            if let RenderMessage::Fatal(reason) = message {
+                failed.0.store(true, Ordering::Relaxed);
+                error!("{reason}");
+                feed.0.end_of_stream_blocking();
+                exit.write(AppExit::error());
+            }
+            return;
+        };
         if count.0 == 0 {
             info!(
                 "g2g encoded Bevy's first frame on the GPU with no read-back: {} bytes H.264",
@@ -412,17 +441,20 @@ fn drain_frames(
             );
         }
         // Hand the access unit to the g2g sink pipeline (H.264 -> file / WHIP).
-        // `push` returns false if the sink is backed up; at this resolution it
-        // keeps up, so a drop would be notable.
-        if !feed.0.push(&au, pts_ns) {
-            warn!("sink feed full; dropped access unit {}", count.0);
+        // Backpressure here slows the render loop instead of dropping frames
+        // before WebRtcSink can publish them.
+        if !feed.0.push_blocking(&au, pts_ns) {
+            failed.0.store(true, Ordering::Relaxed);
+            error!("sink feed closed before access unit {}", count.0);
+            exit.write(AppExit::error());
+            return;
         }
         count.0 += 1;
         // `max == 0` streams forever (watch it live); otherwise stop at the cap.
         if max.0 != 0 && count.0 >= max.0 {
             // Signal EOS so the sink flushes and finalises, then exit; `main` joins
             // the sink thread after the loop returns.
-            feed.0.end_of_stream();
+            feed.0.end_of_stream_blocking();
             info!(
                 "encoded {} frames on the GPU (no read-back); EOS sent, exiting",
                 count.0
@@ -436,7 +468,7 @@ fn drain_frames(
 /// stashes the channel sender + the lazily-built [`Encoder`], and runs
 /// `encode_via_g2g` after the main render.
 struct EncodePlugin {
-    sender: Sender<EncodedAu>,
+    sender: Sender<RenderMessage>,
 }
 
 impl Plugin for EncodePlugin {
@@ -473,16 +505,27 @@ fn encode_via_g2g(
         none => {
             // Build the bridge + encoder on Bevy's (interop) device on first run.
             match EncodeState::new(device.wgpu_device().clone(), (**queue.0).clone()) {
-                Some(s) => none.insert(s),
-                None => {
-                    // No interop bridge / NVENC on this host: nothing to do.
+                Ok(s) => none.insert(s),
+                Err(e) => {
+                    let _ = sender.0.send(RenderMessage::Fatal(format!(
+                        "failed to initialize WgpuToCuda/NvEnc: {e:?}"
+                    )));
                     return;
                 }
             }
         }
     };
 
-    for au in state.encode(&gpu_image.texture) {
-        let _ = sender.0.send(au);
+    match state.encode(&gpu_image.texture) {
+        Ok(aus) => {
+            for au in aus {
+                let _ = sender.0.send(RenderMessage::AccessUnit(au));
+            }
+        }
+        Err(e) => {
+            let _ = sender.0.send(RenderMessage::Fatal(format!(
+                "failed to encode Bevy render target: {e:?}"
+            )));
+        }
     }
 }

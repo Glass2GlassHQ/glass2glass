@@ -279,14 +279,27 @@ impl WebRtcSink {
         let (offer_sdp, pending, mid): (String, SdpPendingOffer, Mid) = {
             let mut api = rtc.sdp_api();
             let mid = api.add_media(self.track.media_kind(), Direction::SendOnly, None, None, None);
-            let (offer, pending) = api.apply().ok_or(G2gError::Hardware(HardwareError::Other))?;
+            let (offer, pending) = api.apply().ok_or_else(|| {
+                std::eprintln!("webrtc offer creation failed");
+                G2gError::Hardware(HardwareError::Other)
+            })?;
             (offer.to_sdp_string(), pending, mid)
         };
 
         // WHIP: POST the offer, receive the answer SDP, apply it.
-        let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp).await?;
-        let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-        rtc.sdp_api().accept_answer(pending, answer).map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        let answer_sdp = post_sdp(&self.whip_url, self.bearer.as_deref(), offer_sdp.clone()).await?;
+        let answer = SdpAnswer::from_sdp_string(&answer_sdp).map_err(|e| {
+            std::eprintln!(
+                "webrtc answer SDP parse failed: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{answer_sdp}"
+            );
+            G2gError::Hardware(HardwareError::Other)
+        })?;
+        rtc.sdp_api().accept_answer(pending, answer).map_err(|e| {
+            std::eprintln!(
+                "webrtc answer SDP rejected: {e:?}\nlocal offer:\n{offer_sdp}\nremote answer:\n{answer_sdp}"
+            );
+            G2gError::Hardware(HardwareError::Other)
+        })?;
 
         let (tx, rx) = mpsc::channel::<MediaUnit>(self.queue_depth);
         let keyframe_requested = Arc::clone(&self.keyframe_requested);

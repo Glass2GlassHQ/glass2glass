@@ -43,15 +43,63 @@ pub(crate) async fn post_sdp(
     offer_sdp: String,
 ) -> Result<String, G2gError> {
     let client = reqwest::Client::new();
+    let resp = match send_sdp(&client, url, bearer, offer_sdp.clone()).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            log_sdp_post_error(url, &e);
+            if let Some(fallback_url) = localhost_ipv4_url(url) {
+                std::eprintln!("retrying WHIP/WHEP SDP POST with {fallback_url}");
+                send_sdp(&client, &fallback_url, bearer, offer_sdp)
+                    .await
+                    .map_err(|e| {
+                        log_sdp_post_error(&fallback_url, &e);
+                        G2gError::Hardware(HardwareError::Other)
+                    })?
+            } else {
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        std::eprintln!("webrtc sdp POST failed for {url}: HTTP {status}: {body}");
+        return Err(G2gError::Hardware(HardwareError::Other));
+    }
+    resp.text().await.map_err(|e| {
+        std::eprintln!("webrtc sdp response read failed for {url}: {e}");
+        G2gError::Hardware(HardwareError::Other)
+    })
+}
+
+async fn send_sdp(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: Option<&str>,
+    offer_sdp: String,
+) -> Result<reqwest::Response, reqwest::Error> {
     let mut req = client.post(url).header("Content-Type", "application/sdp").body(offer_sdp);
     if let Some(token) = bearer {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
-    let resp = req.send().await.map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    if !resp.status().is_success() {
-        return Err(G2gError::Hardware(HardwareError::Other));
+    req.send().await
+}
+
+fn localhost_ipv4_url(url: &str) -> Option<String> {
+    if url.starts_with("http://localhost:") || url.starts_with("https://localhost:") {
+        Some(url.replacen("://localhost:", "://127.0.0.1:", 1))
+    } else {
+        None
     }
-    resp.text().await.map_err(|_| G2gError::Hardware(HardwareError::Other))
+}
+
+fn log_sdp_post_error(url: &str, e: &reqwest::Error) {
+    std::eprintln!("webrtc sdp POST failed for {url}: {e:?}");
+    let mut source = std::error::Error::source(e);
+    while let Some(e) = source {
+        std::eprintln!("  caused by: {e}");
+        source = e.source();
+    }
 }
 
 /// Add this socket's ICE candidates to `rtc`: always the host candidate, plus a

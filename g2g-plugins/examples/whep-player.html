@@ -24,7 +24,7 @@
   <video id="video" autoplay muted controls playsinline></video>
   <p>
     WHEP URL:
-    <input id="url" value="http://localhost:8889/mystream/whep">
+    <input id="url" value="http://127.0.0.1:8889/mystream/whep">
     <button onclick="play()">Play</button>
   </p>
   <pre id="log"></pre>
@@ -37,7 +37,10 @@
       // WHEP: the player offers recvonly transceivers; the server answers and sends.
       pc.addTransceiver('video', { direction: 'recvonly' });
       pc.addTransceiver('audio', { direction: 'recvonly' });
-      pc.ontrack = (e) => { document.getElementById('video').srcObject = e.streams[0]; };
+      pc.ontrack = (e) => {
+        log('track: ' + e.track.kind);
+        document.getElementById('video').srcObject = e.streams[0];
+      };
       pc.oniceconnectionstatechange = () => log('ICE: ' + pc.iceConnectionState);
 
       const offer = await pc.createOffer();
@@ -52,6 +55,14 @@
       const answer = await resp.text();
       await pc.setRemoteDescription({ type: 'answer', sdp: answer });
       log('answer applied; awaiting media...');
+      setInterval(async () => {
+        const stats = await pc.getStats();
+        stats.forEach((s) => {
+          if (s.type === 'inbound-rtp' && s.kind === 'video') {
+            log('video bytes=' + (s.bytesReceived || 0) + ' frames=' + (s.framesDecoded || 0));
+          }
+        });
+      }, 2000);
     }
   </script>
 </body>
