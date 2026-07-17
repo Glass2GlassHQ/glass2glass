@@ -254,10 +254,11 @@ impl SourceLoop for SrtSrc {
                             if srt::is_control(&buf[..n]) {
                                 match srt::parse_control(&buf[..n]) {
                                     Some(Control::Shutdown) => break,
-                                    // Mid-stream rekey: unwrap the new key and file
-                                    // it into the slot its parity names, so packets
-                                    // under the new key decrypt.
-                                    Some(Control::KeyMaterial { km, .. }) => {
+                                    // Mid-stream rekey (KMREQ): unwrap the new key
+                                    // and file it into the slot its parity names,
+                                    // so packets under the new key decrypt, then
+                                    // KMRSP so the sender stops retransmitting.
+                                    Some(Control::KeyMaterial { rsp: false, km }) => {
                                         if let Some(pass) = &self.passphrase {
                                             if let (Some(kk), Some(crypto)) = (
                                                 SrtCrypto::km_kk(&km),
@@ -266,6 +267,12 @@ impl SourceLoop for SrtSrc {
                                                 receiver.install_key(kk, crypto);
                                             }
                                         }
+                                        let rsp = srt::build_control(
+                                            &Control::KeyMaterial { rsp: true, km },
+                                            0,
+                                            peer_socket_id,
+                                        );
+                                        socket.send_to(&rsp, peer).await.map_err(io_err)?;
                                     }
                                     // Keepalive / handshake retries: ignored.
                                     _ => {}

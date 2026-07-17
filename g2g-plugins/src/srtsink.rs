@@ -6,8 +6,9 @@
 //! tokio UDP I/O around it.
 //!
 //! Scope: one connection, the caller role, NAK-based ARQ, AES-128/256 encryption
-//! with optional mid-stream key rotation (`with_key_rotation`). Congestion
-//! control is a follow-up.
+//! with optional mid-stream key rotation (`with_key_rotation`); a rekey KM is
+//! retransmitted until the peer returns a KMRSP, so it survives packet loss.
+//! Congestion control is a follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -38,6 +39,25 @@ const INIT_SEQ: u32 = 1;
 const SEND_CAPACITY: usize = 8192;
 /// Default target latency advertised in the handshake.
 const DEFAULT_LATENCY_MS: u16 = 120;
+/// Resend an unacknowledged mid-stream KM (rekey) this often until the peer
+/// returns a KMRSP, so a rekey survives KM-packet loss on a lossy link.
+const KM_RETRANSMIT_US: u64 = 5_000;
+/// Stop retransmitting the KM after this many tries (a peer that never KMRSPs,
+/// e.g. an older receiver); the new key is already active locally regardless.
+const KM_MAX_RETRANSMITS: u32 = 20;
+
+/// A mid-stream rekey KM awaiting the peer's KMRSP. Retransmitted on a timer
+/// until acknowledged (or [`KM_MAX_RETRANSMITS`] is reached).
+#[derive(Debug)]
+struct PendingKm {
+    /// The full KM control packet, resent verbatim on each retry.
+    pkt: Vec<u8>,
+    /// The KM blob (control CIF), matched against the KMRSP to confirm the ack.
+    km: Vec<u8>,
+    /// Earliest monotonic microsecond time for the next retransmit.
+    next_at_us: u64,
+    retries: u32,
+}
 
 fn ts_bytestream() -> Caps {
     Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs }
@@ -55,6 +75,10 @@ pub struct SrtSink {
     rekey_interval: Option<u64>,
     packets_since_rekey: u64,
     rekeys: u64,
+    /// A rekey KM awaiting the peer's KMRSP, retransmitted until acknowledged.
+    pending_km: Option<PendingKm>,
+    /// Count of KM retransmissions (for tests / metrics).
+    km_retransmits: u64,
     /// Live-mode congestion control (output pacing); `None` sends as fast as the
     /// pipeline produces.
     cc: Option<LiveCc>,
@@ -81,6 +105,8 @@ impl SrtSink {
             rekey_interval: None,
             packets_since_rekey: 0,
             rekeys: 0,
+            pending_km: None,
+            km_retransmits: 0,
             cc: None,
             next_send_us: 0,
             socket: None,
@@ -136,6 +162,11 @@ impl SrtSink {
     /// Number of mid-stream rekeys performed.
     pub fn rekeys(&self) -> u64 {
         self.rekeys
+    }
+
+    /// Number of KM retransmissions sent while awaiting a KMRSP.
+    pub fn km_retransmits(&self) -> u64 {
+        self.km_retransmits
     }
 
     /// Enable live-mode congestion control (output pacing). A positive
@@ -222,6 +253,14 @@ impl SrtSink {
                 Ok(0) => break,
                 Ok(n) => {
                     if let Some(ctrl) = srt::parse_control(&buf[..n]) {
+                        // A KMRSP acknowledges the outstanding rekey: stop
+                        // retransmitting the KM once its blob matches.
+                        if let srt::Control::KeyMaterial { rsp: true, km } = &ctrl {
+                            if self.pending_km.as_ref().is_some_and(|p| &p.km == km) {
+                                self.pending_km = None;
+                            }
+                            continue;
+                        }
                         let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
                         resends.extend(sender.on_control(&ctrl, 0));
                     }
@@ -233,6 +272,29 @@ impl SrtSink {
         let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         for pkt in &resends {
             socket.send(pkt).await.map_err(io_err)?;
+        }
+        // Retransmit an unacknowledged rekey KM until the peer KMRSPs (or we hit
+        // the retry cap, at which point the new key is still active locally).
+        if self.pending_km.is_some() {
+            let now_us = g2g_core::metrics::monotonic_ns() / 1000;
+            let due = self.pending_km.as_ref().is_some_and(|p| now_us >= p.next_at_us);
+            if due {
+                let exhausted =
+                    self.pending_km.as_ref().is_some_and(|p| p.retries >= KM_MAX_RETRANSMITS);
+                if exhausted {
+                    self.pending_km = None;
+                } else {
+                    let pkt = {
+                        let p = self.pending_km.as_mut().expect("pending");
+                        p.retries += 1;
+                        p.next_at_us = now_us + KM_RETRANSMIT_US;
+                        p.pkt.clone()
+                    };
+                    self.km_retransmits += 1;
+                    let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+                    socket.send(&pkt).await.map_err(io_err)?;
+                }
+            }
         }
         self.retransmits = self.sender.as_ref().map(|s| s.retransmits()).unwrap_or(0);
         Ok(())
@@ -378,6 +440,19 @@ impl AsyncElement for SrtSink {
                                 let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
                                 socket.send(&km_pkt).await.map_err(io_err)?;
                                 self.rekeys += 1;
+                                // Track it for KMRSP-acked retransmission so the
+                                // rekey survives KM-packet loss.
+                                let km_blob = match srt::parse_control(&km_pkt) {
+                                    Some(srt::Control::KeyMaterial { km, .. }) => km,
+                                    _ => Vec::new(),
+                                };
+                                let now_us = g2g_core::metrics::monotonic_ns() / 1000;
+                                self.pending_km = Some(PendingKm {
+                                    pkt: km_pkt,
+                                    km: km_blob,
+                                    next_at_us: now_us + KM_RETRANSMIT_US,
+                                    retries: 0,
+                                });
                             }
                         }
                     }

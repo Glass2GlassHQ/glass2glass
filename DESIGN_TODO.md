@@ -524,9 +524,9 @@ Phased plan:
 - **SRT:** real-peer interop with libsrt/ffmpeg is validated for the **full
   matrix** by `srt_ffmpeg_interop` (ignored, needs ffmpeg+libsrt): both
   directions (ffmpeg caller -> `SrtSrc` listener; `SrtSink` caller -> ffmpeg
-  listener) x plaintext + AES-128 + AES-256 (M522/M525/M526). Still open:
-  KM-retransmit-until-KMRSP for lossy rekey. (TSBPD, AES-256, key rotation,
-  congestion control landed earlier.)
+  listener) x plaintext + AES-128 + AES-256 (M522/M525/M526). (TSBPD, AES-256,
+  key rotation, congestion control landed earlier; a rekey KM is now
+  retransmitted until the peer KMRSPs, M671, so it survives KM-packet loss.)
 - **RTMP:** multiple streams. (Window-acknowledgement back-pressure is done, M533:
   `RtmpSession` emits an `Acknowledgement` every Window-Ack-Size bytes received
   (configurable via `with_window_ack_size`), and `RtmpPublisher` tracks the
