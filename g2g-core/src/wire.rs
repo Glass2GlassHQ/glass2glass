@@ -771,7 +771,6 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
 mod tests {
     use super::*;
     use alloc::boxed::Box;
-    use alloc::vec;
 
     fn roundtrip(p: &PipelinePacket) -> PipelinePacket {
         let bytes = encode_packet(p).expect("encode");
@@ -975,7 +974,7 @@ mod tests {
         analytics.relate(d, c, RelationKind::Classifies);
 
         let mut blob = BlobMeta::new();
-        blob.push("embedding", vec![1, 2, 3, 4]);
+        blob.push("embedding", alloc::vec![1, 2, 3, 4]);
 
         let mut meta = FrameMetaSet::new();
         meta.attach(analytics.clone());

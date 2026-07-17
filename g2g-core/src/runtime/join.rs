@@ -285,6 +285,8 @@ impl<A: Future, B: Future> Future for Select2<A, B> {
 mod tests {
     use super::*;
     use crate::runtime::channel::bounded;
+    // Only the std-gated BoxFuture tests below construct a `Box`.
+    #[cfg(feature = "std")]
     use alloc::boxed::Box;
     use core::future::ready;
     use core::task::{RawWaker, RawWakerVTable, Waker};

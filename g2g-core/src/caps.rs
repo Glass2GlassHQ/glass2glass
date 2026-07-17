@@ -611,7 +611,7 @@ impl PassthroughFields {
 /// independently of its input. Same media variant required; `None` if a
 /// passthrough field has no overlap (the alternative dies) or the variants
 /// differ. Used by the solver's `DerivedCoupled` backward sweep.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match (input, pin) {
         (
@@ -685,7 +685,7 @@ pub(crate) fn couple_passthrough(input: &Caps, pin: &Caps, mask: PassthroughFiel
 /// codec vs raw-format boundary, so it is never a passthrough field there); the
 /// input keeps its own variant and scalar identity. `None` if a masked shared
 /// field has no overlap, or for a cross-variant pair with no shared geometry.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub(crate) fn couple_passthrough_derived(input: &Caps, pin: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match (input, pin) {
         (Caps::RawVideo { .. }, Caps::RawVideo { .. })
@@ -718,7 +718,7 @@ pub(crate) fn couple_passthrough_derived(input: &Caps, pin: &Caps, mask: Passthr
 /// i.e. the input feasibility can't be expressed as a single `Caps` (the solver
 /// then imposes no upstream feasibility constraint, the status quo). Used by
 /// `backward_feasible` for the mid-stream snapshot.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "runtime", feature = "std"))]
 pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match out {
         Caps::RawVideo { format, width, height, framerate } => {
@@ -773,7 +773,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
 /// the downstream value from `out` while the non-passthrough fields widen to
 /// `Any`; `sample` supplies the input variant and its scalar identity (codec /
 /// format), which `out` cannot give.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "runtime", feature = "std"))]
 pub(crate) fn project_passthrough_derived(
     sample: &Caps,
     out: &Caps,
@@ -802,7 +802,7 @@ pub(crate) fn project_passthrough_derived(
 
 /// The fields [`discover_passthrough`] probes for, one per [`PassthroughFields`]
 /// flag.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 #[derive(Clone, Copy)]
 enum ProbeField {
     Width,
@@ -829,7 +829,7 @@ enum ProbeField {
 /// there (a wrong `true` would narrow the input incorrectly). `sample` is a
 /// representative input alternative; its geometry is concretised first so a
 /// `Range`/`Any` input field does not confuse the equality test.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub(crate) fn discover_passthrough(f: &dyn Fn(&Caps) -> CapsSet, sample: &Caps) -> PassthroughFields {
     let base = concrete_probe_base(sample);
     // Soundness gate: a field is probed by *varying* it, so a closure that is
@@ -867,7 +867,7 @@ pub(crate) fn discover_passthrough(f: &dyn Fn(&Caps) -> CapsSet, sample: &Caps) 
 /// and passes; only the unsound direction (declared-but-not-honoured) fails. The
 /// conservative reverse (a field the closure passes through but the mask omits)
 /// is sound, just a missed coupling, so it is not flagged.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 pub(crate) fn verify_passthrough_sound(
     f: &dyn Fn(&Caps) -> CapsSet,
     passthrough: PassthroughFields,
@@ -897,7 +897,7 @@ pub(crate) fn verify_passthrough_sound(
 /// is probed on concrete inputs (a `Range`/`Any` input field would otherwise
 /// make the output-equals-input test ambiguous). Scalar identity (format / codec
 /// / channels) is kept from `sample`, since the closure may key on it.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn concrete_probe_base(sample: &Caps) -> Caps {
     match sample {
         Caps::RawVideo { format, .. } => Caps::RawVideo {
@@ -919,7 +919,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
 
 /// True when `f` passes `field` through: two concrete probes that differ only in
 /// `field` each produce a single output whose `field` equals the probe's.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn probe_field(f: &dyn Fn(&Caps) -> CapsSet, base: &Caps, field: ProbeField) -> bool {
     let (Some(p0), Some(p1)) = (set_probe(base, field, false), set_probe(base, field, true)) else {
         return false;
@@ -932,7 +932,7 @@ fn probe_field(f: &dyn Fn(&Caps) -> CapsSet, base: &Caps, field: ProbeField) -> 
 
 /// The single output of `f(input)`, or `None` if it produced zero or several
 /// alternatives (discovery stays conservative on ambiguous closures).
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn single_out(f: &dyn Fn(&Caps) -> CapsSet, input: &Caps) -> Option<Caps> {
     let set = f(input);
     match set.alternatives() {
@@ -943,7 +943,7 @@ fn single_out(f: &dyn Fn(&Caps) -> CapsSet, input: &Caps) -> Option<Caps> {
 
 /// `base` with `field` set to probe value 0 (`hi = false`) or 1 (`hi = true`),
 /// or `None` if `base`'s variant has no such field.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn set_probe(base: &Caps, field: ProbeField, hi: bool) -> Option<Caps> {
     let mut c = base.clone();
     match (&mut c, field) {
@@ -982,7 +982,7 @@ fn set_probe(base: &Caps, field: ProbeField, hi: bool) -> Option<Caps> {
 /// True when `out`'s `field` equals `inp`'s. Geometry/rate compare across
 /// variants (both `RawVideo` and `CompressedVideo` carry them); the scalar
 /// identity / channels / sample_rate require the same variant.
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn field_eq(out: &Caps, inp: &Caps, field: ProbeField) -> bool {
     match field {
         ProbeField::Width => geo_width(out).zip(geo_width(inp)).is_some_and(|(a, b)| a == b),
@@ -1005,7 +1005,7 @@ fn field_eq(out: &Caps, inp: &Caps, field: ProbeField) -> bool {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn geo_width(c: &Caps) -> Option<&Dim> {
     match c {
         Caps::RawVideo { width, .. } | Caps::CompressedVideo { width, .. } => Some(width),
@@ -1013,7 +1013,7 @@ fn geo_width(c: &Caps) -> Option<&Dim> {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn geo_height(c: &Caps) -> Option<&Dim> {
     match c {
         Caps::RawVideo { height, .. } | Caps::CompressedVideo { height, .. } => Some(height),
@@ -1021,7 +1021,7 @@ fn geo_height(c: &Caps) -> Option<&Dim> {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(feature = "runtime")]
 fn geo_rate(c: &Caps) -> Option<&Rate> {
     match c {
         Caps::RawVideo { framerate, .. } | Caps::CompressedVideo { framerate, .. } => Some(framerate),
@@ -1443,6 +1443,8 @@ pub enum TensorLayout {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    // bare `vec!` is used only by the runtime-gated passthrough tests below.
+    #[cfg(feature = "runtime")]
     use alloc::vec;
 
     fn video(width: Dim, height: Dim, framerate: Rate) -> Caps {
@@ -1710,6 +1712,7 @@ mod tests {
         assert_eq!(fixed, video(Dim::Fixed(640), Dim::Fixed(480), Rate::Fixed(30 << 16)));
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn discover_passthrough_decoder_geometry_and_framerate() {
         // H264 -> Nv12: geometry + framerate copied through, format retargeted.
@@ -1733,6 +1736,7 @@ mod tests {
         assert!(!pt.format, "codec -> format is retargeted, not passthrough");
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn discover_passthrough_none_for_fixed_output() {
         // Output ignores the input (fixed dims): nothing invertible to discover.
@@ -1753,6 +1757,7 @@ mod tests {
         assert_eq!(discover_passthrough(&dec, &sample), PassthroughFields::NONE);
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn discover_passthrough_identity_convert_all_fields() {
         // RawVideo -> RawVideo identity: every probed field passes through.
@@ -1761,6 +1766,7 @@ mod tests {
         assert!(pt.width && pt.height && pt.framerate && pt.format);
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn discover_passthrough_scaler_retargets_geometry_only() {
         // A scaler fixes output geometry but keeps format + framerate: those two
@@ -1779,6 +1785,7 @@ mod tests {
         assert!(!pt.width && !pt.height, "geometry is retargeted by the scaler");
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn discover_passthrough_none_for_multivalued_closure() {
         // A converter that offers {passthrough, retargeted-NV12} for an RGBA input
@@ -1811,6 +1818,7 @@ mod tests {
         assert_eq!(discover_passthrough(&conv, &sample), PassthroughFields::NONE);
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn verify_passthrough_sound_accepts_honoured_mask() {
         // A scaler keeps format + framerate, retargets geometry. A mask declaring
@@ -1842,6 +1850,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn verify_passthrough_sound_rejects_overclaiming_mask() {
         // The same scaler, but a mask that also claims `width` passthrough: the
@@ -1866,6 +1875,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "runtime")]
     #[test]
     fn verify_passthrough_sound_passes_when_closure_rejects_input() {
         // A closure that rejects the sample (empty output) has nothing to verify,

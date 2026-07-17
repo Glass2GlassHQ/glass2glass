@@ -813,6 +813,7 @@ mod link_tests {
         assert_eq!(got, [3], "after remove(), the odd frame passes");
     }
 
+    #[cfg(feature = "std")]
     fn drained_sequences(rx: &LinkReceiver) -> Vec<u64> {
         let mut got = Vec::new();
         while let Some(PipelinePacket::DataFrame(f)) = rx.try_recv() {
@@ -821,6 +822,8 @@ mod link_tests {
         got
     }
 
+    // Per-edge drop policy is wired only by the std graph runner.
+    #[cfg(feature = "std")]
     #[test]
     fn drop_newest_discards_incoming_when_full() {
         let (mut tx, rx) = link(2);
@@ -840,6 +843,7 @@ mod link_tests {
         assert_eq!(*counter.lock(), 1);
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn drop_oldest_evicts_front_when_full() {
         let (mut tx, rx) = link(2);
@@ -873,6 +877,7 @@ mod link_tests {
         assert_eq!(rx.fill_percent(), 75, "after one drain, 3 of 4 = 75%");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn leaky_links_never_drop_control_packets() {
         // A capacity-1 leaky link, filled with a data frame. A control packet
