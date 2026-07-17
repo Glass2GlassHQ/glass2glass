@@ -44,11 +44,11 @@
 //! defaults to `wayland-0` so `autovideosink` finds a compositor without the
 //! caller exporting it; an existing value is left untouched.
 //!
-//! Debugging: `G2G_DEBUG` (the `GST_DEBUG` analog, e.g. `G2G_DEBUG=*:debug`)
-//! sets per-category log thresholds; `G2G_CAPS_TRACE=1` turns on the
-//! caps-negotiation explainer, which narrates the per-edge intersect / fixate
-//! decisions (and, on a `CapsMismatch`, names the two conflicting elements and
-//! the caps each wanted). Both are read by `g2g_core::log::init_from_env`.
+//! Debugging: a failed negotiation names the two conflicting elements and the
+//! caps each wanted by default (no env var). `G2G_DEBUG` (the `GST_DEBUG` analog,
+//! e.g. `G2G_DEBUG=*:debug`) sets per-category log thresholds; `G2G_CAPS_TRACE=1`
+//! adds the successful per-edge intersect / fixate narration on top. Both are
+//! read by `g2g_core::log::init_from_env`.
 
 use std::io::Write;
 use std::process;
@@ -76,6 +76,18 @@ const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--thread
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
+
+// Printed on `--help` (not on the terse empty-invocation error): a map of the
+// rest of the dev tooling, so a `gst-launch` reflex finds the ecosystem. Full
+// reference in DEVTOOLS.md.
+const SEE_ALSO: &str = "\n\
+dev tooling (see DEVTOOLS.md):\n  \
+watch a run live      g2g-launch --observe 8787 <pipeline>   then open http://127.0.0.1:8787\n  \
+why did nego fail     a failed run prints the conflicting elements + caps by default; G2G_CAPS_TRACE=1 adds the per-edge trace\n  \
+see the graph         g2g-launch --dot <pipeline> | dot -Tsvg -o pipe.svg\n  \
+inspect an element    g2g-inspect [<name>]                    role, caps, and every property\n  \
+build it visually     tools/builder/ (React Flow: assemble, import, export a pipeline)\n  \
+record / replay       <pipeline> ! recordsink location=cap.g2g   then   replaysrc location=cap.g2g ! ...";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
 #[derive(Default)]
@@ -306,6 +318,7 @@ fn main() {
     let (opts, tokens) = parse_opts(std::env::args().skip(1));
     if opts.help {
         println!("{USAGE}");
+        println!("{SEE_ALSO}");
         return;
     }
     let pipeline = tokens.join(" ");

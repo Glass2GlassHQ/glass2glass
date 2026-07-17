@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M698: `g2g-launch --help` lists the rest of the dev tooling (live dashboard, DOT, inspect, visual builder, record/replay) so it is discoverable from the tool devs reach for first.
 - M697: visual builder imports a gst-launch line or declarative JSON onto the canvas, warns on incompatible link caps, and emits a branched export that actually parses.
 - M696: dashboard edge preview thumbnails NV12 / I420 raw video and MJPEG keyframes, and shows a codec card for other compressed edges instead of a hexdump.
 - M695: `g2g-launch` prints the failing caps negotiation (the conflicting elements and the caps each wanted) by default, without `G2G_CAPS_TRACE`.
