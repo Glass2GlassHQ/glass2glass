@@ -1019,27 +1019,24 @@ the remaining items extend them. Sequencing: the telemetry tap comes first (the
 dashboard, edge probes, negotiation overlay, and latency waterfall all consume
 it); the builder and the scaffold are independent.
 
-- **Telemetry tap + live pipeline dashboard.** Turn the end-of-run
-  `RunStats` snapshot into a live, subscribable stream, then render it in a
-  browser.
-  - Runtime tap: an `observe` cargo feature (implies `std`) adds an
-    `ObserverHandle` the runners publish into: per-edge packet / byte counters,
-    link fill, drops, `CapsChanged` / error / EOS events, element lifecycle,
-    and the M399 per-element `process()` p50/p99 (reuse `ElementProbe`,
-    `g2g-core/src/runtime/instrument.rs`). The no_std baseline is untouched.
-  - Close the M399 remainder as part of the tap: the fan-in / fan-out /
-    session / muxer runners (leave `per_element` empty today); per-*link*
-    transit / queue-residency time (a wall-clock stamp carried with each
-    packet, sampled at recv); source-side timing (sources run one long `run()`
-    loop, so their cost only shows as downstream input fill).
-  - Transport: serialize snapshots + events as serde JSON over a small local
-    WebSocket server (reuse `webutil` / tungstenite), enabled by
-    `g2g-launch --observe <port>`.
-  - Frontend: a static React Flow single page served from the same port,
-    `tools/dashboard/` (vite; no Tauri). Topology from the graph description,
-    edges colored by fill / drops, per-element latency histograms, event log.
-  - Validate live: run an RTSP graph, watch counters move, kill the source,
-    see the failure event arrive.
+- **Telemetry tap + live pipeline dashboard (M677, core done).** The
+  `Observer` (`g2g-core/src/runtime/observe.rs`) shares graph topology + the
+  arms' `ElementProbe` `Arc`s live; `run_graph_observed` registers them; the
+  transport (`g2g-plugins::dashboard`, `observe` feature) serves telemetry +
+  bus events as JSON over one WS/HTTP port; `g2g-launch --observe <port>` runs
+  it with the self-contained page in `tools/dashboard/`. Deviations from the
+  sketch above: no serde in `g2g-core` (JSON built in the transport, keeping
+  the portability core clean); vanilla JS/SVG page, not React Flow (zero build
+  step, JSON protocol so React Flow is a drop-in swap). Remaining:
+  - Per-edge packet / byte counters + drops in the live tap (drops surface
+    only in end-of-run `RunStats` today).
+  - The M399 per-element remainder, now also feeding the tap: fan-in / fan-out /
+    session / muxer runners (leave `per_element` empty); per-*link* transit /
+    queue-residency time (a wall-clock stamp carried with each packet, sampled
+    at recv); source-side timing (their cost only shows as downstream input
+    fill); wiring the observer into the threaded runner (`--observe` is
+    cooperative-runner only).
+  - Validate live against RTSP (unit + e2e cover the localhost path today).
 - **Visual pipeline builder.** A second tab of the dashboard app.
   - Palette + property panels generated from `registry.rs` metadata: add a
     `g2g-inspect --json` machine dump (element names, pad caps,
