@@ -15,6 +15,7 @@ mod channel;
 mod coordinator;
 mod instrument;
 mod join;
+mod passthrough;
 mod progress;
 mod runner;
 mod seek;

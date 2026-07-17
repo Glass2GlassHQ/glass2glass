@@ -15,11 +15,10 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::caps::{
-    couple_passthrough_derived, discover_passthrough, Caps, CapsSet, PassthroughFields,
-};
+use crate::caps::{Caps, CapsSet, PassthroughFields};
+use crate::runtime::passthrough::{couple_passthrough_derived, discover_passthrough};
 #[cfg(feature = "std")]
-use crate::caps::{project_passthrough, project_passthrough_derived};
+use crate::runtime::passthrough::{project_passthrough, project_passthrough_derived};
 use crate::format_element::CapsConstraint;
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
@@ -388,7 +387,7 @@ fn forward_propagate(
             // input. `DerivedOutput` carries no mask, so nothing to check.
             if let CapsConstraint::DerivedCoupled { passthrough, .. } = c {
                 debug_assert!(
-                    crate::caps::verify_passthrough_sound(f.as_ref(), *passthrough, &fixed),
+                    crate::runtime::passthrough::verify_passthrough_sound(f.as_ref(), *passthrough, &fixed),
                     "DerivedCoupled passthrough mask claims a field its derive closure does not pass through"
                 );
             }
@@ -1712,7 +1711,7 @@ fn apply_muxer_node<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::couple_passthrough;
+    use crate::runtime::passthrough::couple_passthrough;
     use crate::caps::{Dim, Rate, VideoCodec, RawVideoFormat};
     use alloc::boxed::Box;
     use alloc::vec;
