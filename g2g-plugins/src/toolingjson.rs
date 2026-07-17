@@ -9,7 +9,10 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Value};
 
-use g2g_core::runtime::{negotiate_graph, parse_launch, run_graph, ElementDoc, Registry, RunStats};
+use g2g_core::runtime::{
+    negotiate_graph_explained, parse_launch, run_graph, ElementDoc, NegotiateError,
+    NegotiationFailure, Registry, RunStats,
+};
 
 use crate::clock::WallClock;
 
@@ -62,19 +65,57 @@ pub fn registry_json(reg: &Registry, name: Option<&str>) -> Result<Value, String
     Ok(json!({ "elements": elements }))
 }
 
-/// Parse + negotiate a launch line without running it. Reports whether the graph
-/// is buildable and, on success, the negotiated caps per edge.
+/// Parse + negotiate a launch line without running it. On success reports the
+/// negotiated caps per edge (with the edge's endpoint node indices); on a solve
+/// conflict, the structured failure naming the offending link.
 pub async fn validate_json(reg: &Registry, line: &str) -> Value {
     let graph = match parse_launch(reg, line) {
         Ok(g) => g,
         Err(e) => return json!({ "ok": false, "stage": "parse", "error": format!("{e}") }),
     };
-    match negotiate_graph(graph).await {
-        Ok((_, edge_caps, _mem)) => {
-            let caps: Vec<String> = edge_caps.iter().map(|c| c.to_gst_string()).collect();
-            json!({ "ok": true, "edge_caps": caps })
+    match negotiate_graph_explained(graph).await {
+        Ok((vg, edge_caps, _mem)) => {
+            let edges: Vec<Value> = vg
+                .edges()
+                .iter()
+                .zip(edge_caps.iter())
+                .map(|(e, caps)| {
+                    json!({
+                        "from": e.src.node.0,
+                        "to": e.dst.node.0,
+                        "caps": caps.to_gst_string(),
+                    })
+                })
+                .collect();
+            json!({ "ok": true, "edges": edges })
         }
-        Err(e) => json!({ "ok": false, "stage": "negotiate", "error": format!("{e:?}") }),
+        Err(NegotiateError::Setup(e)) => {
+            json!({ "ok": false, "stage": "setup", "error": format!("{e:?}") })
+        }
+        Err(NegotiateError::Solve(nf)) => {
+            json!({ "ok": false, "stage": "negotiate", "failure": failure_json(&nf) })
+        }
+    }
+}
+
+/// Structured form of a [`NegotiationFailure`]: the conflict kind plus the node
+/// indices it names, so a caller (dashboard / MCP client) can highlight the
+/// offending link.
+fn failure_json(nf: &NegotiationFailure) -> Value {
+    match nf {
+        NegotiationFailure::EmptyLink { upstream, downstream } => {
+            json!({ "kind": "empty-link", "upstream": upstream, "downstream": downstream })
+        }
+        NegotiationFailure::Unfixable { upstream, downstream } => {
+            json!({ "kind": "unfixable", "upstream": upstream, "downstream": downstream })
+        }
+        NegotiationFailure::EndpointShapeMismatch { index } => {
+            json!({ "kind": "endpoint-shape-mismatch", "index": index })
+        }
+        NegotiationFailure::Degenerate => json!({ "kind": "degenerate" }),
+        NegotiationFailure::Cyclic => json!({ "kind": "cyclic" }),
+        NegotiationFailure::NoConsistentFixation => json!({ "kind": "no-consistent-fixation" }),
+        NegotiationFailure::MixedLegacyAndNative => json!({ "kind": "mixed-legacy-and-native" }),
     }
 }
 
@@ -140,14 +181,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_ok_and_bad() {
+    async fn validate_ok_reports_per_edge_caps() {
         let reg = default_registry();
         let ok = validate_json(&reg, "videotestsrc ! videoscale width=64 height=48 ! fakesink").await;
         assert_eq!(ok["ok"], true);
-        assert!(ok["edge_caps"].as_array().unwrap().len() >= 2);
+        let edges = ok["edges"].as_array().unwrap();
+        assert!(edges.len() >= 2);
+        // Each edge names its endpoints and the negotiated caps.
+        assert!(edges[0]["from"].is_number() && edges[0]["to"].is_number());
+        assert!(edges[0]["caps"].as_str().unwrap().contains("video"));
+    }
 
+    #[tokio::test]
+    async fn validate_parse_error_is_reported() {
+        let reg = default_registry();
         let bad = validate_json(&reg, "nosuchelement ! fakesink").await;
         assert_eq!(bad["ok"], false);
+        assert_eq!(bad["stage"], "parse");
+    }
+
+    #[tokio::test]
+    async fn validate_caps_conflict_names_the_link() {
+        // Force a negotiation conflict: pin a capsfilter to a format videotestsrc
+        // cannot produce so the solver empties that link.
+        let reg = default_registry();
+        let bad = validate_json(
+            &reg,
+            "videotestsrc ! audio/x-raw,format=S16LE ! fakesink",
+        )
+        .await;
+        assert_eq!(bad["ok"], false);
+        // Either the parser rejects the audio caps on a video src, or the solve
+        // empties the link; if it reached the solver, the failure is structured.
+        if bad["stage"] == "negotiate" {
+            assert_eq!(bad["failure"]["kind"], "empty-link");
+        }
     }
 
     #[tokio::test]

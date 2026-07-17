@@ -69,7 +69,7 @@ use crate::runtime::runner::{
 };
 use crate::runtime::solver::{
     graph_downstream_feasibility, resolve_forward_output, solve_graph_labeled, solve_linear,
-    ForwardResolve, NodeConstraint,
+    ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
 
@@ -1688,10 +1688,36 @@ pub async fn negotiate_graph<'a>(
     (ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>, Vec<crate::memory::MemoryDomainKind>),
     G2gError,
 > {
-    let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
+    negotiate_graph_explained(graph).await.map_err(|e| match e {
+        NegotiateError::Setup(err) => err,
+        NegotiateError::Solve(_) => G2gError::CapsMismatch,
+    })
+}
+
+/// Why [`negotiate_graph_explained`] could not negotiate a graph. `Setup` is a
+/// structural / I/O failure before the solve (too few nodes, a bad source, a
+/// source caps-probe error); `Solve` carries the structured
+/// [`NegotiationFailure`] naming the conflicting link, which the opaque
+/// [`negotiate_graph`] flattens to `CapsMismatch`.
+#[derive(Debug)]
+pub enum NegotiateError {
+    Setup(G2gError),
+    Solve(NegotiationFailure),
+}
+
+/// As [`negotiate_graph`], but preserves the structured [`NegotiationFailure`]
+/// on a solve conflict (for the caps-negotiation explainer / `validate`
+/// tooling). `negotiate_graph` is the opaque wrapper over this.
+pub async fn negotiate_graph_explained<'a>(
+    graph: Graph<GraphNodeRef<'a>>,
+) -> Result<
+    (ValidatedGraph<GraphNodeRef<'a>>, Vec<Caps>, Vec<crate::memory::MemoryDomainKind>),
+    NegotiateError,
+> {
+    let mut vg = graph.finish().map_err(|_| NegotiateError::Setup(G2gError::CapsMismatch))?;
     let n = vg.node_count();
     if n < 2 {
-        return Err(G2gError::CapsMismatch);
+        return Err(NegotiateError::Setup(G2gError::CapsMismatch));
     }
     let topo = vg.topo().to_vec();
 
@@ -1700,20 +1726,24 @@ pub async fn negotiate_graph<'a>(
     let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
     for &node in &topo {
         if matches!(vg.kind(node), NodeKind::Source) {
-            let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+            let GraphNodeRef::Source(src) = vg
+                .element_mut(node)
+                .ok_or(NegotiateError::Setup(G2gError::CapsMismatch))?
             else {
-                return Err(G2gError::CapsMismatch);
+                return Err(NegotiateError::Setup(G2gError::CapsMismatch));
             };
-            source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
+            source_caps[node.0 as usize] =
+                Some(src.intercept_caps().await.map_err(NegotiateError::Setup)?);
         }
     }
 
     // Phase 2: build constraints and solve. Scope the immutable borrow so `vg`
     // moves out cleanly in the return.
     let solution = {
-        let constraints = build_node_constraints(&vg, &source_caps)?;
+        let constraints =
+            build_node_constraints(&vg, &source_caps).map_err(NegotiateError::Setup)?;
         solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
-            .map_err(|_| G2gError::CapsMismatch)?
+            .map_err(NegotiateError::Solve)?
     };
 
     // Per-edge memory domain: the domain of the node producing onto that edge.

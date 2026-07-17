@@ -1041,12 +1041,13 @@ Outstanding developer-tooling tasks, highest leverage first.
   unsubscribe per edge over the same WebSocket; conversion runs on a sampled
   copy at a capped rate (e.g. 2/s), never in the hot path, zero cost when no
   subscriber.
-- **Visual negotiation explainer.** The solver explainer
-  (`runtime/solver.rs`, DESIGN 4.20a) emits text today; add a structured serde
-  form (per-node constraint, per-edge candidate sets, the failing edge with
-  both caps sets at the point of failure). The dashboard renders a failed link
-  red with both sides + the intersection result; on success it shows the
-  negotiated caps per edge (the DOT viz already computes these).
+- **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
+  per-edge negotiated caps and, on a solve conflict, the structured failure
+  (kind + node indices). Remaining: carry the *both caps sets* at the point of
+  failure (the upstream produce set vs downstream accept set), which needs the
+  solver to surface the candidate sets, not just the empty-link indices; and a
+  visual overlay (the builder gaining a server-side validate endpoint to render
+  the failing link red).
 - **Latency waterfall.** Per-frame glass-to-glass breakdown. Needs the tap's
   link-transit stamps plus a source-stamped sequence id so one frame's path
   can be assembled across elements. Views: a per-frame waterfall (queue
@@ -1059,9 +1060,8 @@ Outstanding developer-tooling tasks, highest leverage first.
   QA in its own repo, so decide first whether this lives there (adding the
   caps / topology diff) or in-repo; don't build both.
 - **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
-  validate / launch. Add a `validate` path that returns the structured
-  negotiation explainer (once that exists) instead of just ok / error, and a
-  tool to run a declarative graph file.
+  validate / launch. Add a tool to run a declarative graph file, and stream
+  `launch` telemetry (via the `Observer`) rather than only final stats.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 

@@ -85,9 +85,10 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    auto_plug_domain_converters, copy_plan, negotiate_graph, run_graph, run_graph_observed,
-    run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress,
-    DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
+    auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
+    run_graph_observed, run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy,
+    run_graph_with_progress, DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
+    NegotiateError,
 };
 
 #[cfg(feature = "std")]

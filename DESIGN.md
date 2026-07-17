@@ -2194,6 +2194,18 @@ duration_secs)` (run with a deadline, report `RunStats`). The tool bodies live i
 and run shapes have one definition; the async tools drive a current-thread tokio
 runtime via `block_on` while the stdio loop stays synchronous.
 
+The `validate` path returns a structured negotiation report, not just pass/fail.
+`negotiate_graph` flattens a solve conflict to an opaque `CapsMismatch`;
+`negotiate_graph_explained` (its inner) instead returns `NegotiateError`, which
+splits a setup failure (`Setup(G2gError)`, e.g. a source caps-probe I/O error)
+from a solve conflict (`Solve(NegotiationFailure)`, the structured detail naming
+the offending link). `toolingjson::validate_json` reports, on success, the
+negotiated caps per edge with the edge's endpoint node indices, and on a solve
+conflict the failure kind (`empty-link`, `unfixable`, ...) plus those indices, so
+a caller can highlight the failing link. Carrying the two candidate caps sets at
+the point of failure (upstream produce vs downstream accept) is a follow-up
+needing the solver to surface its per-edge domains.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this

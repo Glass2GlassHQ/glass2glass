@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M682: `negotiate_graph_explained` preserves the structured `NegotiationFailure`, so `validate` reports per-edge negotiated caps and names the conflicting link.
 - M681: `g2g-mcp` MCP server (JSON-RPC over stdio) exposes list_elements / inspect / validate / launch for agent-driven dev, over shared `toolingjson` internals.
 - M680: `recordsink` / `replaysrc` capture a pipeline's packet stream to a file and play it back byte-identically, for deterministic repro.
 - M679: `cargo xtask new-element <name> --kind source|transform|sink` stamps a compiling element skeleton, a scaffold test, and the `lib.rs` module wiring.
