@@ -185,8 +185,14 @@ that port. Build with the `observe` feature:
 ```sh
 cargo run -p g2g-plugins --features observe --bin g2g-launch -- \
   --observe 8787 videotestsrc ! videoscale ! fakesink
-# open http://127.0.0.1:8787
+# open http://127.0.0.1:8787 (wait for the "dashboard: ..." line first)
 ```
+
+By default the dashboard binds loopback (`127.0.0.1`), so open it on the same
+machine. To reach it from another host, bind all interfaces with
+`--observe-host 0.0.0.0` and open `http://<machine-ip>:8787`. The dashboard has
+no auth and its telemetry / edge previews expose frame content, so only bind
+non-loopback on a trusted network.
 
 The page (`tools/dashboard/index.html`, self-contained, no build step) draws the
 graph left-to-right, colors each node by input-link fill, shows per-element

@@ -72,7 +72,7 @@ use g2g_plugins::registry::default_registry;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--threads] [--observe <port>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -109,6 +109,12 @@ struct Opts {
     /// (`--observe <port>`): telemetry + bus events stream over a WebSocket, and
     /// the dashboard page is served on the same port. Needs the `observe` build.
     observe: Option<u16>,
+    /// Bind address for `--observe` (`--observe-host <addr>`); default
+    /// `127.0.0.1` (loopback only). Set `0.0.0.0` to serve on all interfaces so
+    /// another machine can reach the dashboard. The dashboard has no auth and its
+    /// telemetry / edge previews expose frame content, so only bind non-loopback
+    /// on a trusted network.
+    observe_host: Option<String>,
 }
 
 /// Parse a `--observe` port, warning and returning `None` on a bad value.
@@ -156,6 +162,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.observe = parse_port(port);
             continue;
         }
+        if let Some(host) = arg.strip_prefix("--observe-host=") {
+            opts.observe_host = Some(host.to_string());
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
@@ -178,6 +188,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--observe" => match args.next() {
                 Some(port) => opts.observe = parse_port(&port),
                 None => eprintln!("g2g-launch: --observe needs a port argument"),
+            },
+            "--observe-host" => match args.next() {
+                Some(host) => opts.observe_host = Some(host),
+                None => eprintln!("g2g-launch: --observe-host needs an address argument"),
             },
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
@@ -465,7 +479,8 @@ fn main() {
     if let Some(port) = opts.observe {
         #[cfg(feature = "observe")]
         {
-            run_dashboard(&rt, graph, port, opts.quiet);
+            let host = opts.observe_host.as_deref().unwrap_or("127.0.0.1");
+            run_dashboard(&rt, graph, host, port, opts.quiet);
             return;
         }
         #[cfg(not(feature = "observe"))]
@@ -563,14 +578,30 @@ fn main() {
     }
 }
 
-/// Run the pipeline while serving the live dashboard on `port`. Sets up an
+/// Run the pipeline while serving the live dashboard on `host:port`. Sets up an
 /// `Observer` (topology + per-element telemetry) and a `Bus` (events), fans bus
 /// messages to every WebSocket client through a broadcast channel, and drives the
 /// run future against the server with `select!` so the server is dropped when the
 /// pipeline ends.
 #[cfg(feature = "observe")]
-fn run_dashboard(rt: &tokio::runtime::Runtime, graph: Graph<GraphNode>, port: u16, quiet: bool) {
+fn run_dashboard(
+    rt: &tokio::runtime::Runtime,
+    graph: Graph<GraphNode>,
+    host: &str,
+    port: u16,
+    quiet: bool,
+) {
     use tokio::sync::broadcast;
+
+    // Non-loopback binds expose unauthenticated telemetry + frame previews.
+    let loopback = host == "127.0.0.1" || host == "::1" || host == "localhost";
+    if !loopback {
+        eprintln!(
+            "g2g-launch: --observe-host {host} serves the dashboard on all matching \
+             interfaces with no auth (telemetry + edge previews are readable by anyone \
+             who can reach it); use only on a trusted network."
+        );
+    }
 
     let clock = WallClock::new();
     let started = Instant::now();
@@ -590,7 +621,10 @@ fn run_dashboard(rt: &tokio::runtime::Runtime, graph: Graph<GraphNode>, port: u1
         });
 
         if !quiet {
-            println!("dashboard: http://127.0.0.1:{port}  (pipeline running, Ctrl-C to stop)");
+            // Show a dialable URL: for an all-interfaces bind, loopback is the
+            // local one to open (the machine's routable IP reaches it too).
+            let shown = if host == "0.0.0.0" || host == "::" { "127.0.0.1" } else { host };
+            println!("dashboard: http://{shown}:{port}  (bound {host}, pipeline running, Ctrl-C to stop)");
         }
 
         // The run future finishes with the pipeline; the server runs forever.
@@ -598,7 +632,7 @@ fn run_dashboard(rt: &tokio::runtime::Runtime, graph: Graph<GraphNode>, port: u1
         // the server; a bind error ends the server first and we surface it.
         tokio::select! {
             r = run_graph_observed(graph, &clock, LINK_CAPACITY, &observer, Some(&bus_handle)) => r,
-            e = g2g_plugins::dashboard::serve(observer.clone(), ev_tx.clone(), port) => {
+            e = g2g_plugins::dashboard::serve(observer.clone(), ev_tx.clone(), host, port) => {
                 if let Err(err) = e {
                     eprintln!("dashboard: server error: {err}");
                 }

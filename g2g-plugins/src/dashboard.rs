@@ -171,7 +171,8 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
     Some(obj.to_string())
 }
 
-/// Serve the dashboard on `127.0.0.1:port` until the process ends. Each
+/// Serve the dashboard on `host:port` until the process ends (`host` is
+/// `127.0.0.1` for loopback-only, `0.0.0.0` for all interfaces). Each
 /// connection either gets the static page (plain HTTP) or a live telemetry +
 /// event stream (WebSocket). `events` is the fan-out channel a bus-drain task
 /// publishes [`event_json`] strings into; every WS client subscribes to it.
@@ -181,9 +182,10 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
 pub async fn serve(
     observer: Observer,
     events: broadcast::Sender<String>,
+    host: &str,
     port: u16,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener = TcpListener::bind((host, port)).await?;
     serve_on(listener, observer, events).await
 }
 

@@ -2176,8 +2176,11 @@ never stalls an arm. The transport lives in `g2g-plugins::dashboard` (the
 answers a plain `GET /` with a self-contained dashboard page
 (`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
 every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
-broadcast channel drained off the `Bus`). The JSON is built in the transport, so
-`g2g-core` stays serde-free, consistent with the portability-core principle. The
+broadcast channel drained off the `Bus`). It binds loopback by default;
+`--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
+no-auth warning since telemetry + edge previews carry frame content. The JSON is
+built in the transport, so `g2g-core` stays serde-free, consistent with the
+portability-core principle. The
 observer rides the cooperative graph runner today; the threaded runner and the
 fan-in / fan-out / muxer runners are follow-ups, matching where `per_element` is
 already collected.
