@@ -252,6 +252,18 @@ pub fn default_registry() -> Registry {
         Caps::Text { format: g2g_core::TextFormat::Srt },
         || Box::new(crate::subtitlesrc::SubtitleSrc::new("", g2g_core::TextFormat::Srt)),
     ));
+    // Image-sequence source (M-gap): reads img%05d.jpg style sequences, Motion-JPEG
+    // by default so `multifilesrc location=img%05d.jpg ! mjpegdec ! ...` works.
+    reg.register_source(SourceFactory::new(
+        "multifilesrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        },
+        || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
+    ));
     // Application push source (M233): the real caps come from its `caps`
     // property; buffers arrive from `appsrc::register_appsrc`.
     reg.register_source(SourceFactory::new(
@@ -286,6 +298,13 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || Box::new(Alpha::new())));
     reg.register_launch(LaunchFactory::of::<VideoBox>("videobox", || Box::new(VideoBox::new())));
+    reg.register_launch(LaunchFactory::of::<crate::gamma::Gamma>("gamma", || Box::new(crate::gamma::Gamma::new())));
+    reg.register_launch(LaunchFactory::of::<crate::deinterlace::Deinterlace>("deinterlace", || {
+        Box::new(crate::deinterlace::Deinterlace::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::timeoverlay::TimeOverlay>("timeoverlay", || {
+        Box::new(crate::timeoverlay::TimeOverlay::new())
+    }));
     // Subtitle overlay (M171): the `location=` property loads an SRT / WebVTT
     // file (std), so cues render by PTS without hand-built Rust.
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
@@ -334,6 +353,20 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<AudioPanorama>("audiopanorama", || {
         Box::new(AudioPanorama::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::audioamplify::AudioAmplify>("audioamplify", || {
+        Box::new(crate::audioamplify::AudioAmplify::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::audioecho::AudioEcho>("audioecho", || {
+        Box::new(crate::audioecho::AudioEcho::new())
+    }));
+    // Level meter + silence detector (passthrough analyzers): measurements are
+    // read via getters, the g2g analog of gst posting them on the bus.
+    reg.register_launch(LaunchFactory::of::<crate::level::Level>("level", || {
+        Box::new(crate::level::Level::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::cutter::Cutter>("cutter", || {
+        Box::new(crate::cutter::Cutter::new())
+    }));
 
     // Demuxers + parsers + passthrough.
     reg.register_launch(LaunchFactory::of::<TsDemux>("tsdemux", || Box::new(TsDemux::new())));
@@ -368,6 +401,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Progress report passthrough: counts frames / bytes, logs periodically.
+    reg.register_launch(LaunchFactory::new("progressreport", Vec::new(), || {
+        Box::new(crate::progressreport::ProgressReport::new())
+    }));
     // A/V offset (M385): shifts PTS/DTS by `offset=` ns; the av-offset sync knob.
     reg.register_launch(LaunchFactory::new("avoffset", Vec::new(), || {
         Box::new(crate::avoffset::AvOffset::new(0))
@@ -392,6 +429,18 @@ pub fn default_registry() -> Registry {
                 framerate: Rate::Fixed(30 << 16),
             },
         ))
+    }));
+    // Sequential concatenation and live input switch: both N-in / 1-out, so the
+    // parser builds them by link degree (input count from the branches linked in).
+    reg.register_muxer(MuxerFactory::new("concat", |inputs| {
+        Box::new(crate::concat::Concat::new(inputs))
+    }));
+    reg.register_muxer(MuxerFactory::new("input-selector", |inputs| {
+        Box::new(crate::inputselector::InputSelector::new(inputs))
+    }));
+    // Live output switch: 1-in / N-out, built by the demux link degree.
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new("output-selector", |outputs| {
+        Box::new(crate::outputselector::OutputSelector::new(outputs))
     }));
     // Subtitle-overlay fan-in (M477): the launch-line sibling of the single-input
     // `textoverlay` above, the analog of GStreamer's `textoverlay` text_sink
@@ -461,6 +510,9 @@ pub fn default_registry() -> Registry {
         Box::new(crate::appsink::AppSink::new())
     }));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
+    reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>("multifilesink", || {
+        Box::new(crate::multifilesink::MultiFileSink::new(""))
+    }));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));
 

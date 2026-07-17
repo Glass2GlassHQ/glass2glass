@@ -67,6 +67,16 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     // would contradict reality).
     ("rtph264depay", GstEquivalent::Unsupported("RTP depayloading is built into `udpsrc` / `rtspsrc`")),
     ("rtph264pay", GstEquivalent::Unsupported("RTP payloading is built into `udpsink`")),
+    // Common gaps not yet filled: point at the closest available element.
+    ("clockoverlay", GstEquivalent::Unsupported(
+        "wall-clock overlay needs a system clock (not the no_std baseline); use `timeoverlay` for buffer time",
+    )),
+    ("spectrum", GstEquivalent::Unsupported("no FFT spectrum analyzer yet; `level` reports peak / RMS")),
+    ("equalizer-3bands", GstEquivalent::Unsupported("no biquad equalizer yet; `volume` / `audioamplify` adjust gain")),
+    ("equalizer-nbands", GstEquivalent::Unsupported("no biquad equalizer yet; `volume` / `audioamplify` adjust gain")),
+    ("splitmuxsink", GstEquivalent::Unsupported(
+        "no split-muxer yet; segment a byte stream with `multifilesink next-file=key-frame`, or mux to `filesink`",
+    )),
 ];
 
 /// Map a GStreamer element name to its g2g equivalent, consulting the live
