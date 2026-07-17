@@ -5,6 +5,7 @@
 //!   g2g-inspect                  # list every registerable element
 //!   g2g-inspect <element>        # dump one element's role, properties, pads
 //!   g2g-inspect --all            # dump every element in full
+//!   g2g-inspect --json [name]    # machine-readable registry dump (all or one)
 //!   g2g-inspect --maturity       # derived conformance maturity per element
 //!   g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
 //!   g2g-inspect --plugin <path>  # load a plugin first, so its elements list
@@ -68,6 +69,68 @@ fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
     }
 }
 
+/// Serialize an `ElementDoc` to a JSON object mirroring the CLI dump: identity,
+/// role, pad caps, and each property's machine-usable type / range / default.
+#[cfg(feature = "tooling-json")]
+fn element_json(d: &g2g_core::runtime::ElementDoc) -> serde_json::Value {
+    use serde_json::json;
+    let props: Vec<serde_json::Value> = d
+        .properties
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "blurb": p.blurb,
+                "type": p.type_label,
+                "default": p.default,
+                "range": p.range.as_ref().map(|(a, b)| json!([a, b])),
+                "enum_values": p.enum_values,
+                "readable": p.readable,
+                "writable": p.writable,
+            })
+        })
+        .collect();
+    json!({
+        "name": d.name,
+        "long_name": d.long_name,
+        "klass": d.klass,
+        "description": d.description,
+        "author": d.author,
+        "role": d.role,
+        "caps": d.caps,
+        "pads": d.pads,
+        "properties": props,
+    })
+}
+
+/// Print the registry (or one element) as JSON: `{"elements":[...]}`.
+#[cfg(feature = "tooling-json")]
+fn dump_json(reg: &g2g_core::runtime::Registry, name: Option<&str>) {
+    use serde_json::json;
+    let docs = match name {
+        Some(n) => match reg.describe(n) {
+            Some(d) => vec![d],
+            None => {
+                eprintln!("No such element: {n}");
+                process::exit(1);
+            }
+        },
+        None => reg.describe_all(),
+    };
+    let elements: Vec<serde_json::Value> = docs.iter().map(element_json).collect();
+    let out = json!({ "elements": elements });
+    println!("{}", serde_json::to_string_pretty(&out).expect("serialize registry"));
+}
+
+#[cfg(not(feature = "tooling-json"))]
+fn dump_json(_reg: &g2g_core::runtime::Registry, _name: Option<&str>) {
+    eprintln!(
+        "g2g-inspect: --json needs the `tooling-json` build feature \
+         (rebuild with --features tooling-json)"
+    );
+    process::exit(1);
+}
+
 fn main() {
     let (plugins, rest) = split_plugin_args(std::env::args().skip(1).collect());
     let mut reg = default_registry();
@@ -94,6 +157,11 @@ fn main() {
                     }
                 }
             }
+        }
+        // `--json [name]`: machine-readable registry dump for the dev tools
+        // (visual builder / MCP server). All elements, or one if named.
+        Some(flag) if flag == "--json" => {
+            dump_json(&reg, args.next().as_deref());
         }
         // `--maturity`: run the in-process conformance battery and print each
         // element's derived maturity (never a hand-authored claim). The batteries

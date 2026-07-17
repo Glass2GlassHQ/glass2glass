@@ -1037,17 +1037,18 @@ it); the builder and the scaffold are independent.
     fill); wiring the observer into the threaded runner (`--observe` is
     cooperative-runner only).
   - Validate live against RTSP (unit + e2e cover the localhost path today).
-- **Visual pipeline builder.** A second tab of the dashboard app.
-  - Palette + property panels generated from `registry.rs` metadata: add a
-    `g2g-inspect --json` machine dump (element names, pad caps,
-    `PropertySpec`s with `PropKind`); the builder also works offline from a
-    checked-in `registry.json`.
-  - Canvas: drag-drop React Flow nodes, per-property inputs typed by
-    `PropKind`, link validity from caps intersect (server-side check via the
-    solver when connected, permissive offline).
-  - Export both directions: emit a `gst-launch` line and declarative JSON /
-    YAML (`declarative.rs` schema); import by parsing a launch line
-    server-side and rendering the resulting graph.
+- **Visual pipeline builder (M678, done).** `g2g-inspect --json [element]`
+  (`tooling-json` feature) dumps the registry (identity, role, pad caps, typed
+  properties); `tools/builder/index.html` (self-contained vanilla JS, checked-in
+  `registry.json`) is a drag-drop canvas with typed property panels that
+  live-exports a `gst-launch` line + declarative JSON, both verified to load
+  back into g2g. Remaining:
+  - Import a `gst-launch` line into the canvas (needs a server-side parse or a
+    JS parser; export both ways works, import does not yet).
+  - Link-validity feedback from caps intersect (the solver) while wiring;
+    today any port pair links and validity surfaces only on load / run.
+  - Optional React Flow frontend and YAML export (JSON export covers the graph
+    model; the schema is shared).
 - **Element scaffolding.** `xtask new-element <name> --kind
   source|transform|sink` stamps the `AsyncElement` / `SourceLoop` impl
   (`intercept_caps` / `configure_pipeline` / `process` stubs), `properties()`

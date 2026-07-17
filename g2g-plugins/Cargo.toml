@@ -97,7 +97,11 @@ remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futu
 # streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
 # alongside the static dashboard page on one port. Reuses the remote-ws WS stack
 # (tokio-tungstenite + futures-util) plus serde_json; implies std.
-observe = ["std", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time", "tokio/macros", "tokio/sync", "dep:tokio-tungstenite", "futures-util/sink", "dep:serde_json"]
+# Machine-readable JSON output for the dev tools: `g2g-inspect --json` (the
+# registry dump the visual builder + MCP server consume). Just serde_json on top
+# of std; the transports below layer their own deps.
+tooling-json = ["std", "dep:serde_json"]
+observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time", "tokio/macros", "tokio/sync", "dep:tokio-tungstenite", "futures-util/sink"]
 # Native WebRTC egress sink (WebRtcSink): publishes a pipeline's encoded H.264 to
 # a WHIP server over a str0m-driven PeerConnection (ICE / DTLS / SRTP). str0m is a
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio

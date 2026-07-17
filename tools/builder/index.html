@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>g2g pipeline builder</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --edge:#3a4152; --text:#e6e9ef; --muted:#8b93a7;
+    --accent:#4da3ff; --source:#46c07a; --sink:#d16ba5; --xform:#4da3ff; --mux:#e0a54d;
+    --port:#8b93a7; --port-hot:#4da3ff; --err:#e06a6a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  header{display:flex;align-items:center;gap:12px;padding:8px 14px;border-bottom:1px solid var(--edge)}
+  header h1{font-size:14px;margin:0;font-weight:600}
+  header .hint{color:var(--muted)}
+  #main{display:flex;height:calc(100% - 41px)}
+  #palette{width:210px;border-right:1px solid var(--edge);display:flex;flex-direction:column}
+  #search{margin:8px;padding:5px 8px;background:var(--panel);border:1px solid var(--edge);
+    color:var(--text);border-radius:4px;font:inherit}
+  #plist{flex:1;overflow:auto;padding:0 8px 8px}
+  .pgroup{color:var(--muted);text-transform:uppercase;font-size:10px;letter-spacing:.06em;margin:10px 0 4px}
+  .pitem{padding:4px 6px;border-radius:4px;cursor:pointer;border:1px solid transparent}
+  .pitem:hover{background:var(--panel);border-color:var(--edge)}
+  .pitem .r{float:right;color:var(--muted);font-size:10px}
+  #canvas{flex:1;position:relative;overflow:hidden;background:
+    radial-gradient(circle,#1b1f27 1px,transparent 1px);background-size:22px 22px}
+  #links{position:absolute;inset:0;pointer-events:none}
+  .node{position:absolute;width:150px;background:var(--panel);border:1.5px solid var(--edge);
+    border-radius:6px;user-select:none;cursor:grab}
+  .node.sel{box-shadow:0 0 0 2px var(--accent)}
+  .node .title{padding:5px 8px;font-weight:600;border-bottom:1px solid var(--edge);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .node .body{padding:4px 8px;color:var(--muted);font-size:11px;min-height:14px}
+  .node.role-source{border-color:var(--source)}
+  .node.role-sink{border-color:var(--sink)}
+  .node.role-element{border-color:var(--xform)}
+  .node.role-muxer{border-color:var(--mux)}
+  .port{position:absolute;width:12px;height:12px;border-radius:50%;background:var(--port);
+    top:50%;transform:translateY(-50%);cursor:crosshair;border:2px solid var(--bg)}
+  .port:hover{background:var(--port-hot)}
+  .port.in{left:-7px}
+  .port.out{right:-7px}
+  #side{width:300px;border-left:1px solid var(--edge);display:flex;flex-direction:column}
+  #side h2{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+    margin:0;padding:8px 12px;border-bottom:1px solid var(--edge)}
+  #props{padding:8px 12px;overflow:auto;max-height:45%}
+  .prow{margin-bottom:7px}
+  .prow label{display:block;color:var(--muted);font-size:11px}
+  .prow input{width:100%;padding:4px 6px;background:var(--bg);border:1px solid var(--edge);
+    color:var(--text);border-radius:4px;font:inherit}
+  #export{flex:1;display:flex;flex-direction:column;border-top:1px solid var(--edge)}
+  .exhdr{display:flex;gap:8px;padding:6px 12px;align-items:center}
+  .exhdr button{background:var(--panel);border:1px solid var(--edge);color:var(--text);
+    padding:3px 8px;border-radius:4px;cursor:pointer;font:inherit}
+  .exhdr button.on{border-color:var(--accent);color:var(--accent)}
+  #exout{flex:1;margin:0 12px 12px;padding:8px;background:var(--bg);border:1px solid var(--edge);
+    border-radius:4px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  #err{color:var(--err);padding:0 12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>g2g pipeline builder</h1>
+  <span class="hint">click a palette element to add &middot; drag ports to link &middot; Del removes</span>
+  <span id="err"></span>
+</header>
+<div id="main">
+  <div id="palette">
+    <input id="search" placeholder="filter elements…">
+    <div id="plist"></div>
+  </div>
+  <div id="canvas">
+    <svg id="links"></svg>
+  </div>
+  <div id="side">
+    <h2 id="proptitle">properties</h2>
+    <div id="props"><span style="color:var(--muted)">select a node</span></div>
+    <div id="export">
+      <div class="exhdr">
+        <span style="color:var(--muted)">export</span>
+        <button id="tab-gst" class="on">gst-launch</button>
+        <button id="tab-json">JSON</button>
+        <button id="copy" style="margin-left:auto">copy</button>
+      </div>
+      <div id="exout"></div>
+    </div>
+  </div>
+</div>
+<script>
+const SVG_NS = "http://www.w3.org/2000/svg";
+const canvas = document.getElementById("canvas");
+const links = document.getElementById("links");
+const errEl = document.getElementById("err");
+
+let registry = {};          // name -> element doc
+let nodes = [];             // {id, name, element, role, props:{}, x, y, el}
+let edges = [];             // {from, to}
+let selected = null;
+let counter = {};           // element -> next instance index
+let linking = null;         // {from} while dragging a link
+let exportMode = "gst";
+
+function roleClass(role) {
+  if (role === "source") return "role-source";
+  if (role.startsWith("muxer")) return "role-muxer";
+  return "role-element";
+}
+// A rough sink test: an element with input pads but the registry marks it a sink
+// via klass or no output caps. The registry role is "element" for both; use klass.
+function isSink(doc) { return /Sink/i.test(doc.klass || ""); }
+
+async function loadRegistry() {
+  try {
+    const res = await fetch("./registry.json");
+    const data = await res.json();
+    data.elements.forEach(e => { registry[e.name] = e; });
+    renderPalette();
+  } catch (e) {
+    errEl.textContent = "registry.json not found - run: g2g-inspect --json > tools/builder/registry.json";
+  }
+}
+
+function renderPalette(filter = "") {
+  const list = document.getElementById("plist");
+  list.innerHTML = "";
+  const groups = { source: [], element: [], "muxer (fan-in)": [] };
+  Object.values(registry)
+    .filter(e => e.name.includes(filter))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach(e => { (groups[e.role] || groups.element).push(e); });
+  for (const [role, items] of Object.entries(groups)) {
+    if (!items.length) continue;
+    const h = document.createElement("div");
+    h.className = "pgroup";
+    h.textContent = role;
+    list.appendChild(h);
+    items.forEach(e => {
+      const d = document.createElement("div");
+      d.className = "pitem";
+      d.innerHTML = `${e.name}<span class="r">${isSink(e) ? "sink" : ""}</span>`;
+      d.title = e.description || "";
+      d.onclick = () => addNode(e.name);
+      list.appendChild(d);
+    });
+  }
+}
+
+function addNode(element) {
+  const doc = registry[element];
+  const idx = counter[element] || 0;
+  counter[element] = idx + 1;
+  const id = element + idx;
+  const props = {};
+  const node = {
+    id, name: id, element, role: doc.role, doc,
+    props,
+    x: 60 + (nodes.length % 5) * 30,
+    y: 60 + (nodes.length % 8) * 24,
+  };
+  nodes.push(node);
+  drawNode(node);
+  select(node);
+  refreshExport();
+}
+
+function drawNode(node) {
+  const el = document.createElement("div");
+  el.className = "node " + roleClass(node.role);
+  el.style.left = node.x + "px";
+  el.style.top = node.y + "px";
+  el.innerHTML = `<div class="title">${node.name}</div><div class="body"></div>`;
+  // input port (not for sources), output port (not for sinks)
+  if (node.role !== "source") {
+    const p = document.createElement("div");
+    p.className = "port in";
+    p.onmouseup = ev => { ev.stopPropagation(); finishLink(node); };
+    el.appendChild(p);
+  }
+  if (!isSink(node.doc)) {
+    const p = document.createElement("div");
+    p.className = "port out";
+    p.onmousedown = ev => { ev.stopPropagation(); startLink(node, ev); };
+    el.appendChild(p);
+  }
+  el.onmousedown = ev => startDrag(node, ev);
+  el.onclick = ev => { ev.stopPropagation(); select(node); };
+  node.el = el;
+  canvas.appendChild(el);
+  updateBody(node);
+}
+
+function updateBody(node) {
+  const set = Object.entries(node.props).filter(([, v]) => v !== "" && v != null);
+  node.el.querySelector(".body").textContent =
+    set.length ? set.map(([k, v]) => `${k}=${v}`).join(" ") : node.element;
+}
+
+let dragState = null;
+function startDrag(node, ev) {
+  if (ev.target.classList.contains("port")) return;
+  dragState = { node, dx: ev.clientX - node.x, dy: ev.clientY - node.y };
+}
+window.addEventListener("mousemove", ev => {
+  if (dragState) {
+    dragState.node.x = ev.clientX - dragState.dx;
+    dragState.node.y = ev.clientY - dragState.dy;
+    dragState.node.el.style.left = dragState.node.x + "px";
+    dragState.node.el.style.top = dragState.node.y + "px";
+    drawLinks();
+  }
+  if (linking) drawLinks(ev);
+});
+window.addEventListener("mouseup", () => { dragState = null; linking = null; drawLinks(); });
+
+function startLink(node, ev) { linking = { from: node }; }
+function finishLink(node) {
+  if (linking && linking.from !== node) {
+    if (!edges.some(e => e.from === linking.from.id && e.to === node.id)) {
+      edges.push({ from: linking.from.id, to: node.id });
+    }
+  }
+  linking = null;
+  drawLinks();
+  refreshExport();
+}
+
+function portPos(node, side) {
+  return { x: node.x + (side === "out" ? 150 : 0), y: node.y + 20 };
+}
+function drawLinks(ev) {
+  links.innerHTML = "";
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  edges.forEach(e => {
+    const a = portPos(byId[e.from], "out"), b = portPos(byId[e.to], "in");
+    addCurve(a, b);
+  });
+  if (linking && ev) {
+    const a = portPos(linking.from, "out");
+    const r = canvas.getBoundingClientRect();
+    addCurve(a, { x: ev.clientX - r.left, y: ev.clientY - r.top });
+  }
+}
+function addCurve(a, b) {
+  const mx = (a.x + b.x) / 2;
+  const p = document.createElementNS(SVG_NS, "path");
+  p.setAttribute("d", `M${a.x},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.x},${b.y}`);
+  p.setAttribute("stroke", "var(--edge)");
+  p.setAttribute("stroke-width", "2");
+  p.setAttribute("fill", "none");
+  links.appendChild(p);
+}
+
+function select(node) {
+  selected = node;
+  nodes.forEach(n => n.el.classList.toggle("sel", n === node));
+  const props = document.getElementById("props");
+  document.getElementById("proptitle").textContent = node.name;
+  props.innerHTML = "";
+  if (!node.doc.properties.length) {
+    props.innerHTML = `<span style="color:var(--muted)">no properties</span>`;
+    return;
+  }
+  node.doc.properties.filter(p => p.writable).forEach(p => {
+    const row = document.createElement("div");
+    row.className = "prow";
+    const ph = p.default != null ? `default ${p.default}` : (p.type || "");
+    row.innerHTML = `<label title="${p.blurb}">${p.name} <span style="color:var(--muted)">${p.type}</span></label>`;
+    const input = document.createElement("input");
+    input.placeholder = ph;
+    input.value = node.props[p.name] ?? "";
+    if (/Boolean/i.test(p.type)) input.placeholder = "true / false";
+    input.oninput = () => {
+      const v = input.value.trim();
+      if (v === "") delete node.props[p.name]; else node.props[p.name] = v;
+      updateBody(node);
+      refreshExport();
+    };
+    row.appendChild(input);
+    props.appendChild(row);
+  });
+}
+
+// Topological order (Kahn) for a stable launch-line / JSON emission.
+function topoOrder() {
+  const indeg = Object.fromEntries(nodes.map(n => [n.id, 0]));
+  edges.forEach(e => { indeg[e.to] = (indeg[e.to] || 0) + 1; });
+  const queue = nodes.filter(n => indeg[n.id] === 0).map(n => n.id);
+  const out = [];
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  while (queue.length) {
+    const id = queue.shift();
+    out.push(byId[id]);
+    edges.filter(e => e.from === id).forEach(e => {
+      if (--indeg[e.to] === 0) queue.push(e.to);
+    });
+  }
+  return out.length === nodes.length ? out : nodes; // cycle: fall back
+}
+
+function propStr(node) {
+  return Object.entries(node.props)
+    .filter(([, v]) => v !== "" && v != null)
+    .map(([k, v]) => ` ${k}=${v}`).join("");
+}
+
+// Emit a gst-launch line. Linear chains use the `!` form; any fan-out / fan-in
+// switches to the `name=` + `elem.` form so branches are unambiguous.
+function toLaunch() {
+  if (!nodes.length) return "";
+  const order = topoOrder();
+  const outdeg = {}, indeg = {};
+  edges.forEach(e => { outdeg[e.from] = (outdeg[e.from] || 0) + 1; indeg[e.to] = (indeg[e.to] || 0) + 1; });
+  const branched = edges.length > 0 &&
+    (Object.values(outdeg).some(d => d > 1) || Object.values(indeg).some(d => d > 1));
+  if (!branched) {
+    return order.map(n => n.element + propStr(n)).join(" ! ");
+  }
+  // Branched: declare each node with name=, then one line of links per edge.
+  const decls = order.map(n => `${n.element}${propStr(n)} name=${n.name}`).join("\n");
+  const linkLines = edges.map(e => `${e.from}. ! ${e.to}.`).join("\n");
+  return decls + "\n" + linkLines;
+}
+
+function toJSON() {
+  return JSON.stringify({
+    nodes: topoOrder().map(n => ({
+      id: n.id, element: n.element,
+      ...(Object.keys(n.props).length ? { props: n.props } : {}),
+    })),
+    edges: edges.map(e => ({ from: e.from, to: e.to })),
+  }, null, 2);
+}
+
+function refreshExport() {
+  document.getElementById("exout").textContent =
+    exportMode === "gst" ? toLaunch() : toJSON();
+}
+
+document.getElementById("search").oninput = ev => renderPalette(ev.target.value.trim());
+document.getElementById("tab-gst").onclick = () => setTab("gst");
+document.getElementById("tab-json").onclick = () => setTab("json");
+document.getElementById("copy").onclick = () =>
+  navigator.clipboard && navigator.clipboard.writeText(document.getElementById("exout").textContent);
+function setTab(m) {
+  exportMode = m;
+  document.getElementById("tab-gst").classList.toggle("on", m === "gst");
+  document.getElementById("tab-json").classList.toggle("on", m === "json");
+  refreshExport();
+}
+canvas.onclick = () => { selected = null; nodes.forEach(n => n.el.classList.remove("sel")); };
+window.addEventListener("keydown", ev => {
+  if ((ev.key === "Delete" || ev.key === "Backspace") && selected &&
+      document.activeElement.tagName !== "INPUT") {
+    edges = edges.filter(e => e.from !== selected.id && e.to !== selected.id);
+    selected.el.remove();
+    nodes = nodes.filter(n => n !== selected);
+    selected = null;
+    drawLinks();
+    refreshExport();
+  }
+});
+
+loadRegistry();
+</script>
+</body>
+</html>

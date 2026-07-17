@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M678: `g2g-inspect --json` emits a machine-readable registry dump feeding a static visual pipeline builder (`tools/builder/`) that exports gst-launch lines and declarative JSON.
 - M677: live pipeline dashboard: `g2g-launch --observe <port>` streams per-element telemetry + bus events over a WebSocket to a served page, backed by a runtime `Observer` tap (`run_graph_observed`).
 - M676: `filesrc` types raw Annex-B elementary streams by extension (`.h264`/`.265` and variants), and name-based `decodebin` expansion now splices the M421 re-framing parser ahead of the decoder.
 - M675: `splitmuxsink` gains a `muxer` property (`mp4`/`matroska`/`mpegts`) to pick the per-segment child container.

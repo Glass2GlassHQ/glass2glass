@@ -205,6 +205,38 @@ Today's tap covers the cooperative graph runner and the two linear runners
 per-link transit time, source-side timing, and the threaded runner are
 follow-ups (see `DESIGN_TODO.md`).
 
+## Visual pipeline builder
+
+`g2g-inspect --json [element]` dumps the registry as JSON (element identity,
+role, pad caps, and each property's machine type / range / default), the same
+data the text dump shows. Needs the `tooling-json` feature:
+
+```sh
+cargo run -p g2g-plugins --features tooling-json --bin g2g-inspect -- --json \
+  > tools/builder/registry.json
+```
+
+`tools/builder/index.html` (self-contained, no build step) loads that
+`registry.json` and lets you assemble a pipeline visually: filter the palette,
+click to add nodes, drag output-to-input ports to link them, and edit each
+node's properties (typed from the registry). It live-exports two formats, both
+loadable back into g2g:
+
+- a `gst-launch` line (`g2g-launch "<line>"`); linear chains use the `!` form,
+  branched graphs the `name=` + `elem.` form.
+- declarative JSON (`g2g-launch --graph <file.json>`, the `declarative.rs`
+  schema).
+
+Serve it over HTTP so the page can fetch `registry.json` (a `file://` open
+cannot):
+
+```sh
+python3 -m http.server -d tools/builder 8080   # then open http://localhost:8080
+```
+
+The checked-in `registry.json` is a snapshot of the standard registry;
+regenerate it with the command above after adding or changing elements.
+
 ## Element reference (`g2g-inspect` and the web page)
 
 Find the docs for a single element the way `gst-inspect` does:
