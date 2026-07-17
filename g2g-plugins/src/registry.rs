@@ -305,6 +305,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::timeoverlay::TimeOverlay>("timeoverlay", || {
         Box::new(crate::timeoverlay::TimeOverlay::new())
     }));
+    reg.register_launch(LaunchFactory::of::<crate::clockoverlay::ClockOverlay>("clockoverlay", || {
+        Box::new(crate::clockoverlay::ClockOverlay::new())
+    }));
     // Subtitle overlay (M171): the `location=` property loads an SRT / WebVTT
     // file (std), so cues render by PTS without hand-built Rust.
     reg.register_launch(LaunchFactory::of::<TextOverlay>("textoverlay", || {
@@ -366,6 +369,12 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<crate::cutter::Cutter>("cutter", || {
         Box::new(crate::cutter::Cutter::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::equalizer::Equalizer3Bands>("equalizer-3bands", || {
+        Box::new(crate::equalizer::Equalizer3Bands::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::spectrum::Spectrum>("spectrum", || {
+        Box::new(crate::spectrum::Spectrum::new())
     }));
 
     // Demuxers + parsers + passthrough.
@@ -512,6 +521,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
     reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>("multifilesink", || {
         Box::new(crate::multifilesink::MultiFileSink::new(""))
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::splitmuxsink::SplitMuxSink>("splitmuxsink", || {
+        Box::new(crate::splitmuxsink::SplitMuxSink::new(""))
     }));
     #[cfg(feature = "rtmp")]
     reg.register_launch(LaunchFactory::of::<RtmpSink>("rtmpsink", || Box::new(RtmpSink::new(""))));

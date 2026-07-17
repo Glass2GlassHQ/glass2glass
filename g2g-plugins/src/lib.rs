@@ -25,6 +25,8 @@ pub mod audioamplify;
 pub mod audioecho;
 pub mod level;
 pub mod cutter;
+pub mod equalizer;
+pub mod spectrum;
 pub mod audiomixer;
 pub mod capsfilter;
 pub mod fakesink;
@@ -93,6 +95,8 @@ pub mod videobox;
 pub mod gamma;
 pub mod deinterlace;
 pub mod timeoverlay;
+#[cfg(feature = "std")]
+pub mod clockoverlay;
 pub mod alpha;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
 // feeding the `textoverlay` element below.
@@ -292,6 +296,8 @@ pub mod filesrc;
 pub mod multifilesink;
 #[cfg(feature = "std")]
 pub mod multifilesrc;
+#[cfg(feature = "std")]
+pub mod splitmuxsink;
 // Subtitle/text file source: a .srt/.vtt/.ssa/.ttml file as a Text stream.
 #[cfg(feature = "std")]
 pub mod subtitlesrc;

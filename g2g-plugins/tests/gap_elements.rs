@@ -76,6 +76,27 @@ async fn audio_dsp_chain_runs() {
 }
 
 #[tokio::test]
+async fn equalizer_and_spectrum_chain_runs() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "audiotestsrc num-buffers=5 ! equalizer-3bands band0=6.0 band2=-6.0 ! spectrum bands=64 ! fakesink",
+    )
+    .expect("equalizer + spectrum pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("equalizer + spectrum pipeline runs");
+    assert_eq!(stats.frames_consumed, 5, "all buffers reached the sink");
+}
+
+#[tokio::test]
+async fn clockoverlay_chain_runs() {
+    let reg = default_registry();
+    let graph = parse_launch(&reg, "videotestsrc num-buffers=3 ! clockoverlay scale=1 ! fakesink")
+        .expect("clockoverlay pipeline parses");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("clockoverlay pipeline runs");
+    assert_eq!(stats.frames_consumed, 3, "all frames reached the sink");
+}
+
+#[tokio::test]
 async fn video_utility_chain_runs() {
     let reg = default_registry();
     let graph = parse_launch(

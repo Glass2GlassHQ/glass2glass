@@ -1,13 +1,10 @@
-//! Buffer-time overlay (`timeoverlay`). Burns each frame's PTS, formatted as
-//! `HH:MM:SS.mmm`, into the top-left corner of a packed RGBA / BGRA frame with
-//! the embedded 8x8 [`bitmapfont`], preserving format and geometry. CPU-only
-//! `no_std`.
+//! Wall-clock overlay (`clockoverlay`). Burns the current wall-clock time of day
+//! (UTC, `HH:MM:SS`) into the top-left of a packed RGBA / BGRA frame, the g2g
+//! analog of GStreamer's `clockoverlay`. Reuses the 8x8 glyph renderer from
+//! [`timeoverlay`]. std-gated: it needs a system clock, unlike `timeoverlay`
+//! (buffer PTS), which is `no_std`. UTC because the baseline has no timezone db.
 //!
-//! The g2g analog of GStreamer's `timeoverlay` (buffer-time mode). Text is white
-//! over a translucent black box for legibility; `scale` sets the integer font
-//! magnification.
-//!
-//! [`bitmapfont`]: crate::bitmapfont
+//! [`timeoverlay`]: crate::timeoverlay
 
 use core::future::Future;
 use core::pin::Pin;
@@ -18,6 +15,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -26,23 +25,19 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
-use crate::paint::blend_px;
+use crate::timeoverlay::draw_text;
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
-/// Format a nanosecond timestamp as `HH:MM:SS.mmm`.
-fn format_time(pts_ns: u64) -> String {
-    let total_ms = pts_ns / 1_000_000;
-    let ms = total_ms % 1000;
-    let s = (total_ms / 1000) % 60;
-    let m = (total_ms / 60_000) % 60;
-    let h = total_ms / 3_600_000;
-    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+/// Current UTC time of day as `HH:MM:SS`.
+fn wall_clock_utc() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tod = secs % 86_400;
+    format!("{:02}:{:02}:{:02}", tod / 3600, (tod % 3600) / 60, tod % 60)
 }
 
 #[derive(Debug)]
-pub struct TimeOverlay {
+pub struct ClockOverlay {
     scale: u32,
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
     configured: bool,
@@ -50,13 +45,13 @@ pub struct TimeOverlay {
     emitted: u64,
 }
 
-impl Default for TimeOverlay {
+impl Default for ClockOverlay {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TimeOverlay {
+impl ClockOverlay {
     pub fn new() -> Self {
         Self { scale: 2, input: None, configured: false, last_caps: None, emitted: 0 }
     }
@@ -78,7 +73,7 @@ impl TimeOverlay {
     }
 }
 
-impl AsyncElement for TimeOverlay {
+impl AsyncElement for ClockOverlay {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -137,8 +132,7 @@ impl AsyncElement for TimeOverlay {
                     }
                     let mut dst = vec![0u8; bytes].into_boxed_slice();
                     dst.copy_from_slice(&src[..bytes]);
-                    let text = format_time(frame.timing.pts_ns);
-                    draw_text(&mut dst, w as usize, h as usize, &text, self.scale.max(1));
+                    draw_text(&mut dst, w as usize, h as usize, &wall_clock_utc(), self.scale.max(1));
 
                     let new_caps = Caps::RawVideo {
                         format,
@@ -179,11 +173,11 @@ impl AsyncElement for TimeOverlay {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        TIMEOVERLAY_PROPS
+        CLOCKOVERLAY_PROPS
     }
 
     fn metadata(&self) -> ElementMetadata {
-        ElementMetadata::new("Time overlay", "Filter/Editor/Video", "Overlays the buffer time on video", "g2g")
+        ElementMetadata::new("Clock overlay", "Filter/Editor/Video", "Overlays the wall-clock time on video", "g2g")
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -208,10 +202,10 @@ impl AsyncElement for TimeOverlay {
     }
 }
 
-static TIMEOVERLAY_PROPS: &[PropertySpec] =
+static CLOCKOVERLAY_PROPS: &[PropertySpec] =
     &[PropertySpec::new("scale", PropKind::Uint, "integer font magnification (>= 1)")];
 
-impl PadTemplates for TimeOverlay {
+impl PadTemplates for ClockOverlay {
     fn pad_templates() -> Vec<PadTemplate> {
         let any_geometry = |format| Caps::RawVideo {
             format,
@@ -224,74 +218,27 @@ impl PadTemplates for TimeOverlay {
     }
 }
 
-/// Draw `text` at the top-left of a packed RGBA/BGRA buffer: a translucent black
-/// box, then white glyphs. The glyph bitmap is channel-symmetric, so it renders
-/// the same in RGBA and BGRA. Shared with `clockoverlay`.
-pub(crate) fn draw_text(buf: &mut [u8], w: usize, h: usize, text: &str, scale: u32) {
-    let scale = scale as i32;
-    let margin = 2 * scale;
-    let cell_w = GLYPH_ADVANCE as i32 * scale;
-    let glyph_h = GLYPH_HEIGHT as i32 * scale;
-    let box_w = margin * 2 + cell_w * text.chars().count() as i32;
-    let box_h = margin * 2 + glyph_h;
-    let dims = (w, h);
-    fill_rect(buf, dims, 0, 0, box_w, box_h, [0, 0, 0, 160]);
-    let white = [255u8, 255, 255, 255];
-    for (i, c) in text.chars().enumerate() {
-        let gx = margin + i as i32 * cell_w;
-        blit_glyph(buf, dims, gx, margin, scale, glyph(c), white);
-    }
-}
-
-fn fill_rect(buf: &mut [u8], dims: (usize, usize), x: i32, y: i32, rw: i32, rh: i32, color: [u8; 4]) {
-    let (wi, hi) = (dims.0 as i32, dims.1 as i32);
-    for py in y..y + rh {
-        if py < 0 || py >= hi {
-            continue;
-        }
-        for px in x..x + rw {
-            if px < 0 || px >= wi {
-                continue;
-            }
-            blend_px(buf, ((py * wi + px) * 4) as usize, color, 255);
-        }
-    }
-}
-
-fn blit_glyph(buf: &mut [u8], dims: (usize, usize), gx: i32, gy: i32, scale: i32, rows: [u8; 8], color: [u8; 4]) {
-    for (ry, bits) in rows.iter().enumerate() {
-        if *bits == 0 {
-            continue;
-        }
-        for col in 0..8i32 {
-            if bits & (0x80 >> col) != 0 {
-                fill_rect(buf, dims, gx + col * scale, gy + ry as i32 * scale, scale, scale, color);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn formats_time_as_hms() {
-        assert_eq!(format_time(0), "00:00:00.000");
-        assert_eq!(format_time(1_500_000_000), "00:00:01.500");
-        assert_eq!(format_time(3_661_250_000_000), "01:01:01.250");
+    fn formats_time_of_day() {
+        // The helper is time-dependent; assert its shape is HH:MM:SS.
+        let t = wall_clock_utc();
+        assert_eq!(t.len(), 8);
+        let parts: Vec<&str> = t.split(':').collect();
+        assert_eq!(parts.len(), 3);
+        for p in parts {
+            assert_eq!(p.len(), 2);
+            assert!(p.chars().all(|c| c.is_ascii_digit()));
+        }
     }
 
     #[test]
-    fn draws_something_onto_a_blank_frame() {
-        // 128x16 white RGBA frame; after overlay some pixels must differ (the box
-        // + glyphs), proving the overlay actually wrote to the buffer.
-        let (w, h) = (128usize, 16usize);
-        let mut buf = vec![255u8; w * h * 4];
-        let before = buf.clone();
-        draw_text(&mut buf, w, h, "00:00:01.000", 1);
-        assert_ne!(buf, before);
-        // top-left pixel is inside the translucent black box, so it darkened.
-        assert!(buf[0] < 255);
+    fn configure_rejects_non_video() {
+        let mut c = ClockOverlay::new();
+        let bad = Caps::Audio { format: g2g_core::AudioFormat::PcmS16Le, channels: 2, sample_rate: 48_000 };
+        assert_eq!(c.configure_pipeline(&bad).unwrap_err(), G2gError::CapsMismatch);
     }
 }
