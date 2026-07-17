@@ -1,9 +1,12 @@
 //! RTSP server sink (RtspServerSink, `rtsp-server` feature): hosts a pipeline's
-//! H.264 as an RTSP endpoint and serves it as RTP/UDP to connecting players (the
-//! OBS / surveillance / contribution-server shape). The sans-IO
+//! H.264 as an RTSP endpoint and serves it over RTP to connecting players (the
+//! OBS / surveillance / contribution-server shape), on either transport a player
+//! SETUPs: unicast RTP/UDP, or TCP-interleaved (RFC 2326 §10.12, `$`-framed RTP
+//! on the control connection, what `ffmpeg -rtsp_transport tcp` uses, for players
+//! behind a firewall that blocks the UDP ports). The sans-IO
 //! [`rtspserver::RtspResponder`](crate::rtspserver) does the protocol work
 //! (OPTIONS / DESCRIBE / SETUP / PLAY); this element is the tokio TCP control
-//! channel + the UDP RTP transport around it, reusing the
+//! channel + the RTP transport around it, reusing the
 //! [`RtpH264Packetizer`](crate::rtppay) the UDP sink uses.
 //!
 //! Multi-client: the listener is bound in `configure_pipeline`; the first buffer
@@ -69,13 +72,18 @@ struct Client {
     pending: Vec<u8>,
     peer_ip: IpAddr,
     dest: Option<SocketAddr>,
+    /// The RTP channel once a TCP-interleaved SETUP was negotiated (RFC 2326
+    /// §10.12): RTP rides the control connection as `$`-framed binary instead of
+    /// its own UDP port. Mutually exclusive with `dest` in practice.
+    interleaved: Option<u8>,
     packetizer: Option<RtpH264Packetizer>,
 }
 
 impl Client {
-    /// PLAYing once SETUP gave us a destination and PLAY armed the packetizer.
+    /// PLAYing once SETUP gave a transport (a UDP destination or an interleaved
+    /// channel) and PLAY armed the packetizer.
     fn playing(&self) -> bool {
-        self.dest.is_some() && self.packetizer.is_some()
+        self.packetizer.is_some() && (self.dest.is_some() || self.interleaved.is_some())
     }
 
     /// Drain whatever control bytes are readable now (non-blocking) and answer
@@ -101,6 +109,9 @@ impl Client {
                 RtspEvent::Setup { client_rtp_port } => {
                     self.dest = Some(SocketAddr::new(self.peer_ip, client_rtp_port));
                 }
+                RtspEvent::SetupInterleaved { rtp_channel, .. } => {
+                    self.interleaved = Some(rtp_channel);
+                }
                 RtspEvent::Play => {
                     self.packetizer = Some(
                         RtpH264Packetizer::new(payload_type, ssrc).with_max_payload(max_payload),
@@ -117,23 +128,42 @@ impl Client {
         true
     }
 
-    /// Packetize `bytes` and send every RTP packet to this player. Returns the
-    /// packet count, or `Err` if the send failed (the caller reaps it).
+    /// Packetize `bytes` and send every RTP packet to this player over its
+    /// negotiated transport: UDP to `dest`, or `$`-framed on the control
+    /// connection for a TCP-interleaved client. Returns the packet count, or
+    /// `Err` if the send failed (the caller reaps it).
     async fn send_frame(
         &mut self,
         socket: &tokio::net::UdpSocket,
         bytes: &[u8],
         timestamp: u32,
     ) -> Result<u64, ()> {
-        let (Some(packetizer), Some(dest)) = (self.packetizer.as_mut(), self.dest) else {
-            return Ok(0);
+        let pkts = match self.packetizer.as_mut() {
+            Some(p) => p.packetize(bytes, timestamp),
+            None => return Ok(0),
         };
         let mut sent = 0;
-        for pkt in &packetizer.packetize(bytes, timestamp) {
-            if socket.send_to(pkt, dest).await.is_err() {
-                return Err(());
+        if let Some(channel) = self.interleaved {
+            // RFC 2326 §10.12: `$` | channel | 16-bit length | RTP, on the TCP
+            // control connection. An RTP packet is always well under 64 KiB.
+            for pkt in &pkts {
+                let mut framed = Vec::with_capacity(4 + pkt.len());
+                framed.push(0x24);
+                framed.push(channel);
+                framed.extend_from_slice(&(pkt.len() as u16).to_be_bytes());
+                framed.extend_from_slice(pkt);
+                if self.control.write_all(&framed).await.is_err() {
+                    return Err(());
+                }
+                sent += 1;
             }
-            sent += 1;
+        } else if let Some(dest) = self.dest {
+            for pkt in &pkts {
+                if socket.send_to(pkt, dest).await.is_err() {
+                    return Err(());
+                }
+                sent += 1;
+            }
         }
         Ok(sent)
     }
@@ -228,6 +258,7 @@ impl RtspServerSink {
         let mut pending: Vec<u8> = Vec::new();
         let mut buf = [0u8; CTRL_BUF];
         let mut dest = None;
+        let mut interleaved = None;
         let packetizer;
         'handshake: loop {
             let n = control.read(&mut buf).await.map_err(io_err)?;
@@ -242,6 +273,9 @@ impl RtspServerSink {
                 match event {
                     RtspEvent::Setup { client_rtp_port } => {
                         dest = Some(SocketAddr::new(peer.ip(), client_rtp_port));
+                    }
+                    RtspEvent::SetupInterleaved { rtp_channel, .. } => {
+                        interleaved = Some(rtp_channel);
                     }
                     RtspEvent::Play => {
                         packetizer = Some(
@@ -261,6 +295,7 @@ impl RtspServerSink {
             pending,
             peer_ip: peer.ip(),
             dest,
+            interleaved,
             packetizer,
         });
         self.tcp = Some(listener);
@@ -287,6 +322,7 @@ impl RtspServerSink {
                 pending: Vec::new(),
                 peer_ip: peer.ip(),
                 dest: None,
+                interleaved: None,
                 packetizer: None,
             });
         }
@@ -433,6 +469,7 @@ mod tests {
             pending: Vec::new(),
             peer_ip: std::net::IpAddr::from([127, 0, 0, 1]),
             dest: None,
+            interleaved: None,
             packetizer: None,
         };
         (client, peer)

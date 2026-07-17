@@ -78,7 +78,9 @@ impl SourceLoop for H264Source {
 
 #[tokio::test]
 async fn flvmux_round_trips_through_flvdemux_in_runner() {
-    let aus = vec![vec![0x65u8, 0xAA, 0xBB], vec![0x41u8, 0xCC]];
+    // Annex-B access units, as an encoder/parser emits (M662: the muxer
+    // re-frames them AVCC into the FLV tags, the demuxer re-frames them back).
+    let aus = vec![vec![0, 0, 0, 1, 0x65u8, 0xAA, 0xBB], vec![0, 0, 0, 1, 0x41u8, 0xCC]];
 
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(Box::new(H264Source { aus, next: 0 })));

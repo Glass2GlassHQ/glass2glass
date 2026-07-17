@@ -405,8 +405,9 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
         Box::new(crate::textoverlay::TextOverlayN::new())
     }));
-    // Summing audio fan-in (M130): adds aligned S16LE buffers from N inputs. The
-    // output caps are a nominal default matching `audiotestsrc`.
+    // Summing audio fan-in (M130): sums N S16LE inputs on a PTS-aligned timeline
+    // (M664). The output caps are a nominal default matching `audiotestsrc`; its
+    // channel count / rate drive the PTS-to-sample-frame mapping.
     reg.register_muxer(MuxerFactory::new("audiomixer", |inputs| {
         Box::new(AudioMixer::new(
             inputs,

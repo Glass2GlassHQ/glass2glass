@@ -66,21 +66,54 @@ ffplay bevy_g2g.h264           # or vlc / mpv
 
 ### Stream live over WebRTC (WHIP)
 
-Point it at a WHIP server and watch in a browser. With
-[mediamtx](https://github.com/bluenviron/mediamtx) running locally (defaults to
-`:8889`):
+Run [MediaMTX](https://github.com/bluenviron/mediamtx) in one terminal:
 
 ```sh
-G2G_WHIP_URL=http://localhost:8889/g2gbevy/whip \
-G2G_FRAMES=0 \
-  cargo run --release
+docker rm -f mediamtx 2>/dev/null || true
+
+docker run --rm -it \
+  --name mediamtx \
+  --network host \
+  bluenviron/mediamtx:1
 ```
 
-`G2G_FRAMES=0` runs forever (until Ctrl-C) so you can watch the stream; omit it
-for the default fixed-length run. Open the bundled WHEP viewer
-`../../g2g-plugins/examples/whep-player.html` (set its URL to the WHEP endpoint,
-e.g. `http://localhost:8889/g2gbevy/whep`) to see the spinning cube, rendered on
-the server GPU and streamed by g2g.
+On Fedora with Podman:
+
+```sh
+podman rm -f mediamtx 2>/dev/null || true
+
+podman run --rm -it \
+  --name mediamtx \
+  --network host \
+  bluenviron/mediamtx:1
+```
+
+Then publish the Bevy stream in another terminal:
+
+```sh
+cd /home/aaron/src/glass2glass/examples/bevy-g2g-stream
+
+G2G_WHIP_URL=http://127.0.0.1:8889/g2gbevy/whip \
+G2G_FRAMES=0 \
+cargo run --release
+```
+
+Open the bundled WHEP viewer:
+
+```text
+/home/aaron/src/glass2glass/g2g-plugins/examples/whep-player.html
+```
+
+Set the WHEP URL to:
+
+```text
+http://127.0.0.1:8889/g2gbevy/whep
+```
+
+Click `Play`. The stream name must match on both sides: publishing to
+`/g2gbevy/whip` means reading from `/g2gbevy/whep`. `G2G_FRAMES=0` runs forever
+(until Ctrl-C) so you can watch the stream; omit it for the default fixed-length
+run.
 
 ### Environment
 
@@ -104,6 +137,8 @@ the server GPU and streamed by g2g.
 - **NVENC AV1 needs an RTX 40-series** (Ada). Ampere (e.g. an RTX 30-series) does
   H.264 + HEVC encode only, which is why this streams H.264 (also the codec
   `WebRtcSink` speaks).
+- **WebRTC playback emits periodic IDRs** once per second. A browser that joins
+  after the first frame needs a fresh keyframe with in-band SPS/PPS before it can
+  decode.
 - The **live WHIP/WebRTC leg** is validated against a browser / WHEP player by a
   human; it is not part of an automated test.
-```

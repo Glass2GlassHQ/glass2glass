@@ -74,12 +74,29 @@ impl AppSrcFeed {
         self.push_slice(SystemSlice::from_boxed(data.to_vec().into_boxed_slice()), pts_ns)
     }
 
+    /// Push one buffer and wait for channel capacity. Returns `false` only if
+    /// the pipeline has gone away.
+    #[cfg(feature = "std")]
+    pub fn push_blocking(&self, data: &[u8], pts_ns: u64) -> bool {
+        self.push_slice_blocking(SystemSlice::from_boxed(data.to_vec().into_boxed_slice()), pts_ns)
+    }
+
     /// Push a pre-built buffer, for the zero-copy path: pass a
     /// [`SystemSlice::from_foreign`] to lend the application's bytes without a
     /// copy (the free callback fires when the frame is finally dropped).
     /// Returns `false` (releasing `slice`) if the feed is full or closed.
     pub fn push_slice(&self, slice: SystemSlice, pts_ns: u64) -> bool {
         self.tx.try_send(AppItem::Frame { domain: MemoryDomain::System(slice), pts_ns }).is_ok()
+    }
+
+    /// Push a pre-built buffer and wait for channel capacity. Returns `false`
+    /// only if the pipeline has gone away.
+    #[cfg(feature = "std")]
+    pub fn push_slice_blocking(&self, slice: SystemSlice, pts_ns: u64) -> bool {
+        g2g_core::runtime::block_on(
+            self.tx.send(AppItem::Frame { domain: MemoryDomain::System(slice), pts_ns }),
+        )
+        .is_ok()
     }
 
     /// Push an imported DMABUF frame: the descriptor stays on the GPU/producer,
@@ -95,6 +112,12 @@ impl AppSrcFeed {
     /// Signal end-of-stream: the source emits a final `Eos` and `run` returns.
     pub fn end_of_stream(&self) -> bool {
         self.tx.try_send(AppItem::Eos).is_ok()
+    }
+
+    /// Signal end-of-stream and wait for channel capacity.
+    #[cfg(feature = "std")]
+    pub fn end_of_stream_blocking(&self) -> bool {
+        g2g_core::runtime::block_on(self.tx.send(AppItem::Eos)).is_ok()
     }
 }
 

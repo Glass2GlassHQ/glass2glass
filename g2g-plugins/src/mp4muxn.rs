@@ -466,29 +466,10 @@ impl MultiInputElement for Mp4MuxN {
     }
 }
 
-/// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
-pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
-    if au.len() < 7 || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
-        return None;
-    }
-    let object_type = ((au[2] >> 6) & 0x03) + 1; // profile + 1
-    let sr_index = (au[2] >> 2) & 0x0F;
-    let channel_config = ((au[2] & 0x01) << 2) | ((au[3] >> 6) & 0x03);
-    Some([
-        (object_type << 3) | (sr_index >> 1),
-        ((sr_index & 1) << 7) | (channel_config << 3),
-    ])
-}
-
-/// Strip the ADTS header (7 bytes, or 9 with CRC) from an AAC access unit.
-pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
-    if au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0 {
-        let header = if au[1] & 0x01 == 0 { 9 } else { 7 }; // protection_absent==0 -> CRC
-        au.get(header..).unwrap_or(&[])
-    } else {
-        au
-    }
-}
+// The ADTS de-frame / ASC-synthesis pair moved to the ungated `aacparse`
+// module (M662, the no_std FLV muxer shares them); re-exported so this
+// module's users keep their import path.
+pub(crate) use crate::aacparse::{asc_from_adts, strip_adts};
 
 fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
     (ns as u128 * timescale as u128 / 1_000_000_000) as u64

@@ -193,87 +193,12 @@ fn ns_to_timescale(ns: u64) -> u64 {
     ns.saturating_mul(TIMESCALE / 1000) / 1_000_000
 }
 
-/// Split an Annex-B buffer into NALUs (3- and 4-byte start codes).
-pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
-    let mut nalus = Vec::new();
-    let mut start = None;
-    let mut i = 0;
-    while i + 2 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-            let code_start = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
-            if let Some(s) = start {
-                nalus.push(&data[s..code_start]);
-            }
-            start = Some(i + 3);
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    if let Some(s) = start {
-        if s < data.len() {
-            nalus.push(&data[s..]);
-        }
-    }
-    nalus
-}
-
-/// NAL unit type, decoded per codec: H.264 packs it in the low 5 bits of byte
-/// 0; H.265 in bits 1..6 of byte 0.
-fn nalu_type(codec: VideoCodec, nalu: &[u8]) -> u8 {
-    let b0 = nalu.first().copied().unwrap_or(0);
-    match codec {
-        VideoCodec::H265 => (b0 >> 1) & 0x3F,
-        _ => b0 & 0x1F,
-    }
-}
-
-fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u8]> {
-    nalus.iter().copied().find(|n| nalu_type(codec, n) == ty)
-}
-
-/// Whether a NAL begins a keyframe: H.264 IDR (type 5), H.265 any IRAP
-/// picture (types 16..=23, covering BLA/IDR/CRA).
-pub(crate) fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
-    let ty = nalu_type(codec, nalu);
-    match codec {
-        VideoCodec::H265 => (16..=23).contains(&ty),
-        _ => ty == 5,
-    }
-}
-
-/// Ordered parameter-set NALUs the moov needs: H.264 SPS(7)+PPS(8), H.265
-/// VPS(32)+SPS(33)+PPS(34). Missing any one is a loud error.
-pub(crate) fn parameter_sets<'a>(
-    codec: VideoCodec,
-    nalus: &[&'a [u8]],
-) -> Result<Vec<&'a [u8]>, G2gError> {
-    let types: &[u8] = match codec {
-        VideoCodec::H265 => &[32, 33, 34],
-        _ => &[7, 8],
-    };
-    let sets: Vec<&[u8]> = types
-        .iter()
-        .map(|ty| find_nalu(codec, nalus, *ty).ok_or(G2gError::CapsMismatch))
-        .collect::<Result<_, _>>()?;
-    // avcC copies profile/compat/level from sps[1..4]; a shorter SPS is
-    // malformed, so fail loud instead of writing a truncated record.
-    if !matches!(codec, VideoCodec::H265) && sets[0].len() < 4 {
-        return Err(G2gError::CapsMismatch);
-    }
-    Ok(sets)
-}
-
-/// AVCC sample payload: every NALU prefixed with its 4-byte big-endian
-/// length (parameter sets stay in-band, which fMP4 players accept).
-pub(crate) fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for n in nalus {
-        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
-        out.extend_from_slice(n);
-    }
-    out
-}
+// The Annex-B split / NAL-type / parameter-set / AVCC helpers moved to the
+// ungated `annexb` module (M662, the no_std FLV muxer shares them);
+// re-exported so this module's users keep their import path.
+pub(crate) use crate::annexb::{
+    avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, split_annexb,
+};
 
 // box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
 use crate::mp4box::{ftyp, full_box, mp4_box, udta_with_tags, MATRIX};
@@ -409,24 +334,6 @@ pub(crate) fn visual_sample_entry(
     mp4_box(fourcc, &p)
 }
 
-/// The `avcC` AVCDecoderConfigurationRecord body (no box header). `param_sets`
-/// is [SPS, PPS]. Also the Matroska `CodecPrivate` for `V_MPEG4/ISO/AVC`.
-pub(crate) fn avcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
-    let sps = param_sets[0];
-    let pps = param_sets[1];
-    let mut p = Vec::new();
-    p.push(1); // configuration version
-    p.extend_from_slice(&sps[1..4.min(sps.len())]); // profile/compat/level
-    p.push(0xFC | 3); // 4-byte NALU lengths
-    p.push(0xE0 | 1); // 1 SPS
-    p.extend_from_slice(&(sps.len() as u16).to_be_bytes());
-    p.extend_from_slice(sps);
-    p.push(1); // 1 PPS
-    p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
-    p.extend_from_slice(pps);
-    p
-}
-
 /// `avcC` decoder configuration record box. `param_sets` is [SPS, PPS].
 fn avcc(param_sets: &[&[u8]]) -> Vec<u8> {
     mp4_box(b"avcC", &avcc_record(param_sets))
@@ -548,6 +455,7 @@ fn fragment(sequence: u64, decode_time: u64, samples: &[(u32, &[u8], bool)]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::annexb::nalu_type;
     use alloc::vec;
 
     #[test]

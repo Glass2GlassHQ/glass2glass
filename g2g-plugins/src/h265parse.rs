@@ -13,9 +13,12 @@
 //! fixed 96 bits. The Annex-B / AVCC framing, the RBSP de-emulation, and the
 //! exp-Golomb bit reader are shared with `h264parse` via the `annexb` module.
 //!
-//! Framerate from the VUI `timing_info` is not recovered yet: in H.265 the VUI
-//! sits past the PCM, short-term-ref-pic-set, and long-term-ref loops, too deep
-//! to reach safely without a real-stream reference, so caps carry `Rate::Any`.
+//! Framerate is recovered from the VUI `timing_info` (M663): the parse
+//! continues past the scaling-list, PCM, short-term-ref-pic-set, and
+//! long-term-ref blocks (the RPS parse is the driver-validated one shared with
+//! the Vulkan Video decoder) to `vui_time_scale / vui_num_units_in_tick`,
+//! best-effort: a stream whose tail cannot be crossed still refines geometry
+//! and leaves the rate unrefined.
 
 use alloc::vec::Vec;
 
@@ -143,9 +146,9 @@ fn h265_au_is_keyframe(au: &[u8]) -> bool {
     })
 }
 
-/// Parse the SPS RBSP (H.265 7.3.2.2) up to the conformance window, returning
-/// the cropped picture dimensions. `None` on a parse failure before the
-/// dimensions resolve.
+/// Parse the SPS RBSP (H.265 7.3.2.2): the cropped picture dimensions from the
+/// head, then (best-effort) the framerate from the VUI `timing_info` (M663).
+/// `None` on a parse failure before the dimensions resolve.
 fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     let mut br = BitReader::new(rbsp);
     let _sps_video_parameter_set_id = br.read_bits(4)?;
@@ -179,7 +182,149 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // adversarial values cannot overflow before the subtract.
     let width = pic_width.saturating_sub(left.saturating_add(right).saturating_mul(sub_width_c));
     let height = pic_height.saturating_sub(top.saturating_add(bottom).saturating_mul(sub_height_c));
-    Some(SpsGeometry { width, height, framerate: None })
+    // The framerate is best-effort: the VUI sits past the scaling-list / RPS /
+    // long-term-ref blocks, and a stream this walk cannot cross still has valid
+    // geometry, so a failure downgrades to `None` instead of failing the parse.
+    let framerate = parse_vui_framerate(&mut br, sps_max_sub_layers_minus1);
+    Some(SpsGeometry { width, height, framerate })
+}
+
+/// Continue the SPS walk past the conformance window down to the VUI
+/// `timing_info` (M663), returning the framerate as Q16 fixed-point fps
+/// (`vui_time_scale / vui_num_units_in_tick`; H.265 ticks are per picture, so
+/// there is no H.264-style field factor of 2). `None` when the VUI omits
+/// timing or a block on the way ends early / is out of range.
+fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Option<u32> {
+    br.read_ue()?; // bit_depth_luma_minus8
+    br.read_ue()?; // bit_depth_chroma_minus8
+    let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
+    if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+        return None;
+    }
+    // sps_sub_layer_ordering_info_present_flag selects one triple or one per
+    // sub-layer.
+    let start =
+        if br.read_bit()? == 1 { 0 } else { sps_max_sub_layers_minus1 };
+    for _ in start..=sps_max_sub_layers_minus1 {
+        br.read_ue()?; // sps_max_dec_pic_buffering_minus1
+        br.read_ue()?; // sps_max_num_reorder_pics
+        br.read_ue()?; // sps_max_latency_increase_plus1
+    }
+    br.read_ue()?; // log2_min_luma_coding_block_size_minus3
+    br.read_ue()?; // log2_diff_max_min_luma_coding_block_size
+    br.read_ue()?; // log2_min_luma_transform_block_size_minus2
+    br.read_ue()?; // log2_diff_max_min_luma_transform_block_size
+    br.read_ue()?; // max_transform_hierarchy_depth_inter
+    br.read_ue()?; // max_transform_hierarchy_depth_intra
+    if br.read_bit()? == 1 {
+        // scaling_list_enabled_flag -> sps_scaling_list_data_present_flag
+        if br.read_bit()? == 1 {
+            skip_scaling_list_data(br)?;
+        }
+    }
+    br.read_bit()?; // amp_enabled_flag
+    br.read_bit()?; // sample_adaptive_offset_enabled_flag
+    if br.read_bit()? == 1 {
+        // pcm_enabled_flag
+        br.read_bits(4)?; // pcm_sample_bit_depth_luma_minus1
+        br.read_bits(4)?; // pcm_sample_bit_depth_chroma_minus1
+        br.read_ue()?; // log2_min_pcm_luma_coding_block_size_minus3
+        br.read_ue()?; // log2_diff_max_min_pcm_luma_coding_block_size
+        br.read_bit()?; // pcm_loop_filter_disabled_flag
+    }
+    let num_short_term_ref_pic_sets = br.read_ue()?;
+    if num_short_term_ref_pic_sets > 64 {
+        return None;
+    }
+    let mut sets = Vec::with_capacity(num_short_term_ref_pic_sets as usize);
+    for idx in 0..num_short_term_ref_pic_sets as usize {
+        sets.push(parse_h265_short_term_rps(br, idx, &sets)?);
+    }
+    if br.read_bit()? == 1 {
+        // long_term_ref_pics_present_flag
+        let num_long_term_ref_pics_sps = br.read_ue()?;
+        if num_long_term_ref_pics_sps > 32 {
+            return None;
+        }
+        for _ in 0..num_long_term_ref_pics_sps {
+            br.skip_bits(log2_max_pic_order_cnt_lsb_minus4 as usize + 4)?; // lt_ref_pic_poc_lsb_sps
+            br.read_bit()?; // used_by_curr_pic_lt_sps_flag
+        }
+    }
+    br.read_bit()?; // sps_temporal_mvp_enabled_flag
+    br.read_bit()?; // strong_intra_smoothing_enabled_flag
+    if br.read_bit()? != 1 {
+        return None; // vui_parameters_present_flag
+    }
+
+    // vui_parameters() (E.2.1) down to timing_info. The head mirrors H.264's,
+    // then HEVC inserts four flags and the default display window.
+    if br.read_bit()? == 1 {
+        // aspect_ratio_info_present_flag; 255 = Extended_SAR.
+        if br.read_bits(8)? == 255 {
+            br.read_bits(16)?; // sar_width
+            br.read_bits(16)?; // sar_height
+        }
+    }
+    if br.read_bit()? == 1 {
+        br.read_bit()?; // overscan_appropriate_flag
+    }
+    if br.read_bit()? == 1 {
+        // video_signal_type_present_flag
+        br.read_bits(3)?; // video_format
+        br.read_bit()?; // video_full_range_flag
+        if br.read_bit()? == 1 {
+            br.read_bits(24)?; // colour primaries / transfer / matrix
+        }
+    }
+    if br.read_bit()? == 1 {
+        // chroma_loc_info_present_flag
+        br.read_ue()?;
+        br.read_ue()?;
+    }
+    br.read_bit()?; // neutral_chroma_indication_flag
+    br.read_bit()?; // field_seq_flag
+    br.read_bit()?; // frame_field_info_present_flag
+    if br.read_bit()? == 1 {
+        // default_display_window_flag
+        br.read_ue()?;
+        br.read_ue()?;
+        br.read_ue()?;
+        br.read_ue()?;
+    }
+    if br.read_bit()? != 1 {
+        return None; // vui_timing_info_present_flag
+    }
+    let num_units_in_tick = br.read_bits(32)?;
+    let time_scale = br.read_bits(32)?;
+    if num_units_in_tick == 0 {
+        return None;
+    }
+    let q16 = ((time_scale as u64) << 16) / (num_units_in_tick as u64);
+    u32::try_from(q16).ok()
+}
+
+/// Skip `scaling_list_data()` (H.265 7.3.4): 4 size classes x 6 matrices (2 for
+/// 32x32), each either predicted (one ue) or explicit (an optional DC delta and
+/// `coefNum` signed deltas).
+fn skip_scaling_list_data(br: &mut BitReader) -> Option<()> {
+    for size_id in 0..4u32 {
+        let matrices = if size_id == 3 { 2 } else { 6 };
+        for _ in 0..matrices {
+            if br.read_bit()? == 0 {
+                br.read_ue()?; // scaling_list_pred_matrix_id_delta
+            } else {
+                let coef_num = 64u32.min(1 << (4 + (size_id << 1)));
+                if size_id > 1 {
+                    br.read_se()?; // scaling_list_dc_coef_minus8
+                }
+                for _ in 0..coef_num {
+                    br.read_se()?; // scaling_list_delta_coef
+                }
+            }
+        }
+    }
+    Some(())
 }
 
 /// Skip `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3). The
@@ -211,6 +356,137 @@ fn skip_profile_tier_level(br: &mut BitReader, max_sub_layers_minus1: u32) -> Op
     Some(())
 }
 
+/// A short-term reference-picture set in canonical (explicit) form: the derived
+/// `DeltaPocS0/S1` deltas and used-by-current flags, whether the stream coded
+/// the set explicitly or by inter-RPS prediction. Storing the derived form lets
+/// the Vulkan Video `Std*` mapping always emit the explicit encoding (with
+/// `inter_ref_pic_set_prediction_flag == 0`), sidestepping the driver-facing
+/// ambiguity of the predicted form; the parser here only needs the pic counts
+/// to cross the RPS list on the way to the VUI (M663).
+#[derive(Debug, Clone, Default)]
+pub struct H265ShortTermRps {
+    pub num_negative_pics: u8,
+    pub num_positive_pics: u8,
+    /// Increasingly negative POC deltas (`DeltaPocS0`), one per negative pic.
+    pub delta_poc_s0: [i32; 16],
+    /// Increasingly positive POC deltas (`DeltaPocS1`), one per positive pic.
+    pub delta_poc_s1: [i32; 16],
+    pub used_s0: [bool; 16],
+    pub used_s1: [bool; 16],
+}
+
+/// Parse the `st_ref_pic_set(stRpsIdx)` at index `idx` (H.265 7.3.7), deriving
+/// the canonical explicit form. When the set is coded by inter-RPS prediction it
+/// is derived from `prev[idx - 1]` per H.265 7.4.8; the bit reader is always
+/// advanced by `NumDeltaPocs[RefRpsIdx] + 1` used/use-delta flags in that branch.
+/// Within an SPS `stRpsIdx` is never `num_short_term_ref_pic_sets`, so
+/// `delta_idx_minus1` is not present. `None` on truncation or an out-of-range
+/// count.
+pub(crate) fn parse_h265_short_term_rps(
+    br: &mut BitReader,
+    idx: usize,
+    prev: &[H265ShortTermRps],
+) -> Option<H265ShortTermRps> {
+    let mut rps = H265ShortTermRps::default();
+    let inter_pred = if idx != 0 { br.read_bit()? == 1 } else { false };
+
+    if inter_pred {
+        // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1); delta_idx_minus1 is not
+        // coded in the SPS, so it is 0 and RefRpsIdx = idx - 1.
+        let reference = prev.get(idx.checked_sub(1)?)?;
+        let delta_rps_sign = br.read_bit()? as i32;
+        let abs_delta_rps_minus1 = br.read_ue()? as i32;
+        let delta_rps = (1 - 2 * delta_rps_sign) * (abs_delta_rps_minus1 + 1);
+        let num_neg = reference.num_negative_pics as usize;
+        let num_pos = reference.num_positive_pics as usize;
+        let num_delta_pocs = num_neg + num_pos;
+
+        // used_by_curr_pic_flag[j] / use_delta_flag[j] for j in 0..=NumDeltaPocs.
+        let mut used_by_curr = [false; 33];
+        let mut use_delta = [true; 33];
+        for j in 0..=num_delta_pocs {
+            let u = br.read_bit()? == 1;
+            used_by_curr[j] = u;
+            use_delta[j] = if u { true } else { br.read_bit()? == 1 };
+        }
+
+        // Derive the negative pics (S0) of the current set (H.265 7.4.8).
+        let mut i = 0usize;
+        for j in (0..num_pos).rev() {
+            let d_poc = reference.delta_poc_s1[j] + delta_rps;
+            if d_poc < 0 && use_delta[num_neg + j] && i < 16 {
+                rps.delta_poc_s0[i] = d_poc;
+                rps.used_s0[i] = used_by_curr[num_neg + j];
+                i += 1;
+            }
+        }
+        if delta_rps < 0 && use_delta[num_delta_pocs] && i < 16 {
+            rps.delta_poc_s0[i] = delta_rps;
+            rps.used_s0[i] = used_by_curr[num_delta_pocs];
+            i += 1;
+        }
+        for j in 0..num_neg {
+            let d_poc = reference.delta_poc_s0[j] + delta_rps;
+            if d_poc < 0 && use_delta[j] && i < 16 {
+                rps.delta_poc_s0[i] = d_poc;
+                rps.used_s0[i] = used_by_curr[j];
+                i += 1;
+            }
+        }
+        rps.num_negative_pics = i as u8;
+
+        // Derive the positive pics (S1).
+        let mut i = 0usize;
+        for j in (0..num_neg).rev() {
+            let d_poc = reference.delta_poc_s0[j] + delta_rps;
+            if d_poc > 0 && use_delta[j] && i < 16 {
+                rps.delta_poc_s1[i] = d_poc;
+                rps.used_s1[i] = used_by_curr[j];
+                i += 1;
+            }
+        }
+        if delta_rps > 0 && use_delta[num_delta_pocs] && i < 16 {
+            rps.delta_poc_s1[i] = delta_rps;
+            rps.used_s1[i] = used_by_curr[num_delta_pocs];
+            i += 1;
+        }
+        for j in 0..num_pos {
+            let d_poc = reference.delta_poc_s1[j] + delta_rps;
+            if d_poc > 0 && use_delta[num_neg + j] && i < 16 {
+                rps.delta_poc_s1[i] = d_poc;
+                rps.used_s1[i] = used_by_curr[num_neg + j];
+                i += 1;
+            }
+        }
+        rps.num_positive_pics = i as u8;
+    } else {
+        let num_negative_pics = br.read_ue()?;
+        let num_positive_pics = br.read_ue()?;
+        if num_negative_pics > 16 || num_positive_pics > 16 {
+            return None;
+        }
+        let mut prev_poc = 0i32;
+        for k in 0..num_negative_pics as usize {
+            let delta_poc_s0_minus1 = br.read_ue()? as i32;
+            rps.used_s0[k] = br.read_bit()? == 1;
+            let dp = prev_poc - (delta_poc_s0_minus1 + 1);
+            rps.delta_poc_s0[k] = dp;
+            prev_poc = dp;
+        }
+        let mut prev_poc = 0i32;
+        for k in 0..num_positive_pics as usize {
+            let delta_poc_s1_minus1 = br.read_ue()? as i32;
+            rps.used_s1[k] = br.read_bit()? == 1;
+            let dp = prev_poc + (delta_poc_s1_minus1 + 1);
+            rps.delta_poc_s1[k] = dp;
+            prev_poc = dp;
+        }
+        rps.num_negative_pics = num_negative_pics as u8;
+        rps.num_positive_pics = num_positive_pics as u8;
+    }
+    Some(rps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +510,17 @@ mod tests {
         chroma_format_idc: u32,
         conf: Option<(u32, u32, u32, u32)>,
     ) -> Vec<u8> {
+        finish_sps(sps_head(pic_w, pic_h, chroma_format_idc, conf))
+    }
+
+    /// The SPS fields up to the conformance window, as a bit writer the caller
+    /// can extend (the M663 VUI variant) before wrapping into a NAL.
+    fn sps_head(
+        pic_w: u32,
+        pic_h: u32,
+        chroma_format_idc: u32,
+        conf: Option<(u32, u32, u32, u32)>,
+    ) -> BitWriter {
         let mut w = BitWriter::default();
         w.write_bits(0, 4); // sps_video_parameter_set_id
         w.write_bits(0, 3); // sps_max_sub_layers_minus1
@@ -258,6 +545,12 @@ mod tests {
             }
             None => w.write_bit(0),
         }
+        w
+    }
+
+    /// Close the RBSP (stop bit + alignment), emulation-prevent it, and wrap it
+    /// in a start code + SPS NAL header.
+    fn finish_sps(mut w: BitWriter) -> Vec<u8> {
         w.write_bit(1); // rbsp_stop_one_bit
         w.align_to_byte();
         let rbsp = w.into_bytes();
@@ -267,6 +560,52 @@ mod tests {
         let mut out = vec![0u8, 0, 0, 1, 0x42, 0x01];
         out.extend_from_slice(&ebsp);
         out
+    }
+
+    /// [`build_annexb_sps`] continued through the whole SPS tail to a VUI with
+    /// `timing_info` (M663): zero/absent optional blocks, then
+    /// `vui_num_units_in_tick` / `vui_time_scale`.
+    fn build_annexb_sps_with_vui(
+        pic_w: u32,
+        pic_h: u32,
+        num_units_in_tick: u32,
+        time_scale: u32,
+    ) -> Vec<u8> {
+        let mut w = sps_head(pic_w, pic_h, 1, None);
+        w.write_ue(0); // bit_depth_luma_minus8
+        w.write_ue(0); // bit_depth_chroma_minus8
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_bit(1); // sps_sub_layer_ordering_info_present_flag
+        w.write_ue(0); // sps_max_dec_pic_buffering_minus1
+        w.write_ue(0); // sps_max_num_reorder_pics
+        w.write_ue(0); // sps_max_latency_increase_plus1
+        w.write_ue(0); // log2_min_luma_coding_block_size_minus3
+        w.write_ue(0); // log2_diff_max_min_luma_coding_block_size
+        w.write_ue(0); // log2_min_luma_transform_block_size_minus2
+        w.write_ue(0); // log2_diff_max_min_luma_transform_block_size
+        w.write_ue(0); // max_transform_hierarchy_depth_inter
+        w.write_ue(0); // max_transform_hierarchy_depth_intra
+        w.write_bit(0); // scaling_list_enabled_flag
+        w.write_bit(0); // amp_enabled_flag
+        w.write_bit(0); // sample_adaptive_offset_enabled_flag
+        w.write_bit(0); // pcm_enabled_flag
+        w.write_ue(0); // num_short_term_ref_pic_sets
+        w.write_bit(0); // long_term_ref_pics_present_flag
+        w.write_bit(0); // sps_temporal_mvp_enabled_flag
+        w.write_bit(0); // strong_intra_smoothing_enabled_flag
+        w.write_bit(1); // vui_parameters_present_flag
+        w.write_bit(0); // aspect_ratio_info_present_flag
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(0); // video_signal_type_present_flag
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(0); // neutral_chroma_indication_flag
+        w.write_bit(0); // field_seq_flag
+        w.write_bit(0); // frame_field_info_present_flag
+        w.write_bit(0); // default_display_window_flag
+        w.write_bit(1); // vui_timing_info_present_flag
+        w.write_bits(num_units_in_tick, 32);
+        w.write_bits(time_scale, 32);
+        finish_sps(w)
     }
 
     /// Inverse of `annexb::strip_emulation_prevention`: insert `0x03` after each
@@ -290,6 +629,24 @@ mod tests {
         let stream = build_annexb_sps(1920, 1080, 1, None);
         let info = extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
+        // The RBSP ends at the conformance window, so the VUI walk truncates:
+        // geometry still resolves, the rate stays unrefined (best-effort M663).
+        assert_eq!(info.framerate, None);
+    }
+
+    #[test]
+    fn recovers_framerate_from_vui_timing_info() {
+        // 25 fps: one tick per picture at a 25 Hz time scale (no H.264-style
+        // field doubling in HEVC).
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25);
+        let info = extract_sps_info(&stream).expect("SPS with VUI must parse");
+        assert_eq!((info.width, info.height), (1920, 1080));
+        assert_eq!(info.framerate, Some(25 << 16), "Q16 fps from timing_info");
+
+        // 29.97 fps (30000/1001): the Q16 value is the truncated division.
+        let ntsc = build_annexb_sps_with_vui(720, 480, 1001, 30_000);
+        let info = extract_sps_info(&ntsc).expect("NTSC SPS must parse");
+        assert_eq!(info.framerate, Some(((30_000u64 << 16) / 1001) as u32));
     }
 
     #[test]

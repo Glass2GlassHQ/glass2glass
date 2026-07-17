@@ -524,10 +524,15 @@ Phased plan:
 - **SRT:** real-peer interop with libsrt/ffmpeg is validated for the **full
   matrix** by `srt_ffmpeg_interop` (ignored, needs ffmpeg+libsrt): both
   directions (ffmpeg caller -> `SrtSrc` listener; `SrtSink` caller -> ffmpeg
-  listener) x plaintext + AES-128 + AES-256 (M522/M525/M526). Still open:
-  KM-retransmit-until-KMRSP for lossy rekey. (TSBPD, AES-256, key rotation,
-  congestion control landed earlier.)
-- **RTMP:** multiple streams. (Window-acknowledgement back-pressure is done, M533:
+  listener) x plaintext + AES-128 + AES-256 (M522/M525/M526). (TSBPD, AES-256,
+  key rotation, congestion control landed earlier; a rekey KM is now
+  retransmitted until the peer KMRSPs, M671, so it survives KM-packet loss.)
+- **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
+  a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
+  client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps
+  model (the same call made against webrtcbin-style request pads). Niche in
+  practice (OBS / ffmpeg / CDNs publish one stream per connection); revisit only
+  with a concrete need. (Window-acknowledgement back-pressure is done, M533:
   `RtmpSession` emits an `Acknowledgement` every Window-Ack-Size bytes received
   (configurable via `with_window_ack_size`), and `RtmpPublisher` tracks the
   server's window + acknowledged sequence, exposing `throttled()`; `RtmpSink`
@@ -540,11 +545,11 @@ Phased plan:
   `rtmp_ffmpeg_interop` has ffmpeg publish into `RtmpSrc`, ffprobe decoding the
   demuxed FLV; ingest interoperates out of the box. Egress to a real CDN stays
   user-side.)
-- **RTSP server:** RTCP / keepalive during PLAY; the serving *sink*'s
-  TCP-interleaved transport (the *ingest* source's is done, M532:
-  `RTP/AVP/TCP;interleaved=`, RFC 2326 §10.12, RTP demuxed from the `$`-framed
-  control connection, validated vs `ffmpeg -rtsp_transport tcp`); serving
-  multi-client is done (`RtspServerSink`), ingest multi-client is a follow-up.
+- **RTSP server:** RTCP / keepalive during PLAY; ingest multi-client (serving
+  multi-client is done, `RtspServerSink`). The serving *sink*'s TCP-interleaved
+  transport is done (M672: `$`-framed RTP on the control connection, RFC 2326
+  §10.12, validated against `ffmpeg -rtsp_transport tcp` playing from the sink),
+  as is the *ingest* source's (M532).
 - **`UdpSrc` SDP/SPS-driven caps discovery** (reports a declared hint today).
 - **WebRTC.** On the sans-IO `str0m` stack (ICE / DTLS / SRTP, pure-Rust
   crypto), behind the `webrtc` feature: `WebRtcSink` (WHIP egress, H.264 *or*
@@ -667,8 +672,9 @@ Phased plan:
   Single-track `MkvMux` also lacks unknown-size Clusters (live read).
 - **MPEG-TS:** multi-stream / multi-program muxing + selection; PCR-based timing.
 - **OGG:** granule-position timing; Vorbis output; multi-stream; `oggmux`.
-- **FLV:** demuxer codec-config / extradata side channel (sequence-header tags);
-  muxer sequence-header / extradata + `onMetaData` script tag.
+- **FLV:** VP6 / H.263 / MP3 / Speex codecs (only H.264 + AAC ride the tag
+  stream today); B-frame composition-time write on the mux side (the demuxer
+  reads CTS, the muxers write 0).
 - **CMAF / fMP4:** the CMAF-specific signalling layer on `Mp4Sink` / `Mp4Src`.
 
 ## Codecs
@@ -691,26 +697,18 @@ Phased plan:
 
 ## Parsers
 
-- `H265Parse`: framerate from VUI `timing_info`; validate against a real H.265
-  elementary stream.
-- `AacParse`: LATM / LOAS framing; AudioSpecificConfig synthesis; validate
-  against a real ADTS stream.
-- `OpusParse`: multichannel (family 1, count in `OpusHead`).
+_(No open parser items.)_
 
 ## Transforms and effects
 
-- **`videobalance`:** hue (faithful chroma rotation needs `sin`/`cos`, a `libm`
-  dep the `no_std` baseline avoids).
-- **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `fontdue`)
-  renders glyf-outline fonts (CJK / accented / mixed-case, horizontal + vertical)
-  with an explicit Latin+CJK fallback chain. Still open: CFF / CFF2 outlines (so
-  variable Noto Sans CJK works, not just glyf fonts like Droid Sans Fallback),
-  real shaping + bidi, and automatic system-font discovery / fallback, all of
-  which point at the `cosmic-text` upgrade; plus a `vello` GPU backend and the
-  `clockoverlay` / `timeoverlay` siblings.
-- **`audiomixer`:** sample-rate + channel-layout reconciliation; PTS-based
-  alignment.
-- **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
+- **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
+  since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
+  horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
+  `.otf` fonts render, not only glyf `.ttf`s. Still open: variable-font axis
+  selection (a non-default instance of a variable Noto Sans CJK), real shaping +
+  bidi, and automatic system-font discovery / fallback, all of which point at the
+  `cosmic-text` upgrade; plus a `vello` GPU backend and the `clockoverlay` /
+  `timeoverlay` siblings.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
@@ -801,8 +799,10 @@ Phased plan:
 ## Compositor
 
 - A wgpu compute variant for HD / many-input scale.
-- NV12 / I420 mixing without a round-trip through RGBA.
-- Configurable output cadence.
+- Timer-driven output (emit at the output rate even when inputs stall, a
+  zero-order-hold aggregator tick). Needs the runner to deadline-tick the
+  compositor without an input packet; constant-rate resampling of a flowing
+  output is already covered by a downstream `videorate`.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

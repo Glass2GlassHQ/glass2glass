@@ -819,23 +819,11 @@ pub struct H265ProfileTierLevel {
     pub general_level_idc: u8,
 }
 
-/// A short-term reference-picture set in canonical (explicit) form: the derived
-/// `DeltaPocS0/S1` deltas and used-by-current flags, whether the stream coded
-/// the set explicitly or by inter-RPS prediction. Storing the derived form lets
-/// the `Std*` mapping always emit the explicit encoding (with
-/// `inter_ref_pic_set_prediction_flag == 0`), sidestepping the driver-facing
-/// ambiguity of the predicted form.
-#[derive(Debug, Clone, Default)]
-pub struct H265ShortTermRps {
-    pub num_negative_pics: u8,
-    pub num_positive_pics: u8,
-    /// Increasingly negative POC deltas (`DeltaPocS0`), one per negative pic.
-    pub delta_poc_s0: [i32; 16],
-    /// Increasingly positive POC deltas (`DeltaPocS1`), one per positive pic.
-    pub delta_poc_s1: [i32; 16],
-    pub used_s0: [bool; 16],
-    pub used_s1: [bool; 16],
-}
+// The short-term RPS parse moved to the ungated `h265parse` module (M663, its
+// SPS walk crosses the RPS list to reach the VUI); re-exported so this module's
+// public surface keeps the type.
+pub use crate::h265parse::H265ShortTermRps;
+use crate::h265parse::parse_h265_short_term_rps;
 
 /// Parsed H.265 sequence parameter set: the fields the `Std*` SPS + its pointee
 /// blocks (PTL, DPB manager, short-term RPS list) need. 4:2:0 / 4:2:2 / 4:4:4
@@ -1001,118 +989,6 @@ fn parse_h265_ptl(br: &mut BitReader, max_sub_layers_minus1: u32) -> Option<H265
         general_frame_only_constraint_flag,
         general_level_idc,
     })
-}
-
-/// Parse the `st_ref_pic_set(stRpsIdx)` at index `idx` (H.265 7.3.7), deriving
-/// the canonical explicit form. When the set is coded by inter-RPS prediction it
-/// is derived from `prev[idx - 1]` per H.265 7.4.8; the bit reader is always
-/// advanced by `NumDeltaPocs[RefRpsIdx] + 1` used/use-delta flags in that branch.
-/// Within an SPS `stRpsIdx` is never `num_short_term_ref_pic_sets`, so
-/// `delta_idx_minus1` is not present. `None` on truncation or an out-of-range
-/// count.
-fn parse_h265_short_term_rps(
-    br: &mut BitReader,
-    idx: usize,
-    prev: &[H265ShortTermRps],
-) -> Option<H265ShortTermRps> {
-    let mut rps = H265ShortTermRps::default();
-    let inter_pred = if idx != 0 { br.read_bit()? == 1 } else { false };
-
-    if inter_pred {
-        // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1); delta_idx_minus1 is not
-        // coded in the SPS, so it is 0 and RefRpsIdx = idx - 1.
-        let reference = prev.get(idx.checked_sub(1)?)?;
-        let delta_rps_sign = br.read_bit()? as i32;
-        let abs_delta_rps_minus1 = br.read_ue()? as i32;
-        let delta_rps = (1 - 2 * delta_rps_sign) * (abs_delta_rps_minus1 + 1);
-        let num_neg = reference.num_negative_pics as usize;
-        let num_pos = reference.num_positive_pics as usize;
-        let num_delta_pocs = num_neg + num_pos;
-
-        // used_by_curr_pic_flag[j] / use_delta_flag[j] for j in 0..=NumDeltaPocs.
-        let mut used_by_curr = [false; 33];
-        let mut use_delta = [true; 33];
-        for j in 0..=num_delta_pocs {
-            let u = br.read_bit()? == 1;
-            used_by_curr[j] = u;
-            use_delta[j] = if u { true } else { br.read_bit()? == 1 };
-        }
-
-        // Derive the negative pics (S0) of the current set (H.265 7.4.8).
-        let mut i = 0usize;
-        for j in (0..num_pos).rev() {
-            let d_poc = reference.delta_poc_s1[j] + delta_rps;
-            if d_poc < 0 && use_delta[num_neg + j] && i < 16 {
-                rps.delta_poc_s0[i] = d_poc;
-                rps.used_s0[i] = used_by_curr[num_neg + j];
-                i += 1;
-            }
-        }
-        if delta_rps < 0 && use_delta[num_delta_pocs] && i < 16 {
-            rps.delta_poc_s0[i] = delta_rps;
-            rps.used_s0[i] = used_by_curr[num_delta_pocs];
-            i += 1;
-        }
-        for j in 0..num_neg {
-            let d_poc = reference.delta_poc_s0[j] + delta_rps;
-            if d_poc < 0 && use_delta[j] && i < 16 {
-                rps.delta_poc_s0[i] = d_poc;
-                rps.used_s0[i] = used_by_curr[j];
-                i += 1;
-            }
-        }
-        rps.num_negative_pics = i as u8;
-
-        // Derive the positive pics (S1).
-        let mut i = 0usize;
-        for j in (0..num_neg).rev() {
-            let d_poc = reference.delta_poc_s0[j] + delta_rps;
-            if d_poc > 0 && use_delta[j] && i < 16 {
-                rps.delta_poc_s1[i] = d_poc;
-                rps.used_s1[i] = used_by_curr[j];
-                i += 1;
-            }
-        }
-        if delta_rps > 0 && use_delta[num_delta_pocs] && i < 16 {
-            rps.delta_poc_s1[i] = delta_rps;
-            rps.used_s1[i] = used_by_curr[num_delta_pocs];
-            i += 1;
-        }
-        for j in 0..num_pos {
-            let d_poc = reference.delta_poc_s1[j] + delta_rps;
-            if d_poc > 0 && use_delta[num_neg + j] && i < 16 {
-                rps.delta_poc_s1[i] = d_poc;
-                rps.used_s1[i] = used_by_curr[num_neg + j];
-                i += 1;
-            }
-        }
-        rps.num_positive_pics = i as u8;
-    } else {
-        let num_negative_pics = br.read_ue()?;
-        let num_positive_pics = br.read_ue()?;
-        if num_negative_pics > 16 || num_positive_pics > 16 {
-            return None;
-        }
-        let mut prev_poc = 0i32;
-        for k in 0..num_negative_pics as usize {
-            let delta_poc_s0_minus1 = br.read_ue()? as i32;
-            rps.used_s0[k] = br.read_bit()? == 1;
-            let dp = prev_poc - (delta_poc_s0_minus1 + 1);
-            rps.delta_poc_s0[k] = dp;
-            prev_poc = dp;
-        }
-        let mut prev_poc = 0i32;
-        for k in 0..num_positive_pics as usize {
-            let delta_poc_s1_minus1 = br.read_ue()? as i32;
-            rps.used_s1[k] = br.read_bit()? == 1;
-            let dp = prev_poc + (delta_poc_s1_minus1 + 1);
-            rps.delta_poc_s1[k] = dp;
-            prev_poc = dp;
-        }
-        rps.num_negative_pics = num_negative_pics as u8;
-        rps.num_positive_pics = num_positive_pics as u8;
-    }
-    Some(rps)
 }
 
 /// Parse an H.265 SPS RBSP (bytes after the 2-byte NAL header, de-emulated).

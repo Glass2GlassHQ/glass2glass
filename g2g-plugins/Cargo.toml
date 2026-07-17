@@ -420,12 +420,14 @@ web-gpu = [
 # attach `TextCueMeta` (cue placement) that `TextOverlayN` reads, and is implied
 # by `analytics` (the detection graph needs the same container).
 metadata = ["g2g-core/metadata"]
-# TrueType text overlay (M409): gives `TextOverlay` a real font backend so it
-# renders CJK / accented Latin / mixed-case (the 8x8 ASCII bitmap baseline paints
-# none of those). Loads a `.ttf` / `.ttc` (e.g. Noto Sans CJK) via `fontdue` and
-# rasterizes glyphs onto the RGBA8 frame, horizontal and vertical (`vertical:rl`).
-# std (file loading); the no_std baseline keeps the bitmap font.
-truetype-overlay = ["std", "dep:fontdue"]
+# TrueType / OpenType text overlay (M409): gives `TextOverlay` a real font
+# backend so it renders CJK / accented Latin / mixed-case (the 8x8 ASCII bitmap
+# baseline paints none of those). Loads a `.ttf` / `.otf` / `.ttc` (e.g. Noto Sans
+# CJK) via `ab_glyph` and rasterizes glyphs onto the RGBA8 frame, horizontal and
+# vertical (`vertical:rl`). `ab_glyph` rasterizes both glyf and CFF/CFF2 outlines,
+# so OpenType-CFF fonts render (the M668 gap fontdue could not). std (file
+# loading); the no_std baseline keeps the bitmap font.
+truetype-overlay = ["std", "dep:ab_glyph"]
 # Analytics overlay (M101): AnalyticsOverlay draws AnalyticsMeta detection boxes
 # onto a raw RGBA8 frame (the detector -> overlay visible end). Pulls in the
 # `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
@@ -649,9 +651,10 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 tokio-tungstenite = { version = "0.24", optional = true }
 url = { version = "2", optional = true }
 bytes = { version = "1", optional = true }
-# TrueType font parser + rasterizer (truetype-overlay feature, M409). Pure-Rust,
-# itself no_std; loads a .ttf / .ttc and rasterizes glyphs to coverage bitmaps.
-fontdue = { version = "0.9", optional = true }
+# TrueType / OpenType font parser + rasterizer (truetype-overlay feature, M409).
+# Pure-Rust (over ttf-parser); loads .ttf / .otf / .ttc and rasterizes both glyf
+# and CFF/CFF2 outlines to coverage, so OpenType-CFF fonts render (M668).
+ab_glyph = { version = "0.2", optional = true }
 # Vello GPU 2D renderer (vello-overlay feature, M102). Renders detection boxes
 # into a wgpu texture; re-exports wgpu 29 (matching g2g-ml) as `vello::wgpu`.
 vello = { version = "0.9", optional = true }

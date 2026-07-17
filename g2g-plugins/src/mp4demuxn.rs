@@ -108,41 +108,9 @@ fn real_caps(kind: &TrackKind) -> Caps {
     }
 }
 
-/// Build an ADTS-framed AAC access unit from the track's 2-byte
-/// AudioSpecificConfig and the raw access unit: a 7-byte ADTS header (no CRC)
-/// derived from the ASC's audio-object-type, sampling-frequency index, and
-/// channel configuration, then the AU. The inverse of the muxer's de-ADTS write,
-/// so the demuxed audio is self-describing. `None` when the ASC is too short, the
-/// rate index / channel config is out of range, or the frame exceeds the 13-bit
-/// ADTS length (then the AU is forwarded raw).
-fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
-    if asc.len() < 2 {
-        return None;
-    }
-    let aot = asc[0] >> 3; // audio object type (5 bits)
-    let sr_index = ((asc[0] & 0x07) << 1) | (asc[1] >> 7);
-    let channel_config = (asc[1] >> 3) & 0x0F;
-    if sr_index > 12 || channel_config == 0 {
-        return None; // reserved/explicit rate or "config in stream": not ADTS-able
-    }
-    let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
-    let frame_len = au.len() + 7;
-    if frame_len > 0x1FFF {
-        return None; // ADTS frame_length is 13 bits
-    }
-    let mut out = Vec::with_capacity(frame_len);
-    out.extend_from_slice(&[
-        0xFF,
-        0xF1, // syncword | MPEG-4 | layer 0 | protection_absent (no CRC)
-        (profile << 6) | (sr_index << 2) | ((channel_config >> 2) & 1),
-        ((channel_config & 3) << 6) | ((frame_len >> 11) & 3) as u8,
-        ((frame_len >> 3) & 0xFF) as u8,
-        (((frame_len & 7) << 5) as u8) | 0x1F, // buffer fullness (top bits)
-        0xFC, // buffer fullness (low) | num_raw_data_blocks = 0
-    ]);
-    out.extend_from_slice(au);
-    Some(out)
-}
+// ADTS synthesis moved to the ungated `aacparse` module (M662, the no_std FLV
+// demuxer shares it); imported so this module's uses keep reading the same.
+use crate::aacparse::adts_from_asc;
 
 /// The forwardable tracks an MP4 carries, in `moov` order (M392): one
 /// [`Mp4StreamInfo`] per A/V `trak`, carrying the negotiation caps (what a decode

@@ -1,8 +1,10 @@
-//! Annex-B/AVCC NAL splitting and RBSP bitstream helpers, shared by the
-//! H.264/H.265 parsers, the WebCodecs payloader (`h264util`), and the RTP
-//! packetizer (`rtppay`).
+//! Annex-B/AVCC NAL splitting, avcC / parameter-set, and RBSP bitstream
+//! helpers, shared by the H.264/H.265 parsers, the WebCodecs payloader
+//! (`h264util`), the RTP packetizer (`rtppay`), and the MP4 / FLV demuxers.
 
 use alloc::vec::Vec;
+
+use g2g_core::{G2gError, VideoCodec};
 
 /// Find the next Annex-B start code (`00 00 01` or `00 00 00 01`) at or after
 /// `from`. Returns `(start_index, payload_index)`: the offset of the start code
@@ -55,28 +57,23 @@ pub(crate) fn is_annex_b(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 0, 1]) || data.starts_with(&[0, 0, 1])
 }
 
-/// Iterator over AVCC NAL units: each NAL is preceded by a 4-byte big-endian
-/// length (`lengthSizeMinusOne = 3`, the dominant case and what `retina` emits).
+/// Iterator over length-prefixed (AVCC) NAL units: each NAL is preceded by a
+/// big-endian length of `len_size` bytes (4 is `lengthSizeMinusOne = 3`, the
+/// dominant case and what `retina` emits; an `avcC` record may declare 1..=4).
 /// A truncated final length or NAL ends iteration rather than panicking.
 pub(crate) struct AvccNals<'a> {
     data: &'a [u8],
     pos: usize,
+    len_size: usize,
 }
 
 impl<'a> Iterator for AvccNals<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<&'a [u8]> {
-        if self.pos + 4 > self.data.len() {
-            return None;
-        }
-        let len = u32::from_be_bytes([
-            self.data[self.pos],
-            self.data[self.pos + 1],
-            self.data[self.pos + 2],
-            self.data[self.pos + 3],
-        ]) as usize;
-        let start = self.pos + 4;
+        let start = self.pos.checked_add(self.len_size)?;
+        let prefix = self.data.get(self.pos..start)?;
+        let len = prefix.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize);
         let end = start.checked_add(len)?;
         if end > self.data.len() {
             return None;
@@ -87,7 +84,15 @@ impl<'a> Iterator for AvccNals<'a> {
 }
 
 pub(crate) fn avcc_nal_units(data: &[u8]) -> AvccNals<'_> {
-    AvccNals { data, pos: 0 }
+    AvccNals { data, pos: 0, len_size: 4 }
+}
+
+/// [`avcc_nal_units`] with an explicit prefix width, for containers whose config
+/// record declares a non-4-byte NAL length (FLV's `avcC` `lengthSizeMinusOne`).
+/// `len_size` outside 1..=4 yields an empty iteration.
+pub(crate) fn length_prefixed_nal_units(data: &[u8], len_size: usize) -> AvccNals<'_> {
+    let len_size = if (1..=4).contains(&len_size) { len_size } else { usize::MAX };
+    AvccNals { data, pos: 0, len_size }
 }
 
 /// NAL iterator over either framing, picked by [`is_annex_b`]. Yields the same
@@ -234,6 +239,172 @@ pub(crate) fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
         out.extend_from_slice(nal);
     }
     out
+}
+
+/// First SPS and PPS out of an `avcC` payload.
+pub(crate) fn parse_avcc(avcc: &[u8]) -> Result<(Vec<u8>, Vec<u8>), G2gError> {
+    // 5 fixed bytes, then SPS count (low 5 bits).
+    let sps_count = avcc.get(5).map(|b| b & 0x1F).ok_or(G2gError::CapsMismatch)?;
+    if sps_count == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    let sps_len = u16::from_be_bytes(
+        avcc.get(6..8).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+    ) as usize;
+    let sps = avcc.get(8..8 + sps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
+    let mut at = 8 + sps_len;
+    let pps_count = *avcc.get(at).ok_or(G2gError::CapsMismatch)?;
+    if pps_count == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    at += 1;
+    let pps_len = u16::from_be_bytes(
+        avcc.get(at..at + 2).ok_or(G2gError::CapsMismatch)?.try_into().expect("2 bytes"),
+    ) as usize;
+    at += 2;
+    let pps = avcc.get(at..at + pps_len).ok_or(G2gError::CapsMismatch)?.to_vec();
+    Ok((sps, pps))
+}
+
+/// Whether the access unit already opens with a parameter-set NAL (so the
+/// config-record sets need not be prepended): H.264 SPS(7), H.265 VPS(32).
+pub(crate) fn starts_with_param_set(annexb: &[u8], codec: VideoCodec) -> bool {
+    if codec == VideoCodec::Mpeg4Part2 {
+        // MPEG-4 Visual uses 3-byte start codes; its config opens with the visual
+        // object sequence start code (0xB0) or a video object layer (0x20..=0x2F).
+        return match annexb {
+            [0, 0, 1, sc, ..] => *sc == 0xB0 || (0x20..=0x2F).contains(sc),
+            _ => false,
+        };
+    }
+    if annexb.len() <= 4 || annexb[..4] != [0, 0, 0, 1] {
+        return false;
+    }
+    match codec {
+        VideoCodec::H265 => (annexb[4] >> 1) & 0x3F == 32,
+        _ => annexb[4] & 0x1F == 7,
+    }
+}
+
+/// Prepend the out-of-band config-record parameter sets to `annexb` (the first
+/// access unit). H.264/H.265 sets are raw NAL bodies, so each gets a 4-byte
+/// Annex-B start code; MPEG-4 Part 2's single set is the esds VOL header, which
+/// already carries its own 3-byte start codes and is prepended verbatim. Shared
+/// by the progressive and fragmented MP4 demuxers and the FLV demuxer.
+pub(crate) fn prepend_param_sets(
+    annexb: &[u8],
+    param_sets: &[Vec<u8>],
+    codec: VideoCodec,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    for set in param_sets {
+        if codec != VideoCodec::Mpeg4Part2 {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+        }
+        out.extend_from_slice(set);
+    }
+    out.extend_from_slice(annexb);
+    out
+}
+
+/// Split an Annex-B buffer into NALUs (3- and 4-byte start codes).
+pub(crate) fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
+    let mut nalus = Vec::new();
+    let mut start = None;
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let code_start = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
+            if let Some(s) = start {
+                nalus.push(&data[s..code_start]);
+            }
+            start = Some(i + 3);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some(s) = start {
+        if s < data.len() {
+            nalus.push(&data[s..]);
+        }
+    }
+    nalus
+}
+
+/// NAL unit type, decoded per codec: H.264 packs it in the low 5 bits of byte
+/// 0; H.265 in bits 1..6 of byte 0.
+pub(crate) fn nalu_type(codec: VideoCodec, nalu: &[u8]) -> u8 {
+    let b0 = nalu.first().copied().unwrap_or(0);
+    match codec {
+        VideoCodec::H265 => (b0 >> 1) & 0x3F,
+        _ => b0 & 0x1F,
+    }
+}
+
+fn find_nalu<'a>(codec: VideoCodec, nalus: &[&'a [u8]], ty: u8) -> Option<&'a [u8]> {
+    nalus.iter().copied().find(|n| nalu_type(codec, n) == ty)
+}
+
+/// Whether a NAL begins a keyframe: H.264 IDR (type 5), H.265 any IRAP
+/// picture (types 16..=23, covering BLA/IDR/CRA).
+pub(crate) fn is_keyframe_nal(codec: VideoCodec, nalu: &[u8]) -> bool {
+    let ty = nalu_type(codec, nalu);
+    match codec {
+        VideoCodec::H265 => (16..=23).contains(&ty),
+        _ => ty == 5,
+    }
+}
+
+/// Ordered parameter-set NALUs the moov needs: H.264 SPS(7)+PPS(8), H.265
+/// VPS(32)+SPS(33)+PPS(34). Missing any one is a loud error.
+pub(crate) fn parameter_sets<'a>(
+    codec: VideoCodec,
+    nalus: &[&'a [u8]],
+) -> Result<Vec<&'a [u8]>, G2gError> {
+    let types: &[u8] = match codec {
+        VideoCodec::H265 => &[32, 33, 34],
+        _ => &[7, 8],
+    };
+    let sets: Vec<&[u8]> = types
+        .iter()
+        .map(|ty| find_nalu(codec, nalus, *ty).ok_or(G2gError::CapsMismatch))
+        .collect::<Result<_, _>>()?;
+    // avcC copies profile/compat/level from sps[1..4]; a shorter SPS is
+    // malformed, so fail loud instead of writing a truncated record.
+    if !matches!(codec, VideoCodec::H265) && sets[0].len() < 4 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(sets)
+}
+
+/// AVCC sample payload: every NALU prefixed with its 4-byte big-endian
+/// length (parameter sets stay in-band, which fMP4 players accept).
+pub(crate) fn avcc_sample(nalus: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for n in nalus {
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        out.extend_from_slice(n);
+    }
+    out
+}
+
+/// The `avcC` AVCDecoderConfigurationRecord body (no box header). `param_sets`
+/// is [SPS, PPS]. Also the Matroska `CodecPrivate` for `V_MPEG4/ISO/AVC`.
+pub(crate) fn avcc_record(param_sets: &[&[u8]]) -> Vec<u8> {
+    let sps = param_sets[0];
+    let pps = param_sets[1];
+    let mut p = Vec::new();
+    p.push(1); // configuration version
+    p.extend_from_slice(&sps[1..4.min(sps.len())]); // profile/compat/level
+    p.push(0xFC | 3); // 4-byte NALU lengths
+    p.push(0xE0 | 1); // 1 SPS
+    p.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+    p.extend_from_slice(sps);
+    p.push(1); // 1 PPS
+    p.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+    p.extend_from_slice(pps);
+    p
 }
 
 /// Convert EBSP to RBSP by removing `0x03` emulation-prevention bytes that

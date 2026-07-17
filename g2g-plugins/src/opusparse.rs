@@ -17,10 +17,12 @@
 //!
 //! Scope: the TOC stereo bit distinguishes mono vs stereo, which covers Opus
 //! channel-mapping family 0 (the common case). Multichannel (family 1) carries
-//! its channel count in the `OpusHead` header, not the per-packet TOC, so a raw
-//! parser can't recover it; that needs the container header and is deferred.
-//! Opus always decodes at 48 kHz regardless of the coded bandwidth, so the
-//! sample rate is the constant [`OPUS_RATE_HZ`].
+//! its channel count in the `OpusHead` header, not the per-packet TOC; when an
+//! `OpusHead` (RFC 7845) arrives in-band it is parsed for the authoritative
+//! channel count and consumed (it is codec config, not audio), and that count
+//! then overrides the TOC for every following packet. Opus always decodes at
+//! 48 kHz regardless of the coded bandwidth, so the sample rate is the constant
+//! [`OPUS_RATE_HZ`].
 
 use core::future::Future;
 use core::pin::Pin;
@@ -42,6 +44,11 @@ pub struct OpusParse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     headers_emitted: u64,
+    /// Authoritative channel count from an in-band `OpusHead` (RFC 7845), once
+    /// seen. It overrides the per-packet TOC's mono/stereo guess, so a
+    /// multichannel (mapping family 1) stream keeps its real channel count
+    /// instead of collapsing to the TOC's internal-stream stereo bit.
+    header_channels: Option<u8>,
 }
 
 impl OpusParse {
@@ -53,6 +60,19 @@ impl OpusParse {
     /// re-emission is suppressed when the channel count is unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.headers_emitted
+    }
+
+    /// The caps to emit for `channels`, or `None` if unchanged from the last.
+    /// Records the new caps and bumps the emit counter when it does change.
+    fn caps_update(&mut self, channels: u8) -> Option<Caps> {
+        let new_caps =
+            Caps::Audio { format: AudioFormat::Opus, channels, sample_rate: OPUS_RATE_HZ };
+        if self.last_emitted_caps.as_ref() == Some(&new_caps) {
+            return None;
+        }
+        self.last_emitted_caps = Some(new_caps.clone());
+        self.headers_emitted += 1;
+        Some(new_caps)
     }
 }
 
@@ -108,16 +128,24 @@ impl AsyncElement for OpusParse {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some(toc) = parse_toc(slice.as_slice()) {
-                            let new_caps = Caps::Audio {
-                                format: AudioFormat::Opus,
-                                channels: toc.channels,
-                                sample_rate: OPUS_RATE_HZ,
-                            };
-                            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone())).await?;
-                                self.last_emitted_caps = Some(new_caps);
-                                self.headers_emitted += 1;
+                        let bytes = slice.as_slice();
+                        // An in-band OpusHead is codec config, not audio: parse the
+                        // authoritative channel count from it, emit caps, and
+                        // consume it (do not forward as a DataFrame).
+                        if let Some(ch) = parse_opus_head(bytes) {
+                            self.header_channels = Some(ch);
+                            if let Some(caps) = self.caps_update(ch) {
+                                out.push(PipelinePacket::CapsChanged(caps)).await?;
+                            }
+                            return Ok(());
+                        }
+                        // Prefer the OpusHead count when known; else the TOC's
+                        // mono/stereo bit (mapping family 0).
+                        let channels =
+                            self.header_channels.or_else(|| parse_toc(bytes).map(|t| t.channels));
+                        if let Some(ch) = channels {
+                            if let Some(caps) = self.caps_update(ch) {
+                                out.push(PipelinePacket::CapsChanged(caps)).await?;
                             }
                         }
                     }
@@ -181,6 +209,20 @@ pub struct OpusToc {
     pub mode: OpusMode,
     pub bandwidth: OpusBandwidth,
     pub frame_duration_us: u32,
+}
+
+/// Total output channel count from an in-band Opus identification header
+/// (RFC 7845 `OpusHead`), or `None` if `packet` is not one. Byte 9 is the total
+/// channel count for every mapping family (family 1 multichannel included),
+/// which the per-packet TOC cannot recover. The header is at least 19 bytes
+/// (family 0); family != 0 appends the channel-mapping table.
+fn parse_opus_head(packet: &[u8]) -> Option<u8> {
+    if packet.len() >= 19 && packet.starts_with(b"OpusHead") {
+        let channels = packet[9];
+        (channels >= 1).then_some(channels)
+    } else {
+        None
+    }
 }
 
 /// Decode the TOC byte of an Opus packet (RFC 6716 §3.1). `None` only for an
@@ -383,6 +425,77 @@ mod tests {
             .collect();
         assert_eq!(channels, vec![1, 2]);
         assert_eq!(parse.caps_changes_emitted(), 2);
+    }
+
+    /// An RFC 7845 OpusHead identification header for `channels` channels at the
+    /// given mapping `family` (family != 0 appends an identity mapping table).
+    fn opus_head(channels: u8, family: u8) -> Vec<u8> {
+        let mut h = b"OpusHead".to_vec();
+        h.push(1); // version
+        h.push(channels);
+        h.extend_from_slice(&[0, 0]); // pre-skip
+        h.extend_from_slice(&48_000u32.to_le_bytes()); // input sample rate
+        h.extend_from_slice(&[0, 0]); // output gain
+        h.push(family);
+        if family != 0 {
+            h.push(1); // stream count
+            h.push(0); // coupled count
+            for i in 0..channels {
+                h.push(i); // identity channel mapping
+            }
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn opus_head_recovers_multichannel_and_locks_channel_count() {
+        let mut parse = OpusParse::new();
+        parse.configure_pipeline(&opus_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        // A 6-channel family-1 OpusHead: caps report 6 channels, and the header
+        // is consumed (codec config, never forwarded as an audio frame).
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(6, 1))), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.packets.len(), 1, "OpusHead emits caps only, no DataFrame");
+        match &sink.packets[0] {
+            PipelinePacket::CapsChanged(Caps::Audio { channels, .. }) => assert_eq!(*channels, 6),
+            other => panic!("expected 6-channel CapsChanged, got {other:?}"),
+        }
+
+        // A following stereo-TOC audio packet must not downgrade to 2 channels:
+        // the header count wins. The frame is forwarded, no new CapsChanged.
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(1, opus_packet(31, true, 12))), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(parse.caps_changes_emitted(), 1, "TOC did not override the header count");
+        assert!(matches!(sink.packets.last().unwrap(), PipelinePacket::DataFrame(_)));
+    }
+
+    #[tokio::test]
+    async fn opus_head_family_zero_also_sets_channels() {
+        let mut parse = OpusParse::new();
+        parse.configure_pipeline(&opus_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+        parse
+            .process(PipelinePacket::DataFrame(frame_with_bytes(0, opus_head(2, 0))), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(sink.packets.len(), 1, "header consumed");
+        assert!(matches!(
+            sink.packets[0],
+            PipelinePacket::CapsChanged(Caps::Audio { channels: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn parse_opus_head_needs_magic_and_length() {
+        assert_eq!(parse_opus_head(&opus_head(8, 1)), Some(8));
+        assert_eq!(parse_opus_head(b"OpusHeadtooshort"), None, "under 19 bytes");
+        assert_eq!(parse_opus_head(&opus_packet(31, true, 12)), None, "a TOC packet is not a header");
     }
 
     #[tokio::test]
