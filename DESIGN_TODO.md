@@ -281,6 +281,14 @@ Phased plan:
   is adequate without either (1080p HLS A/V+subs holds 30 fps); debug builds
   misrepresent it, so validate live runs with `--release`.
 
+## Cleanup
+
+- **Adopt `MemoryDomain::as_system_slice()`.** ~50 sites hand-roll
+  `if let MemoryDomain::System(s) = ..` to read CPU bytes; the accessor
+  (returning `Option<&[u8]>`) replaces them and stays refutable under no_std
+  (single-variant `MemoryDomain`), where the manual match is an irrefutable-let
+  error.
+
 ## Platform: macOS
 
 - `VtDecode`: first `cargo build` on a Mac to settle the FFI `// NOTE` spots; a
@@ -1007,23 +1015,86 @@ _(No open parser items.)_
 The `xtask` crate (`cargo xtask ci | test --here | size | wasm | bench |
 ffi-probe`), the DOT visualizer (with negotiated caps + per-edge memory domains
 via `negotiate_graph`), the caps explainer, and the criterion benches now exist;
-the remaining items extend them. Highest leverage first:
+the remaining items extend them. Sequencing: the telemetry tap comes first (the
+dashboard, edge probes, negotiation overlay, and latency waterfall all consume
+it); the builder and the scaffold are independent.
 
-- **Measured per-element latency report, remaining runners + link transit.**
-  M399 wired measured per-element `process()` p50/p99 + input-link fill into the
-  graph runner and the two linear runners (`RunStats::per_element`,
-  `ElementProbe`). Still open: the fan-in / fan-out / session / muxer runners
-  (leave `per_element` empty today); per-*link* transit / queue-residency time
-  (needs a wall-clock stamp carried with each packet, not just the element-side
-  `process()` timing M399 collects); and source-side timing (sources run one long
-  `run()` loop, so their cost only shows as the downstream element's input fill).
-- **Element scaffolding.** `xtask new-element` (a new subcommand) stamps the
-  `AsyncElement` / `SourceLoop` impl + pad templates + registry stub + milestone
-  test file (the boilerplate every `Mn` repeats).
-- Longer tail: a live pipeline TUI (`gst-launch -v` on steroids); a gst-parity
-  differ (same launch line through real GStreamer vs g2g, diff caps / behaviour);
-  a codec golden-fixture / PSNR conformance harness; an MCP server exposing
-  `inspect` / `launch` / `validate` for agent-driven dev.
+- **Telemetry tap + live pipeline dashboard.** Turn the end-of-run
+  `RunStats` snapshot into a live, subscribable stream, then render it in a
+  browser.
+  - Runtime tap: an `observe` cargo feature (implies `std`) adds an
+    `ObserverHandle` the runners publish into: per-edge packet / byte counters,
+    link fill, drops, `CapsChanged` / error / EOS events, element lifecycle,
+    and the M399 per-element `process()` p50/p99 (reuse `ElementProbe`,
+    `g2g-core/src/runtime/instrument.rs`). The no_std baseline is untouched.
+  - Close the M399 remainder as part of the tap: the fan-in / fan-out /
+    session / muxer runners (leave `per_element` empty today); per-*link*
+    transit / queue-residency time (a wall-clock stamp carried with each
+    packet, sampled at recv); source-side timing (sources run one long `run()`
+    loop, so their cost only shows as downstream input fill).
+  - Transport: serialize snapshots + events as serde JSON over a small local
+    WebSocket server (reuse `webutil` / tungstenite), enabled by
+    `g2g-launch --observe <port>`.
+  - Frontend: a static React Flow single page served from the same port,
+    `tools/dashboard/` (vite; no Tauri). Topology from the graph description,
+    edges colored by fill / drops, per-element latency histograms, event log.
+  - Validate live: run an RTSP graph, watch counters move, kill the source,
+    see the failure event arrive.
+- **Visual pipeline builder.** A second tab of the dashboard app.
+  - Palette + property panels generated from `registry.rs` metadata: add a
+    `g2g-inspect --json` machine dump (element names, pad caps,
+    `PropertySpec`s with `PropKind`); the builder also works offline from a
+    checked-in `registry.json`.
+  - Canvas: drag-drop React Flow nodes, per-property inputs typed by
+    `PropKind`, link validity from caps intersect (server-side check via the
+    solver when connected, permissive offline).
+  - Export both directions: emit a `gst-launch` line and declarative JSON /
+    YAML (`declarative.rs` schema); import by parsing a launch line
+    server-side and rendering the resulting graph.
+- **Element scaffolding.** `xtask new-element <name> --kind
+  source|transform|sink` stamps the `AsyncElement` / `SourceLoop` impl
+  (`intercept_caps` / `configure_pipeline` / `process` stubs), `properties()`
+  skeleton, pad templates, registry entry, `lib.rs` wiring, and the milestone
+  test file (the boilerplate every `Mn` repeats). Templates are `include_str!`
+  in `xtask`, no new deps.
+- **Edge probes with content preview.** Tap any edge from the dashboard and
+  see what flows: video as a downscaled RGB thumbnail, audio as min/max
+  waveform buckets, anything else as a bounded hexdump. Subscribe /
+  unsubscribe per edge over the same WebSocket; conversion runs on a sampled
+  copy at a capped rate (e.g. 2/s), never in the hot path, zero cost when no
+  subscriber.
+- **Record / replay.** Deterministic repro for bugs that need a live source.
+  - `recordsink` writes packets + `CapsChanged` + timestamps as
+    length-prefixed records (reuse the distributed-graph wire codec);
+    `replaysrc` replays with original pacing or as-fast-as-possible, caps from
+    the recorded stream. Explicit elements in the launch line, no `--record`
+    convenience flag.
+  - Test: record a decode pipeline mid-edge, replay into the same downstream,
+    assert bit-identical output.
+- **Visual negotiation explainer.** The solver explainer
+  (`runtime/solver.rs`, DESIGN 4.20a) emits text today; add a structured serde
+  form (per-node constraint, per-edge candidate sets, the failing edge with
+  both caps sets at the point of failure). The dashboard renders a failed link
+  red with both sides + the intersection result; on success it shows the
+  negotiated caps per edge (the DOT viz already computes these).
+- **Latency waterfall.** Per-frame glass-to-glass breakdown. Needs the tap's
+  link-transit stamps plus a source-stamped sequence id so one frame's path
+  can be assembled across elements. Views: a per-frame waterfall (queue
+  residency + `process()` per stage) and an aggregate stacked p50/p99, with
+  the measured total against the `2 * capacity * frame_period` floor. Opt-in
+  sampling (every Nth frame) so overhead stays nil.
+- **gst-parity differ.** Same launch line through real GStreamer and g2g;
+  diff the negotiated caps per edge, the element set after autoplug, and the
+  output (checksum, PSNR for lossy). Calliope already does differential output
+  QA in its own repo, so decide first whether this lives there (adding the
+  caps / topology diff) or in-repo; don't build both.
+- **MCP server.** A `g2g-mcp` stdio binary for agent-driven dev exposing
+  `list-elements`, `inspect(element) -> json`, `validate(line) ->` negotiation
+  result / explainer json, and `launch(line, duration) -> RunStats` json.
+  Reuse the `g2g-inspect` / `g2g-launch` internals as library entry points
+  rather than shelling out; serde only, no framework dep.
+- Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
+  tap); a codec golden-fixture / PSNR conformance harness.
 
 ## Code audit follow-up
 
