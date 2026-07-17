@@ -2137,6 +2137,22 @@ downstream element's input fill. Still open: per-*link* transit (queue-residency
 time, which needs a wall-clock stamp carried with each packet rather than the
 element-side timing collected here.
 
+The same probes drive a *live* view, not just the end-of-run table. An
+`Observer` (`runtime/observe.rs`) captures the graph topology and holds clones of
+the arms' probe `Arc`s; `run_graph_observed` registers them during the prepare
+phase, before any frame flows. Because the probes are the same lock-free atomics
+the report reads, `Observer::snapshot` mid-run is a handful of relaxed loads and
+never stalls an arm. The transport lives in `g2g-plugins::dashboard` (the
+`observe` feature): `g2g-launch --observe <port>` serves one TCP port that
+answers a plain `GET /` with a self-contained dashboard page
+(`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
+every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
+broadcast channel drained off the `Bus`). The JSON is built in the transport, so
+`g2g-core` stays serde-free, consistent with the portability-core principle. The
+observer rides the cooperative graph runner today; the threaded runner and the
+fan-in / fan-out / muxer runners are follow-ups, matching where `per_element` is
+already collected.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this

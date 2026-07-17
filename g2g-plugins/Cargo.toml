@@ -28,7 +28,7 @@ linux-full = [
     "opus", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
     "alsa-sink", "pulse-sink", "pipewire",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
-    "declarative-yaml", "script-rhai",
+    "declarative-yaml", "script-rhai", "observe",
 ]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
@@ -93,6 +93,11 @@ remote = ["std", "tokio/net", "tokio/io-util"]
 # tokio-tungstenite (0.24, the version the detect-server demo already uses) +
 # futures-util's Sink/Stream adapters; implies std + tokio net/io-util.
 remote-ws = ["std", "tokio/net", "tokio/io-util", "dep:tokio-tungstenite", "futures-util/sink"]
+# Live pipeline dashboard: `g2g-launch --observe <port>` runs the pipeline while
+# streaming its `Observer` telemetry + bus events as JSON over a WebSocket, served
+# alongside the static dashboard page on one port. Reuses the remote-ws WS stack
+# (tokio-tungstenite + futures-util) plus serde_json; implies std.
+observe = ["std", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time", "tokio/macros", "tokio/sync", "dep:tokio-tungstenite", "futures-util/sink", "dep:serde_json"]
 # Native WebRTC egress sink (WebRtcSink): publishes a pipeline's encoded H.264 to
 # a WHIP server over a str0m-driven PeerConnection (ICE / DTLS / SRTP). str0m is a
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio

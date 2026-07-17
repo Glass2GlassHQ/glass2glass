@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>g2g pipeline dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --edge: #3a4152; --text: #e6e9ef;
+    --muted: #8b93a7; --accent: #4da3ff; --source: #46c07a; --sink: #d16ba5;
+    --xform: #4da3ff; --tee: #e0a54d; --warn: #e0a54d; --err: #e06a6a;
+    --fill0: #2a5d3a; --fill1: #6b6a2a; --fill2: #7a3a2a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    border-bottom: 1px solid var(--edge); }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  #status { color: var(--muted); }
+  #status.live { color: var(--source); }
+  #status.down { color: var(--err); }
+  #wrap { display: flex; height: calc(100% - 41px); }
+  #graph { flex: 1; overflow: auto; }
+  #side { width: 320px; border-left: 1px solid var(--edge); display: flex;
+    flex-direction: column; }
+  #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+  #events { flex: 1; overflow: auto; padding: 6px 12px; }
+  .ev { padding: 3px 0; border-bottom: 1px solid #20242e; white-space: pre-wrap; }
+  .ev .k { color: var(--accent); }
+  .ev.error .k, .ev.negotiation-failed .k { color: var(--err); }
+  .ev.warning .k, .ev.qos .k { color: var(--warn); }
+  .node rect { rx: 6px; ry: 6px; stroke-width: 1.5; }
+  .node text { fill: var(--text); }
+  .node .name { font-weight: 600; }
+  .node .stat { fill: var(--muted); font-size: 11px; }
+  .edge { stroke: var(--edge); stroke-width: 2; fill: none; }
+  .edge-lbl { fill: var(--muted); font-size: 10px; }
+  footer { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--edge); }
+</style>
+</head>
+<body>
+<header>
+  <h1>g2g pipeline</h1>
+  <span id="status">connecting…</span>
+  <span id="uptime" style="color:var(--muted)"></span>
+</header>
+<div id="wrap">
+  <div id="graph"><svg id="svg" width="100%" height="100%"></svg></div>
+  <div id="side">
+    <h2>events</h2>
+    <div id="events"></div>
+    <footer id="legend">
+      fill: <span style="color:var(--fill0)">low</span>
+      <span style="color:var(--fill1)">mid</span>
+      <span style="color:var(--fill2)">full</span>
+    </footer>
+  </div>
+</div>
+<script>
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("svg");
+const statusEl = document.getElementById("status");
+const uptimeEl = document.getElementById("uptime");
+const eventsEl = document.getElementById("events");
+
+const COL_W = 220, ROW_H = 96, NODE_W = 168, NODE_H = 64, PAD = 30;
+const roleColor = { source: "var(--source)", sink: "var(--sink)",
+  transform: "var(--xform)", tee: "var(--tee)", muxer: "var(--tee)" };
+
+function fmtNs(ns) {
+  if (ns == null) return "-";
+  if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
+  if (ns >= 1e3) return (ns / 1e3).toFixed(1) + "µs";
+  return ns + "ns";
+}
+function fillColor(pct) {
+  if (pct >= 80) return "var(--fill2)";
+  if (pct >= 40) return "var(--fill1)";
+  return "var(--fill0)";
+}
+
+// Longest-path layering: a node's column is 1 + max(column of its predecessors).
+function layout(nodes, edges) {
+  const preds = new Map(nodes.map(n => [n.id, []]));
+  edges.forEach(e => { if (preds.has(e.to)) preds.get(e.to).push(e.from); });
+  const col = new Map();
+  function depth(id, seen) {
+    if (col.has(id)) return col.get(id);
+    if (seen.has(id)) return 0; // cycle guard
+    seen.add(id);
+    const ps = preds.get(id) || [];
+    const d = ps.length ? 1 + Math.max(...ps.map(p => depth(p, seen))) : 0;
+    col.set(id, d);
+    return d;
+  }
+  nodes.forEach(n => depth(n.id, new Set()));
+  const rowOf = new Map();
+  const perCol = new Map();
+  const pos = new Map();
+  nodes.forEach(n => {
+    const c = col.get(n.id);
+    const r = perCol.get(c) || 0;
+    perCol.set(c, r + 1);
+    pos.set(n.id, { x: PAD + c * COL_W, y: PAD + r * ROW_H });
+  });
+  return pos;
+}
+
+function render(msg) {
+  const { nodes, edges } = msg;
+  svg.innerHTML = "";
+  const pos = layout(nodes, edges);
+  const maxX = Math.max(...[...pos.values()].map(p => p.x)) + NODE_W + PAD;
+  const maxY = Math.max(...[...pos.values()].map(p => p.y)) + NODE_H + PAD;
+  svg.setAttribute("width", Math.max(maxX, 400));
+  svg.setAttribute("height", Math.max(maxY, 200));
+
+  // Edges first (under nodes).
+  edges.forEach(e => {
+    const a = pos.get(e.from), b = pos.get(e.to);
+    if (!a || !b) return;
+    const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
+    const x2 = b.x, y2 = b.y + NODE_H / 2;
+    const mx = (x1 + x2) / 2;
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("class", "edge");
+    path.setAttribute("d", `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
+    svg.appendChild(path);
+  });
+
+  nodes.forEach(n => {
+    const p = pos.get(n.id);
+    const g = document.createElementNS(SVG_NS, "g");
+    g.setAttribute("class", "node");
+    g.setAttribute("transform", `translate(${p.x},${p.y})`);
+
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("width", NODE_W);
+    rect.setAttribute("height", NODE_H);
+    rect.setAttribute("rx", 6);
+    const fillPct = n.fill_max_pct || 0;
+    rect.setAttribute("fill", n.proc ? fillColor(fillPct) : "var(--panel)");
+    rect.setAttribute("stroke", roleColor[n.role] || "var(--edge)");
+    g.appendChild(rect);
+
+    const name = document.createElementNS(SVG_NS, "text");
+    name.setAttribute("class", "name");
+    name.setAttribute("x", 10); name.setAttribute("y", 20);
+    name.textContent = n.name || n.role;
+    g.appendChild(name);
+
+    const l1 = document.createElementNS(SVG_NS, "text");
+    l1.setAttribute("class", "stat");
+    l1.setAttribute("x", 10); l1.setAttribute("y", 38);
+    if (n.proc) {
+      l1.textContent = `p50 ${fmtNs(n.proc.p50_ns)}  p99 ${fmtNs(n.proc.p99_ns)}`;
+    } else {
+      l1.textContent = n.role;
+    }
+    g.appendChild(l1);
+
+    const l2 = document.createElementNS(SVG_NS, "text");
+    l2.setAttribute("class", "stat");
+    l2.setAttribute("x", 10); l2.setAttribute("y", 54);
+    if (n.proc) {
+      l2.textContent = `n=${n.proc.count}  fill ${n.fill_mean_pct}/${n.fill_max_pct}%`;
+    }
+    g.appendChild(l2);
+    svg.appendChild(g);
+  });
+}
+
+function addEvent(msg) {
+  const div = document.createElement("div");
+  div.className = "ev " + (msg.kind || "");
+  const detail = Object.entries(msg)
+    .filter(([k]) => k !== "type" && k !== "kind")
+    .map(([k, v]) => `${k}=${v}`).join("  ");
+  div.innerHTML = `<span class="k">${msg.kind}</span> ${detail}`;
+  eventsEl.prepend(div);
+  while (eventsEl.children.length > 200) eventsEl.lastChild.remove();
+}
+
+function connect() {
+  const url = "ws://" + (location.host || "127.0.0.1:8787");
+  const ws = new WebSocket(url);
+  ws.onopen = () => { statusEl.textContent = "live"; statusEl.className = "live"; };
+  ws.onclose = () => {
+    statusEl.textContent = "disconnected"; statusEl.className = "down";
+    setTimeout(connect, 1500);
+  };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "telemetry") {
+      render(msg);
+      uptimeEl.textContent = "t=" + (msg.uptime_ns / 1e9).toFixed(1) + "s";
+    } else if (msg.type === "event") {
+      addEvent(msg);
+    }
+  };
+}
+connect();
+</script>
+</body>
+</html>

@@ -172,9 +172,38 @@ pipeline run summary:
 ```
 
 In code, `RunStats::report()` formats the same summary from any run's stats.
-(Measured per-element / per-link p50 / p99 + channel fill-level needs frame-level
-instrumentation in the runner and is a follow-up; the latency above is the
-chain's *declared* fold.)
+Live per-element telemetry is available while the run is in flight via the
+dashboard below; the end-of-run summary above is the declared-latency fold plus
+the measured throughput.
+
+## Live dashboard (`--observe`)
+
+`g2g-launch --observe <port>` runs the pipeline while serving a live dashboard on
+that port. Build with the `observe` feature:
+
+```sh
+cargo run -p g2g-plugins --features observe --bin g2g-launch -- \
+  --observe 8787 videotestsrc ! videoscale ! fakesink
+# open http://127.0.0.1:8787
+```
+
+The page (`tools/dashboard/index.html`, self-contained, no build step) draws the
+graph left-to-right, colors each node by input-link fill, shows per-element
+`process()` p50 / p99 and frame counts, and logs bus events (state changes, QoS,
+buffering, negotiation failures, EOS, errors) as they arrive.
+
+Underneath, a `g2g_core::runtime::Observer` shares the running graph's topology
+and per-element probes; `run_graph_observed` registers them, so a snapshot is a
+handful of relaxed atomic loads off the same probes the end-of-run report reads
+(no hot-path cost). One TCP port carries both concerns: a plain `GET /` returns
+the page, a WebSocket upgrade gets a JSON `telemetry` snapshot every 250 ms plus
+one `event` per bus message. The JSON is built in `g2g_plugins::dashboard`
+(serde_json), keeping `g2g-core` serde-free.
+
+Today's tap covers the cooperative graph runner and the two linear runners
+(per-element `process()` + input fill); the fan-in / fan-out / muxer runners,
+per-link transit time, source-side timing, and the threaded runner are
+follow-ups (see `DESIGN_TODO.md`).
 
 ## Element reference (`g2g-inspect` and the web page)
 

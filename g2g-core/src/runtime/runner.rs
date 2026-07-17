@@ -1548,7 +1548,7 @@ where
     let snk = g.add_sink(GraphNodeRef::element_ref(sink));
     g.link(prev, snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None, None, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None).await
 }
 
 /// Sentinel sink for terminal elements (sinks proper): swallows pushes.

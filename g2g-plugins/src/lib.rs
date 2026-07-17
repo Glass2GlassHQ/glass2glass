@@ -386,6 +386,12 @@ pub mod udpsrc;
 // the PipelinePacket stream (g2g-core wire codec) and RemoteSrc (TCP listener)
 // reconstructs it, so any graph edge can be cut and the downstream subgraph run
 // across a process / machine boundary. Behind the `remote` feature (std + tokio).
+// Live pipeline dashboard transport (observe feature): serves Observer telemetry
+// + bus events over one WS/HTTP port to the static dashboard page. Used by
+// `g2g-launch --observe`.
+#[cfg(feature = "observe")]
+pub mod dashboard;
+
 #[cfg(feature = "remote")]
 pub mod remotesink;
 #[cfg(feature = "remote")]

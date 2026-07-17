@@ -1038,7 +1038,7 @@ where
     }
     g.link(mux_node.output(), snk).map_err(|_| G2gError::CapsMismatch)?;
 
-    run_graph_inner(g, clock, link_capacity, bus, None, None, None).await
+    run_graph_inner(g, clock, link_capacity, bus, None, None, None, None).await
 }
 
 /// Which arm of a dynamic fan-in ([`run_aggregator_dynamic`]) produced this

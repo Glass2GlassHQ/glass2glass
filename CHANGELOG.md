@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M677: live pipeline dashboard: `g2g-launch --observe <port>` streams per-element telemetry + bus events over a WebSocket to a served page, backed by a runtime `Observer` tap (`run_graph_observed`).
 - M676: `filesrc` types raw Annex-B elementary streams by extension (`.h264`/`.265` and variants), and name-based `decodebin` expansion now splices the M421 re-framing parser ahead of the decoder.
 - M675: `splitmuxsink` gains a `muxer` property (`mp4`/`matroska`/`mpegts`) to pick the per-segment child container.
 - M674: adds `equalizer-3bands`, `spectrum` (FFT analyzer), `clockoverlay`, and `splitmuxsink`; `equalizer-10bands`/`-nbands` alias to `equalizer-3bands`.

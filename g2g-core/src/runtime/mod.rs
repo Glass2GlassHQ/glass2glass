@@ -38,6 +38,9 @@ mod graph_runner;
 #[cfg(feature = "std")]
 mod launch;
 
+#[cfg(feature = "std")]
+mod observe;
+
 pub use channel::{
     bounded, link, BitrateSlot, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot,
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
@@ -82,10 +85,13 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{
-    auto_plug_domain_converters, copy_plan, negotiate_graph, run_graph, run_graph_stateful,
-    run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress, DynMultiOutputElement,
-    GraphNode, GraphNodeRef, GraphTemplate,
+    auto_plug_domain_converters, copy_plan, negotiate_graph, run_graph, run_graph_observed,
+    run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress,
+    DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
 };
+
+#[cfg(feature = "std")]
+pub use observe::{EdgeInfo, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot};
 
 // Thread-per-arm (opt-in multicore) runner. Needs `multi-thread` so the graph's
 // elements + channels are `Send` to cross onto worker threads (the `!Send` arm

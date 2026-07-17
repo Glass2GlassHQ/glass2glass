@@ -56,6 +56,10 @@ use std::time::{Duration, Instant};
 
 use g2g_core::runtime::{parse_launch, run_graph_with_progress, GraphNode, PipelineProgress, Registry};
 use g2g_core::Graph;
+#[cfg(feature = "observe")]
+use g2g_core::runtime::{run_graph_observed, Observer};
+#[cfg(feature = "observe")]
+use g2g_core::Bus;
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::run_graph_threaded_with_progress;
 #[cfg(feature = "multi-thread")]
@@ -68,7 +72,7 @@ use g2g_plugins::registry::default_registry;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--threads] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--threads] [--observe <port>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -101,6 +105,21 @@ struct Opts {
     /// lower per-frame latency; this trades a per-stage thread handoff for
     /// CPU-bound stages overlapping across cores. Needs the `multi-thread` build.
     threads: bool,
+    /// Run the pipeline while serving the live dashboard on this port
+    /// (`--observe <port>`): telemetry + bus events stream over a WebSocket, and
+    /// the dashboard page is served on the same port. Needs the `observe` build.
+    observe: Option<u16>,
+}
+
+/// Parse a `--observe` port, warning and returning `None` on a bad value.
+fn parse_port(s: &str) -> Option<u16> {
+    match s.parse::<u16>() {
+        Ok(p) if p != 0 => Some(p),
+        _ => {
+            eprintln!("g2g-launch: --observe needs a port in 1..=65535, got '{s}'");
+            None
+        }
+    }
 }
 
 /// Split leading `gst-launch`-style flags off the front of the args, returning
@@ -133,6 +152,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.script = Some(path.to_string());
             continue;
         }
+        if let Some(port) = arg.strip_prefix("--observe=") {
+            opts.observe = parse_port(port);
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
@@ -151,6 +174,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--script" => match args.next() {
                 Some(path) => opts.script = Some(path),
                 None => eprintln!("g2g-launch: --script needs a path argument"),
+            },
+            "--observe" => match args.next() {
+                Some(port) => opts.observe = parse_port(&port),
+                None => eprintln!("g2g-launch: --observe needs a port argument"),
             },
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
@@ -432,6 +459,26 @@ fn main() {
         .build()
         .expect("build tokio runtime");
 
+    // Live dashboard path: run the pipeline while serving telemetry + events on
+    // `--observe <port>`. Diverges (returns / exits), so it must precede the
+    // normal run that consumes `graph`.
+    if let Some(port) = opts.observe {
+        #[cfg(feature = "observe")]
+        {
+            run_dashboard(&rt, graph, port, opts.quiet);
+            return;
+        }
+        #[cfg(not(feature = "observe"))]
+        {
+            let _ = port;
+            eprintln!(
+                "pipeline error: --observe requires an observe build \
+                 (rebuild with --features observe)"
+            );
+            process::exit(1);
+        }
+    }
+
     if !opts.quiet {
         println!("Setting pipeline to PLAYING ...");
     }
@@ -498,6 +545,71 @@ fn main() {
             if !opts.quiet {
                 // End-of-run report (M287): the RunStats telemetry plus the
                 // measured wall-clock throughput this run achieved.
+                let elapsed = started.elapsed().as_secs_f64();
+                print!("{}", stats.report());
+                if elapsed > 0.0 {
+                    println!(
+                        "  run:     {:.2} s wall, {:.1} fps",
+                        elapsed,
+                        stats.frames_consumed as f64 / elapsed
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("pipeline error: {err:?}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Run the pipeline while serving the live dashboard on `port`. Sets up an
+/// `Observer` (topology + per-element telemetry) and a `Bus` (events), fans bus
+/// messages to every WebSocket client through a broadcast channel, and drives the
+/// run future against the server with `select!` so the server is dropped when the
+/// pipeline ends.
+#[cfg(feature = "observe")]
+fn run_dashboard(rt: &tokio::runtime::Runtime, graph: Graph<GraphNode>, port: u16, quiet: bool) {
+    use tokio::sync::broadcast;
+
+    let clock = WallClock::new();
+    let started = Instant::now();
+    let result = rt.block_on(async {
+        let observer = Observer::new();
+        let (bus, bus_handle) = Bus::new(256);
+        let (ev_tx, _) = broadcast::channel::<String>(256);
+
+        // Drain the bus and fan each event out to every connected client.
+        let drain_tx = ev_tx.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = bus.recv().await {
+                if let Some(json) = g2g_plugins::dashboard::event_json(&msg) {
+                    let _ = drain_tx.send(json);
+                }
+            }
+        });
+
+        if !quiet {
+            println!("dashboard: http://127.0.0.1:{port}  (pipeline running, Ctrl-C to stop)");
+        }
+
+        // The run future finishes with the pipeline; the server runs forever.
+        // `select!` returns on whichever ends first: normally the run, dropping
+        // the server; a bind error ends the server first and we surface it.
+        tokio::select! {
+            r = run_graph_observed(graph, &clock, LINK_CAPACITY, &observer, Some(&bus_handle)) => r,
+            e = g2g_plugins::dashboard::serve(observer.clone(), ev_tx.clone(), port) => {
+                if let Err(err) = e {
+                    eprintln!("dashboard: server error: {err}");
+                }
+                Ok(Default::default())
+            }
+        }
+    });
+
+    match result {
+        Ok(stats) => {
+            if !quiet {
                 let elapsed = started.elapsed().as_secs_f64();
                 print!("{}", stats.report());
                 if elapsed > 0.0 {
