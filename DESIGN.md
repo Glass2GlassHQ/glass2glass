@@ -2164,9 +2164,10 @@ the WebSocket, the server installs a rate-limited `PreviewTap` on that edge's
 slot (via `Observer::edge_probe` / `edge_caps`), and streams back a `preview`
 message: a downscaled thumbnail for RGBA/BGRA and planar NV12/I420 video (and
 MJPEG keyframes under the `mjpeg` feature, reusing `videoconvert` / `mjpegdec`
-rather than duplicating the conversion), a codec card for other compressed edges,
-PCM S16 waveform buckets, or a bounded hexdump (`g2g-plugins::preview`), sampled a
-few times a second on a copy, never blocking the data path.
+rather than duplicating the conversion), a codec card for other compressed edges
+(codec, resolution, header-parsed frame type, and size, no decode), PCM S16
+waveform buckets, or a bounded hexdump (`g2g-plugins::preview`), sampled a few
+times a second on a copy, never blocking the data path.
 
 The same probes drive a *live* view, not just the end-of-run table. An
 `Observer` (`runtime/observe.rs`) captures the graph topology and holds clones of

@@ -1027,11 +1027,9 @@ Outstanding developer-tooling tasks, highest leverage first.
   - Validate the dashboard live against an RTSP source.
 - **Visual builder follow-ups.** For `tools/builder/` (React Flow):
   - YAML export (the JSON export already covers the graph model; schema shared).
-- **Edge preview follow-ups.** Remaining: decode a keyframe for non-MJPEG
-  compressed edges (MJPEG already thumbnails behind the `mjpeg` feature; other
-  codecs show a codec card); per-edge tap on the fan-in / muxer arms (the slot is
-  shared via `SenderSink`, so those arms already carry it, but they are not
-  exercised).
+- **Edge preview follow-ups.** Remaining: per-edge tap on the fan-in / muxer arms
+  (the slot is shared via `SenderSink`, so those arms already carry it, but they
+  are not exercised).
 - **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
   per-edge negotiated caps and, on a solve conflict, the structured failure
   (kind + node indices). Remaining: carry the *both caps sets* at the point of

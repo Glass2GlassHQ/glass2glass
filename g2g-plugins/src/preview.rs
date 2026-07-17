@@ -90,7 +90,71 @@ fn compressed_preview(
             return video_thumb(&rgba, dw as usize, dh as usize, false);
         }
     }
-    json!({ "kind": "compressed", "codec": codec_name(codec), "w": w, "h": h })
+    // No decode (would need a heavy decoder, and a sampled packet is rarely a
+    // self-contained keyframe): enrich the card from the packet header instead:
+    // the codec, resolution, this packet's frame type, and its size.
+    json!({
+        "kind": "compressed",
+        "codec": codec_name(codec),
+        "w": w,
+        "h": h,
+        "frame": frame_kind(codec, bytes),
+        "bytes": bytes.len(),
+    })
+}
+
+/// Best-effort frame type from the packet header ("key" if it carries a keyframe
+/// / IRAP unit, else "delta"), or `None` when the codec is not cheaply classified
+/// here. Header inspection only, never a decode.
+fn frame_kind(codec: VideoCodec, bytes: &[u8]) -> Option<&'static str> {
+    match codec {
+        // H.264 NAL type = header & 0x1F: 5 = IDR (key), 1 = non-IDR slice (delta).
+        VideoCodec::H264 => annexb_kind(bytes, |h| match h & 0x1F {
+            5 => Some(true),
+            1 => Some(false),
+            _ => None,
+        }),
+        // H.265 NAL type = (header >> 1) & 0x3F: 16..=23 are IRAP (key), 0..=9 the
+        // trailing / leading VCL slices (delta).
+        VideoCodec::H265 => annexb_kind(bytes, |h| {
+            let t = (h >> 1) & 0x3F;
+            if (16..=23).contains(&t) {
+                Some(true)
+            } else if t <= 9 {
+                Some(false)
+            } else {
+                None
+            }
+        }),
+        // VP8 frame tag: bit 0 of the first byte is the frame type (0 = key).
+        VideoCodec::Vp8 => bytes.first().map(|b| if b & 1 == 0 { "key" } else { "delta" }),
+        _ => None,
+    }
+}
+
+/// Scan Annex-B NAL units, classifying by the first unit `classify` recognizes
+/// (`Some(true)` = keyframe, `Some(false)` = delta, `None` = skip, e.g. SPS / PPS
+/// / SEI). A keyframe VCL unit anywhere wins; otherwise a delta unit does.
+fn annexb_kind(bytes: &[u8], classify: impl Fn(u8) -> Option<bool>) -> Option<&'static str> {
+    let mut i = 0;
+    let mut saw_delta = false;
+    while i + 3 < bytes.len() {
+        if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
+            match classify(bytes[i + 3]) {
+                Some(true) => return Some("key"),
+                Some(false) => saw_delta = true,
+                None => {}
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    if saw_delta {
+        Some("delta")
+    } else {
+        None
+    }
 }
 
 /// Stable lower-case name for a video codec, shown on the compressed preview card.
@@ -296,19 +360,39 @@ mod tests {
         assert_eq!(v["kind"], "hex");
     }
 
-    #[test]
-    fn compressed_video_becomes_card() {
-        let caps = Caps::CompressedVideo {
+    fn h264_caps() -> Caps {
+        Caps::CompressedVideo {
             codec: g2g_core::VideoCodec::H264,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
-        };
-        let v = packet_preview(&frame(vec![0xde, 0xad, 0xbe, 0xef]), &caps).unwrap();
+        }
+    }
+
+    #[test]
+    fn compressed_video_becomes_card() {
+        // No recognizable NAL: card with codec + resolution + byte size, no frame.
+        let v = packet_preview(&frame(vec![0xde, 0xad, 0xbe, 0xef]), &h264_caps()).unwrap();
         assert_eq!(v["kind"], "compressed");
         assert_eq!(v["codec"], "h264");
         assert_eq!(v["w"], 1920);
         assert_eq!(v["h"], 1080);
+        assert_eq!(v["bytes"], 4);
+        assert!(v["frame"].is_null());
+    }
+
+    #[test]
+    fn h264_idr_reads_as_a_keyframe() {
+        // Annex-B start code + NAL header 0x65 (nal_ref_idc=3, type=5 = IDR).
+        let v = packet_preview(&frame(vec![0, 0, 1, 0x65, 0x88, 0x84]), &h264_caps()).unwrap();
+        assert_eq!(v["frame"], "key");
+    }
+
+    #[test]
+    fn h264_non_idr_reads_as_delta() {
+        // NAL header 0x41 (type=1 = non-IDR slice), no IDR present.
+        let v = packet_preview(&frame(vec![0, 0, 1, 0x41, 0x9a]), &h264_caps()).unwrap();
+        assert_eq!(v["frame"], "delta");
     }
 
     #[test]

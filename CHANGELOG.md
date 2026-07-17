@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M702: the dashboard's compressed edge card parses the packet header for the frame type (H.264 / H.265 IDR vs delta, VP8 key vs delta) and shows the packet size, no decoder.
 - M701: the builder embeds the wasm caps solver as base64 and instantiates it from bytes, so the real solver runs in the static bundle and the self-contained artifact (not just `pnpm dev`).
 - M700: `ffmpegdec` seeds libavcodec with the stream's parameter sets and SPS-derived reorder depth at open, so a stream that reorders around its first IDR no longer loses the opening GOP's leading pictures.
 - M699: the visual builder validates links with g2g's real caps solver compiled to wasm (`g2g-validate-wasm`), showing negotiated caps and flagging failing links, falling back to the family heuristic when the blob is absent.

@@ -214,7 +214,8 @@ see where a frame's time goes. The end-of-run summary prints the same as
 Click any edge to tap its content: the dashboard streams a live preview of the
 packets crossing it, a downscaled thumbnail for RGBA/BGRA and planar NV12/I420
 video (and MJPEG keyframes when built with the `mjpeg` feature), a codec card for
-other compressed edges, a min/max waveform for PCM audio, or a bounded hexdump
+other compressed edges (codec, resolution, this packet's frame type where cheaply
+parseable, and its size), a min/max waveform for PCM audio, or a bounded hexdump
 otherwise. Sampling runs a few times a second on a copy and never blocks the data
 path; click again to stop.
 
