@@ -383,7 +383,7 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
 `multifilesink` / `multifilesrc` image-sequence pair, and `splitmuxsink`
-(segmented MP4 recording).
+(segmented recording, `muxer=mp4|matroska|mpegts`).
 
 ## Sample pipelines
 

@@ -1,13 +1,14 @@
-//! Splitting MP4 muxer sink (`splitmuxsink`). Muxes an H.264 / H.265 elementary
-//! stream into a series of self-contained MP4 files, starting a new file at a
-//! keyframe once the current one reaches `max-size-time` or `max-size-bytes`. The
-//! g2g analog of GStreamer's `splitmuxsink` (default `mp4mux` child). std-gated.
+//! Splitting muxer sink (`splitmuxsink`). Muxes an H.264 / H.265 elementary
+//! stream into a series of self-contained container files, starting a new file at
+//! a keyframe once the current one reaches `max-size-time` or `max-size-bytes`.
+//! The g2g analog of GStreamer's `splitmuxsink`. std-gated.
 //!
-//! It owns an [`Mp4Mux`](crate::mp4mux::Mp4Mux) per segment and writes its output
-//! to the current file through an internal byte-capturing sink; rotating finalizes
-//! the current muxer (so its `moov`/tail is written) and opens a fresh one, so
-//! every file is independently playable. With both limits `0` (the default) it
-//! never splits and behaves like `mp4mux ! filesink`.
+//! The `muxer` property picks the child container: `mp4` (default), `matroska`, or
+//! `mpegts`. It owns one muxer per segment and writes its output to the current
+//! file through an internal byte-capturing sink; rotating finalizes the current
+//! muxer (so its `moov`/cues/tail is written) and opens a fresh one, so every file
+//! is independently playable. With both limits `0` (the default) it never splits
+//! and behaves like `<muxer> ! filesink`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -26,7 +27,48 @@ use g2g_core::{
 };
 
 use crate::filesink::io_err;
-use crate::mp4mux::Mp4Mux;
+
+// A type alias (not a `use` of the trait) so the trait's methods do not land in
+// scope: `SplitMuxSink` implements `AsyncElement`, and the blanket
+// `DynAsyncElement` impl would otherwise make `self.process` / `configure_pipeline`
+// ambiguous. Method calls on the boxed muxer use the fully-qualified path.
+type BoxedMuxer = Box<dyn g2g_core::element::DynAsyncElement>;
+
+/// The container the child muxer writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MuxerKind {
+    Mp4,
+    Matroska,
+    MpegTs,
+}
+
+impl MuxerKind {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "mp4" | "mp4mux" | "qtmux" => Some(Self::Mp4),
+            "matroska" | "matroskamux" | "mkv" | "webm" => Some(Self::Matroska),
+            "mpegts" | "mpegtsmux" | "ts" => Some(Self::MpegTs),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Matroska => "matroska",
+            Self::MpegTs => "mpegts",
+        }
+    }
+
+    /// A fresh child muxer instance for this container.
+    fn make(self) -> BoxedMuxer {
+        match self {
+            Self::Mp4 => Box::new(crate::mp4mux::Mp4Mux::new()),
+            Self::Matroska => Box::new(crate::mkvmux::MkvMux::new()),
+            Self::MpegTs => Box::new(crate::tsmux::TsMux::new()),
+        }
+    }
+}
 
 /// An `OutputSink` that writes the muxer's output bytes to one segment file and
 /// counts them (the split decision reads that count).
@@ -65,26 +107,41 @@ impl OutputSink for SegmentSink {
     }
 }
 
-#[derive(Debug)]
 pub struct SplitMuxSink {
     location: String,
+    muxer: MuxerKind,
     max_size_time_ns: u64,
     max_size_bytes: u64,
     index: u64,
     caps: Option<Caps>,
-    mux: Option<Mp4Mux>,
+    mux: Option<BoxedMuxer>,
     seg: Option<SegmentSink>,
     segment_start_ns: u64,
     started: bool,
     files_written: u64,
 }
 
+// `dyn DynAsyncElement` is not Debug, so implement it by hand (like StreamDemux).
+impl core::fmt::Debug for SplitMuxSink {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SplitMuxSink")
+            .field("location", &self.location)
+            .field("muxer", &self.muxer)
+            .field("max_size_time_ns", &self.max_size_time_ns)
+            .field("max_size_bytes", &self.max_size_bytes)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SplitMuxSink {
     /// `location` is a printf-style pattern with one integer field, e.g.
-    /// `clip%03d.mp4`; without a field the index is appended.
+    /// `clip%03d.mp4`; without a field the index is appended. Defaults to the MP4
+    /// child muxer; set `muxer` for matroska / mpegts.
     pub fn new(location: impl Into<String>) -> Self {
         Self {
             location: location.into(),
+            muxer: MuxerKind::Mp4,
             max_size_time_ns: 0,
             max_size_bytes: 0,
             index: 0,
@@ -117,8 +174,8 @@ impl SplitMuxSink {
     fn open_segment(&mut self) -> Result<(), G2gError> {
         let caps = self.caps.clone().ok_or(G2gError::NotConfigured)?;
         let path = crate::multifilesink::expand(&self.location, self.index);
-        let mut mux = Mp4Mux::new();
-        mux.configure_pipeline(&caps)?;
+        let mut mux = self.muxer.make();
+        g2g_core::element::DynAsyncElement::configure_pipeline(mux.as_mut(), &caps)?;
         self.mux = Some(mux);
         self.seg = Some(SegmentSink::create(&path)?);
         self.index += 1;
@@ -130,7 +187,7 @@ impl SplitMuxSink {
     /// flush the file.
     async fn finalize_current(&mut self) -> Result<(), G2gError> {
         if let (Some(mux), Some(seg)) = (self.mux.as_mut(), self.seg.as_mut()) {
-            mux.process(PipelinePacket::Eos, seg).await?;
+            g2g_core::element::DynAsyncElement::process(mux.as_mut(), PipelinePacket::Eos, seg).await?;
             seg.flush()?;
         }
         self.mux = None;
@@ -200,7 +257,12 @@ impl AsyncElement for SplitMuxSink {
                     }
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let seg = self.seg.as_mut().ok_or(G2gError::NotConfigured)?;
-                    mux.process(PipelinePacket::DataFrame(frame), seg).await?;
+                    g2g_core::element::DynAsyncElement::process(
+                        mux.as_mut(),
+                        PipelinePacket::DataFrame(frame),
+                        seg,
+                    )
+                    .await?;
                 }
                 PipelinePacket::Eos => {
                     self.finalize_current().await?;
@@ -226,6 +288,10 @@ impl AsyncElement for SplitMuxSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "location" => self.location = value.as_str().ok_or(PropError::Type)?.into(),
+            "muxer" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.muxer = MuxerKind::from_str(s).ok_or(PropError::Value)?;
+            }
             "max-size-time" => self.max_size_time_ns = value.as_uint().ok_or(PropError::Type)?,
             "max-size-bytes" => self.max_size_bytes = value.as_uint().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
@@ -236,6 +302,7 @@ impl AsyncElement for SplitMuxSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.location.clone())),
+            "muxer" => Some(PropValue::Str(self.muxer.as_str().into())),
             "max-size-time" => Some(PropValue::Uint(self.max_size_time_ns)),
             "max-size-bytes" => Some(PropValue::Uint(self.max_size_bytes)),
             _ => None,
@@ -244,7 +311,8 @@ impl AsyncElement for SplitMuxSink {
 }
 
 static SPLITMUXSINK_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("location", PropKind::Str, "printf-style MP4 pattern, e.g. clip%03d.mp4"),
+    PropertySpec::new("location", PropKind::Str, "printf-style file pattern, e.g. clip%03d.mp4"),
+    PropertySpec::new("muxer", PropKind::Str, "child container: mp4 | matroska | mpegts"),
     PropertySpec::new("max-size-time", PropKind::Uint, "max segment duration in ns (0 = no split)"),
     PropertySpec::new("max-size-bytes", PropKind::Uint, "max segment size in bytes (0 = no split)"),
 ];
@@ -267,6 +335,7 @@ impl PadTemplates for SplitMuxSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use g2g_core::{Frame, FrameTiming, SystemSlice};
 
     struct NullSink;
@@ -332,6 +401,39 @@ mod tests {
             assert!(meta.len() > 0, "segment {i} has data");
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    async fn split_into_two_with_muxer(muxer: &str, ext: &str) {
+        let dir = std::env::temp_dir();
+        let pat = dir.join(format!("g2g_smux_{muxer}_%03d.{ext}")).to_string_lossy().into_owned();
+        for i in 0..3 {
+            let _ = std::fs::remove_file(crate::multifilesink::expand(&pat, i));
+        }
+        let mut sink = SplitMuxSink::new(&pat);
+        sink.set_property("muxer", PropValue::Str(muxer.into())).unwrap();
+        sink.set_property("max-size-time", PropValue::Uint(50_000_000)).unwrap();
+        sink.configure_pipeline(&h264(320, 240)).unwrap();
+        let mut out = NullSink;
+        sink.process(keyframe(0), &mut out).await.unwrap();
+        sink.process(keyframe(60_000_000), &mut out).await.unwrap();
+        sink.process(PipelinePacket::Eos, &mut out).await.unwrap();
+        assert_eq!(sink.files_written(), 2, "{muxer}: one file per keyframe past the limit");
+        for i in 0..2 {
+            let path = crate::multifilesink::expand(&pat, i);
+            let meta = std::fs::metadata(&path).unwrap_or_else(|_| panic!("{muxer} segment {i} exists"));
+            assert!(meta.len() > 0, "{muxer} segment {i} has data");
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[tokio::test]
+    async fn mpegts_muxer_splits() {
+        split_into_two_with_muxer("mpegts", "ts").await;
+    }
+
+    #[tokio::test]
+    async fn matroska_muxer_splits() {
+        split_into_two_with_muxer("matroska", "mkv").await;
     }
 
     #[tokio::test]
