@@ -171,18 +171,16 @@ use crate::camera2src::Camera2Src;
 /// ```
 /// The decode-chain parser injector (M421): an auto-plugged decoder is fed one
 /// access unit per packet by splicing an access-unit-re-framing `h264parse` ahead
-/// of it, the way GStreamer's `decodebin` always inserts a parser. Returns `None`
-/// for codecs without a re-framing parser (the input decodes directly). H.264
-/// (M421) and H.265 (M425) re-frame to one access unit per packet; audio still
-/// decodes directly.
-fn video_parser_provider(input: &Caps) -> Option<Box<dyn g2g_core::element::DynAsyncElement>> {
+/// of it, the way GStreamer's `decodebin` always inserts a parser. Names the
+/// registered launch element (M676: the name-based `decodebin` expansion in
+/// `parse_launch` shares this mapping; both launch registrations construct the
+/// re-framing form). Returns `None` for codecs without a re-framing parser (the
+/// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
+/// unit per packet; audio still decodes directly.
+fn video_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => {
-            Some(Box::new(crate::h264parse::H264Parse::reframing()))
-        }
-        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => {
-            Some(Box::new(crate::h265parse::H265Parse::reframing()))
-        }
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H264, .. } => Some("h264parse"),
+        Caps::CompressedVideo { codec: g2g_core::VideoCodec::H265, .. } => Some("h265parse"),
         _ => None,
     }
 }

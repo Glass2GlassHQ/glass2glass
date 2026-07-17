@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M676: `filesrc` types raw Annex-B elementary streams by extension (`.h264`/`.265` and variants), and name-based `decodebin` expansion now splices the M421 re-framing parser ahead of the decoder.
 - M675: `splitmuxsink` gains a `muxer` property (`mp4`/`matroska`/`mpegts`) to pick the per-segment child container.
 - M674: adds `equalizer-3bands`, `spectrum` (FFT analyzer), `clockoverlay`, and `splitmuxsink`; `equalizer-10bands`/`-nbands` alias to `equalizer-3bands`.
 - M673: fills GStreamer element gaps: `audioamplify`, `audioecho`, `level`, `cutter`, `gamma`, `deinterlace`, `timeoverlay`, `concat`, `input-selector`/`output-selector`, `progressreport`, `multifilesink`/`multifilesrc`.

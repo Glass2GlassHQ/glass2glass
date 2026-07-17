@@ -919,12 +919,14 @@ mod factory {
         /// or `None` to decode the input directly. A decoder fed un-aligned units
         /// (one MPEG-TS PES that is not one access unit) mis-parses; this is how
         /// the registry mirrors GStreamer's `decodebin` always inserting a parser.
-        /// A bare function pointer so the registry stays `Debug` + `Default`;
-        /// [`default_registry`](crate) sets it. `None` (the default) decodes
-        /// directly, preserving the prior behaviour for registries that do not set
-        /// it.
-        #[allow(clippy::type_complexity)]
-        parser_provider: Option<fn(&Caps) -> Option<Box<dyn DynAsyncElement>>>,
+        /// Maps input caps to the LAUNCH NAME of the parser (M676: a name, not a
+        /// boxed element, so the name-based `decodebin` expansion in `parse_launch`
+        /// shares the one mapping); the element is built via
+        /// [`make_element`](Self::make_element). A bare function pointer so the
+        /// registry stays `Debug` + `Default`; [`default_registry`](crate) sets it.
+        /// `None` (the default) decodes directly, preserving the prior behaviour
+        /// for registries that do not set it.
+        parser_provider: Option<fn(&Caps) -> Option<&'static str>>,
     }
 
     impl Registry {
@@ -1021,17 +1023,24 @@ mod factory {
 
         /// Set the parser injector consulted by [`decodebin`](Self::decodebin) and
         /// [`decodebin_preferring`](Self::decodebin_preferring) (M421): before a
-        /// decode chain is spliced, `provider(input)` may return a parser element
+        /// decode chain is spliced, `provider(input)` may name a registered parser
         /// (e.g. an access-unit-re-framing `h264parse`) to prepend ahead of the
-        /// decoder, so the decoder is fed one access unit per packet. Returns
+        /// decoder, so the decoder is fed one access unit per packet. The
+        /// name-based `decodebin` expansion in `parse_launch` consults the same
+        /// mapping via [`parser_name`](Self::parser_name) (M676). Returns
         /// `&mut self` to chain calls.
-        #[allow(clippy::type_complexity)]
         pub fn set_parser_provider(
             &mut self,
-            provider: fn(&Caps) -> Option<Box<dyn DynAsyncElement>>,
+            provider: fn(&Caps) -> Option<&'static str>,
         ) -> &mut Self {
             self.parser_provider = Some(provider);
             self
+        }
+
+        /// The launch name of the re-framing parser `decodebin` prepends ahead of
+        /// a decoder for `input` caps, if the provider names one (M676).
+        pub fn parser_name(&self, input: &Caps) -> Option<&'static str> {
+            self.parser_provider.and_then(|provider| provider(input))
         }
 
         /// Prepend the [`parser_provider`](Self::set_parser_provider)'s parser to a
@@ -1041,10 +1050,8 @@ mod factory {
             if elements.is_empty() {
                 return;
             }
-            if let Some(provider) = self.parser_provider {
-                if let Some(parser) = provider(input) {
-                    elements.insert(0, parser);
-                }
+            if let Some(parser) = self.parser_name(input).and_then(|name| self.make_element(name)) {
+                elements.insert(0, parser);
             }
         }
 
@@ -1898,10 +1905,18 @@ mod tests {
             let mut reg = Registry::new();
             reg.register(dec_factory());
             if provider {
+                // The provider names a registered launch element (M676), the
+                // identity-caps re-framing parser.
+                reg.register_launch(LaunchFactory::new(
+                    "auparse",
+                    Vec::from([
+                        PadTemplate::sink(CapsSet::one(h264(Dim::Any))),
+                        PadTemplate::source(CapsSet::one(h264(Dim::Any))),
+                    ]),
+                    || alloc::boxed::Box::new(Dummy),
+                ));
                 reg.set_parser_provider(|caps| match caps {
-                    Caps::CompressedVideo { codec: VideoCodec::H264, .. } => {
-                        Some(alloc::boxed::Box::new(Dummy))
-                    }
+                    Caps::CompressedVideo { codec: VideoCodec::H264, .. } => Some("auparse"),
                     _ => None,
                 });
             }

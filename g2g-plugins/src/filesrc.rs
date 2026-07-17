@@ -28,9 +28,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    PropertySpec, Rate, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -339,11 +339,22 @@ static FILESRC_PROPS: &[PropertySpec] = &[
 
 /// Derive the media type from a file extension (M478), so a bare launch
 /// `filesrc location=X` types without an explicit `bytestream-format`. Containers
-/// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`; an unknown
-/// extension returns `None` (the caller keeps the MPEG-TS default). String-only,
-/// so it costs no filesystem read at parse time. Content sniffing
-/// (`bytestream-format=auto`) covers a mis-named or extensionless file.
+/// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`, raw Annex-B
+/// elementary streams to `Caps::CompressedVideo` at a fixable `Range`
+/// placeholder geometry (never `Any`, which cannot fixate; the parser refines
+/// via SPS, M676); an unknown extension returns `None` (the caller keeps the
+/// MPEG-TS default). String-only, so it costs no filesystem read at parse
+/// time. Content sniffing (`bytestream-format=auto`) covers a mis-named or
+/// extensionless file.
 fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
+    let elementary = |codec| {
+        Some(Caps::CompressedVideo {
+            codec,
+            width: Dim::Range { min: 16, max: 65535 },
+            height: Dim::Range { min: 16, max: 65535 },
+            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        })
+    };
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let encoding = match ext.as_str() {
         "ts" | "m2ts" | "mts" => ByteStreamEncoding::MpegTs,
@@ -351,6 +362,8 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
         "flv" => ByteStreamEncoding::Flv,
         "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
+        "h264" | "264" | "avc" => return elementary(VideoCodec::H264),
+        "h265" | "265" | "hevc" => return elementary(VideoCodec::H265),
         "vtt" => return Some(Caps::Text { format: g2g_core::TextFormat::WebVtt }),
         "srt" => return Some(Caps::Text { format: g2g_core::TextFormat::Srt }),
         "ass" | "ssa" => return Some(Caps::Text { format: g2g_core::TextFormat::Ssa }),
