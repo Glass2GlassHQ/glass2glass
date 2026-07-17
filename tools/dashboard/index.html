@@ -26,6 +26,13 @@
     flex-direction: column; }
   #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
     color: var(--muted); margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+  #waterfall { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+  #waterfall .row { margin: 4px 0; }
+  #waterfall .lbl { color: var(--muted); font-size: 11px; display: flex; justify-content: space-between; }
+  #waterfall .bar { height: 12px; display: flex; border-radius: 3px; overflow: hidden; background: #10131a; }
+  #waterfall .wait { background: var(--warn); }
+  #waterfall .work { background: var(--xform); }
+  #waterfall .total { color: var(--muted); font-size: 11px; margin-top: 4px; }
   #preview { padding: 8px 12px; border-bottom: 1px solid var(--edge); min-height: 60px; }
   #preview .hint { color: var(--muted); }
   #preview canvas { image-rendering: pixelated; width: 100%; max-width: 260px;
@@ -55,6 +62,8 @@
 <div id="wrap">
   <div id="graph"><svg id="svg" width="100%" height="100%"></svg></div>
   <div id="side">
+    <h2>latency waterfall (p50)</h2>
+    <div id="waterfall"><span class="hint" style="color:var(--muted)">waiting for frames…</span></div>
     <h2>edge preview</h2>
     <div id="preview"><span class="hint">click an edge to tap its content</span></div>
     <h2>events</h2>
@@ -73,6 +82,7 @@ const statusEl = document.getElementById("status");
 const uptimeEl = document.getElementById("uptime");
 const eventsEl = document.getElementById("events");
 const previewEl = document.getElementById("preview");
+const waterfallEl = document.getElementById("waterfall");
 
 let socket = null;             // live WebSocket, for edge subscribe/unsubscribe
 const tapped = new Set();      // edge indices currently subscribed
@@ -189,6 +199,39 @@ function render(msg) {
   });
 }
 
+// Per-stage latency breakdown: input-link wait (transit p50) + process p50,
+// stacked and scaled to the slowest stage. Only nodes with a process() probe
+// appear (sources have none).
+function renderWaterfall(nodes) {
+  const stages = nodes
+    .filter(n => n.proc && n.proc.count > 0)
+    .map(n => ({
+      name: n.name || n.role,
+      wait: n.transit ? n.transit.p50_ns : 0,
+      work: n.proc.p50_ns,
+    }));
+  if (!stages.length) return;
+  const max = Math.max(...stages.map(s => s.wait + s.work), 1);
+  waterfallEl.innerHTML = "";
+  stages.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const total = s.wait + s.work;
+    row.innerHTML =
+      `<div class="lbl"><span>${s.name}</span><span>${fmtNs(total)}</span></div>` +
+      `<div class="bar">` +
+        `<div class="wait" style="width:${(s.wait / max * 100).toFixed(1)}%"></div>` +
+        `<div class="work" style="width:${(s.work / max * 100).toFixed(1)}%"></div>` +
+      `</div>`;
+    waterfallEl.appendChild(row);
+  });
+  const legend = document.createElement("div");
+  legend.className = "total";
+  legend.innerHTML = `<span style="color:var(--warn)">■</span> input wait ` +
+    `<span style="color:var(--xform)">■</span> process`;
+  waterfallEl.appendChild(legend);
+}
+
 function addEvent(msg) {
   const div = document.createElement("div");
   div.className = "ev " + (msg.kind || "");
@@ -273,6 +316,7 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "telemetry") {
       render(msg);
+      renderWaterfall(msg.nodes);
       uptimeEl.textContent = "t=" + (msg.uptime_ns / 1e9).toFixed(1) + "s";
     } else if (msg.type === "event") {
       addEvent(msg);

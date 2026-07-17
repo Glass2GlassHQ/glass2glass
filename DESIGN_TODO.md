@@ -1026,10 +1026,8 @@ Outstanding developer-tooling tasks, highest leverage first.
   - Per-edge packet / byte counters + drops in the live tap (drops surface only
     in end-of-run `RunStats`).
   - The fan-in / fan-out / session / muxer runners leave `per_element` empty:
-    wire probes into them.
-  - Per-*link* transit / queue-residency time: a wall-clock stamp carried with
-    each packet, sampled at recv (the element-side `process()` timing does not
-    capture queue wait).
+    wire probes into them (also extends the transit measurement, which today
+    covers the graph runner's Block edges into transform/sink arms only).
   - Source-side timing: a source runs one long `run()` loop, so its cost only
     shows as its downstream's input fill.
   - Wire the `Observer` into the threaded runner (`run_graph_threaded` passes
@@ -1055,12 +1053,12 @@ Outstanding developer-tooling tasks, highest leverage first.
   solver to surface the candidate sets, not just the empty-link indices; and a
   visual overlay (the builder gaining a server-side validate endpoint to render
   the failing link red).
-- **Latency waterfall.** Per-frame glass-to-glass breakdown. Needs the tap's
-  link-transit stamps plus a source-stamped sequence id so one frame's path
-  can be assembled across elements. Views: a per-frame waterfall (queue
-  residency + `process()` per stage) and an aggregate stacked p50/p99, with
-  the measured total against the `2 * capacity * frame_period` floor. Opt-in
-  sampling (every Nth frame) so overhead stays nil.
+- **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
+  wait+work p50 per stage. The remaining piece is a single frame's path: a
+  source-stamped sequence id carried through so one frame's queue-residency +
+  `process()` at each stage can be assembled end to end (the aggregate uses
+  per-stage distributions, not one frame's journey), plus the measured total
+  against the `2 * capacity * frame_period` floor.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

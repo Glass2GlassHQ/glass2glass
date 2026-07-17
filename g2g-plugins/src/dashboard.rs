@@ -103,6 +103,16 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
                     "max_ns": l.proc.max_ns,
                 })
             });
+            // Input-link queue-residency (the "wait" half of the latency
+            // waterfall). Null when the node's input edge is not instrumented.
+            let transit = n.latency.as_ref().filter(|l| l.transit.count > 0).map(|l| {
+                json!({
+                    "count": l.transit.count,
+                    "p50_ns": l.transit.p50_ns,
+                    "p99_ns": l.transit.p99_ns,
+                    "max_ns": l.transit.max_ns,
+                })
+            });
             let (fill_mean, fill_max) =
                 n.latency.as_ref().map(|l| (l.fill_mean_pct, l.fill_max_pct)).unwrap_or((0, 0));
             json!({
@@ -110,6 +120,7 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
                 "name": n.name,
                 "role": role_str(n.role),
                 "proc": proc,
+                "transit": transit,
                 "fill_mean_pct": fill_mean,
                 "fill_max_pct": fill_max,
             })
@@ -358,6 +369,14 @@ mod tests {
                     latency: Some(ElementLatency {
                         name: String::from("decode0"),
                         proc: LatencySnapshot {
+                            count: 0,
+                            mean_ns: 0,
+                            max_ns: 0,
+                            p50_ns: 0,
+                            p95_ns: 0,
+                            p99_ns: 0,
+                        },
+                        transit: LatencySnapshot {
                             count: 0,
                             mean_ns: 0,
                             max_ns: 0,

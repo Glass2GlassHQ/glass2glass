@@ -388,8 +388,16 @@ impl RunStats {
                 // proc.count == 0 means fill was sampled but no `process()` timing
                 // was taken (no_std, no clock); show fill alone in that case.
                 if e.proc.count > 0 {
+                    // Include measured input-link queue-residency (transit) when
+                    // the edge was instrumented; it is the "wait" half of the
+                    // per-stage latency, complementing the `process()` "work".
+                    let transit = if e.transit.count > 0 {
+                        format!(", wait p50 {:.2} ms / p99 {:.2} ms", ms(e.transit.p50_ns), ms(e.transit.p99_ns))
+                    } else {
+                        alloc::string::String::new()
+                    };
                     s.push_str(&format!(
-                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}), in-fill {}%/{}% avg/max\n",
+                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){transit}, in-fill {}%/{}% avg/max\n",
                         e.name,
                         ms(e.proc.p50_ns),
                         ms(e.proc.p99_ns),

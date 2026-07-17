@@ -148,6 +148,8 @@ pub fn stats_json(stats: &RunStats) -> Value {
                 "proc_count": e.proc.count,
                 "proc_p50_ns": e.proc.p50_ns,
                 "proc_p99_ns": e.proc.p99_ns,
+                "transit_p50_ns": e.transit.p50_ns,
+                "transit_p99_ns": e.transit.p99_ns,
                 "fill_mean_pct": e.fill_mean_pct,
                 "fill_max_pct": e.fill_max_pct,
             })

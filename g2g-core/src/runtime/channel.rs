@@ -280,6 +280,29 @@ pub struct LinkSender {
     /// packets crossing this edge without touching the arms. Empty (pass-through,
     /// zero cost) unless a subscriber installs one.
     pub(crate) probe: ProbeSlot,
+    /// Per-edge transit-time ring (dev tooling): a send-time stamp per queued
+    /// `DataFrame`, popped at the consumer to measure queue residency. `None`
+    /// (zero cost) unless the runner enabled instrumentation on this edge.
+    pub(crate) transit: Option<TransitRing>,
+}
+
+/// Send-time stamps for the packets queued on one link, shared between its
+/// [`LinkSender`] and [`LinkReceiver`]. FIFO, aligned with the data channel (one
+/// stamp pushed per queued `DataFrame`, one popped per received `DataFrame`), so
+/// the consumer reads each frame's queue-residency time.
+pub(crate) type TransitRing = Arc<Mutex<VecDeque<u64>>>;
+
+/// Monotonic send stamp for the transit ring; 0 under `no_std` (no clock).
+#[inline]
+fn stamp_now_ns() -> u64 {
+    #[cfg(feature = "std")]
+    {
+        crate::metrics::monotonic_ns()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        0
+    }
 }
 
 impl LinkSender {
@@ -315,6 +338,9 @@ pub struct LinkReceiver {
     pub(crate) reconfigure: ReconfigureSlot,
     pub(crate) qos: QosSlot,
     pub(crate) bitrate: BitrateSlot,
+    /// Shared with the [`LinkSender`] when transit instrumentation is on; see
+    /// [`pop_transit_ns`](LinkReceiver::pop_transit_ns).
+    pub(crate) transit: Option<TransitRing>,
 }
 
 impl LinkReceiver {
@@ -330,6 +356,26 @@ impl LinkReceiver {
     /// Fill of this link as a percent (0-100), for buffering reports.
     pub fn fill_percent(&self) -> u8 {
         self.data.fill_percent()
+    }
+
+    /// Pop the queue-residency (transit) time in ns of the just-received
+    /// `DataFrame`: the wall-clock elapsed since the producer queued it. Call
+    /// once per received `DataFrame` to keep the stamp ring aligned with the data
+    /// channel. `None` when this edge is not instrumented (or under `no_std`,
+    /// where there is no clock so the stamp is 0). Only `DataFrame`s are stamped,
+    /// so callers must not pop for control packets.
+    pub fn pop_transit_ns(&self) -> Option<u64> {
+        let ring = self.transit.as_ref()?;
+        let sent = ring.lock().pop_front()?;
+        #[cfg(feature = "std")]
+        {
+            Some(crate::metrics::monotonic_ns().saturating_sub(sent))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = sent;
+            Some(0)
+        }
     }
 
     /// Latest-wins: overwrites any pending request that the producer
@@ -365,6 +411,17 @@ impl LinkReceiver {
 /// Build a bidirectional inter-element link with `capacity` forward
 /// slots and a capacity-1 reverse `Reconfigure` slot.
 pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
+    build_link(capacity, None)
+}
+
+/// As [`link`], but with per-edge transit-time instrumentation enabled: the
+/// sender stamps each queued `DataFrame`, the receiver pops the stamp to measure
+/// queue residency. Used by the runner only when an observer is attached.
+pub(crate) fn link_with_transit(capacity: usize) -> (LinkSender, LinkReceiver) {
+    build_link(capacity, Some(Arc::new(Mutex::new(VecDeque::new()))))
+}
+
+fn build_link(capacity: usize, transit: Option<TransitRing>) -> (LinkSender, LinkReceiver) {
     let (data_tx, data_rx) = bounded::<PipelinePacket>(capacity);
     let slot = ReconfigureSlot::default();
     let qos = QosSlot::default();
@@ -378,8 +435,9 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
             policy: LinkPolicy::Block,
             dropped: None,
             probe: ProbeSlot::default(),
+            transit: transit.clone(),
         },
-        LinkReceiver { data: data_rx, reconfigure: slot, qos, bitrate },
+        LinkReceiver { data: data_rx, reconfigure: slot, qos, bitrate, transit },
     )
 }
 
@@ -583,12 +641,27 @@ impl OutputSink for SenderSink {
                 }
                 return Ok(self.post_send_outcome());
             }
+            // Transit instrumentation (Block links only, where there are no
+            // drops so the stamp ring stays aligned): stamp the frame's queue
+            // entry before the send, roll back if it never enqueues.
+            if is_data {
+                if let Some(ring) = &self.link.transit {
+                    ring.lock().push_back(stamp_now_ns());
+                }
+            }
             match self.link.data.send(packet).await {
                 // Post-send check covers the "request fired while we were
                 // awaiting capacity" window; the packet is already in the link
                 // under old caps.
                 Ok(()) => Ok(self.post_send_outcome()),
-                Err(SendError::Closed) => Err(G2gError::Shutdown),
+                Err(SendError::Closed) => {
+                    if is_data {
+                        if let Some(ring) = &self.link.transit {
+                            ring.lock().pop_back();
+                        }
+                    }
+                    Err(G2gError::Shutdown)
+                }
                 Err(SendError::Full) => unreachable!("send().await never returns Full"),
             }
         })

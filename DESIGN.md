@@ -2140,9 +2140,20 @@ runners leave it empty, like their declared latency. It is `std`-gated where it
 needs a clock: the histogram is `no_std`, but with no `monotonic_ns` the timing
 compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
-downstream element's input fill. Still open: per-*link* transit (queue-residency)
-time, which needs a wall-clock stamp carried with each packet rather than the
-element-side timing collected here.
+downstream element's input fill.
+
+The `process()` timing is the "work" half of a stage's latency; the "wait" half
+is queue residency, added as measured per-link transit. When an observer is
+attached, the graph runner builds `Block` edges into transform/sink arms with a
+per-link transit ring (`link_with_transit`): the producer's `SenderSink` stamps a
+monotonic send time as each `DataFrame` is queued, and the consuming arm pops the
+stamp when it pulls the frame (`LinkReceiver::pop_transit_ns`), recording the
+elapsed queue time into `ElementProbe::transit`. The ring stays aligned with the
+data channel because `Block` links never drop (leaky edges are left plain, so
+their transit is simply not measured), and it is `Option`-gated so an
+uninstrumented run carries no stamp and pays nothing. `RunStats::report()` prints
+`wait p50/p99` beside `proc`, and the dashboard stacks the two per stage into a
+latency waterfall.
 
 Every link also carries a per-edge content-inspection slot (`LinkSender::probe`,
 a `ProbeSlot` the wrapping `SenderSink` shares), so a tool can install a

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M684: measured per-link transit (queue-residency) time via a send-time stamp on Block edges into transform/sink arms, feeding an `ElementLatency::transit` distribution and the dashboard's per-stage latency waterfall (wait + process).
 - M683: dashboard edge tap: click an edge to stream a live content preview (RGBA/BGRA thumbnail, PCM waveform, or hexdump) over the WebSocket, via a per-edge `LinkInterceptor` slot on every link.
 - M682: `negotiate_graph_explained` preserves the structured `NegotiationFailure`, so `validate` reports per-edge negotiated caps and names the conflicting link.
 - M681: `g2g-mcp` MCP server (JSON-RPC over stdio) exposes list_elements / inspect / validate / launch for agent-driven dev, over shared `toolingjson` internals.

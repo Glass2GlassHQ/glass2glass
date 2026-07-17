@@ -57,7 +57,9 @@ use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::segment::Segment;
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{bounded, link, LinkReceiver, LinkSender, Receiver, Sender, SenderSink};
+use crate::runtime::channel::{
+    bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, Sender, SenderSink,
+};
 use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
@@ -969,6 +971,7 @@ fn build_channels<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     topo: &[NodeId],
     link_capacity: usize,
+    instrument: bool,
 ) -> GraphChannels {
     let n = vg.node_count();
     // Phase 4: one bounded channel per edge, then one arm per node. Each arm
@@ -983,7 +986,15 @@ fn build_channels<'a>(
     for eid in 0..ne {
         // A per-edge depth (a `queue max-size-buffers=N`) overrides the graph-wide
         // default; most edges leave it `None` and take `link_capacity`.
-        let (mut tx, rx) = link(vg.edge(eid).capacity.unwrap_or(link_capacity));
+        let cap = vg.edge(eid).capacity.unwrap_or(link_capacity);
+        // Transit instrumentation only where it is measured + read: `Block` edges
+        // (no drops -> the stamp ring stays aligned) into a transform/sink arm
+        // (which pops the stamp). Elsewhere a plain link (zero cost).
+        let dst_kind = vg.kind(vg.edge(eid).dst.node);
+        let instr_edge = instrument
+            && vg.edge(eid).policy == crate::link::LinkPolicy::Block
+            && matches!(dst_kind, NodeKind::Transform | NodeKind::Sink);
+        let (mut tx, rx) = if instr_edge { link_with_transit(cap) } else { link(cap) };
         let policy = vg.edge(eid).policy;
         tx.set_policy(policy);
         if policy != crate::link::LinkPolicy::Block {
@@ -1073,7 +1084,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     }
 
     let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
-        build_channels(&vg, &topo, link_capacity);
+        build_channels(&vg, &topo, link_capacity, observer.is_some());
 
     // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
     // (shared with the arm's `SenderSink`) + its negotiated caps, so a preview
@@ -1377,7 +1388,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         prepare_graph(&mut vg, &topo, &state, bus, clock, None).await?;
 
     let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
-        build_channels(&vg, &topo, link_capacity);
+        build_channels(&vg, &topo, link_capacity, false);
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
     // handle resolves on this thread once its worker thread finishes.
@@ -2050,6 +2061,10 @@ async fn transform_arm<'a>(
                     probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
+                    // Queue-residency of this frame on the input link (M684).
+                    if let Some(t) = in_rx.pop_transit_ns() {
+                        p.record_transit(t);
+                    }
                 }
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
@@ -2202,6 +2217,10 @@ async fn sink_arm<'a>(
                 let timed = probe.as_deref().filter(|_| is_buffer);
                 if let Some(p) = timed {
                     p.record_fill(in_rx.fill_percent());
+                    // Queue-residency of this frame on the input link (M684).
+                    if let Some(t) = in_rx.pop_transit_ns() {
+                        p.record_transit(t);
+                    }
                 }
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
