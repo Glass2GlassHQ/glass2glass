@@ -1,0 +1,2 @@
+# Standalone (workspace-excluded) crate: its own build dir.
+/target

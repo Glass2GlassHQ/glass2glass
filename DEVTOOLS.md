@@ -248,20 +248,31 @@ The reverse also works: paste a `gst-launch` line or a declarative JSON document
 into the import box and it loads onto the canvas (auto-detected, or forced with
 the format toggle), so you can start from an existing pipeline. An element the
 loaded registry doesn't know becomes a flagged placeholder rather than being
-dropped. While you wire, an edge whose two ends have obviously incompatible caps
-families (e.g. raw video into an audio input) is drawn red; it is a cheap
-heuristic, not the full solver, so it never blocks a link, and the authoritative
-check is still the run.
+dropped.
+
+While you wire, links are checked live. With the wasm solver built (below) the
+builder runs g2g's *real* caps negotiation client-side: each edge shows its
+negotiated caps, and a link that fails to negotiate is drawn red with the reason.
+Without the blob (the single-file artifact under a strict CSP), it falls back to
+a cheap family heuristic (raw video into an audio input, etc.); the footer says
+which is active. Neither blocks a link.
 
 Run it (needs Node + pnpm):
 
 ```sh
 cd tools/builder
 pnpm install
+./build-wasm.sh     # optional: the real caps solver (needs wasm-pack + wasm32);
+                    # without it the builder uses the family heuristic
 pnpm dev            # dev server with live reload, prints a localhost URL
 # or a static self-contained bundle:
 pnpm build && python3 -m http.server -d dist 8099   # open http://localhost:8099
 ```
+
+The solver is a small dedicated crate (`g2g-validate-wasm`, not the heavy
+`g2g-web`) wrapping `toolingjson::validate_json`; `build-wasm.sh` compiles it into
+`public/wasm/` (gitignored, built on demand). Regenerate it after changing the
+core solver, parser, or registry.
 
 A "dynamic" palette group adds `uridecodebin` (with a `uri` prop) and
 `decodebin`. These are parse-time autoplug macros, not registered elements, so

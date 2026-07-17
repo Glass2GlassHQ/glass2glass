@@ -12,6 +12,7 @@ import {
 import { G2gNode } from "./nodes.jsx";
 import { toLaunch, toJSON, isSink, nodeData } from "./export.js";
 import { fromLaunch, fromJSON, seedCounters, decorateEdge, CAPS_WARN_TITLE } from "./import.js";
+import { loadSolver, applyValidation } from "./solve.js";
 
 const nodeTypes = { g2g: G2gNode };
 
@@ -114,6 +115,58 @@ export default function App() {
     },
     [setEdges],
   );
+
+  // Authoritative caps validation via the real solver compiled to wasm, loaded
+  // best-effort once. When present it supersedes the family heuristic; when not
+  // (missing blob, or the CSP-restricted single-file artifact) the heuristic on
+  // onConnect stays the feedback.
+  const solverRef = useRef(null);
+  const [solverActive, setSolverActive] = useState(false);
+  const [capsError, setCapsError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    loadSolver().then((fn) => {
+      if (!alive) return;
+      solverRef.current = fn;
+      setSolverActive(!!fn);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Re-validate only when the graph STRUCTURE changes (elements, props, links),
+  // not when we restyle edges with the result (which would retrigger the effect).
+  // The effect body reads live nodes/edges through refs, so structure is the only
+  // trigger; edgesRef mirrors edges the way nodesRef mirrors nodes above.
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
+  const graphSig = useMemo(
+    () =>
+      JSON.stringify([
+        nodes.map((n) => [n.id, n.data.element, n.data.props || {}]),
+        edges.map((e) => [e.source, e.target]),
+      ]),
+    [nodes, edges],
+  );
+  useEffect(() => {
+    if (!solverActive || !solverRef.current || !nodesRef.current.length) return undefined;
+    const handle = setTimeout(async () => {
+      const live = nodesRef.current;
+      const line = toLaunch(live, edgesRef.current);
+      if (!line.trim()) return;
+      let result;
+      try {
+        result = JSON.parse(await solverRef.current(line));
+      } catch {
+        return; // solver unavailable mid-session: leave the last styling
+      }
+      const parseOrSetup = result.ok === false && (result.stage === "parse" || result.stage === "setup");
+      setCapsError(parseOrSetup ? `caps: ${result.error}` : "");
+      setEdges((eds) => applyValidation(live, eds, result));
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [graphSig, solverActive, setEdges]);
 
   const [importText, setImportText] = useState("");
   const [importFmt, setImportFmt] = useState("auto"); // auto | gst | json
@@ -279,8 +332,11 @@ export default function App() {
             onChange={(e) => setImportText(e.target.value)}
           />
           {importErr && <div className="err">{importErr}</div>}
+          {capsError && <div className="err">{capsError}</div>}
           <div className="hint" title={CAPS_WARN_TITLE}>
-            red links = caps families look incompatible (heuristic, not the full solver)
+            {solverActive
+              ? "live caps: real solver. red links = negotiation fails; labels = negotiated caps"
+              : "live caps: family heuristic. red links = caps families look incompatible (not the full solver)"}
           </div>
         </div>
 

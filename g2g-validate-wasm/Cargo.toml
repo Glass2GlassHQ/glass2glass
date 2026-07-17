@@ -1,0 +1,40 @@
+# g2g-validate-wasm: a minimal WebAssembly wrapper around g2g's real caps solver,
+# so the visual builder (tools/builder) can authoritatively validate a pipeline's
+# per-link caps client-side instead of the coarse family heuristic.
+#
+# EXCLUDED from the workspace (like g2g-web) so its cdylib crate-type + std +
+# wasm-bindgen deps never enter a native `--workspace` build or perturb the no_std
+# baseline's feature resolution. Kept deliberately small (only the plugins
+# features `default_registry` + `validate_json` need) so the .wasm blob stays
+# tiny; do NOT depend on g2g-web (heavy: g2g-ml, wgpu, analytics). Build for
+# wasm32 via tools/builder/build-wasm.sh (wasm-pack); native `cargo test` runs the
+# solver-wrapping logic through the rlib.
+[package]
+name = "g2g-validate-wasm"
+version = "0.2.0"
+edition = "2021"
+publish = false
+description = "glass2glass caps-solver validator compiled to WebAssembly for the visual builder."
+
+[lib]
+# cdylib for the .wasm artifact wasm-pack post-processes; rlib so the inner
+# `validate` is unit-testable natively.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+g2g-core = { path = "../g2g-core", default-features = false, features = ["runtime"] }
+# Minimal plugins set: `std` (the Registry + parser are std) + `tooling-json`
+# (validate_json + serde_json). No network / ffmpeg / gpu / ml / windows.
+g2g-plugins = { path = "../g2g-plugins", default-features = false, features = ["std", "tooling-json"] }
+
+# wasm-bindgen glue is only needed for the browser entry point; native builds /
+# tests skip it. wasm-bindgen-futures backs the async `#[wasm_bindgen]` export.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+# Drive the async inner `validate` in the native unit test.
+tokio = { version = "1", features = ["rt", "macros"] }
+# Parse the JSON string `validate` returns, to assert on its shape.
+serde_json = "1"

@@ -1026,10 +1026,9 @@ Outstanding developer-tooling tasks, highest leverage first.
     shows as its downstream's input fill.
   - Validate the dashboard live against an RTSP source.
 - **Visual builder follow-ups.** For `tools/builder/` (React Flow):
-  - Authoritative caps feedback while wiring: today a coarse family heuristic
-    warns on obviously-disjoint links, but the real solver only runs on load /
-    run. A wasm `negotiate` blob loaded client-side (or a server validate
-    endpoint) would give the true per-link check.
+  - Inline the wasm solver blob into the single-file artifact (base64) so the
+    published artifact runs the real solver too, not just the family heuristic
+    (the strict-CSP artifact currently can't fetch the sibling `.wasm`).
   - YAML export (the JSON export already covers the graph model; schema shared).
 - **Edge preview follow-ups.** Remaining: decode a keyframe for non-MJPEG
   compressed edges (MJPEG already thumbnails behind the `mjpeg` feature; other
