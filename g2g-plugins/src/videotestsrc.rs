@@ -45,9 +45,9 @@ pub enum Pattern {
     /// A filled white ball bouncing over a dark field (reflecting off the edges).
     /// Smooth two-axis motion for a frame-rate / judder check.
     Ball,
-    /// Concentric rings whose spacing tightens with radius (`(x^2 + y^2)` square
-    /// wave, phase-animated): an integer zone plate, for resampling / aliasing
-    /// tests. A square-wave approximation of the sinusoidal chirp (no `libm`).
+    /// Concentric rings whose spacing tightens with radius: a sinusoidal zone
+    /// plate `128 + 127*sin(2*pi*(x^2 + y^2)/period)`, phase-animated, for
+    /// resampling / aliasing tests. Uses the `libm`-free [`crate::mathf`] sine.
     ZonePlate,
 }
 
@@ -503,17 +503,22 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
                 px[3] = 255;
             }
         }
-        // Concentric rings about the centre. Ring frequency rises with radius
-        // because `d2` is quadratic (the zone-plate aliasing property); `seq`
-        // phase-shifts them so the rings pulse outward.
+        // Concentric sinusoidal rings about the centre. Ring frequency rises with
+        // radius because `d2` is quadratic (the zone-plate aliasing property);
+        // `seq` phase-shifts them so the rings pulse outward. `d2` is reduced
+        // modulo the period before the sine so the phase stays exact at large
+        // radius (sine is periodic, so dropping whole turns is lossless).
         Pattern::ZonePlate => {
+            const PERIOD: u64 = 128;
             let w = width.max(1) as usize;
             let h = ((buf.len() / 4) / w).max(1);
             let (cx, cy) = ((w / 2) as i64, (h / 2) as i64);
             for (p, px) in buf.chunks_exact_mut(4).enumerate() {
                 let (dx, dy) = ((p % w) as i64 - cx, (p / w) as i64 - cy);
                 let d2 = (dx * dx + dy * dy) as u64;
-                let v = if ((d2 >> 6).wrapping_add(seq)) & 1 == 0 { 255 } else { 0 };
+                let phase = (d2.wrapping_add(seq.wrapping_mul(8)) % PERIOD) as f32 / PERIOD as f32;
+                let s = crate::mathf::sin_turns(phase); // -1..1
+                let v = (128.0 + 127.0 * s) as u8;
                 px[0] = v;
                 px[1] = v;
                 px[2] = v;
@@ -601,6 +606,22 @@ mod tests {
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             assert!(a.chunks_exact(4).all(|px| px[3] == 255), "{pattern:?} opaque");
         }
+    }
+
+    #[test]
+    fn zone_plate_is_sinusoidal_not_binary() {
+        // A large enough frame to sweep the rings through a full cycle. A square
+        // wave would yield only {min, max}; the sinusoid fills the range with
+        // many intermediate grey levels, and the centre sits at mid-grey.
+        const N: u32 = 64;
+        let mut buf = vec![0u8; (N * N * 4) as usize];
+        fill_pattern(Pattern::ZonePlate, &mut buf, N, 0);
+        let levels: std::collections::HashSet<u8> = buf.chunks_exact(4).map(|px| px[0]).collect();
+        assert!(levels.len() > 16, "sinusoid should span many grey levels, got {}", levels.len());
+        assert!(levels.iter().any(|&v| (40..=215).contains(&v)), "has mid-tones, not just 0/255");
+        // centre pixel: d2 = 0 -> sin(0) = 0 -> mid-grey.
+        let c = ((N / 2) * N + N / 2) as usize * 4;
+        assert_eq!(buf[c], 128, "centre is mid-grey");
     }
 
     #[test]
