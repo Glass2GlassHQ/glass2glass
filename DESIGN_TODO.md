@@ -1041,14 +1041,6 @@ Outstanding developer-tooling tasks, highest leverage first.
   unsubscribe per edge over the same WebSocket; conversion runs on a sampled
   copy at a capped rate (e.g. 2/s), never in the hot path, zero cost when no
   subscriber.
-- **Record / replay.** Deterministic repro for bugs that need a live source.
-  - `recordsink` writes packets + `CapsChanged` + timestamps as
-    length-prefixed records (reuse the distributed-graph wire codec);
-    `replaysrc` replays with original pacing or as-fast-as-possible, caps from
-    the recorded stream. Explicit elements in the launch line, no `--record`
-    convenience flag.
-  - Test: record a decode pipeline mid-edge, replay into the same downstream,
-    assert bit-identical output.
 - **Visual negotiation explainer.** The solver explainer
   (`runtime/solver.rs`, DESIGN 4.20a) emits text today; add a structured serde
   form (per-node constraint, per-edge candidate sets, the failing edge with

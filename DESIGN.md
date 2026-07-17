@@ -2172,6 +2172,18 @@ pipeline builder (`tools/builder/`), a self-contained page that loads a
 graphs) and declarative JSON (`declarative.rs` schema), both of which load back
 into g2g; and, later, the MCP server.
 
+`recordsink` / `replaysrc` (std-gated, in `g2g-plugins::record`) turn a live
+stream into a file and back, for deterministic repro. `recordsink` writes the
+negotiated caps (from `configure_pipeline`) then every `DataFrame` as
+length-prefixed `g2g_core::wire` records; `replaysrc` reads the leading record as
+its `intercept_caps` result and re-emits the caps + frames as a source, optionally
+paced to the recorded PTS (`sync=true`) or as fast as possible (the default, for
+deterministic tests). They are ordinary launch-line elements (`... ! recordsink
+location=x` / `replaysrc location=x ! ...`), no convenience flag, and the wire
+codec is shared with the distributed-graph transports so there is one packet
+serialization. A truncated trailing record (a recording cut off mid-write) is
+dropped on replay rather than failing.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this

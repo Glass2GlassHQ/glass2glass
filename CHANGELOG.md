@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M680: `recordsink` / `replaysrc` capture a pipeline's packet stream to a file and play it back byte-identically, for deterministic repro.
 - M679: `cargo xtask new-element <name> --kind source|transform|sink` stamps a compiling element skeleton, a scaffold test, and the `lib.rs` module wiring.
 - M678: `g2g-inspect --json` emits a machine-readable registry dump feeding a static visual pipeline builder (`tools/builder/`) that exports gst-launch lines and declarative JSON.
 - M677: live pipeline dashboard: `g2g-launch --observe <port>` streams per-element telemetry + bus events over a WebSocket to a served page, backed by a runtime `Observer` tap (`run_graph_observed`).

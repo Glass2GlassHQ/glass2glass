@@ -36,6 +36,7 @@ use crate::capsfilter::CapsFilter;
 use crate::fakesink::FakeSink;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
+use crate::record::{RecordSink, ReplaySrc};
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
 use crate::h264parse::H264Parse;
@@ -517,6 +518,13 @@ pub fn default_registry() -> Registry {
         Box::new(crate::appsink::AppSink::new())
     }));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || Box::new(FileSink::new(""))));
+    // Record / replay pair: record the packet stream to a file, play it back as a source.
+    reg.register_launch(LaunchFactory::of::<RecordSink>("recordsink", || Box::new(RecordSink::new(""))));
+    reg.register_source(SourceFactory::new(
+        "replaysrc",
+        Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+        || Box::new(ReplaySrc::new("")),
+    ));
     reg.register_launch(LaunchFactory::of::<crate::multifilesink::MultiFileSink>("multifilesink", || {
         Box::new(crate::multifilesink::MultiFileSink::new(""))
     }));

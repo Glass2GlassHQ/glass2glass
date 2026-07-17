@@ -292,6 +292,10 @@ pub mod clock;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Record / replay: dump the packet stream to a file and play it back, for
+// deterministic repro of bugs that need a live source.
+#[cfg(feature = "std")]
+pub mod record;
 #[cfg(feature = "std")]
 pub mod multifilesink;
 #[cfg(feature = "std")]

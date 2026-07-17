@@ -238,6 +238,24 @@ python3 -m http.server -d tools/builder 8080   # then open http://localhost:8080
 The checked-in `registry.json` is a snapshot of the standard registry;
 regenerate it with the command above after adding or changing elements.
 
+## Record / replay
+
+Capture a pipeline's packet stream to a file and play it back, for deterministic
+repro of bugs that need a live source. Both are ordinary launch-line elements
+(std build):
+
+```sh
+# record: caps + every frame crossing the sink's input go to a file
+g2g-launch "rtspsrc location=rtsp://cam ! h264parse ! recordsink location=cam.g2g"
+
+# replay: the file becomes a source (add sync=true to pace to the recorded PTS)
+g2g-launch "replaysrc location=cam.g2g ! h264parse ! avdec_h264 ! autovideosink"
+```
+
+The round-trip is byte-identical (`replaysrc` re-emits the recorded caps and
+frames exactly). The file is length-prefixed `g2g_core::wire` records, the same
+codec the distributed-graph transports use.
+
 ## Element reference (`g2g-inspect` and the web page)
 
 Find the docs for a single element the way `gst-inspect` does:
