@@ -587,11 +587,12 @@ impl FfmpegH264Dec {
 
 impl PadTemplates for FfmpegH264Dec {
     /// Static superset for auto-plug: any supported codec in (any geometry), raw
-    /// NV12 or I420 out. A constructed instance narrows the source pad to its
-    /// configured `OutputFormat` via `caps_constraint_as_transform`; the template
-    /// lists both formats the type can ever emit so the registry search can route
-    /// either way, and every codec it can decode so `decodebin` autoplugs it for
-    /// H.265 / VP8 / VP9 / AV1 too, not just H.264.
+    /// NV12 / I420 / I422 / I444 out. A constructed instance narrows the source
+    /// pad to its configured `OutputFormat` via `caps_constraint_as_transform`
+    /// (`Auto` keeps all chromas so negotiation picks the one a downstream pins);
+    /// the template lists every format the type can emit so the registry search
+    /// can route any of them, and every codec it can decode so `decodebin`
+    /// autoplugs it for H.265 / VP8 / VP9 / AV1 too, not just H.264.
     fn pad_templates() -> Vec<PadTemplate> {
         let any_geometry = |format| Caps::RawVideo {
             format,
@@ -612,6 +613,11 @@ impl PadTemplates for FfmpegH264Dec {
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
                 any_geometry(RawVideoFormat::Nv12),
                 any_geometry(RawVideoFormat::I420),
+                // 4:2:2 / 4:4:4 chroma preserved (software backend, M685); listed
+                // so a downstream that pins one auto-plugs, and `Auto` narrows to
+                // it during negotiation.
+                any_geometry(RawVideoFormat::I422),
+                any_geometry(RawVideoFormat::I444),
             ]))),
         ])
     }

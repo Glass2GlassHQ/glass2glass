@@ -612,6 +612,22 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     }
 }
 
+/// Autoplug output format for the **software** `ffmpegdec` (M685/M686): default
+/// to `Auto` for a loose target so the decoder keeps the source chroma and a
+/// downstream that pins 4:2:2 / 4:4:4 (a capsfilter) negotiates it. NV12 stays
+/// explicit for overlay-plane sinks. Distinct from [`ffmpegdec_output_format`],
+/// which the fixed-format hwaccel path (`ffmpegvaapidec`) keeps using.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+fn ffmpegdec_sw_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
+    use crate::ffmpegdec::OutputFormat;
+    match out {
+        Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
+        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
+        _ => OutputFormat::Auto,
+    }
+}
+
 fn register_autoplug_candidates(reg: &mut Registry) {
     // Parsers (baseline): elementary-stream framing, no external deps.
     reg.register(ElementFactory::of::<H264Parse>("h264parse", |_| Box::new(H264Parse::new())));
@@ -663,7 +679,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // arm and failed startup negotiation. Default to I420 for a loose target.
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register(ElementFactory::of::<FfmpegH264Dec>("ffmpegdec", |out| {
-        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_output_format(out)))
+        Box::new(FfmpegH264Dec::new().with_output_format(ffmpegdec_sw_output_format(out)))
     }));
     // AAC (and other libavcodec audio codecs) -> interleaved PcmS16Le (M422), the
     // audio sibling of ffmpegdec, in the auto-plug pool so a decode chain reaches
@@ -1034,7 +1050,11 @@ fn register_feature_gated(reg: &mut Registry) {
     ));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
-        Box::new(FfmpegH264Dec::new())
+        // Auto preserves source chroma (M685/M686): a `decodebin` chain whose
+        // downstream pins 4:2:2 / 4:4:4 negotiates it, while a 4:2:0 source (or
+        // an I420 request) still resolves to I420. A downstream that needs NV12
+        // sets `output-format=nv12` explicitly.
+        Box::new(FfmpegH264Dec::new().with_output_format(crate::ffmpegdec::OutputFormat::Auto))
     }));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<crate::ffmpegaudiodec::FfmpegAudioDec>(

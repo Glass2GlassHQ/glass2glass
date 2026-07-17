@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M687: `decodebin` auto-plugs `ffmpegdec` as `output-format=auto`, so a 4:2:2 / 4:4:4 source decodes to its native chroma when a downstream caps pins it (the launch path, not just the element API); the decoder's source pad template advertises I422 / I444.
 - M686: `ffmpegdec output-format=auto` matches the source chroma automatically, resolving I420/I422/I444 per frame from the decoded pixel format.
 - M685: `ffmpegdec` preserves 4:2:2 / 4:4:4 chroma (`output-format=i422|i444`) instead of forcing 4:2:0; a decoded 4:4:4 stream is now byte-identical to ffmpeg's own decode.
 - M684: measured per-link transit (queue-residency) time via a send-time stamp on Block edges into transform/sink arms, feeding an `ElementLatency::transit` distribution and the dashboard's per-stage latency waterfall (wait + process).
