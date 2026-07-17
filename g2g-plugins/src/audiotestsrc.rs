@@ -98,27 +98,13 @@ impl AudioTestSrc {
                     -(i16::MAX / 2)
                 }
             }
-            Wave::Sine => (sin_turns(phase) * HALF) as i16,
+            Wave::Sine => (crate::mathf::sin_turns(phase) * HALF) as i16,
             Wave::Saw => ((2.0 * phase - 1.0) * HALF) as i16,
             Wave::Triangle => (tri_turns(phase) * HALF) as i16,
             // Handled above before the period calculation.
             Wave::WhiteNoise => unreachable!(),
         }
     }
-}
-
-/// sin(2*pi*t) for t in [0, 1) via Bhaskara I's approximation; pure f32
-/// arithmetic so it works in `no_std` (core has no `sin` intrinsic).
-fn sin_turns(t: f32) -> f32 {
-    // map to half-turn x in [0, pi) with sign from the half
-    let (x, sign) = if t < 0.5 {
-        (t * 2.0, 1.0f32)
-    } else {
-        ((t - 0.5) * 2.0, -1.0f32)
-    };
-    const PI: f32 = core::f32::consts::PI;
-    let xr = x * PI;
-    sign * (16.0 * xr * (PI - xr)) / (5.0 * PI * PI - 4.0 * xr * (PI - xr))
 }
 
 /// Triangle for t in [0, 1): 0 -> +1 -> -1 -> 0, sharing the sine's phase
@@ -316,15 +302,6 @@ impl PadTemplates for AudioTestSrc {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sine_approximation_hits_the_anchors() {
-        // sin(0) = 0, sin(pi/2) = 1, sin(pi) = 0, sin(3pi/2) = -1
-        assert!(sin_turns(0.0).abs() < 0.01);
-        assert!((sin_turns(0.25) - 1.0).abs() < 0.01);
-        assert!(sin_turns(0.5).abs() < 0.01);
-        assert!((sin_turns(0.75) + 1.0).abs() < 0.01);
-    }
 
     #[test]
     fn sine_starts_at_zero_and_peaks_mid_half_period() {

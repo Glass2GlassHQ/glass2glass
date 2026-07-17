@@ -24,3 +24,15 @@ async fn videobalance_runs_in_a_text_pipeline() {
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("balanced pipeline runs");
     assert_eq!(stats.frames_consumed, 3, "all balanced frames reached the sink");
 }
+
+#[tokio::test]
+async fn videobalance_hue_is_settable_from_launch() {
+    let reg = default_registry();
+    let graph = parse_launch(
+        &reg,
+        "videotestsrc num-buffers=3 pattern=smpte ! videobalance hue=0.5 ! fakesink",
+    )
+    .expect("hue property parses");
+    let stats = run_graph(graph, &ZeroClock, 4).await.expect("hue-rotated pipeline runs");
+    assert_eq!(stats.frames_consumed, 3, "all hue-rotated frames reached the sink");
+}

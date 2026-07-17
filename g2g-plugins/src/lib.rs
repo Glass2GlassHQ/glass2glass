@@ -33,6 +33,7 @@ pub mod mux;
 pub mod streamdemux;
 pub mod tsmuxn;
 // Shared integer source-over blend used by the compositor and CPU overlays.
+mod mathf;
 mod paint;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.

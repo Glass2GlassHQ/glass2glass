@@ -698,8 +698,6 @@ Phased plan:
 
 ## Transforms and effects
 
-- **`videobalance`:** hue (faithful chroma rotation needs `sin`/`cos`, a `libm`
-  dep the `no_std` baseline avoids).
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `fontdue`)
   renders glyf-outline fonts (CJK / accented / mixed-case, horizontal + vertical)
   with an explicit Latin+CJK fallback chain. Still open: CFF / CFF2 outlines (so
@@ -707,7 +705,8 @@ Phased plan:
   real shaping + bidi, and automatic system-font discovery / fallback, all of
   which point at the `cosmic-text` upgrade; plus a `vello` GPU backend and the
   `clockoverlay` / `timeoverlay` siblings.
-- **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
+- **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (can use the
+  `libm`-free `mathf` sine).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
