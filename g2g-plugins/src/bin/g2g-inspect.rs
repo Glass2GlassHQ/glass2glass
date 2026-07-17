@@ -69,57 +69,17 @@ fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
     }
 }
 
-/// Serialize an `ElementDoc` to a JSON object mirroring the CLI dump: identity,
-/// role, pad caps, and each property's machine-usable type / range / default.
-#[cfg(feature = "tooling-json")]
-fn element_json(d: &g2g_core::runtime::ElementDoc) -> serde_json::Value {
-    use serde_json::json;
-    let props: Vec<serde_json::Value> = d
-        .properties
-        .iter()
-        .map(|p| {
-            json!({
-                "name": p.name,
-                "blurb": p.blurb,
-                "type": p.type_label,
-                "default": p.default,
-                "range": p.range.as_ref().map(|(a, b)| json!([a, b])),
-                "enum_values": p.enum_values,
-                "readable": p.readable,
-                "writable": p.writable,
-            })
-        })
-        .collect();
-    json!({
-        "name": d.name,
-        "long_name": d.long_name,
-        "klass": d.klass,
-        "description": d.description,
-        "author": d.author,
-        "role": d.role,
-        "caps": d.caps,
-        "pads": d.pads,
-        "properties": props,
-    })
-}
-
-/// Print the registry (or one element) as JSON: `{"elements":[...]}`.
+/// Print the registry (or one element) as JSON: `{"elements":[...]}`. The JSON
+/// shape lives in `g2g_plugins::toolingjson`, shared with the MCP server.
 #[cfg(feature = "tooling-json")]
 fn dump_json(reg: &g2g_core::runtime::Registry, name: Option<&str>) {
-    use serde_json::json;
-    let docs = match name {
-        Some(n) => match reg.describe(n) {
-            Some(d) => vec![d],
-            None => {
-                eprintln!("No such element: {n}");
-                process::exit(1);
-            }
-        },
-        None => reg.describe_all(),
-    };
-    let elements: Vec<serde_json::Value> = docs.iter().map(element_json).collect();
-    let out = json!({ "elements": elements });
-    println!("{}", serde_json::to_string_pretty(&out).expect("serialize registry"));
+    match g2g_plugins::toolingjson::registry_json(reg, name) {
+        Ok(v) => println!("{}", serde_json::to_string_pretty(&v).expect("serialize registry")),
+        Err(msg) => {
+            eprintln!("{msg}");
+            process::exit(1);
+        }
+    }
 }
 
 #[cfg(not(feature = "tooling-json"))]

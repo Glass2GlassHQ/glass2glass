@@ -2184,6 +2184,16 @@ codec is shared with the distributed-graph transports so there is one packet
 serialization. A truncated trailing record (a recording cut off mid-write) is
 dropped on replay rather than failing.
 
+`g2g-mcp` (the `tooling-json` feature) is a Model Context Protocol server so an
+agent can drive g2g development. It speaks newline-delimited JSON-RPC 2.0 over
+stdio with no MCP framework dependency (the envelope is hand-rolled with
+serde_json), and exposes four tools: `list_elements`, `inspect(element)`,
+`validate(pipeline)` (parse + negotiate, no run), and `launch(pipeline,
+duration_secs)` (run with a deadline, report `RunStats`). The tool bodies live in
+`g2g-plugins::toolingjson`, shared with `g2g-inspect --json` so the registry-dump
+and run shapes have one definition; the async tools drive a current-thread tokio
+runtime via `block_on` while the stdio loop stays synchronous.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this

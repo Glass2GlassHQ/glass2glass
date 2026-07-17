@@ -1058,11 +1058,10 @@ Outstanding developer-tooling tasks, highest leverage first.
   output (checksum, PSNR for lossy). Calliope already does differential output
   QA in its own repo, so decide first whether this lives there (adding the
   caps / topology diff) or in-repo; don't build both.
-- **MCP server.** A `g2g-mcp` stdio binary for agent-driven dev exposing
-  `list-elements`, `inspect(element) -> json`, `validate(line) ->` negotiation
-  result / explainer json, and `launch(line, duration) -> RunStats` json.
-  Reuse the `g2g-inspect` / `g2g-launch` internals as library entry points
-  rather than shelling out; serde only, no framework dep.
+- **MCP server follow-ups.** `g2g-mcp` exposes list_elements / inspect /
+  validate / launch. Add a `validate` path that returns the structured
+  negotiation explainer (once that exists) instead of just ok / error, and a
+  tool to run a declarative graph file.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 

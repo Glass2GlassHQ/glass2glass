@@ -256,6 +256,22 @@ The round-trip is byte-identical (`replaysrc` re-emits the recorded caps and
 frames exactly). The file is length-prefixed `g2g_core::wire` records, the same
 codec the distributed-graph transports use.
 
+## MCP server (`g2g-mcp`)
+
+`g2g-mcp` is a Model Context Protocol server (JSON-RPC over stdio) for
+agent-driven dev. Build with `tooling-json` and point an MCP client at the
+binary:
+
+```sh
+cargo build -p g2g-plugins --features tooling-json --bin g2g-mcp
+# register target/debug/g2g-mcp as an MCP stdio server in your client
+```
+
+Tools: `list_elements`, `inspect {element}`, `validate {pipeline}` (parse +
+negotiate, no run), `launch {pipeline, duration_secs}` (run with a deadline,
+report `RunStats`). The tool bodies are the shared `toolingjson` internals, the
+same code behind `g2g-inspect --json`.
+
 ## Element reference (`g2g-inspect` and the web page)
 
 Find the docs for a single element the way `gst-inspect` does:

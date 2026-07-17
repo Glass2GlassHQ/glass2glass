@@ -891,6 +891,11 @@ required-features = ["std"]
 name = "g2g-docgen"
 required-features = ["std"]
 
+# MCP server for agent-driven dev; needs serde_json (registry dump / results).
+[[bin]]
+name = "g2g-mcp"
+required-features = ["tooling-json"]
+
 # Porting reference: a third-party element registered and run via the launcher.
 [[example]]
 name = "third_party_element"
