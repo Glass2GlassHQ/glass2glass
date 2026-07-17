@@ -56,6 +56,13 @@ jobs:
             sha="${{ github.event.before }}"
             # All-zeros = no parent (branch creation); skip.
             case "$sha" in 0000000000000000000000000000000000000000) sha="" ;; esac
+            # A force-push (history rewrite) leaves `before` pointing at an
+            # orphaned commit not in the fetched history; skip the compare rather
+            # than fail the checkout.
+            if [ -n "$sha" ] && ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "base $sha not in history (force-push?); skipping compare"
+              sha=""
+            fi
             echo "sha=$sha" >> "$GITHUB_OUTPUT"
           else
             echo "sha=" >> "$GITHUB_OUTPUT"
