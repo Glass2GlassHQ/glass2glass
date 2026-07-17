@@ -74,10 +74,19 @@
 //! prefer, so the `KmsSink` path opts into it. The conversion is a direct
 //! interleave of the U/V planes after the YUV420P decode (no swscale).
 //!
+//! Chroma: the software backend preserves the source chroma when asked to
+//! (`OutputFormat::I422` for a 4:2:2 source, `OutputFormat::I444` for 4:4:4),
+//! so a high-chroma stream is not silently downsampled; a 4:4:4 source can still
+//! be box-averaged to I420 / NV12 on request. The GPU backends stay NV12-only.
+//!
 //! Deferred:
 //! - 10-bit pixel formats (`YUV420P10` / `P010`). Mainline H.264 cameras emit
-//!   8-bit YUV420P; `YUV444P` is now accepted (chroma box-averaged to 4:2:0),
-//!   but 10-bit and other formats are still rejected with `CapsMismatch`.
+//!   8-bit YUV420P; 10-bit and other formats are still rejected with
+//!   `CapsMismatch`.
+//! - Auto-selecting the output chroma from the stream (the caller picks the
+//!   `OutputFormat` today; matching the source chroma automatically needs the
+//!   decoded pixel format at negotiation time, which Annex-B only knows after
+//!   the first frame).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -111,11 +120,18 @@ const MAX_PENDING_ARRIVALS: usize = 1024;
 /// Pixel layout emitted on the decoder's output side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
-    /// Planar Y / U / V (default). Byte length = `w*h + 2 * ceil(w/2) * ceil(h/2)`.
+    /// Planar 4:2:0 Y / U / V (default). Byte length = `w*h + 2 * ceil(w/2) * ceil(h/2)`.
     I420,
     /// Y plane followed by interleaved U/V (NV12). Same total byte length
     /// as I420; what KMS overlay planes (and many GPU samplers) prefer.
     Nv12,
+    /// Planar 4:2:2 Y / U / V (half-width, full-height chroma). Preserves the
+    /// chroma of a 4:2:2 (High 4:2:2 profile) source instead of downsampling to
+    /// 4:2:0. Software backend only.
+    I422,
+    /// Planar 4:4:4 Y / U / V (full-resolution chroma). Preserves the chroma of a
+    /// 4:4:4 (High 4:4:4 profile) source. Software backend only.
+    I444,
 }
 
 impl OutputFormat {
@@ -123,6 +139,19 @@ impl OutputFormat {
         match self {
             OutputFormat::I420 => RawVideoFormat::I420,
             OutputFormat::Nv12 => RawVideoFormat::Nv12,
+            OutputFormat::I422 => RawVideoFormat::I422,
+            OutputFormat::I444 => RawVideoFormat::I444,
+        }
+    }
+
+    /// Chroma subsampling shift `(x, y)` of the output: chroma plane dims are
+    /// `ceil(w >> x)` by `ceil(h >> y)`. 4:2:0 -> (1,1), 4:2:2 -> (1,0),
+    /// 4:4:4 -> (0,0).
+    fn chroma_shift(self) -> (u32, u32) {
+        match self {
+            OutputFormat::I420 | OutputFormat::Nv12 => (1, 1),
+            OutputFormat::I422 => (1, 0),
+            OutputFormat::I444 => (0, 0),
         }
     }
 }
@@ -345,7 +374,7 @@ impl FfmpegH264Dec {
                 self.output_format = OutputFormat::Nv12;
             }
             Backend::Vaapi => {
-                // The downloaded surface is packed by `copy_yuv420` like the
+                // The downloaded surface is packed by `copy_yuv` like the
                 // software path, so either output layout works (no forced
                 // format). cuvid's `surfaces` knob doesn't apply; leave
                 // `low_delay` off so B-frame reorder stays correct (VAAPI has
@@ -476,9 +505,9 @@ impl FfmpegH264Dec {
                         // frame (NV12 on radeonsi / Intel), then pack like the
                         // software path.
                         let sw = transfer_hw_to_sw(&frame)?;
-                        DecodedPayload::System(copy_yuv420(&sw, format)?)
+                        DecodedPayload::System(copy_yuv(&sw, format)?)
                     } else {
-                        DecodedPayload::System(copy_yuv420(&frame, format)?)
+                        DecodedPayload::System(copy_yuv(&frame, format)?)
                     };
                     let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
@@ -777,6 +806,8 @@ impl AsyncElement for FfmpegH264Dec {
                 self.output_format = match value.as_str().ok_or(PropError::Type)? {
                     "i420" | "I420" => OutputFormat::I420,
                     "nv12" | "NV12" => OutputFormat::Nv12,
+                    "i422" | "I422" => OutputFormat::I422,
+                    "i444" | "I444" => OutputFormat::I444,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -796,6 +827,8 @@ impl AsyncElement for FfmpegH264Dec {
                 match self.output_format {
                     OutputFormat::I420 => "i420",
                     OutputFormat::Nv12 => "nv12",
+                    OutputFormat::I422 => "i422",
+                    OutputFormat::I444 => "i444",
                 }
                 .into(),
             )),
@@ -1039,36 +1072,33 @@ fn yuv420_caps(format: OutputFormat, w: u32, h: u32, framerate: Rate) -> Caps {
 /// chroma is box-averaged down to 4:2:0 (lossy). Any other format (e.g.
 /// 10-bit) is rejected loud — those streams need a `ColorConvert` element
 /// upstream of any I420/NV12 consumer.
-fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
+fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
     let src = match frame.format() {
-        // YUVJ420P is YUV420P with JPEG (full) range. Same plane layout, so
-        // accept it; range fidelity is preserved in the pixel values and can
-        // be advertised by a future colour-metadata field on `Caps::Video`.
+        // YUVJ*P is the JPEG (full) range sibling; same plane layout, so accept
+        // it (range fidelity is preserved in the pixel values).
         Pixel::YUV420P | Pixel::YUVJ420P => SourceLayout::Planar420,
         Pixel::NV12 => SourceLayout::SemiPlanar420,
-        // 4:4:4 (High 4:4:4 profile). Full-resolution chroma is box-averaged
-        // down to 4:2:0; lossy in chroma, but keeps the output contract.
+        Pixel::YUV422P | Pixel::YUVJ422P => SourceLayout::Planar422,
         Pixel::YUV444P | Pixel::YUVJ444P => SourceLayout::Planar444,
         _ => return Err(G2gError::CapsMismatch),
     };
-    let required_planes = match src {
-        SourceLayout::Planar420 | SourceLayout::Planar444 => 3,
-        SourceLayout::SemiPlanar420 => 2,
-    };
+    let required_planes = if matches!(src, SourceLayout::SemiPlanar420) { 2 } else { 3 };
     if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
     let w = frame.width() as usize;
     let h = frame.height() as usize;
-    let cw = w.div_ceil(2);
-    let ch = h.div_ceil(2);
+    // Output chroma dims from the requested format's subsampling.
+    let (osx, osy) = format.chroma_shift();
+    let cw = w.div_ceil(1 << osx);
+    let ch = h.div_ceil(1 << osy);
     let y_size = w * h;
     let c_size = cw * ch;
     let total = y_size + 2 * c_size;
 
     let mut out = alloc::vec![0u8; total];
 
-    // Y plane (full resolution).
+    // Y plane (full resolution), honouring source pitch.
     let y_src = frame.data(0);
     let y_pitch = frame.stride(0);
     for row in 0..h {
@@ -1077,41 +1107,13 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
         out[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
     }
     match (src, format) {
-        // Planar source -> planar I420: copy U then V at half-res.
+        // --- 4:2:0 output (I420 / NV12) from a 4:2:0 source (planar or NV12) ---
         (SourceLayout::Planar420, OutputFormat::I420) => {
-            let u_src = frame.data(1);
-            let u_pitch = frame.stride(1);
-            let v_src = frame.data(2);
-            let v_pitch = frame.stride(2);
-            for row in 0..ch {
-                let dst_off = y_size + row * cw;
-                out[dst_off..dst_off + cw]
-                    .copy_from_slice(&u_src[row * u_pitch..row * u_pitch + cw]);
-            }
-            for row in 0..ch {
-                let dst_off = y_size + c_size + row * cw;
-                out[dst_off..dst_off + cw]
-                    .copy_from_slice(&v_src[row * v_pitch..row * v_pitch + cw]);
-            }
+            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
         }
-        // Planar source -> semi-planar NV12: interleave U and V.
         (SourceLayout::Planar420, OutputFormat::Nv12) => {
-            let u_src = frame.data(1);
-            let u_pitch = frame.stride(1);
-            let v_src = frame.data(2);
-            let v_pitch = frame.stride(2);
-            for row in 0..ch {
-                let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
-                let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
-                let dst_base = y_size + row * 2 * cw;
-                for col in 0..cw {
-                    out[dst_base + 2 * col] = u_row[col];
-                    out[dst_base + 2 * col + 1] = v_row[col];
-                }
-            }
+            interleave_planar_chroma(&mut out, frame, y_size, cw, ch);
         }
-        // Semi-planar source (NV12) -> NV12 output: row copy of the
-        // interleaved UV plane, honouring source pitch.
         (SourceLayout::SemiPlanar420, OutputFormat::Nv12) => {
             let uv_src = frame.data(1);
             let uv_pitch = frame.stride(1);
@@ -1122,7 +1124,6 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                     .copy_from_slice(&uv_src[row * uv_pitch..row * uv_pitch + uv_row_bytes]);
             }
         }
-        // Semi-planar source -> planar I420: de-interleave UV into U then V.
         (SourceLayout::SemiPlanar420, OutputFormat::I420) => {
             let uv_src = frame.data(1);
             let uv_pitch = frame.stride(1);
@@ -1136,15 +1137,18 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                 }
             }
         }
-        // 4:4:4 source -> planar I420: box-average each full-res U/V plane to
-        // half resolution (tightly packed, row stride `cw`), then store.
+        // --- 4:4:4 source ---
+        // Preserve: copy the full-resolution chroma into planar I444.
+        (SourceLayout::Planar444, OutputFormat::I444) => {
+            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
+        }
+        // Downsample to 4:2:0 (lossy) for an I420 / NV12 consumer.
         (SourceLayout::Planar444, OutputFormat::I420) => {
             let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
             let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
             out[y_size..y_size + c_size].copy_from_slice(&u_ds);
             out[y_size + c_size..y_size + 2 * c_size].copy_from_slice(&v_ds);
         }
-        // 4:4:4 source -> semi-planar NV12: downsample, then interleave U/V.
         (SourceLayout::Planar444, OutputFormat::Nv12) => {
             let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
             let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
@@ -1156,16 +1160,69 @@ fn copy_yuv420(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gEr
                 }
             }
         }
+        // --- 4:2:2 source: preserve into planar I422 (half-width, full-height) ---
+        (SourceLayout::Planar422, OutputFormat::I422) => {
+            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
+        }
+        // A mismatch we do not resample (e.g. requesting I444 from a 4:2:0
+        // source would upsample chroma, or NV12 from a 4:2:2 source): reject
+        // loud rather than emit a wrong-chroma buffer. Put a `ColorConvert`
+        // upstream for a genuine chroma conversion.
+        _ => return Err(G2gError::CapsMismatch),
     }
 
     Ok(out.into_boxed_slice())
+}
+
+/// Copy a planar source's U then V plane into the output at `cw`x`ch`, honouring
+/// source pitch. Used when source and output chroma subsampling match (I420 from
+/// 4:2:0, I422 from 4:2:2, I444 from 4:4:4), so it is a lossless plane copy.
+fn copy_planar_chroma(
+    out: &mut [u8],
+    frame: &FfVideo,
+    y_size: usize,
+    c_size: usize,
+    cw: usize,
+    ch: usize,
+) {
+    let u_src = frame.data(1);
+    let u_pitch = frame.stride(1);
+    let v_src = frame.data(2);
+    let v_pitch = frame.stride(2);
+    for row in 0..ch {
+        let dst = y_size + row * cw;
+        out[dst..dst + cw].copy_from_slice(&u_src[row * u_pitch..row * u_pitch + cw]);
+    }
+    for row in 0..ch {
+        let dst = y_size + c_size + row * cw;
+        out[dst..dst + cw].copy_from_slice(&v_src[row * v_pitch..row * v_pitch + cw]);
+    }
+}
+
+/// Interleave a planar 4:2:0 source's U/V into the output's NV12 chroma plane.
+fn interleave_planar_chroma(out: &mut [u8], frame: &FfVideo, y_size: usize, cw: usize, ch: usize) {
+    let u_src = frame.data(1);
+    let u_pitch = frame.stride(1);
+    let v_src = frame.data(2);
+    let v_pitch = frame.stride(2);
+    for row in 0..ch {
+        let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
+        let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
+        let dst_base = y_size + row * 2 * cw;
+        for col in 0..cw {
+            out[dst_base + 2 * col] = u_row[col];
+            out[dst_base + 2 * col + 1] = v_row[col];
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum SourceLayout {
     Planar420,
     SemiPlanar420,
-    /// Planar 4:4:4 (full-resolution chroma); downsampled to 4:2:0 on output.
+    /// Planar 4:2:2 (High 4:2:2 profile): half-width, full-height chroma.
+    Planar422,
+    /// Planar 4:4:4 (High 4:4:4 profile): full-resolution chroma.
     Planar444,
 }
 
@@ -1231,7 +1288,7 @@ unsafe fn pick_hw_format(
 /// Download a decoded hardware surface (e.g. `AV_PIX_FMT_VAAPI`) into a freshly
 /// allocated system-memory frame. The destination format is left unset so
 /// libavcodec picks the surface's preferred transfer format (NV12 on radeonsi /
-/// Intel VAAPI); [`copy_yuv420`] then packs NV12 or planar into the element's
+/// Intel VAAPI); [`copy_yuv`] then packs NV12 or planar into the element's
 /// `OutputFormat`. Geometry and plane data come from the surface; the caller
 /// reads pts / width / height off the source frame before this call.
 fn transfer_hw_to_sw(hw: &FfVideo) -> Result<FfVideo, G2gError> {
@@ -1239,7 +1296,7 @@ fn transfer_hw_to_sw(hw: &FfVideo) -> Result<FfVideo, G2gError> {
     // SAFETY: `hw` is a decoded hardware-surface frame from a VAAPI-configured
     // decoder; `sw` is a freshly allocated empty frame. av_hwframe_transfer_data
     // allocates sw's buffers and downloads the surface. A non-negative return
-    // means sw holds valid system-memory planes read by `copy_yuv420`.
+    // means sw holds valid system-memory planes read by `copy_yuv`.
     let ret = unsafe { ffmpeg::ffi::av_hwframe_transfer_data(sw.as_mut_ptr(), hw.as_ptr(), 0) };
     if ret < 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
@@ -1339,6 +1396,82 @@ struct AVCUDADeviceContextHead {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a planar YUV frame of `format` with each plane filled by `fill`
+    /// (called with plane index + (x, y)), honouring libavcodec's row stride.
+    fn planar_frame(
+        pixfmt: Pixel,
+        w: u32,
+        h: u32,
+        chroma: (u32, u32),
+        fill: impl Fn(usize, usize, usize) -> u8,
+    ) -> FfVideo {
+        let mut frame = FfVideo::new(pixfmt, w, h);
+        let dims = [
+            (w as usize, h as usize),
+            ((w >> chroma.0) as usize, (h >> chroma.1) as usize),
+            ((w >> chroma.0) as usize, (h >> chroma.1) as usize),
+        ];
+        for (p, &(pw, ph)) in dims.iter().enumerate() {
+            let stride = frame.stride(p);
+            let data = frame.data_mut(p);
+            for y in 0..ph {
+                for x in 0..pw {
+                    data[y * stride + x] = fill(p, x, y);
+                }
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn i444_output_preserves_full_resolution_chroma() {
+        let (w, h) = (4usize, 2usize);
+        // Distinct per-plane, per-pixel values so any downsample would show.
+        let val = |p: usize, x: usize, y: usize| (p * 40 + y * 4 + x) as u8;
+        let frame = planar_frame(Pixel::YUV444P, w as u32, h as u32, (0, 0), val);
+        let out = copy_yuv(&frame, OutputFormat::I444).expect("444 -> I444");
+
+        let ysz = w * h;
+        assert_eq!(out.len(), ysz * 3, "I444 = 3 full-res planes");
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(out[y * w + x], val(0, x, y), "Y");
+                assert_eq!(out[ysz + y * w + x], val(1, x, y), "U preserved full-res");
+                assert_eq!(out[2 * ysz + y * w + x], val(2, x, y), "V preserved full-res");
+            }
+        }
+    }
+
+    #[test]
+    fn i422_output_preserves_half_width_full_height_chroma() {
+        let (w, h) = (4usize, 2usize);
+        let val = |p: usize, x: usize, y: usize| (p * 50 + y * 4 + x) as u8;
+        let frame = planar_frame(Pixel::YUV422P, w as u32, h as u32, (1, 0), val);
+        let out = copy_yuv(&frame, OutputFormat::I422).expect("422 -> I422");
+
+        let ysz = w * h;
+        let cw = w / 2; // half width
+        let ch = h; // full height
+        let csz = cw * ch;
+        assert_eq!(out.len(), ysz + 2 * csz);
+        for y in 0..ch {
+            for x in 0..cw {
+                assert_eq!(out[ysz + y * cw + x], val(1, x, y), "U half-width full-height");
+                assert_eq!(out[ysz + csz + y * cw + x], val(2, x, y), "V half-width full-height");
+            }
+        }
+    }
+
+    #[test]
+    fn upsampling_chroma_is_rejected() {
+        // A 4:2:0 source cannot produce 4:4:4 / 4:2:2 output (no chroma upsample).
+        let frame = planar_frame(Pixel::YUV420P, 4, 2, (1, 1), |_, _, _| 0);
+        assert!(copy_yuv(&frame, OutputFormat::I444).is_err());
+        assert!(copy_yuv(&frame, OutputFormat::I422).is_err());
+        // ... but 4:2:0 -> I420 still works.
+        assert!(copy_yuv(&frame, OutputFormat::I420).is_ok());
+    }
 
     #[test]
     fn caps_constraint_derives_output_for_supported_codecs() {
@@ -1490,7 +1623,7 @@ mod tests {
     #[test]
     fn vaapi_backend_selectable_and_keeps_output_format() {
         // Unlike NvdecCuda, the VAAPI path downloads to system memory and packs
-        // via copy_yuv420, so it honours either output layout (no forced NV12).
+        // via copy_yuv, so it honours either output layout (no forced NV12).
         let dec = FfmpegH264Dec::new()
             .with_output_format(OutputFormat::I420)
             .with_backend(Backend::Vaapi);

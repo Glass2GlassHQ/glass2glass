@@ -604,6 +604,10 @@ fn ffmpegdec_output_format(out: &Caps) -> crate::ffmpegdec::OutputFormat {
     // I420. Anything that is not raw video falls back to I420.
     match out {
         Caps::RawVideo { format: RawVideoFormat::Nv12, .. } => OutputFormat::Nv12,
+        // A downstream that pins 4:2:2 / 4:4:4 gets the source chroma preserved
+        // (software backend); otherwise default to I420.
+        Caps::RawVideo { format: RawVideoFormat::I422, .. } => OutputFormat::I422,
+        Caps::RawVideo { format: RawVideoFormat::I444, .. } => OutputFormat::I444,
         _ => OutputFormat::I420,
     }
 }
