@@ -235,6 +235,113 @@ async fn pip_scale_overlay_is_visible_in_the_inset() {
     assert_eq!(inset, [0, 255, 0, 255], "green camera visible in the inset");
 }
 
+fn nv12_caps(w: u32, h: u32) -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(w),
+        height: Dim::Fixed(h),
+        framerate: Rate::Fixed(30 << 16),
+    }
+}
+
+/// A solid NV12 frame: Y plane of `y`, then an interleaved half-res UV plane.
+fn solid_nv12(w: usize, h: usize, y: u8, u: u8, v: u8) -> Vec<u8> {
+    let mut buf = vec![y; w * h];
+    for _ in 0..(w / 2) * (h / 2) {
+        buf.push(u);
+        buf.push(v);
+    }
+    buf
+}
+
+/// Emits `count` solid NV12 frames of `w` x `h`, then EOS.
+struct Nv12ColorSrc {
+    w: u32,
+    h: u32,
+    yuv: [u8; 3],
+    count: u64,
+    configured: bool,
+}
+
+impl SourceLoop for Nv12ColorSrc {
+    type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>> where Self: 'a;
+    type CapsFuture<'a> = core::future::Ready<Result<Caps, G2gError>> where Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(nv12_caps(self.w, self.h)))
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            for seq in 0..self.count {
+                let buf = solid_nv12(self.w as usize, self.h as usize, self.yuv[0], self.yuv[1], self.yuv[2]);
+                let frame = Frame {
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+                    timing: Default::default(),
+                    sequence: seq,
+                    meta: Default::default(),
+                };
+                out.push(PipelinePacket::DataFrame(frame)).await?;
+            }
+            out.push(PipelinePacket::Eos).await?;
+            Ok(self.count)
+        })
+    }
+}
+
+// End-to-end NV12 fan-in through the real runner: a base and an overlay in NV12
+// mix planar (no RGBA round-trip) and the composited Y/chroma land correctly.
+#[tokio::test]
+async fn nv12_fan_in_mixes_planar_end_to_end() {
+    const W: usize = 8;
+    const H: usize = 8;
+
+    let frames = Arc::new(Mutex::new(Vec::<Box<[u8]>>::new()));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let base = g.add_source(GraphNode::source(Nv12ColorSrc {
+        w: W as u32, h: H as u32, yuv: [50, 60, 70], count: 4, configured: false,
+    }));
+    let overlay = g.add_source(GraphNode::source(Nv12ColorSrc {
+        w: 4, h: 4, yuv: [200, 100, 150], count: 4, configured: false,
+    }));
+    let comp = g.add_muxer(
+        GraphNode::muxer(
+            Compositor::new(
+                W as u32, H as u32,
+                Vec::from([CompositorPad::at(0, 0), CompositorPad::at(2, 2).with_zorder(1)]),
+            )
+            .with_format(RawVideoFormat::Nv12),
+        ),
+        2,
+    );
+    let snk = g.add_sink(GraphNode::element(ShareSink(frames.clone())));
+    g.link(base, comp.input(0)).unwrap();
+    g.link(overlay, comp.input(1)).unwrap();
+    g.link(comp.output(), snk).unwrap();
+
+    run_graph(g, &ZeroClock, 4).await.expect("NV12 compositor DAG runs");
+
+    let frames = frames.lock().unwrap();
+    let last = frames.last().expect("a composited frame");
+    assert_eq!(last.len(), W * H * 3 / 2, "output is a full NV12 frame");
+    // luma: overlay inside (2,2), base outside.
+    let y_at = |b: &[u8], x: usize, yy: usize| b[yy * W + x];
+    assert_eq!(y_at(last, 2, 2), 200, "overlay luma inside");
+    assert_eq!(y_at(last, 0, 0), 50, "base luma outside");
+    // chroma (interleaved UV at half res) under luma (2,2): cx=cy=1.
+    let uv_base = W * H;
+    let u_at = |b: &[u8], cx: usize, cy: usize| b[uv_base + (cy * (W / 2) + cx) * 2];
+    let v_at = |b: &[u8], cx: usize, cy: usize| b[uv_base + (cy * (W / 2) + cx) * 2 + 1];
+    assert_eq!(u_at(last, 1, 1), 100, "overlay U inside");
+    assert_eq!(v_at(last, 1, 1), 150, "overlay V inside");
+    assert_eq!(u_at(last, 0, 0), 60, "base U outside");
+}
+
 /// Records the inset-centre pixel of each output frame (and counts frames),
 /// throttling slightly so the background does not race arbitrarily ahead of the
 /// overlay (mirrors an output-paced consumer).

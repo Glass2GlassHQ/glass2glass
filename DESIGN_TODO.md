@@ -797,7 +797,6 @@ Phased plan:
 ## Compositor
 
 - A wgpu compute variant for HD / many-input scale.
-- NV12 / I420 mixing without a round-trip through RGBA.
 - Configurable output cadence.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
