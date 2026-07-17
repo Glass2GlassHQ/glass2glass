@@ -698,13 +698,14 @@ Phased plan:
 
 ## Transforms and effects
 
-- **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `fontdue`)
-  renders glyf-outline fonts (CJK / accented / mixed-case, horizontal + vertical)
-  with an explicit Latin+CJK fallback chain. Still open: CFF / CFF2 outlines (so
-  variable Noto Sans CJK works, not just glyf fonts like Droid Sans Fallback),
-  real shaping + bidi, and automatic system-font discovery / fallback, all of
-  which point at the `cosmic-text` upgrade; plus a `vello` GPU backend and the
-  `clockoverlay` / `timeoverlay` siblings.
+- **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
+  since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
+  horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
+  `.otf` fonts render, not only glyf `.ttf`s. Still open: variable-font axis
+  selection (a non-default instance of a variable Noto Sans CJK), real shaping +
+  bidi, and automatic system-font discovery / fallback, all of which point at the
+  `cosmic-text` upgrade; plus a `vello` GPU backend and the `clockoverlay` /
+  `timeoverlay` siblings.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),

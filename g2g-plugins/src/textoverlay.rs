@@ -14,10 +14,11 @@
 //! all-caps ASCII bitmap font is the `no_std` baseline.
 //!
 //! With the `truetype-overlay` feature (M409) the overlay instead rasterizes
-//! glyphs from a loaded `.ttf` / `.ttc` ([`TextOverlay::with_font`] / `font=`),
-//! so CJK, accented Latin, and mixed-case text render, horizontal and vertical
-//! (`vertical:rl` / `lr`). `fontdue` does the parsing / rasterization on the CPU;
-//! full shaping (cosmic-text) is a later upgrade.
+//! glyphs from a loaded `.ttf` / `.otf` / `.ttc` ([`TextOverlay::with_font`] /
+//! `font=`), so CJK, accented Latin, and mixed-case text render, horizontal and
+//! vertical (`vertical:rl` / `lr`). `ab_glyph` does the parsing / rasterization on
+//! the CPU, covering both glyf and CFF/CFF2 outlines; full shaping + bidi
+//! (cosmic-text) is a later upgrade.
 //!
 //! [`bitmapfont`]: crate::bitmapfont
 
@@ -40,11 +41,94 @@ use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextA
 #[cfg(feature = "truetype-overlay")]
 use crate::subparse::WritingMode;
 
-/// A parsed TrueType / OpenType face wrapped so `TextOverlay` keeps deriving
-/// `Debug` (`fontdue::Font` does not implement it). Holds the rasterizer used by
-/// the [`truetype-overlay`](crate) render path.
+/// A parsed TrueType / OpenType face used by the [`truetype-overlay`](crate)
+/// render path. Wraps `ab_glyph` (glyf + CFF/CFF2 outlines) behind a small shim
+/// whose `Metrics` mirror the y-up fontdue contract the placement math expects,
+/// so switching rasterizer left that math unchanged. Also keeps `TextOverlay`
+/// deriving `Debug` (`ab_glyph::FontVec` does not implement it).
 #[cfg(feature = "truetype-overlay")]
-struct FontFace(fontdue::Font);
+struct FontFace(ab_glyph::FontVec);
+
+/// One glyph's placement metrics, in the y-up convention fontdue used: `xmin` is
+/// the pen-to-left-edge offset, `ymin` the baseline-to-bottom-edge offset
+/// (negative below the baseline), `width` / `height` the coverage-bitmap size.
+#[cfg(feature = "truetype-overlay")]
+struct Metrics {
+    advance_width: f32,
+    xmin: i32,
+    ymin: i32,
+    width: usize,
+    height: usize,
+}
+
+/// Scaled line metrics: `ascent` above the baseline and `new_line_size` the
+/// baseline-to-baseline advance (ascent - descent + line gap).
+#[cfg(feature = "truetype-overlay")]
+struct LineMetrics {
+    ascent: f32,
+    new_line_size: f32,
+}
+
+#[cfg(feature = "truetype-overlay")]
+impl FontFace {
+    /// Whether this face has a real (non-`.notdef`) glyph for `c`.
+    fn has_glyph(&self, c: char) -> bool {
+        use ab_glyph::Font;
+        self.0.glyph_id(c).0 != 0
+    }
+
+    /// Scaled ascent + line advance at `px`.
+    fn line_metrics(&self, px: f32) -> LineMetrics {
+        use ab_glyph::{Font, ScaleFont};
+        let sf = self.0.as_scaled(px);
+        LineMetrics { ascent: sf.ascent(), new_line_size: sf.height() + sf.line_gap() }
+    }
+
+    /// Advance width of `c` at `px` (no rasterization); other `Metrics` fields
+    /// are unused by the callers that ask only for the advance.
+    fn metrics(&self, c: char, px: f32) -> Metrics {
+        use ab_glyph::{Font, ScaleFont};
+        let id = self.0.glyph_id(c);
+        Metrics {
+            advance_width: self.0.as_scaled(px).h_advance(id),
+            xmin: 0,
+            ymin: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// Rasterize `c` at `px` to a coverage bitmap (one byte per pixel) plus its
+    /// placement metrics. A glyph with no outline (space) yields an empty bitmap.
+    fn rasterize(&self, c: char, px: f32) -> (Metrics, Vec<u8>) {
+        use ab_glyph::{Font, ScaleFont};
+        let id = self.0.glyph_id(c);
+        let advance_width = self.0.as_scaled(px).h_advance(id);
+        let glyph = id.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
+        let Some(outlined) = self.0.outline_glyph(glyph) else {
+            return (Metrics { advance_width, xmin: 0, ymin: 0, width: 0, height: 0 }, Vec::new());
+        };
+        let b = outlined.px_bounds();
+        let width = b.width().round() as usize;
+        let height = b.height().round() as usize;
+        let mut cov = alloc::vec![0u8; width * height];
+        outlined.draw(|x, y, c| {
+            let (x, y) = (x as usize, y as usize);
+            if x < width && y < height {
+                cov[y * width + x] = (c * 255.0 + 0.5) as u8;
+            }
+        });
+        // px_bounds is y-down from the baseline; convert to the y-up contract.
+        let m = Metrics {
+            advance_width,
+            xmin: b.min.x.round() as i32,
+            ymin: -(b.max.y.round() as i32),
+            width,
+            height,
+        };
+        (m, cov)
+    }
+}
 
 #[cfg(feature = "truetype-overlay")]
 impl core::fmt::Debug for FontFace {
@@ -73,10 +157,11 @@ pub struct TextOverlay {
     bg_color: [u8; 4],
     /// The `location=` path, retained for `get_property` round-trips.
     location: Option<String>,
-    /// TrueType face fallback chain (the `truetype-overlay` feature). Glyphs are
-    /// rasterized from the first face that has the character (so a Latin primary
-    /// plus a CJK fallback renders mixed text); empty means the 8x8 ASCII bitmap
-    /// font is used. `fontdue` does no fallback itself, hence the explicit chain.
+    /// TrueType / OpenType face fallback chain (the `truetype-overlay` feature).
+    /// Glyphs are rasterized from the first face that has the character (so a
+    /// Latin primary plus a CJK fallback renders mixed text); empty means the 8x8
+    /// ASCII bitmap font is used. `ab_glyph` does no fallback itself, hence the
+    /// explicit chain.
     #[cfg(feature = "truetype-overlay")]
     fonts: Vec<FontFace>,
     /// The primary `font=` path, retained for `get_property` round-trips.
@@ -111,18 +196,18 @@ impl TextOverlay {
         }
     }
 
-    /// Append a glyph font from in-memory `.ttf` / `.ttc` bytes to the fallback
-    /// chain (the `truetype-overlay` feature). `collection_index` selects a face
-    /// in a `.ttc` collection (0 for a plain `.ttf`). The first font added is the
-    /// primary; later fonts cover characters the primary lacks (e.g. a Latin
-    /// primary + a CJK fallback). Adding any font switches the render path from
-    /// the ASCII bitmap to rasterized glyphs. Note `fontdue` rasterizes TrueType
-    /// (glyf) outlines; a CFF / CFF2 font (e.g. variable Noto Sans CJK) yields
-    /// empty glyphs.
+    /// Append a glyph font from in-memory `.ttf` / `.otf` / `.ttc` bytes to the
+    /// fallback chain (the `truetype-overlay` feature). `collection_index` selects
+    /// a face in a `.ttc` collection (0 for a plain `.ttf` / `.otf`). The first
+    /// font added is the primary; later fonts cover characters the primary lacks
+    /// (e.g. a Latin primary + a CJK fallback). Adding any font switches the
+    /// render path from the ASCII bitmap to rasterized glyphs. `ab_glyph`
+    /// rasterizes both glyf and CFF/CFF2 outlines, so OpenType-CFF fonts (e.g.
+    /// Noto Sans CJK OTF) render, not only glyf `.ttf`s.
     #[cfg(feature = "truetype-overlay")]
     pub fn add_font_bytes(&mut self, bytes: &[u8], collection_index: u32) -> Result<(), G2gError> {
-        let settings = fontdue::FontSettings { collection_index, ..Default::default() };
-        let font = fontdue::Font::from_bytes(bytes, settings).map_err(|_| G2gError::CapsMismatch)?;
+        let font = ab_glyph::FontVec::try_from_vec_and_index(bytes.to_vec(), collection_index)
+            .map_err(|_| G2gError::CapsMismatch)?;
         self.fonts.push(FontFace(font));
         Ok(())
     }
@@ -158,13 +243,13 @@ impl TextOverlay {
     /// (which renders the `.notdef` box). Empty chain is unreachable here (the
     /// TTF path only runs with at least one font).
     #[cfg(feature = "truetype-overlay")]
-    fn glyph_font(&self, c: char) -> &fontdue::Font {
+    fn glyph_font(&self, c: char) -> &FontFace {
         for f in &self.fonts {
-            if f.0.lookup_glyph_index(c) != 0 {
-                return &f.0;
+            if f.has_glyph(c) {
+                return f;
             }
         }
-        &self.fonts[0].0
+        &self.fonts[0]
     }
 
     /// Use a preparsed cue list.
@@ -409,13 +494,11 @@ impl TextOverlay {
     fn render_active_ttf(&self, buf: &mut [u8], t_ns: u64) {
         // Line metrics come from the primary; each glyph is rasterized from the
         // first font in the chain that has it (see `glyph_font`).
-        let primary = &self.fonts[0].0;
+        let primary = &self.fonts[0];
         let w = self.width as f32;
         let h = self.height as f32;
         let px = self.ttf_px();
-        let Some(lm) = primary.horizontal_line_metrics(px) else {
-            return;
-        };
+        let lm = primary.line_metrics(px);
         let line_h = lm.new_line_size.max(px);
         let pad = (px * 0.25).max(2.0);
         let margin = px * 0.5;
@@ -1185,7 +1268,7 @@ mod tests {
         assert!(ov.intercept_caps(&rgba_caps(16, 16)).is_ok());
     }
 
-    // -- TrueType overlay (M409): CJK / vertical rendering via fontdue. ---------
+    // -- TrueType/OpenType overlay (M409): CJK / vertical rendering via ab_glyph. -
 
     /// Read the first available CJK-capable system font, or `None` to skip (CI
     /// without CJK fonts). These are the Fedora paths the dev host has.
@@ -1256,6 +1339,50 @@ mod tests {
         let (x0, y0, x1, y1) = bounds;
         assert!(y1 - y0 > (h / 8), "glyphs stack down the column");
         assert!(x1 - x0 > (w / 12), "two columns span horizontally");
+    }
+
+    /// Read the first available OpenType-CFF (`.otf`) system font, or `None` to
+    /// skip. `.otf` fonts carry CFF outlines, which the old fontdue backend could
+    /// not rasterize (empty glyphs); `ab_glyph` does.
+    #[cfg(feature = "truetype-overlay")]
+    fn cff_font_bytes() -> Option<Vec<u8>> {
+        for p in [
+            "/usr/share/fonts/aajohan-comfortaa-fonts/Comfortaa-Regular.otf",
+            "/usr/share/fonts/adobe-source-code-pro/SourceCodePro-Regular.otf",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+        ] {
+            if let Ok(b) = std::fs::read(p) {
+                return Some(b);
+            }
+        }
+        None
+    }
+
+    #[test]
+    #[cfg(feature = "truetype-overlay")]
+    fn opentype_cff_font_renders_glyphs() {
+        use crate::subparse::CueSettings;
+        let (w, h) = (240usize, 96usize);
+        let Some(bytes) = cff_font_bytes() else {
+            std::eprintln!("skip: no CFF (.otf) system font found");
+            return;
+        };
+        let mut ov = TextOverlay::new()
+            .with_font_bytes(&bytes, 0)
+            .expect("CFF font parses")
+            .with_cues(vec![Cue {
+                start_ns: 0,
+                end_ns: u64::MAX,
+                text: "Ag".into(),
+                settings: CueSettings::default(),
+            }]);
+        ov.width = w as u32;
+        ov.height = h as u32;
+        ov.configured = true;
+        let mut buf = black(w, h);
+        ov.render_active_ttf(&mut buf, 0);
+        // fontdue produced empty glyphs for CFF; ab_glyph rasterizes the outlines.
+        assert!(drawn_bounds(&buf, w, h).is_some(), "CFF outlines rasterize to visible glyphs");
     }
 
     // -- TextOverlayN (M403): the two-input video + text-stream overlay. --------
