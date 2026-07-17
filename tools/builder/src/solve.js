@@ -1,8 +1,8 @@
-// Authoritative caps validation via g2g's real solver, compiled to wasm
-// (g2g-validate-wasm). loadSolver best-effort loads the blob; applyValidation is
-// a pure function that maps a validate result back onto the builder's edges. When
-// the blob is unavailable (missing pkg, CSP-blocked fetch in the singlefile
-// artifact) the caller keeps import.js's coarse family heuristic as the fallback.
+// Authoritative caps validation via g2g's real solver, compiled to wasm. This
+// module is the pure, node-testable half: applyValidation maps a validate result
+// back onto the builder's edges. Loading the blob lives in solver-load.js (a
+// browser-only virtual import), so this file stays importable by the node test.
+// When the solver is unavailable the caller keeps import.js's family heuristic.
 
 import { topoOrder } from "./export.js";
 
@@ -16,23 +16,6 @@ const LINK_FAILURE_REASON = {
   "empty-link": "no caps overlap",
   unfixable: "caps cannot be fixed",
 };
-
-// Best-effort load + init of the wasm validator. Returns the `validate_pipeline`
-// function (launch string -> JSON string, async) or null on any failure. Never
-// throws, so a build without the blob silently falls back to the heuristic. The
-// pkg lives under src/wasm (a source module Vite transforms, unlike a /public
-// file which cannot be imported); the import is @vite-ignore'd so a build without
-// the generated pkg does not fail (it is produced on demand by build-wasm.sh).
-export async function loadSolver() {
-  try {
-    const url = new URL("./wasm/g2g_validate.js", import.meta.url).href;
-    const mod = await import(/* @vite-ignore */ url);
-    await mod.default();
-    return mod.validate_pipeline;
-  } catch {
-    return null;
-  }
-}
 
 // The media-type head of a gst caps string ("video/x-raw, format=..." ->
 // "video/x-raw"), for a compact edge label; the full string rides in edge.data.

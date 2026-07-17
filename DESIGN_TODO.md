@@ -1026,9 +1026,6 @@ Outstanding developer-tooling tasks, highest leverage first.
     shows as its downstream's input fill.
   - Validate the dashboard live against an RTSP source.
 - **Visual builder follow-ups.** For `tools/builder/` (React Flow):
-  - Inline the wasm solver blob into the single-file artifact (base64) so the
-    published artifact runs the real solver too, not just the family heuristic
-    (the strict-CSP artifact currently can't fetch the sibling `.wasm`).
   - YAML export (the JSON export already covers the graph model; schema shared).
 - **Edge preview follow-ups.** Remaining: decode a keyframe for non-MJPEG
   compressed edges (MJPEG already thumbnails behind the `mjpeg` feature; other

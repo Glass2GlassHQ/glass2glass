@@ -12,7 +12,8 @@ import {
 import { G2gNode } from "./nodes.jsx";
 import { toLaunch, toJSON, isSink, nodeData } from "./export.js";
 import { fromLaunch, fromJSON, seedCounters, decorateEdge, CAPS_WARN_TITLE } from "./import.js";
-import { loadSolver, applyValidation } from "./solve.js";
+import { applyValidation } from "./solve.js";
+import { loadSolver } from "./solver-load.js";
 
 const nodeTypes = { g2g: G2gNode };
 

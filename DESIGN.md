@@ -2205,10 +2205,12 @@ into g2g; and the MCP server. Links are validated live: with `g2g-validate-wasm`
 built (g2g's real caps solver wrapping `toolingjson::validate_json`, compiled to
 wasm and loaded client-side) each edge shows its negotiated caps and a failing
 link is flagged; without the blob (the strict-CSP single-file artifact) it falls
-back to a coarse caps-family heuristic (the solver rides the `pnpm dev` server;
-the static bundle and artifact use the heuristic). The builder is the one tool
-with a JS build step (source under `tools/builder/`, `node_modules` / `dist` /
-`src/wasm` gitignored); every other dev tool is a Rust binary or a zero-build page.
+back to a coarse caps-family heuristic when the blob is absent. A Vite plugin
+embeds the wasm as base64 and instantiates it from bytes, so the solver runs in
+`pnpm dev`, the static bundle, and the self-contained artifact alike (no fetch,
+CSP-safe). The builder is the one tool with a JS build step (source under
+`tools/builder/`, `node_modules` / `dist` / `src/wasm` gitignored); every other
+dev tool is a Rust binary or a zero-build page.
 
 `recordsink` / `replaysrc` (std-gated, in `g2g-plugins::record`) turn a live
 stream into a file and back, for deterministic repro. `recordsink` writes the

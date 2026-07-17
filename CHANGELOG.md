@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M701: the builder embeds the wasm caps solver as base64 and instantiates it from bytes, so the real solver runs in the static bundle and the self-contained artifact (not just `pnpm dev`).
 - M700: `ffmpegdec` seeds libavcodec with the stream's parameter sets and SPS-derived reorder depth at open, so a stream that reorders around its first IDR no longer loses the opening GOP's leading pictures.
 - M699: the visual builder validates links with g2g's real caps solver compiled to wasm (`g2g-validate-wasm`), showing negotiated caps and flagging failing links, falling back to the family heuristic when the blob is absent.
 - M698: `g2g-launch --help` lists the rest of the dev tooling (live dashboard, DOT, inspect, visual builder, record/replay) so it is discoverable from the tool devs reach for first.
