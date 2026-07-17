@@ -17,6 +17,47 @@ const isSink = (doc) => /Sink/i.test(doc.klass || "");
 const roleClass = (role) =>
   role === "source" ? "source" : role.startsWith("muxer") ? "muxer" : "element";
 
+// Parse-time autoplug macros (uridecodebin/decodebin), not registered elements,
+// so g2g-inspect omits them. Shaped like a registry ElementDoc so the palette,
+// node handles, and property panel treat them uniformly. They only round-trip
+// through the gst-launch export, not the declarative JSON loader.
+const DYNAMIC = [
+  {
+    name: "uridecodebin",
+    role: "source",
+    klass: "Source/Dynamic",
+    long_name: "URI decode bin",
+    description: "Auto-plugs a source + demux + decode chain for a URI (parse-time macro)",
+    caps: "",
+    pads: [],
+    dynamic: true,
+    properties: [
+      {
+        name: "uri",
+        type: "String",
+        blurb: "media URI (file://, http://, rtsp://, ...)",
+        default: null,
+        enum_values: null,
+        range: null,
+        readable: true,
+        writable: true,
+      },
+    ],
+  },
+  {
+    name: "decodebin",
+    role: "element",
+    klass: "Codec/Decoder/Dynamic",
+    long_name: "Decode bin",
+    description: "Auto-plugs a demux + decode chain for its input (parse-time macro)",
+    caps: "",
+    pads: [],
+    dynamic: true,
+    properties: [],
+  },
+];
+const dynamicMap = Object.fromEntries(DYNAMIC.map((e) => [e.name, e]));
+
 export default function App() {
   const [registry, setRegistry] = useState({});
   const [error, setError] = useState("");
@@ -43,9 +84,12 @@ export default function App() {
       );
   }, []);
 
+  // Registered elements plus the dynamic autoplug macros, keyed by name.
+  const elements = useMemo(() => ({ ...dynamicMap, ...registry }), [registry]);
+
   const addNode = useCallback(
     (element) => {
-      const doc = registry[element];
+      const doc = elements[element];
       const idx = counters.current[element] || 0;
       counters.current[element] = idx + 1;
       const id = element + idx;
@@ -67,7 +111,7 @@ export default function App() {
       setNodes((nds) => nds.concat(node));
       setSelectedId(id);
     },
-    [registry, setNodes],
+    [elements, setNodes],
   );
 
   const onConnect = useCallback(
@@ -94,18 +138,20 @@ export default function App() {
 
   // Palette grouped by role, filtered by the search box.
   const groups = useMemo(() => {
-    const g = { source: [], element: [], "muxer (fan-in)": [] };
-    Object.values(registry)
+    const g = { source: [], element: [], "muxer (fan-in)": [], dynamic: [] };
+    Object.values(elements)
       .filter((e) => e.name.includes(filter))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .forEach((e) => (g[e.role] || g.element).push(e));
+      .forEach((e) => (e.dynamic ? g.dynamic : g[e.role] || g.element).push(e));
     return g;
-  }, [registry, filter]);
+  }, [elements, filter]);
 
   const exportText = useMemo(
     () => (exportMode === "gst" ? toLaunch(nodes, edges) : toJSON(nodes, edges)),
     [exportMode, nodes, edges],
   );
+
+  const hasDynamic = nodes.some((n) => n.data.doc?.dynamic);
 
   return (
     <div className="app">
@@ -200,6 +246,11 @@ export default function App() {
               copy
             </button>
           </div>
+          {hasDynamic && exportMode === "json" && (
+            <div className="err">
+              uridecodebin/decodebin are parse-time macros; load via the gst-launch export, not --graph
+            </div>
+          )}
           <pre className="exout">{exportText}</pre>
         </div>
       </aside>

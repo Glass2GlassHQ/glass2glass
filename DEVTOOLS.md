@@ -249,7 +249,12 @@ pnpm dev            # dev server with live reload, prints a localhost URL
 pnpm build && python3 -m http.server -d dist 8099   # open http://localhost:8099
 ```
 
-The palette comes from `g2g-inspect --json`; the checked-in
+A "dynamic" palette group adds `uridecodebin` (with a `uri` prop) and
+`decodebin`. These are parse-time autoplug macros, not registered elements, so
+they only round-trip through the `gst-launch` export, not the declarative JSON
+(the builder warns when a dynamic node is present in JSON mode).
+
+The rest of the palette comes from `g2g-inspect --json`; the checked-in
 `public/registry.json` is a snapshot of the standard registry, fetched at
 runtime. Regenerate it after adding or changing elements (needs the
 `tooling-json` feature):
