@@ -1026,13 +1026,12 @@ Outstanding developer-tooling tasks, highest leverage first.
   - Wire the `Observer` into the threaded runner (`run_graph_threaded` passes
     `None`, so `--observe` is cooperative-runner only).
   - Validate the dashboard live against an RTSP source.
-- **Visual builder follow-ups.** For `tools/builder/`:
+- **Visual builder follow-ups.** For `tools/builder/` (React Flow):
   - Import a `gst-launch` line into the canvas (needs a server-side parse or a
     JS launch-line parser).
-  - Link-validity feedback from the caps solver while wiring (today any port
-    pair links; a bad pair only fails on load / run).
-  - Optional React Flow frontend + YAML export (the JSON export already covers
-    the graph model; the schema is shared).
+  - Link-validity feedback from the caps solver while wiring (today React Flow
+    enforces out -> in, but caps compatibility is only checked on load / run).
+  - YAML export (the JSON export already covers the graph model; schema shared).
 - **Edge preview follow-ups.** The dashboard edge tap handles packed RGBA/BGRA
   video, PCM S16 audio, and a hexdump fallback. Remaining: convert planar /
   semi-planar raw video (NV12 / I420) to a thumbnail instead of falling back to

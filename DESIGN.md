@@ -2191,11 +2191,14 @@ role, output caps or pad templates, and each property's machine type, range,
 default, and read/write flags, from the same `ElementDoc` / `PropertyDoc`
 introspection the text path uses. Like the dashboard it is serialized in
 `g2g-plugins` (serde_json), not `g2g-core`. It feeds two consumers: the visual
-pipeline builder (`tools/builder/`), a self-contained page that loads a
-`registry.json` snapshot, offers a typed drag-drop canvas, and live-exports a
-`gst-launch` line (the `!` form for linear chains, the `name=` form for branched
-graphs) and declarative JSON (`declarative.rs` schema), both of which load back
-into g2g; and, later, the MCP server.
+pipeline builder (`tools/builder/`), a React Flow app (Vite + pnpm) that loads a
+`registry.json` snapshot, offers a typed drag-drop canvas with pan / zoom and
+either-direction linking, and live-exports a `gst-launch` line (the `!` form for
+linear chains, the `name=` form for branched graphs) and declarative JSON
+(`declarative.rs` schema), both of which load back into g2g; and the MCP server.
+The builder is the one tool with a JS build step (source under `tools/builder/`,
+`node_modules` / `dist` gitignored); every other dev tool is a Rust binary or a
+zero-build page.
 
 `recordsink` / `replaysrc` (std-gated, in `g2g-plugins::record`) turn a live
 stream into a file and back, for deterministic repro. `recordsink` writes the

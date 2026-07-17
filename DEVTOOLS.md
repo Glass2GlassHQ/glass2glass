@@ -224,18 +224,9 @@ follow-ups (see `DESIGN_TODO.md`).
 
 ## Visual pipeline builder
 
-`g2g-inspect --json [element]` dumps the registry as JSON (element identity,
-role, pad caps, and each property's machine type / range / default), the same
-data the text dump shows. Needs the `tooling-json` feature:
-
-```sh
-cargo run -p g2g-plugins --features tooling-json --bin g2g-inspect -- --json \
-  > tools/builder/registry.json
-```
-
-`tools/builder/index.html` (self-contained, no build step) loads that
-`registry.json` and lets you assemble a pipeline visually: filter the palette,
-click to add nodes, drag output-to-input ports to link them, and edit each
+`tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a
+pipeline visually: filter the palette, click to add nodes, drag a link from
+either end (React Flow only allows valid out -> in), pan / zoom, and edit each
 node's properties (typed from the registry). It live-exports two formats, both
 loadable back into g2g:
 
@@ -244,15 +235,25 @@ loadable back into g2g:
 - declarative JSON (`g2g-launch --graph <file.json>`, the `declarative.rs`
   schema).
 
-Serve it over HTTP so the page can fetch `registry.json` (a `file://` open
-cannot):
+Run it (needs Node + pnpm):
 
 ```sh
-python3 -m http.server -d tools/builder 8080   # then open http://localhost:8080
+cd tools/builder
+pnpm install
+pnpm dev            # dev server with live reload, prints a localhost URL
+# or a static self-contained bundle:
+pnpm build && python3 -m http.server -d dist 8099   # open http://localhost:8099
 ```
 
-The checked-in `registry.json` is a snapshot of the standard registry;
-regenerate it with the command above after adding or changing elements.
+The palette comes from `g2g-inspect --json`; the checked-in
+`public/registry.json` is a snapshot of the standard registry, fetched at
+runtime. Regenerate it after adding or changing elements (needs the
+`tooling-json` feature):
+
+```sh
+cargo run -p g2g-plugins --features tooling-json --bin g2g-inspect -- --json \
+  > tools/builder/public/registry.json
+```
 
 ## Record / replay
 
