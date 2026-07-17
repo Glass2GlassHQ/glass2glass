@@ -199,6 +199,10 @@ graph left-to-right, colors each node by input-link fill, shows per-element
 `process()` p50 / p99 and frame counts, and logs bus events (state changes, QoS,
 buffering, negotiation failures, EOS, errors) as they arrive.
 
+Each edge is labelled with its negotiated caps (hover for the full gst-string).
+Scroll to zoom, drag the background to pan, and use the fit button (or
+double-click) to frame the whole graph, so a large pipeline stays navigable.
+
 The sidebar shows a per-stage latency waterfall: each element's input-link wait
 (measured queue-residency, p50) stacked with its `process()` cost (p50), so you
 see where a frame's time goes. The end-of-run summary prints the same as

@@ -728,7 +728,11 @@ async fn prepare_graph<'a>(
         let edges: Vec<crate::runtime::EdgeInfo> = vg
             .edges()
             .iter()
-            .map(|e| crate::runtime::EdgeInfo { from: e.src.node.0 as usize, to: e.dst.node.0 as usize })
+            .map(|e| crate::runtime::EdgeInfo {
+                from: e.src.node.0 as usize,
+                to: e.dst.node.0 as usize,
+                caps: None,
+            })
             .collect();
         obs.register(names, roles, probes.clone(), edges);
     }

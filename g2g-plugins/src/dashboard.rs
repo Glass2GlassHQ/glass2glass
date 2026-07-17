@@ -9,9 +9,10 @@
 //! step.
 //!
 //! Wire protocol (each WS frame is one JSON object, discriminated by `type`):
-//! - `{"type":"telemetry","uptime_ns":N,"nodes":[..],"edges":[{"from":i,"to":j}]}`
-//!   where each node is `{"id","name","role","proc":{count,mean_ns,p50_ns,p95_ns,
-//!   p99_ns,max_ns}|null,"fill_mean_pct","fill_max_pct"}`.
+//! - `{"type":"telemetry","uptime_ns":N,"nodes":[..],"edges":[{"from":i,"to":j,
+//!   "caps":"<gst-string>"|null}]}` where each node is `{"id","name","role",
+//!   "proc":{..}|null,"transit":{..}|null,"fill_mean_pct","fill_max_pct"}` and
+//!   `caps` is the edge's negotiated caps.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
 use std::collections::HashMap;
@@ -126,7 +127,11 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
             })
         })
         .collect();
-    let edges: Vec<Value> = snap.edges.iter().map(|e| json!({"from": e.from, "to": e.to})).collect();
+    let edges: Vec<Value> = snap
+        .edges
+        .iter()
+        .map(|e| json!({ "from": e.from, "to": e.to, "caps": e.caps }))
+        .collect();
     json!({
         "type": "telemetry",
         "uptime_ns": snap.uptime_ns,
@@ -391,7 +396,7 @@ mod tests {
                     }),
                 },
             ],
-            edges: vec![EdgeInfo { from: 0, to: 1 }],
+            edges: vec![EdgeInfo { from: 0, to: 1, caps: None }],
         };
         let json = snapshot_json(&snap);
         let v: Value = serde_json::from_str(&json).unwrap();

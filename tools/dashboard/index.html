@@ -21,7 +21,16 @@
   #status.live { color: var(--source); }
   #status.down { color: var(--err); }
   #wrap { display: flex; height: calc(100% - 41px); }
-  #graph { flex: 1; overflow: auto; }
+  #graph { flex: 1; overflow: hidden; position: relative; }
+  #svg { display: block; cursor: grab; }
+  #svg.panning { cursor: grabbing; }
+  #zoomctl { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 6px;
+    align-items: center; user-select: none; }
+  #zoomctl button { width: 26px; height: 24px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--edge); border-radius: 4px; cursor: pointer; font: inherit; }
+  #zoomctl button:hover { border-color: var(--accent); }
+  #zoomctl button.fit { width: auto; padding: 0 8px; }
+  #zoomctl #zoomlbl { color: var(--muted); font-size: 11px; min-width: 34px; }
   #side { width: 320px; border-left: 1px solid var(--edge); display: flex;
     flex-direction: column; }
   #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
@@ -49,7 +58,7 @@
   .node .name { font-weight: 600; }
   .node .stat { fill: var(--muted); font-size: 11px; }
   .edge { stroke: var(--edge); stroke-width: 2; fill: none; }
-  .edge-lbl { fill: var(--muted); font-size: 10px; }
+  .edge-lbl { fill: var(--muted); font-size: 10px; pointer-events: none; }
   footer { padding: 6px 12px; color: var(--muted); border-top: 1px solid var(--edge); }
 </style>
 </head>
@@ -60,7 +69,15 @@
   <span id="uptime" style="color:var(--muted)"></span>
 </header>
 <div id="wrap">
-  <div id="graph"><svg id="svg" width="100%" height="100%"></svg></div>
+  <div id="graph">
+    <svg id="svg" width="100%" height="100%"></svg>
+    <div id="zoomctl">
+      <button data-z="out" title="zoom out">&minus;</button>
+      <button data-z="in" title="zoom in">+</button>
+      <button data-z="fit" class="fit" title="fit graph">fit</button>
+      <span id="zoomlbl"></span>
+    </div>
+  </div>
   <div id="side">
     <h2>latency waterfall (p50)</h2>
     <div id="waterfall"><span class="hint" style="color:var(--muted)">waiting for frames…</span></div>
@@ -87,6 +104,9 @@ const waterfallEl = document.getElementById("waterfall");
 let socket = null;             // live WebSocket, for edge subscribe/unsubscribe
 const tapped = new Set();      // edge indices currently subscribed
 let shownEdge = null;          // edge whose preview is displayed
+let view = { x: 0, y: 0, k: 1 }; // pan/zoom of the graph viewport
+let fitted = false;            // frame the graph once on first paint
+let contentSize = { w: 0, h: 0 };
 
 const COL_W = 220, ROW_H = 96, NODE_W = 168, NODE_H = 64, PAD = 30;
 const roleColor = { source: "var(--source)", sink: "var(--sink)",
@@ -103,6 +123,20 @@ function fillColor(pct) {
   if (pct >= 40) return "var(--fill1)";
   return "var(--fill0)";
 }
+// Compact a gst caps string ("video/x-raw, format=(string)RGBA, width=(int)320,
+// ...") to "video/x-raw RGBA 320x240" for the edge label; the full string is the
+// SVG <title> tooltip.
+function capsShort(s) {
+  const parts = s.split(",").map(x => x.trim());
+  const get = (k) => {
+    const p = parts.find(x => x.startsWith(k + "="));
+    return p ? p.split("=")[1].replace(/\(.*?\)/, "") : null;
+  };
+  const fmt = get("format"), w = get("width"), h = get("height");
+  const extra = [fmt, w && h ? `${w}x${h}` : null].filter(Boolean).join(" ");
+  return extra ? `${parts[0]} ${extra}` : parts[0];
+}
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Longest-path layering: a node's column is 1 + max(column of its predecessors).
 function layout(nodes, edges) {
@@ -135,10 +169,14 @@ function render(msg) {
   const { nodes, edges } = msg;
   svg.innerHTML = "";
   const pos = layout(nodes, edges);
-  const maxX = Math.max(...[...pos.values()].map(p => p.x)) + NODE_W + PAD;
-  const maxY = Math.max(...[...pos.values()].map(p => p.y)) + NODE_H + PAD;
-  svg.setAttribute("width", Math.max(maxX, 400));
-  svg.setAttribute("height", Math.max(maxY, 200));
+  const maxX = Math.max(...[...pos.values()].map(p => p.x), 0) + NODE_W + PAD;
+  const maxY = Math.max(...[...pos.values()].map(p => p.y), 0) + NODE_H + PAD;
+  contentSize = { w: maxX, h: maxY };
+
+  // All content goes in a viewport <g> so wheel/drag pan+zoom is one transform.
+  const vp = document.createElementNS(SVG_NS, "g");
+  vp.setAttribute("id", "viewport");
+  svg.appendChild(vp);
 
   // Edges first (under nodes). Each is clickable to tap its content; the array
   // index is the edge id the server keys previews on.
@@ -154,7 +192,20 @@ function render(msg) {
     path.style.pointerEvents = "stroke";
     path.style.cursor = "pointer";
     path.onclick = () => toggleEdge(i);
-    svg.appendChild(path);
+    vp.appendChild(path);
+    // Negotiated caps label at the edge midpoint (gst-string, trimmed).
+    if (e.caps) {
+      const lbl = document.createElementNS(SVG_NS, "text");
+      lbl.setAttribute("class", "edge-lbl");
+      lbl.setAttribute("x", mx);
+      lbl.setAttribute("y", (y1 + y2) / 2 - 5);
+      lbl.setAttribute("text-anchor", "middle");
+      lbl.textContent = capsShort(e.caps);
+      const title = document.createElementNS(SVG_NS, "title");
+      title.textContent = e.caps;
+      lbl.appendChild(title);
+      vp.appendChild(lbl);
+    }
   });
 
   nodes.forEach(n => {
@@ -195,8 +246,12 @@ function render(msg) {
       l2.textContent = `n=${n.proc.count}  fill ${n.fill_mean_pct}/${n.fill_max_pct}%`;
     }
     g.appendChild(l2);
-    svg.appendChild(g);
+    vp.appendChild(g);
   });
+
+  // Frame the whole graph on first paint; afterwards respect the user's pan/zoom.
+  if (!fitted && nodes.length) { fitView(); fitted = true; }
+  applyView();
 }
 
 // Per-stage latency breakdown: input-link wait (transit p50) + process p50,
@@ -302,6 +357,60 @@ function renderPreview(edge, p) {
     previewEl.appendChild(div);
   }
 }
+
+// ---- pan / zoom of the graph viewport ----
+function applyView() {
+  const vp = document.getElementById("viewport");
+  if (vp) vp.setAttribute("transform", `translate(${view.x},${view.y}) scale(${view.k})`);
+  const lbl = document.getElementById("zoomlbl");
+  if (lbl) lbl.textContent = Math.round(view.k * 100) + "%";
+}
+function fitView() {
+  const r = svg.getBoundingClientRect();
+  if (!r.width || !contentSize.w) return;
+  const pad = 24;
+  view.k = clamp(Math.min((r.width - 2 * pad) / contentSize.w, (r.height - 2 * pad) / contentSize.h), 0.15, 1.5);
+  view.x = (r.width - contentSize.w * view.k) / 2;
+  view.y = (r.height - contentSize.h * view.k) / 2;
+  applyView();
+}
+function zoomBy(factor, cx, cy) {
+  const r = svg.getBoundingClientRect();
+  if (cx == null) { cx = r.width / 2; cy = r.height / 2; }
+  const nk = clamp(view.k * factor, 0.15, 4);
+  // Keep the graph point under the cursor fixed while scaling.
+  const wx = (cx - view.x) / view.k, wy = (cy - view.y) / view.k;
+  view.k = nk; view.x = cx - wx * nk; view.y = cy - wy * nk;
+  applyView();
+}
+svg.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const r = svg.getBoundingClientRect();
+  zoomBy(ev.deltaY < 0 ? 1.1 : 1 / 1.1, ev.clientX - r.left, ev.clientY - r.top);
+}, { passive: false });
+svg.addEventListener("dblclick", () => fitView());
+let panning = null;
+svg.addEventListener("mousedown", (ev) => {
+  if (ev.target.classList.contains("edge")) return; // let an edge click tap it
+  panning = { x: ev.clientX, y: ev.clientY };
+  svg.classList.add("panning");
+});
+window.addEventListener("mousemove", (ev) => {
+  if (!panning) return;
+  view.x += ev.clientX - panning.x;
+  view.y += ev.clientY - panning.y;
+  panning = { x: ev.clientX, y: ev.clientY };
+  applyView();
+});
+window.addEventListener("mouseup", () => {
+  if (panning) { panning = null; svg.classList.remove("panning"); }
+});
+document.getElementById("zoomctl").addEventListener("click", (ev) => {
+  const z = ev.target.dataset.z;
+  if (z === "in") zoomBy(1.2);
+  else if (z === "out") zoomBy(1 / 1.2);
+  else if (z === "fit") fitView();
+});
 
 function connect() {
   const url = "ws://" + (location.host || "127.0.0.1:8787");

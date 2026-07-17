@@ -157,10 +157,22 @@ impl Observer {
                 latency: probe.as_ref().map(|p| p.snapshot()),
             })
             .collect();
+        // Fill each edge's negotiated caps from the aligned `edge_caps` (present
+        // once the runner has registered them, after negotiation).
+        let edges = s
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(i, e)| EdgeInfo {
+                from: e.from,
+                to: e.to,
+                caps: s.edge_caps.get(i).map(|c| c.to_gst_string()),
+            })
+            .collect();
         TelemetrySnapshot {
             uptime_ns: crate::metrics::monotonic_ns().saturating_sub(self.inner.start_ns),
             nodes,
-            edges: s.edges.clone(),
+            edges,
         }
     }
 }
@@ -196,11 +208,14 @@ pub struct NodeTelemetry {
     pub latency: Option<ElementLatency>,
 }
 
-/// A directed link, by node index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A directed link, by node index, with its negotiated caps (the `to_gst_string`
+/// of the solved per-edge `Caps`). `caps` is `None` until the runner registers
+/// the negotiated solution, and in a topology-only `EdgeInfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdgeInfo {
     pub from: usize,
     pub to: usize,
+    pub caps: Option<alloc::string::String>,
 }
 
 #[cfg(test)]
@@ -224,7 +239,7 @@ mod tests {
             alloc::vec![String::from("src0"), String::from("decode0")],
             alloc::vec![NodeRole::Source, NodeRole::Transform],
             alloc::vec![None, Some(probe.clone())],
-            alloc::vec![EdgeInfo { from: 0, to: 1 }],
+            alloc::vec![EdgeInfo { from: 0, to: 1, caps: None }],
         );
 
         // A read taken before any work: the transform's probe exists but is empty.
@@ -241,7 +256,7 @@ mod tests {
         let lat = after.nodes[1].latency.as_ref().unwrap();
         assert_eq!(lat.fill_max_pct, 100);
         assert!(lat.fill_mean_pct > 0);
-        assert_eq!(after.edges, alloc::vec![EdgeInfo { from: 0, to: 1 }]);
+        assert_eq!(after.edges, alloc::vec![EdgeInfo { from: 0, to: 1, caps: None }]);
     }
 
     #[test]

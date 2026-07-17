@@ -2176,7 +2176,9 @@ never stalls an arm. The transport lives in `g2g-plugins::dashboard` (the
 answers a plain `GET /` with a self-contained dashboard page
 (`tools/dashboard/`) and a WebSocket upgrade with a JSON `telemetry` snapshot
 every 250 ms plus one `event` per `BusMessage` (fanned out to all clients via a
-broadcast channel drained off the `Bus`). It binds loopback by default;
+broadcast channel drained off the `Bus`). Each telemetry edge carries its
+negotiated caps (from the `Observer`'s per-edge solution), which the page labels
+on the link; the page pans / zooms so a large graph stays navigable. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the

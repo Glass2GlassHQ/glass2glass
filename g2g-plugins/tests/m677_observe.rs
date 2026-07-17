@@ -6,7 +6,7 @@
 //! `cargo test -p g2g-plugins --features std`.
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{parse_launch, run_graph_observed, EdgeInfo, NodeRole, Observer};
+use g2g_core::runtime::{parse_launch, run_graph_observed, NodeRole, Observer};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
 
@@ -33,7 +33,13 @@ async fn observed_run_captures_topology_and_per_element() {
 
     let snap = obs.snapshot();
     assert_eq!(snap.nodes.len(), 3, "src -> scale -> sink");
-    assert_eq!(snap.edges, vec![EdgeInfo { from: 0, to: 1 }, EdgeInfo { from: 1, to: 2 }]);
+    assert_eq!(
+        snap.edges.iter().map(|e| (e.from, e.to)).collect::<Vec<_>>(),
+        vec![(0, 1), (1, 2)],
+    );
+    // Each edge carries its negotiated caps (raw video after the decode-free chain).
+    assert!(snap.edges.iter().all(|e| e.caps.is_some()), "edges carry negotiated caps");
+    assert!(snap.edges[0].caps.as_ref().unwrap().contains("video"));
 
     // Source has no `process()` probe; its cost surfaces as downstream fill.
     assert_eq!(snap.nodes[0].role, NodeRole::Source);
