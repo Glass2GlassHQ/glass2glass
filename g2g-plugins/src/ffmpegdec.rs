@@ -74,19 +74,18 @@
 //! prefer, so the `KmsSink` path opts into it. The conversion is a direct
 //! interleave of the U/V planes after the YUV420P decode (no swscale).
 //!
-//! Chroma: the software backend preserves the source chroma when asked to
-//! (`OutputFormat::I422` for a 4:2:2 source, `OutputFormat::I444` for 4:4:4),
-//! so a high-chroma stream is not silently downsampled; a 4:4:4 source can still
-//! be box-averaged to I420 / NV12 on request. The GPU backends stay NV12-only.
+//! Chroma (software backend): the output format picks the chroma. A fixed
+//! `OutputFormat::I422` / `I444` preserves a 4:2:2 / 4:4:4 source (no
+//! downsample), `I420` / `Nv12` box-average a higher-chroma source to 4:2:0, and
+//! `OutputFormat::Auto` matches the source: it advertises all three chromas at
+//! negotiation, then per frame resolves to the decoded pixel format's native
+//! chroma and emits the concrete output caps via `CapsChanged`. The GPU backends
+//! stay NV12-only.
 //!
 //! Deferred:
 //! - 10-bit pixel formats (`YUV420P10` / `P010`). Mainline H.264 cameras emit
 //!   8-bit YUV420P; 10-bit and other formats are still rejected with
 //!   `CapsMismatch`.
-//! - Auto-selecting the output chroma from the stream (the caller picks the
-//!   `OutputFormat` today; matching the source chroma automatically needs the
-//!   decoded pixel format at negotiation time, which Annex-B only knows after
-//!   the first frame).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -132,12 +131,21 @@ pub enum OutputFormat {
     /// Planar 4:4:4 Y / U / V (full-resolution chroma). Preserves the chroma of a
     /// 4:4:4 (High 4:4:4 profile) source. Software backend only.
     I444,
+    /// Match the source chroma: emit I420 / I422 / I444 to preserve whatever the
+    /// stream carries, resolved per frame from the decoded pixel format. Software
+    /// backend only; the caller sets it when it does not know (or want to fix)
+    /// the source chroma up front (e.g. a differential-QA harness matching a
+    /// reference of unknown chroma).
+    Auto,
 }
 
 impl OutputFormat {
+    /// The concrete `RawVideoFormat` for a fixed variant. `Auto` has no single
+    /// format (it is resolved per frame by [`resolve_output_format`]); it maps to
+    /// `I420` only as a nominal fallback, never used for packing.
     fn raw_format(self) -> RawVideoFormat {
         match self {
-            OutputFormat::I420 => RawVideoFormat::I420,
+            OutputFormat::I420 | OutputFormat::Auto => RawVideoFormat::I420,
             OutputFormat::Nv12 => RawVideoFormat::Nv12,
             OutputFormat::I422 => RawVideoFormat::I422,
             OutputFormat::I444 => RawVideoFormat::I444,
@@ -146,13 +154,42 @@ impl OutputFormat {
 
     /// Chroma subsampling shift `(x, y)` of the output: chroma plane dims are
     /// `ceil(w >> x)` by `ceil(h >> y)`. 4:2:0 -> (1,1), 4:2:2 -> (1,0),
-    /// 4:4:4 -> (0,0).
+    /// 4:4:4 -> (0,0). Not meaningful for `Auto` (resolved to a concrete format
+    /// before packing); treated as 4:2:0.
     fn chroma_shift(self) -> (u32, u32) {
         match self {
-            OutputFormat::I420 | OutputFormat::Nv12 => (1, 1),
+            OutputFormat::I420 | OutputFormat::Nv12 | OutputFormat::Auto => (1, 1),
             OutputFormat::I422 => (1, 0),
             OutputFormat::I444 => (0, 0),
         }
+    }
+}
+
+/// Resolve the effective output format for a decoded frame. A fixed format is
+/// returned unchanged; `Auto` maps to the source's native chroma (I420 for 4:2:0
+/// / NV12, I422 for 4:2:2, I444 for 4:4:4), so the decode preserves it. An
+/// unsupported source pixel format under `Auto` is a loud `CapsMismatch`.
+fn resolve_output_format(requested: OutputFormat, src: Pixel) -> Result<OutputFormat, G2gError> {
+    match requested {
+        OutputFormat::Auto => match src {
+            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12 => Ok(OutputFormat::I420),
+            Pixel::YUV422P | Pixel::YUVJ422P => Ok(OutputFormat::I422),
+            Pixel::YUV444P | Pixel::YUVJ444P => Ok(OutputFormat::I444),
+            _ => Err(G2gError::CapsMismatch),
+        },
+        other => Ok(other),
+    }
+}
+
+/// Whether a decoder configured with `requested` can emit `format`: any of the
+/// three chromas under `Auto`, else the one configured format.
+fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
+    match requested {
+        OutputFormat::Auto => matches!(
+            format,
+            RawVideoFormat::I420 | RawVideoFormat::I422 | RawVideoFormat::I444
+        ),
+        other => other.raw_format() == format,
     }
 }
 
@@ -205,6 +242,10 @@ struct DecodedPicture {
     /// frame so glass-to-glass latency survives decode. Looked up in
     /// `pts_to_arrival` after libavcodec echoes the input pts back.
     arrival_ns: u64,
+    /// Concrete output format this picture was packed as. Equals the requested
+    /// format for a fixed choice; for `Auto` it is the source's native chroma
+    /// resolved at decode, so the emitted output caps match the payload.
+    format: OutputFormat,
 }
 
 /// Where a decoded picture's pixels live.
@@ -490,30 +531,37 @@ impl FfmpegH264Dec {
                     };
                     let width = frame.width();
                     let height = frame.height();
-                    let payload = if outputs_cuda {
+                    // `Auto` resolves to each frame's native chroma (a fixed
+                    // request passes through), so the packed payload and the
+                    // emitted caps agree. Resolved per backend against the real
+                    // source pixel format (the CUDA path is always NV12; VAAPI
+                    // resolves against the downloaded system frame).
+                    let (payload, resolved) = if outputs_cuda {
                         // SAFETY: the NvdecCuda backend decodes into
                         // `AV_PIX_FMT_CUDA` frames; `cuda_context` is the
                         // `CUcontext` its hwdevice was created with. The
                         // helper reads the device pointers and moves the
                         // frame into the buffer's keep-alive.
-                        DecodedPayload::Cuda(unsafe {
-                            cuda_buffer_from_frame(frame, cuda_context)?
-                        })
+                        let buf = unsafe { cuda_buffer_from_frame(frame, cuda_context)? };
+                        (DecodedPayload::Cuda(buf), OutputFormat::Nv12)
                     } else if transfers_from_hw {
                         // VAAPI: the decoded frame is a GPU surface
                         // (AV_PIX_FMT_VAAPI). Download it into a system-memory
                         // frame (NV12 on radeonsi / Intel), then pack like the
                         // software path.
                         let sw = transfer_hw_to_sw(&frame)?;
-                        DecodedPayload::System(copy_yuv(&sw, format)?)
+                        let resolved = resolve_output_format(format, sw.format())?;
+                        (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
                     } else {
-                        DecodedPayload::System(copy_yuv(&frame, format)?)
+                        let resolved = resolve_output_format(format, frame.format())?;
+                        (DecodedPayload::System(copy_yuv(&frame, resolved)?), resolved)
                     };
                     let arrival_ns = self.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                     decoded.push(DecodedPicture {
                         payload,
                         width,
                         height,
+                        format: resolved,
                         pts_ns,
                         arrival_ns,
                     });
@@ -602,7 +650,7 @@ impl AsyncElement for FfmpegH264Dec {
     /// legacy single-fixated cascade to the per-link path without
     /// regression.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let out_fmt = self.output_format.raw_format();
+        let out_fmt = self.output_format;
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
             derive_output_caps(input, out_fmt)
         }))
@@ -808,6 +856,7 @@ impl AsyncElement for FfmpegH264Dec {
                     "nv12" | "NV12" => OutputFormat::Nv12,
                     "i422" | "I422" => OutputFormat::I422,
                     "i444" | "I444" => OutputFormat::I444,
+                    "auto" | "AUTO" => OutputFormat::Auto,
                     _ => return Err(PropError::Value),
                 };
                 Ok(())
@@ -829,6 +878,7 @@ impl AsyncElement for FfmpegH264Dec {
                     OutputFormat::Nv12 => "nv12",
                     OutputFormat::I422 => "i422",
                     OutputFormat::I444 => "i444",
+                    OutputFormat::Auto => "auto",
                 }
                 .into(),
             )),
@@ -878,9 +928,11 @@ impl AsyncElement for FfmpegH264Dec {
                         {
                             self.input_caps = Some(c);
                         }
-                        Caps::RawVideo { format, .. }
-                            if *format == self.output_format.raw_format() =>
-                        {
+                        // A pre-fixed output CapsChanged from the runner: accept
+                        // any format this decoder can emit. Under `Auto` that is
+                        // any of the three chromas it advertised; otherwise the
+                        // one configured format.
+                        Caps::RawVideo { format, .. } if accepts_output(self.output_format, *format) => {
                             out.push(PipelinePacket::CapsChanged(c.clone())).await?;
                             self.last_caps = Some(c);
                         }
@@ -908,7 +960,6 @@ impl AsyncElement for FfmpegH264Dec {
                 }
             }
 
-            let out_format = self.output_format;
             // Carry the negotiated framerate (from the input caps) into the
             // output caps. Emitting `Rate::Any` here breaks the mid-stream
             // forward-caps resolve downstream: a format/geometry-changing
@@ -923,7 +974,9 @@ impl AsyncElement for FfmpegH264Dec {
                 _ => Rate::Fixed(30 << 16),
             };
             for d in decoded {
-                let new_caps = yuv420_caps(out_format, d.width, d.height, out_framerate.clone());
+                // Use the picture's *resolved* format (native chroma under Auto),
+                // so the emitted caps match the packed payload.
+                let new_caps = yuv420_caps(d.format, d.width, d.height, out_framerate.clone());
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion: the
                     // decode-time output caps must be consistent with
@@ -936,7 +989,7 @@ impl AsyncElement for FfmpegH264Dec {
                     // stale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input, out_format.raw_format());
+                        let expected = derive_output_caps(input, self.output_format);
                         debug_assert!(
                             !expected
                                 .intersect(&CapsSet::one(new_caps.clone()))
@@ -1031,17 +1084,28 @@ fn cuvid_name(codec: VideoCodec) -> &'static str {
     }
 }
 
-fn derive_output_caps(input: &Caps, out_fmt: RawVideoFormat) -> CapsSet {
+fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
     match input {
         Caps::CompressedVideo { codec, width, height, framerate }
             if SUPPORTED_CODECS.contains(codec) =>
         {
-            CapsSet::one(Caps::RawVideo {
-                format: out_fmt,
+            let mk = |f: RawVideoFormat| Caps::RawVideo {
+                format: f,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
-            })
+            };
+            match out {
+                // Auto emits whichever chroma the stream carries; advertise all
+                // three so a flexible downstream links, then the decoder fixes
+                // the concrete format via its own `CapsChanged` after decode.
+                OutputFormat::Auto => CapsSet::from_alternatives(alloc::vec![
+                    mk(RawVideoFormat::I420),
+                    mk(RawVideoFormat::I422),
+                    mk(RawVideoFormat::I444),
+                ]),
+                other => CapsSet::one(mk(other.raw_format())),
+            }
         }
         _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
     }
@@ -1461,6 +1525,46 @@ mod tests {
                 assert_eq!(out[ysz + csz + y * cw + x], val(2, x, y), "V half-width full-height");
             }
         }
+    }
+
+    #[test]
+    fn auto_resolves_to_native_chroma() {
+        use OutputFormat::*;
+        // Auto -> the source's native chroma.
+        assert_eq!(resolve_output_format(Auto, Pixel::YUV420P).unwrap(), I420);
+        assert_eq!(resolve_output_format(Auto, Pixel::NV12).unwrap(), I420);
+        assert_eq!(resolve_output_format(Auto, Pixel::YUV422P).unwrap(), I422);
+        assert_eq!(resolve_output_format(Auto, Pixel::YUV444P).unwrap(), I444);
+        assert!(resolve_output_format(Auto, Pixel::RGB24).is_err(), "unsupported src");
+        // A fixed request passes through regardless of the source.
+        assert_eq!(resolve_output_format(I420, Pixel::YUV444P).unwrap(), I420);
+        assert_eq!(resolve_output_format(Nv12, Pixel::YUV420P).unwrap(), Nv12);
+    }
+
+    #[test]
+    fn auto_advertises_all_three_chromas() {
+        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Auto);
+        let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
+            panic!("expected DerivedOutput");
+        };
+        let input =
+            Caps::CompressedVideo { codec: VideoCodec::H264, width: Dim::Fixed(16), height: Dim::Fixed(16), framerate: Rate::Fixed(30 << 16) };
+        let set = f(&input);
+        // I420, I422, I444 are all offered so a flexible downstream links; the
+        // decoder then fixes the concrete chroma per frame.
+        for fmt in [RawVideoFormat::I420, RawVideoFormat::I422, RawVideoFormat::I444] {
+            let one = CapsSet::one(Caps::RawVideo {
+                format: fmt,
+                width: Dim::Fixed(16),
+                height: Dim::Fixed(16),
+                framerate: Rate::Fixed(30 << 16),
+            });
+            assert!(!set.intersect(&one).is_empty(), "Auto advertises {fmt:?}");
+        }
+        assert!(accepts_output(OutputFormat::Auto, RawVideoFormat::I444));
+        assert!(!accepts_output(OutputFormat::Auto, RawVideoFormat::Rgba8));
+        assert!(accepts_output(OutputFormat::I420, RawVideoFormat::I420));
+        assert!(!accepts_output(OutputFormat::I420, RawVideoFormat::I444));
     }
 
     #[test]

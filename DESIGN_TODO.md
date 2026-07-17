@@ -693,12 +693,6 @@ Phased plan:
 - **AV1 encode** (`Av1Enc`): explicit quantizer rate control. (Target-bitrate
   rate control with hysteresis is done; 8/10/12-bit in 4:2:0 / 4:2:2 / 4:4:4
   all done.)
-- **`FfmpegVideoDec` auto chroma selection.** The decoder now preserves 4:2:2 /
-  4:4:4 when asked (`output-format=i422|i444`), but the caller must know and set
-  the source chroma. Auto-selecting it from the stream needs the decoded pixel
-  format at negotiation time, which Annex-B only exposes after the first frame
-  (or via an SPS `chroma_format_idc` parse); until then a caps-set output
-  (`{I420,I422,I444}`) fixated on the first `CapsChanged` is the likely shape.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
