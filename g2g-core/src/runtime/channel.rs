@@ -416,7 +416,9 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
 
 /// As [`link`], but with per-edge transit-time instrumentation enabled: the
 /// sender stamps each queued `DataFrame`, the receiver pops the stamp to measure
-/// queue residency. Used by the runner only when an observer is attached.
+/// queue residency. Used by the graph runner (std) when an observer is attached;
+/// gated on `std` so the no_std / runtime-only build doesn't flag it as unused.
+#[cfg(feature = "std")]
 pub(crate) fn link_with_transit(capacity: usize) -> (LinkSender, LinkReceiver) {
     build_link(capacity, Some(Arc::new(Mutex::new(VecDeque::new()))))
 }
