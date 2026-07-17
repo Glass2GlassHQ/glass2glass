@@ -61,8 +61,11 @@ Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.75, stable toolchain):
   comment. Types need `Debug` (`missing_debug_implementations = "warn"`).
 - **Commits:** keep messages terse, a subject line plus at most a one or two
   line body. No `Co-Authored-By` trailer, ever: do not add Claude / Opus / any
-  AI assistant as a co-author. Same for `CHANGELOG.md`, one terse line per
-  milestone.
+  AI assistant as a co-author.
+- **`CHANGELOG.md`: one terse line per milestone.** State what changed, not how
+  it works, why it was found, or what it now enables. One sentence, no
+  sub-clauses piling on internals. If the detail matters it goes in `DESIGN.md`,
+  not here. Match the length of the surrounding entries, never exceed it.
 
 ## Build & test (PowerShell)
 
@@ -90,7 +93,8 @@ under test. Every test needs an assertion that fails if the feature breaks.
 
 Work is tracked by milestone `Mn`. The high-level roadmap is the top of
 `DESIGN_TODO.md`; `DESIGN.md` §4.10 maps the architectural tracks to their spec
-sections. Record each milestone in `CHANGELOG.md` under `## Unreleased`.
+sections. Record each milestone in `CHANGELOG.md` under `## Unreleased`, one
+terse line (see the Conventions note above).
 Pre-release `0.2.0` (tagged, not published to crates.io). Stability tiers and the
 versioning policy live in `STABILITY.md`.
 
