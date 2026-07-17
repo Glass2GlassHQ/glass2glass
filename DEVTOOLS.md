@@ -253,9 +253,9 @@ dropped.
 While you wire, links are checked live. With the wasm solver built (below) the
 builder runs g2g's *real* caps negotiation client-side: each edge shows its
 negotiated caps, and a link that fails to negotiate is drawn red with the reason.
-Without the blob (the single-file artifact under a strict CSP), it falls back to
-a cheap family heuristic (raw video into an audio input, etc.); the footer says
-which is active. Neither blocks a link.
+Without the blob (a plain build, or the single-file artifact under a strict CSP),
+it falls back to a cheap family heuristic (raw video into an audio input, etc.);
+the footer says which is active. Neither blocks a link.
 
 Run it (needs Node + pnpm):
 
@@ -271,8 +271,10 @@ pnpm build && python3 -m http.server -d dist 8099   # open http://localhost:8099
 
 The solver is a small dedicated crate (`g2g-validate-wasm`, not the heavy
 `g2g-web`) wrapping `toolingjson::validate_json`; `build-wasm.sh` compiles it into
-`public/wasm/` (gitignored, built on demand). Regenerate it after changing the
-core solver, parser, or registry.
+`src/wasm/` (gitignored, built on demand), where Vite transforms it as a source
+module. It is loaded under `pnpm dev`; the static `pnpm build` bundle and the
+artifact use the heuristic. Regenerate it after changing the core solver, parser,
+or registry.
 
 A "dynamic" palette group adds `uridecodebin` (with a `uri` prop) and
 `decodebin`. These are parse-time autoplug macros, not registered elements, so

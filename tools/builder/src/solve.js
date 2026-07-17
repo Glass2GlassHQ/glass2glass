@@ -20,12 +20,12 @@ const LINK_FAILURE_REASON = {
 // Best-effort load + init of the wasm validator. Returns the `validate_pipeline`
 // function (launch string -> JSON string, async) or null on any failure. Never
 // throws, so a build without the blob silently falls back to the heuristic. The
-// pkg lives under public/wasm (served at the root in dev and copied into dist on
-// build); the import is @vite-ignore'd so a build without the generated pkg does
-// not fail (it is produced on demand by tools/builder/build-wasm.sh).
+// pkg lives under src/wasm (a source module Vite transforms, unlike a /public
+// file which cannot be imported); the import is @vite-ignore'd so a build without
+// the generated pkg does not fail (it is produced on demand by build-wasm.sh).
 export async function loadSolver() {
   try {
-    const url = `${import.meta.env.BASE_URL}wasm/g2g_validate.js`;
+    const url = new URL("./wasm/g2g_validate.js", import.meta.url).href;
     const mod = await import(/* @vite-ignore */ url);
     await mod.default();
     return mod.validate_pipeline;
