@@ -20,6 +20,10 @@
 //! One composited output frame is emitted per input-0 frame, overlaying the
 //! latest frame cached from every other input. Each overlay updates
 //! independently as new frames land, so a live overlay animates at its own rate.
+//! To emit at a different constant output rate, put a `VideoRate` downstream
+//! (`compositor ! videorate`); the compositor stamps each output frame with
+//! input 0's PTS, so videorate resamples the cadence without any compositor-side
+//! frame-rate conversion.
 //!
 //! **Startup:** inputs start asynchronously and an overlay branch (camera warm-up,
 //! extra transforms) can lag the background, in the extreme starting only after a
@@ -151,8 +155,11 @@ impl Compositor {
         }
     }
 
-    /// Set the output framerate in nominal fps (stored Q16). The output cadence
-    /// still follows input 0's frames; this only labels the output caps.
+    /// Set the output framerate in nominal fps (stored Q16). This labels the
+    /// output caps; the emit cadence follows input 0's frames. To resample the
+    /// output to a different constant rate, put a `VideoRate` downstream
+    /// (`compositor ! videorate`), which repeats / drops to the target rate off
+    /// the per-frame PTS the compositor stamps.
     pub fn with_framerate(mut self, fps: u32) -> Self {
         self.framerate_q16 = fps << 16;
         self

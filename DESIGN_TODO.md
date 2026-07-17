@@ -794,7 +794,10 @@ _(No open parser items.)_
 ## Compositor
 
 - A wgpu compute variant for HD / many-input scale.
-- Configurable output cadence.
+- Timer-driven output (emit at the output rate even when inputs stall, a
+  zero-order-hold aggregator tick). Needs the runner to deadline-tick the
+  compositor without an input packet; constant-rate resampling of a flowing
+  output is already covered by a downstream `videorate`.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
