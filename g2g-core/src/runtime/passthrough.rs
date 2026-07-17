@@ -9,8 +9,11 @@
 
 use crate::caps::{
     intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields, Rate, RawVideoFormat,
-    VideoCodec, ANY_SAMPLE_RATE,
+    VideoCodec,
 };
+// Only the std-gated `project_passthrough` widens sample_rate back to ANY.
+#[cfg(feature = "std")]
+use crate::caps::ANY_SAMPLE_RATE;
 
 /// Narrow `input` by intersecting each *passthrough* field against the
 /// corresponding field of `pin` (the field-level backward coupling: e.g.
