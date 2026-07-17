@@ -707,8 +707,6 @@ Phased plan:
   real shaping + bidi, and automatic system-font discovery / fallback, all of
   which point at the `cosmic-text` upgrade; plus a `vello` GPU backend and the
   `clockoverlay` / `timeoverlay` siblings.
-- **`audiomixer`:** sample-rate + channel-layout reconciliation; PTS-based
-  alignment.
 - **`videotestsrc`:** a sinusoidal (vs square-wave) zone plate (needs `libm`).
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
