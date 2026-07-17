@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M687: `decodebin` auto-plugs `ffmpegdec` as `output-format=auto`, so a 4:2:2 / 4:4:4 source decodes to its native chroma when a downstream caps pins it (the launch path, not just the element API); the decoder's source pad template advertises I422 / I444.
+- M688: visual builder fixes: links to far nodes no longer clip (SVG sized to the canvas), ports connect from either drag direction, and edges attach at the true port center.
 - M687: `g2g-launch --observe-host <addr>` binds the dashboard to a chosen address (default `127.0.0.1`; `0.0.0.0` serves all interfaces, with a no-auth warning).
 - M686: `ffmpegdec output-format=auto` matches the source chroma automatically, resolving I420/I422/I444 per frame from the decoded pixel format.
 - M685: `ffmpegdec` preserves 4:2:2 / 4:4:4 chroma (`output-format=i422|i444`) instead of forcing 4:2:0; a decoded 4:4:4 stream is now byte-identical to ffmpeg's own decode.

@@ -27,7 +27,9 @@
   .pitem .r{float:right;color:var(--muted);font-size:10px}
   #canvas{flex:1;position:relative;overflow:hidden;background:
     radial-gradient(circle,#1b1f27 1px,transparent 1px);background-size:22px 22px}
-  #links{position:absolute;inset:0;pointer-events:none}
+  /* width/height:100% sizes the SVG user-space to the canvas; without it an
+     inline SVG keeps its 300x150 default viewport and clips links to far nodes. */
+  #links{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
   .node{position:absolute;width:150px;background:var(--panel);border:1.5px solid var(--edge);
     border-radius:6px;user-select:none;cursor:grab}
   .node.sel{box-shadow:0 0 0 2px var(--accent)}
@@ -172,17 +174,21 @@ function drawNode(node) {
   el.style.left = node.x + "px";
   el.style.top = node.y + "px";
   el.innerHTML = `<div class="title">${node.name}</div><div class="body"></div>`;
-  // input port (not for sources), output port (not for sinks)
+  // input port (not for sources), output port (not for sinks). A link can be
+  // dragged from either end; the edge is always normalized to out -> in, so it
+  // doesn't matter which port the user grabs first.
   if (node.role !== "source") {
     const p = document.createElement("div");
     p.className = "port in";
-    p.onmouseup = ev => { ev.stopPropagation(); finishLink(node); };
+    p.onmousedown = ev => { ev.stopPropagation(); startLink(node, "in"); };
+    p.onmouseup = ev => { ev.stopPropagation(); finishLink(node, "in"); };
     el.appendChild(p);
   }
   if (!isSink(node.doc)) {
     const p = document.createElement("div");
     p.className = "port out";
-    p.onmousedown = ev => { ev.stopPropagation(); startLink(node, ev); };
+    p.onmousedown = ev => { ev.stopPropagation(); startLink(node, "out"); };
+    p.onmouseup = ev => { ev.stopPropagation(); finishLink(node, "out"); };
     el.appendChild(p);
   }
   el.onmousedown = ev => startDrag(node, ev);
@@ -215,11 +221,16 @@ window.addEventListener("mousemove", ev => {
 });
 window.addEventListener("mouseup", () => { dragState = null; linking = null; drawLinks(); });
 
-function startLink(node, ev) { linking = { from: node }; }
-function finishLink(node) {
-  if (linking && linking.from !== node) {
-    if (!edges.some(e => e.from === linking.from.id && e.to === node.id)) {
-      edges.push({ from: linking.from.id, to: node.id });
+function startLink(node, side) { linking = { node, side }; }
+function finishLink(node, side) {
+  // Require two opposite ends on different nodes; normalize to out -> in so the
+  // drag direction doesn't matter (drag from a sink's input to a source's output
+  // and it still records source -> sink).
+  if (linking && linking.node !== node && linking.side !== side) {
+    const outNode = side === "out" ? node : linking.node;
+    const inNode = side === "in" ? node : linking.node;
+    if (!edges.some(e => e.from === outNode.id && e.to === inNode.id)) {
+      edges.push({ from: outNode.id, to: inNode.id });
     }
   }
   linking = null;
@@ -228,17 +239,21 @@ function finishLink(node) {
 }
 
 function portPos(node, side) {
-  return { x: node.x + (side === "out" ? 150 : 0), y: node.y + 20 };
+  // Port center from the node's actual box (height varies with the property
+  // summary), matching the CSS ports at top:50% and left/right:-7px.
+  const w = node.el ? node.el.offsetWidth : 150;
+  const h = node.el ? node.el.offsetHeight : 48;
+  return { x: node.x + (side === "out" ? w : 0), y: node.y + h / 2 };
 }
 function drawLinks(ev) {
   links.innerHTML = "";
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   edges.forEach(e => {
-    const a = portPos(byId[e.from], "out"), b = portPos(byId[e.to], "in");
-    addCurve(a, b);
+    const from = byId[e.from], to = byId[e.to];
+    if (from && to) addCurve(portPos(from, "out"), portPos(to, "in"));
   });
   if (linking && ev) {
-    const a = portPos(linking.from, "out");
+    const a = portPos(linking.node, linking.side);
     const r = canvas.getBoundingClientRect();
     addCurve(a, { x: ev.clientX - r.left, y: ev.clientY - r.top });
   }
