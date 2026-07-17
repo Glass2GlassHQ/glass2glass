@@ -308,6 +308,10 @@ pub struct FfmpegH264Dec {
     /// on a multi-GPU host may not be the intended GPU. Ignored by the other
     /// backends.
     vaapi_device: Option<String>,
+    /// Codec resolved at `configure_pipeline`; the libavcodec decoder is opened
+    /// lazily on the first access unit so its parameter sets can seed the decoder
+    /// as `extradata` (see [`Self::open_decoder`]).
+    codec_kind: Option<VideoCodec>,
 }
 
 /// Preferred name now that this element decodes more than H.264 (also H.265 /
@@ -352,6 +356,7 @@ impl FfmpegH264Dec {
             cuda_context: 0,
             requested_alloc: None,
             vaapi_device: None,
+            codec_kind: None,
         }
     }
 
@@ -583,111 +588,20 @@ impl FfmpegH264Dec {
         }
         self.drain_frames(decoded)
     }
-}
 
-impl PadTemplates for FfmpegH264Dec {
-    /// Static superset for auto-plug: any supported codec in (any geometry), raw
-    /// NV12 / I420 / I422 / I444 out. A constructed instance narrows the source
-    /// pad to its configured `OutputFormat` via `caps_constraint_as_transform`
-    /// (`Auto` keeps all chromas so negotiation picks the one a downstream pins);
-    /// the template lists every format the type can emit so the registry search
-    /// can route any of them, and every codec it can decode so `decodebin`
-    /// autoplugs it for H.265 / VP8 / VP9 / AV1 too, not just H.264.
-    fn pad_templates() -> Vec<PadTemplate> {
-        let any_geometry = |format| Caps::RawVideo {
-            format,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
-        let any_codec = |codec| Caps::CompressedVideo {
-            codec,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
-        Vec::from([
-            PadTemplate::sink(CapsSet::from_alternatives(
-                SUPPORTED_CODECS.into_iter().map(any_codec).collect(),
-            )),
-            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
-                any_geometry(RawVideoFormat::Nv12),
-                any_geometry(RawVideoFormat::I420),
-                // 4:2:2 / 4:4:4 chroma preserved (software backend, M685); listed
-                // so a downstream that pins one auto-plugs, and `Auto` narrows to
-                // it during negotiation.
-                any_geometry(RawVideoFormat::I422),
-                any_geometry(RawVideoFormat::I444),
-            ]))),
-        ])
-    }
-}
-
-impl AsyncElement for FfmpegH264Dec {
-    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-
-    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        for codec in SUPPORTED_CODECS {
-            let candidate = Caps::CompressedVideo {
-                codec,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            };
-            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
-                return Ok(narrowed);
-            }
-        }
-        Err(G2gError::CapsMismatch)
-    }
-
-    /// M16 step 5k: native `DerivedOutput` — accepts H.264 with any
-    /// geometry and produces NV12 or I420 (chosen at construction) at
-    /// the same dims and framerate. The closure validates the input
-    /// format and returns an empty set on mismatch, so the solver
-    /// rejects non-H.264 upstream at negotiation time instead of via
-    /// the dynamic `intercept_caps` callback. Mixed chains containing
-    /// this decoder now get real per-link caps from the solver: H.264
-    /// to the decoder, NV12/I420 to the sink. Coupled with 5j (NV12
-    /// sinks tolerate mid-stream dim changes), the production
-    /// `rtsp → ffmpegdec → wayland/kms` chain switches from the
-    /// legacy single-fixated cascade to the per-link path without
-    /// regression.
-    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let out_fmt = self.output_format;
-        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
-            derive_output_caps(input, out_fmt)
-        }))
-    }
-
-    /// M12 / C3 step 3: record the downstream consumer's allocation proposal.
-    /// A `MemoryDomainKind::Cuda` request (from `CudaGlSink`) is honoured by
-    /// construction on the `NvdecCuda` backend, which already emits
-    /// device-resident frames; the other backends emit system memory, so a
-    /// Cuda request there is simply unsatisfiable and stays recorded for
-    /// diagnostics rather than silently changing the output domain.
-    fn configure_allocation(&mut self, params: &AllocationParams) {
-        self.requested_alloc = Some(*params);
-    }
-
-    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let codec_kind = match absolute_caps {
-            Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => *codec,
-            _ => return Err(G2gError::CapsMismatch),
-        };
-
-        // ffmpeg::init() registers codecs once per process; calling it
-        // repeatedly is safe and cheap.
-        ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-
-        // NvdecCuda needs NV12 out (the device frame's native layout); reject
-        // an I420 request loud rather than silently emit mismatched caps.
-        if self.backend == Backend::NvdecCuda && self.output_format != OutputFormat::Nv12 {
-            return Err(G2gError::CapsMismatch);
-        }
-
+    /// Open the libavcodec decoder, optionally seeding it with `extradata`
+    /// (Annex-B parameter sets from the first access unit). libavcodec parses
+    /// extradata at open and derives the reorder depth (`has_b_frames`) from the
+    /// SPS, so the decoder buffers the opening GOP's leading pictures instead of
+    /// emitting the first IDR early and discarding them. Called lazily on the
+    /// first frame, since g2g carries parameter sets in-band (Annex-B, not a
+    /// codec_data side channel), the way ffmpeg / gstreamer seed their decoders.
+    fn open_decoder(
+        &mut self,
+        codec_kind: VideoCodec,
+        extradata: Option<&[u8]>,
+        reorder_frames: Option<u8>,
+    ) -> Result<(), G2gError> {
         let codec = match self.backend {
             // The generic decoder hosts the CUDA / VAAPI hwaccel; NvdecCuda and
             // Vaapi attach a device + get_format hook to it below.
@@ -711,6 +625,40 @@ impl AsyncElement for FfmpegH264Dec {
             // depth dominates p50); set explicitly here so the policy is
             // visible alongside the surface count.
             decoder_ctx.set_flags(Flags::LOW_DELAY);
+        }
+        // Seed the decoder with the stream's parameter sets before open, so it
+        // derives the reorder depth from the SPS up front (see this method's
+        // doc). libavcodec owns the buffer (frees it on close) and requires the
+        // `AV_INPUT_BUFFER_PADDING_SIZE` trailing zero bytes.
+        if let Some(extradata) = extradata {
+            // SAFETY: `decoder_ctx` is freshly allocated and not yet opened.
+            // `av_mallocz` returns a zeroed buffer (so the required trailing
+            // padding is already zero); we copy `extradata` into it and hand
+            // ownership to the context via its raw `extradata`/`extradata_size`
+            // fields, the canonical way to set decoder extradata.
+            unsafe {
+                let size = extradata.len();
+                let total = size + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+                let buf = ffmpeg::ffi::av_mallocz(total) as *mut u8;
+                if buf.is_null() {
+                    return Err(G2gError::Hardware(HardwareError::Other));
+                }
+                core::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, size);
+                let raw = decoder_ctx.as_mut_ptr();
+                (*raw).extradata = buf;
+                (*raw).extradata_size = size as i32;
+            }
+        }
+        // Tell the decoder its output-reorder depth up front (from the SPS), so it
+        // buffers the opening GOP's leading pictures instead of emitting the first
+        // IDR early and dropping them. Skipped on the low-delay path, which
+        // deliberately releases each picture as soon as decoded.
+        if let (false, Some(n)) = (self.low_delay, reorder_frames) {
+            // SAFETY: `decoder_ctx` is freshly allocated and not yet opened;
+            // `has_b_frames` is a plain int field read by the decoder at open.
+            unsafe {
+                (*decoder_ctx.as_mut_ptr()).has_b_frames = n as i32;
+            }
         }
         // cuvid's tunables live as AVOptions on the codec's private data,
         // applied at `avcodec_open2` via an `AVDictionary`. The `surfaces`
@@ -830,6 +778,117 @@ impl AsyncElement for FfmpegH264Dec {
             .video()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.decoder = Some(decoder);
+        Ok(())
+    }
+}
+
+impl PadTemplates for FfmpegH264Dec {
+    /// Static superset for auto-plug: any supported codec in (any geometry), raw
+    /// NV12 / I420 / I422 / I444 out. A constructed instance narrows the source
+    /// pad to its configured `OutputFormat` via `caps_constraint_as_transform`
+    /// (`Auto` keeps all chromas so negotiation picks the one a downstream pins);
+    /// the template lists every format the type can emit so the registry search
+    /// can route any of them, and every codec it can decode so `decodebin`
+    /// autoplugs it for H.265 / VP8 / VP9 / AV1 too, not just H.264.
+    fn pad_templates() -> Vec<PadTemplate> {
+        let any_geometry = |format| Caps::RawVideo {
+            format,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let any_codec = |codec| Caps::CompressedVideo {
+            codec,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        Vec::from([
+            PadTemplate::sink(CapsSet::from_alternatives(
+                SUPPORTED_CODECS.into_iter().map(any_codec).collect(),
+            )),
+            PadTemplate::source(CapsSet::from_alternatives(Vec::from([
+                any_geometry(RawVideoFormat::Nv12),
+                any_geometry(RawVideoFormat::I420),
+                // 4:2:2 / 4:4:4 chroma preserved (software backend, M685); listed
+                // so a downstream that pins one auto-plugs, and `Auto` narrows to
+                // it during negotiation.
+                any_geometry(RawVideoFormat::I422),
+                any_geometry(RawVideoFormat::I444),
+            ]))),
+        ])
+    }
+}
+
+impl AsyncElement for FfmpegH264Dec {
+    type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        for codec in SUPPORTED_CODECS {
+            let candidate = Caps::CompressedVideo {
+                codec,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            };
+            if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
+                return Ok(narrowed);
+            }
+        }
+        Err(G2gError::CapsMismatch)
+    }
+
+    /// M16 step 5k: native `DerivedOutput` — accepts H.264 with any
+    /// geometry and produces NV12 or I420 (chosen at construction) at
+    /// the same dims and framerate. The closure validates the input
+    /// format and returns an empty set on mismatch, so the solver
+    /// rejects non-H.264 upstream at negotiation time instead of via
+    /// the dynamic `intercept_caps` callback. Mixed chains containing
+    /// this decoder now get real per-link caps from the solver: H.264
+    /// to the decoder, NV12/I420 to the sink. Coupled with 5j (NV12
+    /// sinks tolerate mid-stream dim changes), the production
+    /// `rtsp → ffmpegdec → wayland/kms` chain switches from the
+    /// legacy single-fixated cascade to the per-link path without
+    /// regression.
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        let out_fmt = self.output_format;
+        CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| {
+            derive_output_caps(input, out_fmt)
+        }))
+    }
+
+    /// M12 / C3 step 3: record the downstream consumer's allocation proposal.
+    /// A `MemoryDomainKind::Cuda` request (from `CudaGlSink`) is honoured by
+    /// construction on the `NvdecCuda` backend, which already emits
+    /// device-resident frames; the other backends emit system memory, so a
+    /// Cuda request there is simply unsatisfiable and stays recorded for
+    /// diagnostics rather than silently changing the output domain.
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        self.requested_alloc = Some(*params);
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let codec_kind = match absolute_caps {
+            Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => *codec,
+            _ => return Err(G2gError::CapsMismatch),
+        };
+
+        // ffmpeg::init() registers codecs once per process; calling it
+        // repeatedly is safe and cheap.
+        ffmpeg::init().map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+
+        // NvdecCuda needs NV12 out (the device frame's native layout); reject
+        // an I420 request loud rather than silently emit mismatched caps.
+        if self.backend == Backend::NvdecCuda && self.output_format != OutputFormat::Nv12 {
+            return Err(G2gError::CapsMismatch);
+        }
+
+        // Defer the libavcodec open to the first access unit (see `open_decoder`),
+        // so the stream's parameter sets can seed the decoder as `extradata` and
+        // it learns the reorder depth before emitting its first picture.
+        self.codec_kind = Some(codec_kind);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -907,6 +966,20 @@ impl AsyncElement for FfmpegH264Dec {
                     let MemoryDomain::System(slice) = &frame.domain else {
                         return Err(G2gError::UnsupportedDomain);
                     };
+                    // Open the decoder on the first access unit, seeding it with
+                    // the unit's parameter sets (extradata) and its output-reorder
+                    // depth so libavcodec keeps the opening GOP's leading pictures
+                    // instead of dropping them (see `open_decoder`).
+                    if self.decoder.is_none() {
+                        let codec_kind = self.codec_kind.ok_or(G2gError::NotConfigured)?;
+                        let au = slice.as_slice();
+                        let extradata = annexb_extradata(codec_kind, au);
+                        let reorder = match codec_kind {
+                            VideoCodec::H264 => crate::h264parse::sps_reorder_frames(au),
+                            _ => None,
+                        };
+                        self.open_decoder(codec_kind, extradata.as_deref(), reorder)?;
+                    }
                     self.feed_access_unit(
                         slice.as_slice(),
                         frame.timing.pts_ns,
@@ -1064,6 +1137,25 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).
+/// Build libavcodec `extradata` from an access unit's Annex-B parameter sets
+/// (H.264 SPS+PPS, H.265 VPS+SPS+PPS), each prefixed with a 4-byte start code so
+/// libavcodec parses them at open. `None` for codecs with no in-band parameter
+/// sets (VP8/VP9/AV1) or a unit missing a complete set: the decoder then opens
+/// without extradata (the prior behavior).
+fn annexb_extradata(codec: VideoCodec, au: &[u8]) -> Option<Vec<u8>> {
+    if !matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
+        return None;
+    }
+    let nalus = crate::annexb::split_annexb(au);
+    let sets = crate::annexb::parameter_sets(codec, &nalus).ok()?;
+    let mut out = Vec::new();
+    for ns in sets {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(ns);
+    }
+    Some(out)
+}
+
 fn codec_id(codec: VideoCodec) -> Id {
     match codec {
         VideoCodec::H264 => Id::H264,

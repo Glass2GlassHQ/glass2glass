@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M700: `ffmpegdec` seeds libavcodec with the stream's parameter sets and SPS-derived reorder depth at open, so a stream that reorders around its first IDR no longer loses the opening GOP's leading pictures.
 - M699: the visual builder validates links with g2g's real caps solver compiled to wasm (`g2g-validate-wasm`), showing negotiated caps and flagging failing links, falling back to the family heuristic when the blob is absent.
 - M698: `g2g-launch --help` lists the rest of the dev tooling (live dashboard, DOT, inspect, visual builder, record/replay) so it is discoverable from the tool devs reach for first.
 - M697: visual builder imports a gst-launch line or declarative JSON onto the canvas, warns on incompatible link caps, and emits a branched export that actually parses.
