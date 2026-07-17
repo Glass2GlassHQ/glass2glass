@@ -12,10 +12,14 @@
 //! upstream produces) rather than the video parsers' `Identity(any geometry)`.
 //! The AAC-only guard lives in `intercept_caps`.
 //!
-//! Scope is ADTS, the common elementary-stream framing. LATM / LOAS (the
-//! MPEG-TS / broadcast framing) is deferred. The ADTS header is plain bit
-//! fields: no exp-Golomb, no emulation prevention, so this needs none of the
-//! `annexb` machinery the H.264 / H.265 parsers share.
+//! Both AAC framings are handled: ADTS (the common elementary-stream sync) and
+//! LOAS/LATM (the MPEG-TS / broadcast `AudioSyncStream`), whose `StreamMuxConfig`
+//! embeds an `AudioSpecificConfig` the parser reads for the channel count and
+//! rate. The LATM path handles the common `audioMuxVersion == 0` layout and
+//! bails safely (caps unrefined, never wrong) on the rare version-1 / config-reuse
+//! variants. Neither framing needs exp-Golomb or emulation prevention, so this
+//! shares none of the `annexb` machinery the H.264 / H.265 parsers use (just a
+//! small local MSB-first bit reader for the LATM fields).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -149,7 +153,7 @@ impl AsyncElement for AacParse {
         ElementMetadata::new(
             "AAC parser",
             "Codec/Parser/Audio",
-            "Parses an AAC ADTS stream and refines caps",
+            "Parses an AAC ADTS or LOAS/LATM stream and refines caps",
             "g2g",
         )
     }
@@ -166,7 +170,7 @@ impl AsyncElement for AacParse {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some(info) = parse_adts(slice.as_slice()) {
+                        if let Some(info) = parse_aac(slice.as_slice()) {
                             let new_caps = Caps::Audio {
                                 format: AudioFormat::Aac,
                                 channels: info.channels,
@@ -213,16 +217,23 @@ impl PadTemplates for AacParse {
     }
 }
 
-/// Channel count and sample rate recovered from an ADTS header.
-struct AdtsInfo {
+/// Channel count and sample rate recovered from an AAC bitstream header (ADTS or
+/// LOAS/LATM).
+struct AacInfo {
     channels: u8,
     sample_rate: u32,
+}
+
+/// Recover the channel count and sample rate from either AAC framing: ADTS (the
+/// elementary-stream sync) first, then LOAS/LATM (the MPEG-TS / broadcast sync).
+fn parse_aac(au: &[u8]) -> Option<AacInfo> {
+    parse_adts(au).or_else(|| parse_loas(au))
 }
 
 /// Scan `au` for the first valid ADTS header and decode its channel count and
 /// sample rate. `None` if no header parses (no syncword, reserved sampling
 /// index, or a channel configuration that doesn't pin a channel count).
-fn parse_adts(au: &[u8]) -> Option<AdtsInfo> {
+fn parse_adts(au: &[u8]) -> Option<AacInfo> {
     // The fixed header is 7 bytes; we read fields up to byte 3.
     let last = au.len().checked_sub(7)?;
     for i in 0..=last {
@@ -243,9 +254,101 @@ fn parse_adts(au: &[u8]) -> Option<AdtsInfo> {
             7 => 8,                  // 7.1
             _ => continue,           // 0 = carried in the AOT config, not ADTS
         };
-        return Some(AdtsInfo { channels, sample_rate });
+        return Some(AacInfo { channels, sample_rate });
     }
     None
+}
+
+/// A minimal MSB-first bit reader over a byte slice, for the LATM fields (no
+/// exp-Golomb / emulation prevention, so the `annexb` reader is not needed).
+struct BitReader<'a> {
+    data: &'a [u8],
+    bit: usize,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, bit: 0 }
+    }
+
+    /// Read `n` bits (0..=24) as an unsigned value, MSB first. `None` past the end.
+    fn read(&mut self, n: u32) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = *self.data.get(self.bit >> 3)?;
+            let b = (byte >> (7 - (self.bit & 7))) & 1;
+            v = (v << 1) | b as u32;
+            self.bit += 1;
+        }
+        Some(v)
+    }
+}
+
+/// Scan `au` for the first LOAS `AudioSyncStream` frame (syncword 0x2B7, 11 bits)
+/// and recover the AAC channel count and sample rate from the LATM
+/// `StreamMuxConfig`'s embedded `AudioSpecificConfig`. `None` if no frame parses.
+fn parse_loas(au: &[u8]) -> Option<AacInfo> {
+    let last = au.len().checked_sub(3)?;
+    for i in 0..=last {
+        // Syncword 0x2B7 byte-aligned: byte0 = 0x56, top 3 bits of byte1 = 111.
+        if au[i] != 0x56 || (au[i + 1] & 0xE0) != 0xE0 {
+            continue;
+        }
+        // audioMuxLengthBytes: the 13 bits after the 11-bit syncword.
+        let mux_len = (((au[i + 1] & 0x1F) as usize) << 8) | au[i + 2] as usize;
+        let Some(payload) = au.get(i + 3..).and_then(|p| p.get(..mux_len)) else {
+            continue;
+        };
+        if let Some(info) = parse_audio_mux_element(payload) {
+            return Some(info);
+        }
+    }
+    None
+}
+
+/// Parse a LATM `AudioMuxElement` (muxConfigPresent = 1, the LOAS case) far
+/// enough to reach the `AudioSpecificConfig`. Handles the common
+/// `audioMuxVersion == 0` layout; the rarer version-1 (variable-length values)
+/// and stream-mux-config reuse yield `None` (caps stay unrefined, never wrong).
+fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
+    let mut r = BitReader::new(data);
+    if r.read(1)? == 1 {
+        return None; // useSameStreamMux: reuses a prior config we did not retain
+    }
+    // StreamMuxConfig
+    if r.read(1)? != 0 {
+        return None; // audioMuxVersion 1 (LatmGetValue lengths) not handled
+    }
+    r.read(1)?; // allStreamsSameTimeFraming
+    r.read(6)?; // numSubFrames
+    r.read(4)?; // numProgram (only program 0 is parsed)
+    r.read(3)?; // numLayer of program 0 (only layer 0 is parsed)
+    // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
+    parse_audio_specific_config(&mut r)
+}
+
+/// Read the leading fields of an `AudioSpecificConfig` (ISO/IEC 14496-3): the
+/// audio object type, sampling frequency (index or explicit), and channel
+/// configuration, enough to pin the channel count and sample rate.
+fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
+    let mut aot = r.read(5)?;
+    if aot == 31 {
+        aot = 32 + r.read(6)?; // escape value
+    }
+    let _ = aot; // the object type does not affect the channel count / rate
+    let sr_index = r.read(4)? as usize;
+    let sample_rate = if sr_index == 0x0F {
+        r.read(24)? // explicit 24-bit sampling frequency
+    } else {
+        *SAMPLE_RATES.get(sr_index)?
+    };
+    let channel_config = r.read(4)?;
+    let channels = match channel_config {
+        1..=6 => channel_config as u8,
+        7 => 8,
+        _ => return None, // 0 = further config; reserved otherwise
+    };
+    Some(AacInfo { channels, sample_rate })
 }
 
 #[cfg(test)]
@@ -312,6 +415,85 @@ mod tests {
     fn returns_none_on_non_adts() {
         assert!(parse_adts(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00]).is_none());
         assert!(parse_adts(&[]).is_none());
+    }
+
+    // -- LOAS / LATM (broadcast framing) -----------------------------------
+
+    /// Pack the LATM `AudioMuxElement` bits (audioMuxVersion 0) up to and
+    /// including the `AudioSpecificConfig` channel configuration.
+    fn latm_mux_element(aot: u32, sr_index: u32, channel_config: u32) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        let mut push = |val: u32, n: u32| {
+            for k in (0..n).rev() {
+                bits.push(((val >> k) & 1) as u8);
+            }
+        };
+        push(0, 1); // useSameStreamMux = 0
+        push(0, 1); // audioMuxVersion = 0
+        push(1, 1); // allStreamsSameTimeFraming
+        push(0, 6); // numSubFrames
+        push(0, 4); // numProgram (program 0 only)
+        push(0, 3); // numLayer (layer 0 only)
+        push(aot, 5); // AudioSpecificConfig: audio object type
+        push(sr_index, 4); // sampling frequency index
+        push(channel_config, 4); // channel configuration
+        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+        for (idx, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                bytes[idx / 8] |= 1 << (7 - (idx % 8));
+            }
+        }
+        bytes
+    }
+
+    /// Wrap a LATM `AudioMuxElement` payload in a LOAS `AudioSyncStream` frame
+    /// (11-bit syncword 0x2B7 + 13-bit length).
+    fn loas_frame(payload: &[u8]) -> Vec<u8> {
+        let mux_len = payload.len();
+        let mut f = vec![
+            0x56,
+            0xE0 | ((mux_len >> 8) as u8 & 0x1F),
+            (mux_len & 0xFF) as u8,
+        ];
+        f.extend_from_slice(payload);
+        f
+    }
+
+    #[test]
+    fn recovers_loas_latm_stereo_44100() {
+        // AAC-LC (AOT 2), sr index 4 (44100), channel config 2 (stereo).
+        let frame = loas_frame(&latm_mux_element(2, 4, 2));
+        let info = parse_aac(&frame).expect("LOAS/LATM must parse");
+        assert_eq!((info.channels, info.sample_rate), (2, 44_100));
+    }
+
+    #[test]
+    fn recovers_loas_latm_5_1() {
+        // channel config 6 = 5.1.
+        let info = parse_aac(&loas_frame(&latm_mux_element(2, 3, 6))).expect("LATM 5.1 parses");
+        assert_eq!((info.channels, info.sample_rate), (6, 48_000));
+    }
+
+    #[test]
+    fn loas_found_after_leading_bytes() {
+        let mut stream = vec![0x00, 0x11];
+        stream.extend_from_slice(&loas_frame(&latm_mux_element(2, 4, 1)));
+        let info = parse_aac(&stream).expect("LOAS after junk parses");
+        assert_eq!((info.channels, info.sample_rate), (1, 44_100));
+    }
+
+    #[test]
+    fn latm_audiomux_version_1_bails_safely() {
+        // Flip audioMuxVersion to 1: unsupported, so no (wrong) caps are produced.
+        let mut payload = latm_mux_element(2, 4, 2);
+        payload[0] |= 0b0100_0000; // set bit 1 (audioMuxVersion) after useSameStreamMux
+        assert!(parse_audio_mux_element(&payload).is_none());
+    }
+
+    #[test]
+    fn parse_aac_accepts_both_framings() {
+        assert_eq!(parse_aac(&adts_frame(2, 4, 16)).map(|i| i.channels), Some(2));
+        assert_eq!(parse_aac(&loas_frame(&latm_mux_element(2, 4, 2))).map(|i| i.channels), Some(2));
     }
 
     // -- Element-level tests (drive AacParse::process directly) -------------
@@ -436,6 +618,23 @@ mod tests {
             .collect();
         assert_eq!(params, vec![(2, 44_100), (1, 48_000)]);
         assert_eq!(parse.caps_changes_emitted(), 2);
+    }
+
+    #[tokio::test]
+    async fn loas_latm_drives_caps_through_process() {
+        let mut parse = AacParse::new();
+        parse.configure_pipeline(&aac_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let frame = frame_with_bytes(0, loas_frame(&latm_mux_element(2, 3, 6)));
+        parse.process(PipelinePacket::DataFrame(frame), &mut sink).await.unwrap();
+
+        assert_eq!(sink.packets.len(), 2, "CapsChanged then the forwarded frame");
+        assert!(matches!(
+            sink.packets[0],
+            PipelinePacket::CapsChanged(Caps::Audio { channels: 6, sample_rate: 48_000, .. })
+        ));
+        assert!(matches!(sink.packets[1], PipelinePacket::DataFrame(_)));
     }
 
     #[tokio::test]

@@ -692,9 +692,7 @@ Phased plan:
 
 ## Parsers
 
-- `AacParse`: LATM / LOAS framing; AudioSpecificConfig synthesis; validate
-  against a real ADTS stream.
-- `OpusParse`: multichannel (family 1, count in `OpusHead`).
+_(No open parser items.)_
 
 ## Transforms and effects
 
