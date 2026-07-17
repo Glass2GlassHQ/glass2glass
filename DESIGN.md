@@ -2093,6 +2093,13 @@ each field, compiles and runs it, and emits the `const _: () = assert!(size_of::
 <Struct>() == N)` to paste alongside the `#[repr(C)]` transcription. Layout is
 locked down before it is trusted, and an SDK version bump that resizes a struct
 fails the build rather than the GPU. `bench` runs the criterion benchmarks.
+`new-element <name> --kind source|transform|sink` stamps the boilerplate every
+new element repeats: the `g2g-plugins` source file with the correct
+`AsyncElement` / `SourceLoop` skeleton for the kind (`intercept_caps` /
+`configure_pipeline` / `process` or `run`, with TODOs), a scaffold test, and the
+`pub mod` wiring inserted into `lib.rs` alongside the unconditional module block;
+it prints the `registry.rs` registration line to paste (the registration
+function is context-dependent). The generated element compiles as-is.
 
 The criterion benchmarks live in a standalone `g2g-bench` crate, excluded from
 the workspace (like `examples/g2g-size`) because criterion pulls plotters / rayon
@@ -2152,6 +2159,18 @@ broadcast channel drained off the `Bus`). The JSON is built in the transport, so
 observer rides the cooperative graph runner today; the threaded runner and the
 fan-in / fan-out / muxer runners are follow-ups, matching where `per_element` is
 already collected.
+
+`g2g-inspect --json [element]` (the `tooling-json` feature) emits the registry as
+JSON, the machine-readable sibling of the text dump: per element the identity,
+role, output caps or pad templates, and each property's machine type, range,
+default, and read/write flags, from the same `ElementDoc` / `PropertyDoc`
+introspection the text path uses. Like the dashboard it is serialized in
+`g2g-plugins` (serde_json), not `g2g-core`. It feeds two consumers: the visual
+pipeline builder (`tools/builder/`), a self-contained page that loads a
+`registry.json` snapshot, offers a typed drag-drop canvas, and live-exports a
+`gst-launch` line (the `!` form for linear chains, the `name=` form for branched
+graphs) and declarative JSON (`declarative.rs` schema), both of which load back
+into g2g; and, later, the MCP server.
 
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 

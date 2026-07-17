@@ -99,10 +99,14 @@ Pre-release `0.2.0` (tagged, not published to crates.io). Stability tiers and th
 versioning policy live in `STABILITY.md`.
 
 `DESIGN_TODO.md` is a terse catalogue of outstanding tasks only: no comparison
-to GStreamer, no list of historical accomplishments. When a task is done, remove
-it from `DESIGN_TODO.md` (do not leave "DONE" notes); if it established
-architecture worth keeping, document that in `DESIGN.md` instead. `DESIGN.md`
-describes only the current design.
+to GStreamer, no list of historical accomplishments. It must never mention a done
+item, not even to note it as done or partially done: when a task (or part of one)
+is finished, delete that text from `DESIGN_TODO.md` and leave only what is still
+outstanding, phrased as a plain future task with no reference to what already
+landed. Done work appears only in `DESIGN.md` (the current design) and
+`CHANGELOG.md` (the milestone line), never in `DESIGN_TODO.md`. If finishing a
+task established architecture worth keeping, document that in `DESIGN.md`.
+`DESIGN.md` describes only the current design.
 
 ## Platform notes
 

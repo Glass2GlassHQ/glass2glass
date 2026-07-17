@@ -24,6 +24,7 @@ cargo xtask <command>
 | `wasm` | Builds the wasm32 targets (core `runtime`, plugins `web` / `web-codecs`). |
 | `bench` | Runs the criterion benchmarks (see below). Extra args pass through, e.g. `cargo xtask bench -- --save-baseline main`. |
 | `ffi-probe` | Generates a C `sizeof`/`offsetof` probe for an SDK struct and emits the `repr(C)` size assert (see below). |
+| `new-element <name> --kind source\|transform\|sink` | Stamps a new `g2g-plugins` element: the source file with the right `AsyncElement`/`SourceLoop` skeleton, a scaffold test, and the `pub mod` wiring in `lib.rs`; prints the `registry.rs` line to paste. The generated element compiles as-is; fill in the TODOs. |
 
 The cross-compiling commands (`size`, `wasm`) prepend `~/.cargo/bin` to `PATH` so
 cargo uses the rustup toolchain rather than a distro `rustc` that lacks the target

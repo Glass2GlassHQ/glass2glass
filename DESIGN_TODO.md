@@ -1012,49 +1012,29 @@ _(No open parser items.)_
 
 ## Developer tooling
 
-The `xtask` crate (`cargo xtask ci | test --here | size | wasm | bench |
-ffi-probe`), the DOT visualizer (with negotiated caps + per-edge memory domains
-via `negotiate_graph`), the caps explainer, and the criterion benches now exist;
-the remaining items extend them. Sequencing: the telemetry tap comes first (the
-dashboard, edge probes, negotiation overlay, and latency waterfall all consume
-it); the builder and the scaffold are independent.
+Outstanding developer-tooling tasks, highest leverage first.
 
-- **Telemetry tap + live pipeline dashboard (M677, core done).** The
-  `Observer` (`g2g-core/src/runtime/observe.rs`) shares graph topology + the
-  arms' `ElementProbe` `Arc`s live; `run_graph_observed` registers them; the
-  transport (`g2g-plugins::dashboard`, `observe` feature) serves telemetry +
-  bus events as JSON over one WS/HTTP port; `g2g-launch --observe <port>` runs
-  it with the self-contained page in `tools/dashboard/`. Deviations from the
-  sketch above: no serde in `g2g-core` (JSON built in the transport, keeping
-  the portability core clean); vanilla JS/SVG page, not React Flow (zero build
-  step, JSON protocol so React Flow is a drop-in swap). Remaining:
-  - Per-edge packet / byte counters + drops in the live tap (drops surface
-    only in end-of-run `RunStats` today).
-  - The M399 per-element remainder, now also feeding the tap: fan-in / fan-out /
-    session / muxer runners (leave `per_element` empty); per-*link* transit /
-    queue-residency time (a wall-clock stamp carried with each packet, sampled
-    at recv); source-side timing (their cost only shows as downstream input
-    fill); wiring the observer into the threaded runner (`--observe` is
-    cooperative-runner only).
-  - Validate live against RTSP (unit + e2e cover the localhost path today).
-- **Visual pipeline builder (M678, done).** `g2g-inspect --json [element]`
-  (`tooling-json` feature) dumps the registry (identity, role, pad caps, typed
-  properties); `tools/builder/index.html` (self-contained vanilla JS, checked-in
-  `registry.json`) is a drag-drop canvas with typed property panels that
-  live-exports a `gst-launch` line + declarative JSON, both verified to load
-  back into g2g. Remaining:
+- **Per-element / per-link telemetry gaps.** Extend the `Observer` tap
+  (`g2g-core/src/runtime/observe.rs`) and the M399 `ElementProbe` coverage:
+  - Per-edge packet / byte counters + drops in the live tap (drops surface only
+    in end-of-run `RunStats`).
+  - The fan-in / fan-out / session / muxer runners leave `per_element` empty:
+    wire probes into them.
+  - Per-*link* transit / queue-residency time: a wall-clock stamp carried with
+    each packet, sampled at recv (the element-side `process()` timing does not
+    capture queue wait).
+  - Source-side timing: a source runs one long `run()` loop, so its cost only
+    shows as its downstream's input fill.
+  - Wire the `Observer` into the threaded runner (`run_graph_threaded` passes
+    `None`, so `--observe` is cooperative-runner only).
+  - Validate the dashboard live against an RTSP source.
+- **Visual builder follow-ups.** For `tools/builder/`:
   - Import a `gst-launch` line into the canvas (needs a server-side parse or a
-    JS parser; export both ways works, import does not yet).
-  - Link-validity feedback from caps intersect (the solver) while wiring;
-    today any port pair links and validity surfaces only on load / run.
-  - Optional React Flow frontend and YAML export (JSON export covers the graph
-    model; the schema is shared).
-- **Element scaffolding.** `xtask new-element <name> --kind
-  source|transform|sink` stamps the `AsyncElement` / `SourceLoop` impl
-  (`intercept_caps` / `configure_pipeline` / `process` stubs), `properties()`
-  skeleton, pad templates, registry entry, `lib.rs` wiring, and the milestone
-  test file (the boilerplate every `Mn` repeats). Templates are `include_str!`
-  in `xtask`, no new deps.
+    JS launch-line parser).
+  - Link-validity feedback from the caps solver while wiring (today any port
+    pair links; a bad pair only fails on load / run).
+  - Optional React Flow frontend + YAML export (the JSON export already covers
+    the graph model; the schema is shared).
 - **Edge probes with content preview.** Tap any edge from the dashboard and
   see what flows: video as a downscaled RGB thumbnail, audio as min/max
   waveform buckets, anything else as a bounded hexdump. Subscribe /

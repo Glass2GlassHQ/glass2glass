@@ -42,6 +42,7 @@ fn main() {
         "wasm" => cmd_wasm(),
         "bench" => cmd_bench(rest),
         "ffi-probe" => cmd_ffi_probe(rest),
+        "new-element" => cmd_new_element(rest),
         "help" | "-h" | "--help" => {
             print_help();
             0
@@ -67,6 +68,7 @@ fn print_help() {
            wasm           build the wasm32 targets (core + web plugins)\n  \
            bench [args]   run the criterion benchmarks (caps solve, frame convert)\n  \
            ffi-probe      sizeof/offsetof a C SDK struct, emit the repr(C) size assert\n  \
+           new-element    stamp a new element (--kind source|transform|sink) + test + lib wiring\n  \
            help           show this message\n\n\
          ffi-probe usage:\n  \
            cargo xtask ffi-probe --header <h> --struct <S> [--field <f>]... [-I <dir>]... [--cc <cc>]\n  \
@@ -775,6 +777,351 @@ fn rustup_path_env() -> Vec<(String, String)> {
     }
 }
 
+// --- new-element --------------------------------------------------------
+
+/// Stamp a new `g2g-plugins` element: the source file with the right trait impl
+/// for its kind, a scaffold test, and the `pub mod` wiring in `lib.rs`. Prints
+/// the registry registration line to paste (the registration function / import
+/// is context-dependent, so it is not auto-edited).
+///
+/// Usage: `cargo xtask new-element <name> [--kind source|transform|sink]`.
+fn cmd_new_element(rest: &[String]) -> i32 {
+    let mut name = String::new();
+    let mut kind = String::from("transform");
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--kind" => match it.next() {
+                Some(k) => kind = k.clone(),
+                None => return arg_err("--kind needs a value"),
+            },
+            other if other.starts_with('-') => {
+                eprintln!("xtask new-element: ignoring unknown argument '{other}'");
+            }
+            other => name = other.to_string(),
+        }
+    }
+    if name.is_empty() {
+        return arg_err("usage: cargo xtask new-element <name> [--kind source|transform|sink]");
+    }
+    if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+        return arg_err("element name must be lowercase [a-z0-9_] (it becomes a module name)");
+    }
+    let template = match kind.as_str() {
+        "source" => SOURCE_TEMPLATE,
+        "transform" => TRANSFORM_TEMPLATE,
+        "sink" => SINK_TEMPLATE,
+        other => return arg_err(&format!("--kind must be source|transform|sink, got '{other}'")),
+    };
+    let type_name = pascal_case(&name);
+
+    let src_path = format!("g2g-plugins/src/{name}.rs");
+    let test_path = format!("g2g-plugins/tests/{name}_element.rs");
+    if std::path::Path::new(&src_path).exists() {
+        eprintln!("xtask new-element: {src_path} already exists; refusing to overwrite");
+        return 1;
+    }
+
+    let fill = |t: &str| t.replace("__NAME__", &name).replace("__TYPE__", &type_name);
+    if let Err(e) = std::fs::write(&src_path, fill(template)) {
+        eprintln!("xtask new-element: cannot write {src_path}: {e}");
+        return 1;
+    }
+    if let Err(e) = std::fs::write(&test_path, fill(TEST_TEMPLATE)) {
+        eprintln!("xtask new-element: cannot write {test_path}: {e}");
+        return 1;
+    }
+    match wire_lib_mod(&name) {
+        Ok(()) => {}
+        Err(e) => eprintln!("xtask new-element: could not auto-wire lib.rs ({e}); add `pub mod {name};` yourself"),
+    }
+
+    let reg_line = if kind == "source" {
+        format!(
+            "reg.register_source(SourceFactory::new(\"{name}\", <output caps>, || Box::new({type_name}::new())));"
+        )
+    } else {
+        format!(
+            "reg.register(ElementFactory::of::<{type_name}>(\"{name}\", |_| Box::new({type_name}::new())));"
+        )
+    };
+    println!("created {src_path}");
+    println!("created {test_path}");
+    println!("wired  g2g-plugins/src/lib.rs  (pub mod {name};)");
+    println!("\nnext: register it in g2g-plugins/src/registry.rs:");
+    println!("  use crate::{name}::{type_name};");
+    println!("  {reg_line}");
+    println!("\nthen: cargo check -p g2g-plugins  &&  fill in the TODOs.");
+    0
+}
+
+/// `my_filter` -> `MyFilter`.
+fn pascal_case(name: &str) -> String {
+    name.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut c = s.chars();
+            match c.next() {
+                Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Insert `pub mod <name>;` after the last unconditional `pub mod X;` line in
+/// `lib.rs`, keeping the module declarations together.
+fn wire_lib_mod(name: &str) -> Result<(), String> {
+    let path = "g2g-plugins/src/lib.rs";
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    match insert_mod_decl(&text, name)? {
+        Some(updated) => std::fs::write(path, updated).map_err(|e| e.to_string()),
+        None => Ok(()), // already wired
+    }
+}
+
+/// Pure core of [`wire_lib_mod`]: return the file text with `pub mod <name>;`
+/// inserted after the last unconditional `pub mod X;`, `None` if already
+/// present, or an error if there is no anchor. Kept separate so it is testable
+/// without touching the filesystem.
+fn insert_mod_decl(text: &str, name: &str) -> Result<Option<String>, String> {
+    let decl = format!("pub mod {name};");
+    if text.lines().any(|l| l.trim() == decl) {
+        return Ok(None);
+    }
+    // An anchor is an unconditional `pub mod X;` (no inline module body, and not
+    // preceded by a `#[cfg(...)]` attribute), so the new decl joins the main
+    // module block rather than landing among the feature-gated ones.
+    let lines: Vec<&str> = text.lines().collect();
+    let is_plain_mod = |i: usize| {
+        let l = lines[i].trim();
+        let gated = i > 0 && lines[i - 1].trim_start().starts_with("#[cfg");
+        l.starts_with("pub mod ") && l.ends_with(';') && !l.contains('{') && !gated
+    };
+    let last = (0..lines.len())
+        .rev()
+        .find(|&i| is_plain_mod(i))
+        .ok_or_else(|| String::from("no `pub mod` anchor found"))?;
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    out.insert(last + 1, decl);
+    let joined = out.join("\n") + if text.ends_with('\n') { "\n" } else { "" };
+    Ok(Some(joined))
+}
+
+const TRANSFORM_TEMPLATE: &str = r#"//! __NAME__: TODO describe what this transform does.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
+};
+
+#[derive(Debug, Default)]
+pub struct __TYPE__ {
+    configured: bool,
+}
+
+impl __TYPE__ {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl AsyncElement for __TYPE__ {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // TODO: transform the caps this element emits (default: pass through).
+        Ok(upstream_caps.clone())
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        // TODO: replace with `Accepts(set)` once the accepted caps are decided.
+        CapsConstraint::IdentityAny
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(f) => {
+                    // TODO: process the frame before forwarding it.
+                    out.push(PipelinePacket::DataFrame(f)).await?;
+                }
+                // The runner forwards Eos after process(Eos) returns.
+                PipelinePacket::Eos => {}
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+"#;
+
+const SINK_TEMPLATE: &str = r#"//! __NAME__: TODO describe what this sink does.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+
+use g2g_core::{
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, G2gError, OutputSink, PipelinePacket,
+};
+
+#[derive(Debug, Default)]
+pub struct __TYPE__ {
+    configured: bool,
+    consumed: u64,
+}
+
+impl __TYPE__ {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn consumed(&self) -> u64 {
+        self.consumed
+    }
+}
+
+impl AsyncElement for __TYPE__ {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        // TODO: replace with the caps this sink actually accepts.
+        CapsConstraint::AcceptsAny
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        _out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            if let PipelinePacket::DataFrame(_frame) = packet {
+                // TODO: consume the frame (write / present / encode).
+                self.consumed += 1;
+            }
+            Ok(())
+        })
+    }
+}
+"#;
+
+const SOURCE_TEMPLATE: &str = r#"//! __NAME__: TODO describe what this source produces.
+
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+
+use g2g_core::runtime::SourceLoop;
+use g2g_core::{
+    Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+};
+
+#[derive(Debug, Default)]
+pub struct __TYPE__ {
+    configured: bool,
+}
+
+impl __TYPE__ {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn caps(&self) -> Caps {
+        // TODO: describe the frames this source emits.
+        Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Fixed(30 << 16),
+        }
+    }
+}
+
+impl SourceLoop for __TYPE__ {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
+        core::future::ready(Ok(self.caps()))
+    }
+
+    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            out.push(PipelinePacket::CapsChanged(self.caps())).await?;
+            // TODO: emit DataFrame packets here.
+            out.push(PipelinePacket::Eos).await?;
+            Ok(0)
+        })
+    }
+}
+"#;
+
+const TEST_TEMPLATE: &str = r#"//! Scaffold smoke test for __TYPE__ (generated by `xtask new-element`).
+//! TODO: replace this with a real behavioural test (run it in a pipeline and
+//! assert on the output).
+#![cfg(feature = "std")]
+
+use g2g_plugins::__NAME__::__TYPE__;
+
+#[test]
+fn __NAME___constructs() {
+    let _element = __TYPE__::new();
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +1220,34 @@ mod tests {
         let out = "sizeof(NV_ENC_INITIALIZE_PARAMS) = 1816\noffsetof(NV_ENC_INITIALIZE_PARAMS, encodeWidth) = 24";
         assert_eq!(parse_struct_size(out, "NV_ENC_INITIALIZE_PARAMS"), Some(1816));
         assert_eq!(parse_struct_size(out, "OTHER"), None);
+    }
+
+    #[test]
+    fn pascal_case_joins_snake_segments() {
+        assert_eq!(pascal_case("colorwarp"), "Colorwarp");
+        assert_eq!(pascal_case("my_filter"), "MyFilter");
+        assert_eq!(pascal_case("h264_thing"), "H264Thing");
+    }
+
+    #[test]
+    fn insert_mod_decl_after_last_plain_mod() {
+        let src = "extern crate alloc;\npub mod a;\npub mod b;\n\n#[cfg(feature=\"x\")]\npub mod gated;\n";
+        let out = insert_mod_decl(src, "newelem").unwrap().expect("inserted");
+        // Inserted after the last *unconditional* `pub mod` (b), not after the gated one.
+        assert!(out.contains("pub mod b;\npub mod newelem;"));
+        // The gated decl is left untouched.
+        assert!(out.contains("#[cfg(feature=\"x\")]\npub mod gated;"));
+    }
+
+    #[test]
+    fn insert_mod_decl_idempotent() {
+        let src = "pub mod a;\npub mod newelem;\n";
+        assert!(insert_mod_decl(src, "newelem").unwrap().is_none(), "already wired -> no change");
+    }
+
+    #[test]
+    fn insert_mod_decl_needs_anchor() {
+        assert!(insert_mod_decl("// no modules here\n", "x").is_err());
     }
 
     #[test]
