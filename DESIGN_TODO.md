@@ -693,6 +693,13 @@ Phased plan:
 - **AV1 encode** (`Av1Enc`): explicit quantizer rate control. (Target-bitrate
   rate control with hysteresis is done; 8/10/12-bit in 4:2:0 / 4:2:2 / 4:4:4
   all done.)
+- **`FfmpegVideoDec` 4:2:2 / 4:4:4 output.** The decoder only emits NV12 / I420,
+  so a 4:2:2 / 4:4:4 source is downsampled to 4:2:0 on decode and can never
+  match a same-chroma reference bit-for-bit (this is why the differential-QA 422
+  scenario is ffmpeg-vs-GStreamer only, not vs g2g). The fix is decoder
+  output-format negotiation (request the source's chroma from the ffmpeg decode
+  context, plumb it through `intercept_caps` / `configure_output` and the frame
+  layout), not a `videoconvert` patch.
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
