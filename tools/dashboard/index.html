@@ -47,6 +47,8 @@
   #preview canvas { image-rendering: pixelated; width: 100%; max-width: 260px;
     border: 1px solid var(--edge); border-radius: 4px; background: #000; }
   #preview .hex { color: var(--muted); word-break: break-all; font-size: 11px; }
+  #preview .compressed { display: inline-block; padding: 10px 14px; font-size: 13px;
+    border: 1px solid var(--edge); border-radius: 4px; background: #1a1e27; }
   .edge.tapped { stroke: var(--accent); }
   #events { flex: 1; overflow: auto; padding: 6px 12px; }
   .ev { padding: 3px 0; border-bottom: 1px solid #20242e; white-space: pre-wrap; }
@@ -350,6 +352,12 @@ function renderPreview(edge, p) {
     pre.className = "hex";
     pre.textContent = `${p.len} bytes\n` + (p.bytes.match(/.{1,2}/g) || []).join(" ");
     previewEl.appendChild(pre);
+  } else if (p.kind === "compressed") {
+    const card = document.createElement("div");
+    card.className = "compressed";
+    const dims = (p.w && p.h) ? ` ${p.w}x${p.h}` : "";
+    card.textContent = `${p.codec.toUpperCase()}${dims} (compressed)`;
+    previewEl.appendChild(card);
   } else {
     const div = document.createElement("div");
     div.className = "hint";

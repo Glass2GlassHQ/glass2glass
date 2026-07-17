@@ -3,6 +3,24 @@
 // load back into g2g: the gst-launch line via the text parser, the JSON via the
 // declarative graph loader.
 
+// Shared node-shape helpers, used by both the palette (App.jsx) and the
+// importers (import.js), so the two build identical node data.
+export const isSink = (doc) => /Sink/i.test(doc.klass || "");
+export const roleClass = (role) =>
+  role === "source" ? "source" : role.startsWith("muxer") ? "muxer" : "element";
+export function nodeData(id, element, doc, props = {}) {
+  return {
+    name: id,
+    element,
+    role: doc.role,
+    roleClass: roleClass(doc.role),
+    doc,
+    props,
+    hasIn: doc.role !== "source",
+    hasOut: !isSink(doc),
+  };
+}
+
 export function topoOrder(nodes, edges) {
   const indeg = Object.fromEntries(nodes.map((n) => [n.id, 0]));
   edges.forEach((e) => {
@@ -45,9 +63,21 @@ export function toLaunch(nodes, edges) {
     edges.length > 0 &&
     (Object.values(outdeg).some((d) => d > 1) || Object.values(indeg).some((d) => d > 1));
   if (!branched) return order.map((n) => n.data.element + propStr(n)).join(" ! ");
-  const decls = order.map((n) => `${n.data.element}${propStr(n)} name=${n.id}`).join("\n");
-  const links = edges.map((e) => `${e.source}. ! ${e.target}.`).join("\n");
-  return `${decls}\n${links}`;
+  // g2g's launch parser only starts a new chain at a `name.` reference, never by
+  // juxtaposing two elements, so a plain decls-then-links dump does not parse.
+  // Emit each node as its own named definition chain and each edge as a
+  // `src. ! dst.` link chain, ordering them so every definition is immediately
+  // followed by a link chain (which begins with a ref, the only safe boundary).
+  // Verbose but always parses and runs; linear chains keep the clean `!` form.
+  const defChain = (n) => `${n.data.element}${propStr(n)} name=${n.id}`;
+  const linkChain = (e) => `${e.source}. ! ${e.target}.`;
+  const out = [];
+  order.forEach((n, i) => {
+    out.push(defChain(n));
+    if (i < edges.length) out.push(linkChain(edges[i]));
+  });
+  for (let j = order.length; j < edges.length; j += 1) out.push(linkChain(edges[j]));
+  return out.join("\n");
 }
 
 export function toJSON(nodes, edges) {

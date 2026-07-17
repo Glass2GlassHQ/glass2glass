@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M697: visual builder imports a gst-launch line or declarative JSON onto the canvas, warns on incompatible link caps, and emits a branched export that actually parses.
+- M696: dashboard edge preview thumbnails NV12 / I420 raw video and MJPEG keyframes, and shows a codec card for other compressed edges instead of a hexdump.
+- M695: `g2g-launch` prints the failing caps negotiation (the conflicting elements and the caps each wanted) by default, without `G2G_CAPS_TRACE`.
+- M694: live telemetry covers the threaded runner (new `run_graph_threaded_observed`) and the muxer / demux fan nodes, so a branched or multicore pipeline reports per-element `process()` latency and fill too.
 - M693: `filesrc` content-sniffs raw Annex-B H.264/H.265 elementary streams, so an unknown or mis-named extension (e.g. a `.jsv` conformance vector) types by content instead of the MPEG-TS default.
 - M692: builder palette adds a dynamic group for `uridecodebin` / `decodebin` (gst-launch export only).
 - M687: `decodebin` auto-plugs `ffmpegdec` as `output-format=auto`, so a 4:2:2 / 4:4:4 source decodes to its native chroma when a downstream caps pins it (the launch path, not just the element API); the decoder's source pad template advertises I422 / I444.

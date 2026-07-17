@@ -105,11 +105,14 @@ G2G_CAPS_TRACE=1 g2g-launch videotestsrc num-buffers=1 ! videoconvert ! fakesink
 ```
 
 It logs each node's constraint and, per edge, the surviving caps set and its
-fixated result (`VideoTestSrc -> VideoConvert: ... ✓ -> video/x-raw,...`). On a
-mismatch it logs, at ERROR, the two conflicting elements and the caps each
-wanted, so a `CapsMismatch` is a readable log rather than a guess. The narration
-is free when off (one atomic load). `G2G_CAPS_TRACE` accepts a level name /
-number (`debug`, `trace`, `7`) to tune verbosity.
+fixated result (`VideoTestSrc -> VideoConvert: ... ✓ -> video/x-raw,...`). The
+narration is free when off (one atomic load). `G2G_CAPS_TRACE` accepts a level
+name / number (`debug`, `trace`, `7`) to tune verbosity.
+
+The mismatch half is on by default: a failed negotiation logs, at ERROR, the two
+conflicting elements and the caps each wanted, with no env var, so a plain
+`g2g-launch` run that fails to negotiate reads as a diagnosis rather than a bare
+`CapsMismatch`. `G2G_CAPS_TRACE` only adds the successful-edge narration on top.
 
 `G2G_DEBUG` is the general `GST_DEBUG` analog: `G2G_DEBUG=*:debug` or
 `G2G_DEBUG=videoscale:trace,*:warn` set per-category (element-type) thresholds.
@@ -209,9 +212,11 @@ see where a frame's time goes. The end-of-run summary prints the same as
 `wait p50/p99` beside `proc`.
 
 Click any edge to tap its content: the dashboard streams a live preview of the
-packets crossing it, a downscaled thumbnail for packed RGBA/BGRA video, a min/max
-waveform for PCM audio, or a bounded hexdump otherwise. Sampling runs a few times
-a second on a copy and never blocks the data path; click again to stop.
+packets crossing it, a downscaled thumbnail for RGBA/BGRA and planar NV12/I420
+video (and MJPEG keyframes when built with the `mjpeg` feature), a codec card for
+other compressed edges, a min/max waveform for PCM audio, or a bounded hexdump
+otherwise. Sampling runs a few times a second on a copy and never blocks the data
+path; click again to stop.
 
 Underneath, a `g2g_core::runtime::Observer` shares the running graph's topology
 and per-element probes; `run_graph_observed` registers them, so a snapshot is a
@@ -235,9 +240,18 @@ node's properties (typed from the registry). It live-exports two formats, both
 loadable back into g2g:
 
 - a `gst-launch` line (`g2g-launch "<line>"`); linear chains use the `!` form,
-  branched graphs the `name=` + `elem.` form.
+  branched graphs the named-definition + `elem.` reference form.
 - declarative JSON (`g2g-launch --graph <file.json>`, the `declarative.rs`
   schema).
+
+The reverse also works: paste a `gst-launch` line or a declarative JSON document
+into the import box and it loads onto the canvas (auto-detected, or forced with
+the format toggle), so you can start from an existing pipeline. An element the
+loaded registry doesn't know becomes a flagged placeholder rather than being
+dropped. While you wire, an edge whose two ends have obviously incompatible caps
+families (e.g. raw video into an audio input) is drawn red; it is a cheap
+heuristic, not the full solver, so it never blocks a link, and the authoritative
+check is still the run.
 
 Run it (needs Node + pnpm):
 

@@ -10,12 +10,10 @@ import {
   useEdgesState,
 } from "@xyflow/react";
 import { G2gNode } from "./nodes.jsx";
-import { toLaunch, toJSON } from "./export.js";
+import { toLaunch, toJSON, isSink, nodeData } from "./export.js";
+import { fromLaunch, fromJSON, seedCounters, decorateEdge, CAPS_WARN_TITLE } from "./import.js";
 
 const nodeTypes = { g2g: G2gNode };
-const isSink = (doc) => /Sink/i.test(doc.klass || "");
-const roleClass = (role) =>
-  role === "source" ? "source" : role.startsWith("muxer") ? "muxer" : "element";
 
 // Parse-time autoplug macros (uridecodebin/decodebin), not registered elements,
 // so g2g-inspect omits them. Shaped like a registry ElementDoc so the palette,
@@ -97,16 +95,7 @@ export default function App() {
         id,
         type: "g2g",
         position: { x: 80 + (Object.keys(counters.current).length % 3) * 60, y: 60 + idx * 90 },
-        data: {
-          name: id,
-          element,
-          role: doc.role,
-          roleClass: roleClass(doc.role),
-          doc,
-          props: {},
-          hasIn: doc.role !== "source",
-          hasOut: !isSink(doc),
-        },
+        data: nodeData(id, element, doc, {}),
       };
       setNodes((nds) => nds.concat(node));
       setSelectedId(id);
@@ -114,10 +103,47 @@ export default function App() {
     [elements, setNodes],
   );
 
+  // Latest nodes for onConnect's caps lookup, without rebuilding the callback
+  // (or running a side effect inside a state updater) on every node change.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
   const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge({ ...params, animated: true }, eds)),
+    (params) => {
+      const docById = Object.fromEntries(nodesRef.current.map((n) => [n.id, n.data.doc]));
+      setEdges((eds) => addEdge(decorateEdge({ ...params, animated: true }, docById), eds));
+    },
     [setEdges],
   );
+
+  const [importText, setImportText] = useState("");
+  const [importFmt, setImportFmt] = useState("auto"); // auto | gst | json
+  const [importErr, setImportErr] = useState("");
+
+  const loadImport = useCallback(() => {
+    const text = importText.trim();
+    if (!text) return;
+    let asJson = importFmt === "json";
+    if (importFmt === "auto") {
+      try {
+        JSON.parse(text);
+        asJson = true;
+      } catch {
+        asJson = false;
+      }
+    }
+    try {
+      const { nodes: ns, edges: es } = asJson
+        ? fromJSON(text, elements)
+        : fromLaunch(text, elements);
+      setNodes(ns);
+      setEdges(es);
+      counters.current = seedCounters(ns);
+      setSelectedId(null);
+      setImportErr("");
+    } catch (e) {
+      setImportErr(String(e.message || e));
+    }
+  }, [importText, importFmt, elements, setNodes, setEdges]);
 
   const setProp = useCallback(
     (id, key, value) => {
@@ -228,6 +254,34 @@ export default function App() {
                 onChange={(v) => setProp(selected.id, p.name, v)}
               />
             ))}
+        </div>
+
+        <div className="import">
+          <div className="exhdr">
+            <span className="hint">import</span>
+            <button className={importFmt === "auto" ? "on" : ""} onClick={() => setImportFmt("auto")}>
+              auto
+            </button>
+            <button className={importFmt === "gst" ? "on" : ""} onClick={() => setImportFmt("gst")}>
+              gst
+            </button>
+            <button className={importFmt === "json" ? "on" : ""} onClick={() => setImportFmt("json")}>
+              JSON
+            </button>
+            <button className="copy" onClick={loadImport}>
+              load
+            </button>
+          </div>
+          <textarea
+            className="imin"
+            placeholder="paste a gst-launch line or declarative JSON, then load (replaces the canvas)"
+            value={importText}
+            onChange={(e) => setImportText(e.target.value)}
+          />
+          {importErr && <div className="err">{importErr}</div>}
+          <div className="hint" title={CAPS_WARN_TITLE}>
+            red links = caps families look incompatible (heuristic, not the full solver)
+          </div>
         </div>
 
         <div className="export">

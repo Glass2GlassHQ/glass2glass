@@ -2162,9 +2162,11 @@ arms; empty (pass-through, zero cost) unless a subscriber installs one. The
 dashboard uses it for edge previews: clicking an edge sends a `subscribe` over
 the WebSocket, the server installs a rate-limited `PreviewTap` on that edge's
 slot (via `Observer::edge_probe` / `edge_caps`), and streams back a `preview`
-message: a downscaled RGBA/BGRA thumbnail, PCM S16 waveform buckets, or a bounded
-hexdump (`g2g-plugins::preview`), sampled a few times a second on a copy, never
-blocking the data path.
+message: a downscaled thumbnail for RGBA/BGRA and planar NV12/I420 video (and
+MJPEG keyframes under the `mjpeg` feature, reusing `videoconvert` / `mjpegdec`
+rather than duplicating the conversion), a codec card for other compressed edges,
+PCM S16 waveform buckets, or a bounded hexdump (`g2g-plugins::preview`), sampled a
+few times a second on a copy, never blocking the data path.
 
 The same probes drive a *live* view, not just the end-of-run table. An
 `Observer` (`runtime/observe.rs`) captures the graph topology and holds clones of
@@ -2183,9 +2185,10 @@ on the link; the page pans / zooms so a large graph stays navigable. It binds lo
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the
 portability-core principle. The
-observer rides the cooperative graph runner today; the threaded runner and the
-fan-in / fan-out / muxer runners are follow-ups, matching where `per_element` is
-already collected.
+observer rides the cooperative graph runner and, via `run_graph_threaded_observed`,
+the threaded runner; both cover the muxer / demux fan nodes. The standalone
+hand-built fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`, not
+reachable from `run_graph_observed`) are the remaining follow-up.
 
 `g2g-inspect --json [element]` (the `tooling-json` feature) emits the registry as
 JSON, the machine-readable sibling of the text dump: per element the identity,

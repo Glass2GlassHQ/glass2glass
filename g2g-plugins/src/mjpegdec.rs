@@ -88,7 +88,7 @@ impl MjpegDec {
     /// Decode one JPEG access unit, returning `(pixels, width, height)` in the
     /// configured output format. I420 decodes via RGBA then the shared BT.601
     /// conversion (so its range matches `VideoConvert`); it requires even dims.
-    fn decode(&self, jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
+    pub(crate) fn decode(&self, jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), G2gError> {
         let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
         let mut dec = JpegDecoder::new_with_options(ZCursor::new(jpeg), opts);
         let rgba = dec.decode().map_err(|_| G2gError::CapsMismatch)?;

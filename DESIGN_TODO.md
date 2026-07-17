@@ -1018,33 +1018,30 @@ Outstanding developer-tooling tasks, highest leverage first.
   (`g2g-core/src/runtime/observe.rs`) and the M399 `ElementProbe` coverage:
   - Per-edge packet / byte counters + drops in the live tap (drops surface only
     in end-of-run `RunStats`).
-  - The fan-in / fan-out / session / muxer runners leave `per_element` empty:
-    wire probes into them (also extends the transit measurement, which today
-    covers the graph runner's Block edges into transform/sink arms only).
+  - The standalone fan-in / fan-out / session runners (`fanin.rs` / `runner.rs`
+    hand-built API, not reachable from `run_graph_observed`) leave `per_element`
+    empty: give them observed entry points and wire probes if that API needs to
+    be observable.
   - Source-side timing: a source runs one long `run()` loop, so its cost only
     shows as its downstream's input fill.
-  - Wire the `Observer` into the threaded runner (`run_graph_threaded` passes
-    `None`, so `--observe` is cooperative-runner only).
   - Validate the dashboard live against an RTSP source.
 - **Visual builder follow-ups.** For `tools/builder/` (React Flow):
-  - Import a `gst-launch` line into the canvas (needs a server-side parse or a
-    JS launch-line parser).
-  - Link-validity feedback from the caps solver while wiring (today React Flow
-    enforces out -> in, but caps compatibility is only checked on load / run).
+  - Authoritative caps feedback while wiring: today a coarse family heuristic
+    warns on obviously-disjoint links, but the real solver only runs on load /
+    run. A wasm `negotiate` blob loaded client-side (or a server validate
+    endpoint) would give the true per-link check.
   - YAML export (the JSON export already covers the graph model; schema shared).
-- **Edge preview follow-ups.** The dashboard edge tap handles packed RGBA/BGRA
-  video, PCM S16 audio, and a hexdump fallback. Remaining: convert planar /
-  semi-planar raw video (NV12 / I420) to a thumbnail instead of falling back to
-  hex; decode a keyframe for a compressed-edge thumbnail; per-edge tap on the
-  fan-in / muxer / threaded runners (the slot is shared via `SenderSink`, so
-  those arms already carry it, but they are not exercised).
+- **Edge preview follow-ups.** Remaining: decode a keyframe for non-MJPEG
+  compressed edges (MJPEG already thumbnails behind the `mjpeg` feature; other
+  codecs show a codec card); per-edge tap on the fan-in / muxer arms (the slot is
+  shared via `SenderSink`, so those arms already carry it, but they are not
+  exercised).
 - **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
   per-edge negotiated caps and, on a solve conflict, the structured failure
   (kind + node indices). Remaining: carry the *both caps sets* at the point of
-  failure (the upstream produce set vs downstream accept set), which needs the
-  solver to surface the candidate sets, not just the empty-link indices; and a
-  visual overlay (the builder gaining a server-side validate endpoint to render
-  the failing link red).
+  failure in the structured `NegotiationFailure` (the by-default log narration
+  already prints them, but the error type still hands programmatic consumers only
+  the node indices), which needs the solver to surface the candidate sets.
 - **Per-frame latency waterfall.** The dashboard renders an aggregate stacked
   wait+work p50 per stage. The remaining piece is a single frame's path: a
   source-stamped sequence id carried through so one frame's queue-residency +

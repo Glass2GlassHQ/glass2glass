@@ -1,7 +1,9 @@
 //! Edge content preview (dev tooling, `observe` feature): convert a sampled
-//! packet into a small JSON preview for the dashboard. Video (packed RGBA/BGRA in
-//! system memory) becomes a downscaled thumbnail; PCM audio becomes min/max
-//! waveform buckets; anything else (compressed, GPU, unhandled raw formats)
+//! packet into a small JSON preview for the dashboard. Raw video (packed
+//! RGBA/BGRA and planar NV12/I420 in system memory) becomes a downscaled
+//! thumbnail; PCM audio becomes min/max waveform buckets; a compressed edge
+//! becomes a keyframe thumbnail where cheap (MJPEG, with the `mjpeg` feature) or
+//! a labelled codec card otherwise; anything else (GPU, unhandled raw formats)
 //! becomes a bounded hexdump. Pure and unit-testable; the rate-limited tap that
 //! calls it lives in `dashboard`.
 
@@ -11,7 +13,7 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Value};
 
-use g2g_core::{AudioFormat, Caps, Dim, MemoryDomain, PipelinePacket, RawVideoFormat};
+use g2g_core::{AudioFormat, Caps, Dim, MemoryDomain, PipelinePacket, RawVideoFormat, VideoCodec};
 
 /// Longest thumbnail edge in pixels.
 const MAX_THUMB: usize = 48;
@@ -39,19 +41,71 @@ pub fn packet_preview(packet: &PipelinePacket, caps: &Caps) -> Option<Value> {
     };
     let bytes = slice.as_slice();
     Some(match caps {
-        Caps::RawVideo { format, width, height, .. }
-            if matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8) =>
-        {
-            match (dim(width), dim(height)) {
-                (Some(w), Some(h)) => {
-                    video_thumb(bytes, w as usize, h as usize, matches!(format, RawVideoFormat::Bgra8))
-                }
-                _ => hexdump(bytes),
-            }
-        }
+        Caps::RawVideo { format, width, height, .. } => match (dim(width), dim(height)) {
+            (Some(w), Some(h)) => raw_video_thumb(bytes, *format, w as usize, h as usize),
+            _ => hexdump(bytes),
+        },
         Caps::Audio { format: AudioFormat::PcmS16Le, .. } => audio_peaks(bytes),
+        Caps::CompressedVideo { codec, width, height, .. } => {
+            compressed_preview(bytes, *codec, dim(width), dim(height))
+        }
         _ => hexdump(bytes),
     })
+}
+
+/// Thumbnail one raw-video frame. Packed RGBA/BGRA go straight to the downscaler;
+/// planar NV12/I420 are converted to RGBA first via the shared `VideoConvert`
+/// math. Unhandled formats or a short buffer fall back to a hexdump.
+fn raw_video_thumb(bytes: &[u8], format: RawVideoFormat, w: usize, h: usize) -> Value {
+    match format {
+        RawVideoFormat::Rgba8 => video_thumb(bytes, w, h, false),
+        RawVideoFormat::Bgra8 => video_thumb(bytes, w, h, true),
+        RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
+            // 4:2:0 needs even dims and a luma + half-size chroma plane.
+            let planar_len = w.saturating_mul(h).saturating_mul(3) / 2;
+            if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 || bytes.len() < planar_len {
+                return hexdump(bytes);
+            }
+            let rgba = crate::videoconvert::convert(bytes, format, RawVideoFormat::Rgba8, w, h);
+            video_thumb(&rgba, w, h, false)
+        }
+        _ => hexdump(bytes),
+    }
+}
+
+/// Preview a compressed-video edge. With the `mjpeg` feature an MJPEG packet is a
+/// self-contained baseline JPEG, so it decodes to a keyframe thumbnail; every
+/// other codec (and a failed MJPEG decode) yields a labelled card carrying the
+/// codec name and resolution.
+#[cfg_attr(not(feature = "mjpeg"), allow(unused_variables))]
+fn compressed_preview(
+    bytes: &[u8],
+    codec: VideoCodec,
+    w: Option<u32>,
+    h: Option<u32>,
+) -> Value {
+    #[cfg(feature = "mjpeg")]
+    if codec == VideoCodec::Mjpeg {
+        if let Ok((rgba, dw, dh)) = crate::mjpegdec::MjpegDec::new().decode(bytes) {
+            return video_thumb(&rgba, dw as usize, dh as usize, false);
+        }
+    }
+    json!({ "kind": "compressed", "codec": codec_name(codec), "w": w, "h": h })
+}
+
+/// Stable lower-case name for a video codec, shown on the compressed preview card.
+fn codec_name(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "h264",
+        VideoCodec::H265 => "h265",
+        VideoCodec::Av1 => "av1",
+        VideoCodec::Vp8 => "vp8",
+        VideoCodec::Vp9 => "vp9",
+        VideoCodec::Mjpeg => "mjpeg",
+        VideoCodec::Mpeg4Part2 => "mpeg4",
+        VideoCodec::JpegXs => "jpegxs",
+        _ => "compressed",
+    }
 }
 
 /// Nearest-neighbor downscale of a packed 8-bit RGBA/BGRA buffer to a thumbnail,
@@ -136,7 +190,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Fixed(30 << 16),
         };
-        let buf = vec![255u8, 0, 0, 255].repeat(4 * 2);
+        let buf = [255u8, 0, 0, 255].repeat(4 * 2);
         let v = packet_preview(&frame(buf), &caps).unwrap();
         assert_eq!(v["kind"], "video");
         assert_eq!(v["w"], 4);
@@ -195,12 +249,106 @@ mod tests {
     }
 
     #[test]
-    fn compressed_falls_back_to_hex() {
+    fn i420_becomes_thumbnail() {
+        let (w, h) = (4u32, 2u32);
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        // luma + U + V planes = w*h*3/2 bytes, mid-gray chroma.
+        let mut buf = vec![128u8; (w * h) as usize];
+        buf.extend(vec![128u8; (w * h) as usize / 2]);
+        let v = packet_preview(&frame(buf), &caps).unwrap();
+        assert_eq!(v["kind"], "video");
+        assert_eq!(v["w"], w);
+        assert_eq!(v["h"], h);
+        assert_eq!(v["rgba"].as_array().unwrap().len(), (w * h * 4) as usize);
+    }
+
+    #[test]
+    fn nv12_becomes_thumbnail() {
+        let (w, h) = (4u32, 2u32);
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let mut buf = vec![128u8; (w * h) as usize];
+        buf.extend(vec![128u8; (w * h) as usize / 2]);
+        let v = packet_preview(&frame(buf), &caps).unwrap();
+        assert_eq!(v["kind"], "video");
+        assert_eq!(v["w"], w);
+        assert_eq!(v["h"], h);
+    }
+
+    #[test]
+    fn short_planar_buffer_falls_back_to_hex() {
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(64),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let v = packet_preview(&frame(vec![1, 2, 3, 4]), &caps).unwrap();
+        assert_eq!(v["kind"], "hex");
+    }
+
+    #[test]
+    fn compressed_video_becomes_card() {
+        let caps = Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let v = packet_preview(&frame(vec![0xde, 0xad, 0xbe, 0xef]), &caps).unwrap();
+        assert_eq!(v["kind"], "compressed");
+        assert_eq!(v["codec"], "h264");
+        assert_eq!(v["w"], 1920);
+        assert_eq!(v["h"], 1080);
+    }
+
+    #[test]
+    fn bytestream_still_falls_back_to_hex() {
         let caps = Caps::ByteStream { encoding: g2g_core::ByteStreamEncoding::MpegTs };
         let v = packet_preview(&frame(vec![0xde, 0xad, 0xbe, 0xef]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");
         assert_eq!(v["len"], 4);
         assert_eq!(v["bytes"], "deadbeef");
+    }
+
+    #[cfg(feature = "mjpeg")]
+    #[test]
+    fn mjpeg_keyframe_becomes_thumbnail() {
+        // A self-contained baseline JPEG decodes to a thumbnail, not a card.
+        const RED16: &[u8] = include_bytes!("../tests/data/red16.jpg");
+        let caps = Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let v = packet_preview(&frame(RED16.to_vec()), &caps).unwrap();
+        assert_eq!(v["kind"], "video");
+        assert_eq!(v["w"], 16);
+        assert_eq!(v["h"], 16);
+    }
+
+    #[cfg(feature = "mjpeg")]
+    #[test]
+    fn undecodable_mjpeg_becomes_card() {
+        let caps = Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            width: Dim::Fixed(16),
+            height: Dim::Fixed(16),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        let v = packet_preview(&frame(vec![0, 1, 2, 3]), &caps).unwrap();
+        assert_eq!(v["kind"], "compressed");
+        assert_eq!(v["codec"], "mjpeg");
     }
 
     #[test]

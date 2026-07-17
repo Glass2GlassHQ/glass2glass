@@ -689,10 +689,15 @@ async fn prepare_graph<'a>(
     {
         let mut counts: Vec<(&'static str, u32)> = Vec::new();
         for &node in topo {
+            // M694: fan-in / fan-out nodes carry a `process()` too, so name and
+            // probe them alongside transforms / sinks (a plain broadcast tee has
+            // no element and no `process()`, so it stays unnamed / unprobed).
             let category = match vg.element_mut(node) {
                 Some(GraphNodeRef::Source(src)) => src.log_category(),
                 Some(GraphNodeRef::Element(elem)) => elem.log_category(),
-                _ => continue, // muxer / tee: not named for v1
+                Some(GraphNodeRef::Muxer(_)) => "mux",
+                Some(GraphNodeRef::Demux(_)) => "demux",
+                None => continue, // plain broadcast tee: no element to name
             };
             let n = match counts.iter_mut().find(|(c, _)| *c == category) {
                 Some(e) => {
@@ -712,7 +717,12 @@ async fn prepare_graph<'a>(
                 Some(GraphNodeRef::Element(elem)) => elem.set_instance_name(name.clone()),
                 _ => {}
             }
-            if matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink) {
+            // Mint a measured-latency probe for every node with a `process()`:
+            // transforms, sinks, muxers, and demuxers (a demux is a `Tee`-kind
+            // node whose payload is a `Demux` element).
+            let has_process = matches!(vg.kind(node), NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_))
+                || matches!(vg.element(node), Some(GraphNodeRef::Demux(_)));
+            if has_process {
                 probes[node.0 as usize] = Some(ElementProbe::new(name.clone()));
             }
             crate::g2g_info!(crate::log::Target::named(category, &name), "added to pipeline");
@@ -1153,6 +1163,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
             // merges its inputs by DataFrame PTS); the default drains round-robin
             // in arrival order.
+            let mux_probe = probes[node.0 as usize].clone();
             let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
                 Box::pin(muxer_arm_pts(
                     mux,
@@ -1163,6 +1174,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     coord_handle.clone(),
                     node,
                     pad_upstream,
+                    mux_probe,
                 ))
             } else {
                 Box::pin(muxer_arm(
@@ -1174,6 +1186,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     coord_handle.clone(),
                     node,
                     pad_upstream,
+                    mux_probe,
                 ))
             };
             arms.push(arm);
@@ -1237,7 +1250,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 // tolerates a branch that has dropped out (closed its channel).
                 let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
-                    Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(demux, in_rx, out_txs)),
+                    Some(GraphNodeRef::Demux(demux)) => {
+                        Box::pin(demux_arm(demux, in_rx, out_txs, probes[node.0 as usize].clone()))
+                    }
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
@@ -1378,6 +1393,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     bus: Option<&BusHandle>,
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
+    observer: Option<&Observer>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
     let link_capacity: usize = link_capacity.into().get();
@@ -1389,10 +1405,19 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     let topo = vg.topo().to_vec();
 
     let (probes, Prepared { solution, feasibility, latency, allocation, clock_priority, base_time_ns }) =
-        prepare_graph(&mut vg, &topo, &state, bus, clock, None).await?;
+        prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
 
     let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
-        build_channels(&vg, &topo, link_capacity, false);
+        build_channels(&vg, &topo, link_capacity, observer.is_some());
+
+    // Dev-tooling edge tap: same as the cooperative path, hand the observer each
+    // edge's content-inspection slot + negotiated caps. No arm changes needed.
+    if let Some(obs) = observer {
+        let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
+            .map(|e| txs.get(e).and_then(|o| o.as_ref()).map(|s| s.probe.clone()).unwrap_or_default())
+            .collect();
+        obs.register_edges(edge_probes, solution.clone());
+    }
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
     // handle resolves on this thread once its worker thread finishes.
@@ -1434,16 +1459,19 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             let pts_ordered = mux.input_pts_ordered();
             let ch = coord_handle.clone();
+            let mux_probe = probes[node.0 as usize].clone();
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> = if pts_ordered {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm_pts(
                         mux, pad_rxs, out_tx, input_count, mux_out_caps, ch, node, pad_upstream,
+                        mux_probe,
                     ))
                 })
             } else {
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     Box::pin(muxer_arm(
                         mux, pad_rxs, out_tx, input_count, mux_out_caps, ch, node, pad_upstream,
+                        mux_probe,
                     ))
                 })
             };
@@ -1505,8 +1533,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
                     Some(GraphNodeRef::Demux(demux)) => {
+                        let demux_probe = probes[node.0 as usize].clone();
                         alloc::boxed::Box::new(move || -> LocalArmFuture {
-                            Box::pin(demux_arm(demux, in_rx, out_txs))
+                            Box::pin(demux_arm(demux, in_rx, out_txs, demux_probe))
                         })
                     }
                     _ => alloc::boxed::Box::new(move || -> LocalArmFuture {
@@ -1553,7 +1582,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     link_capacity: impl Into<LinkCapacity>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, spawner).await
+    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, None, spawner).await
 }
 
 /// As [`run_graph_threaded`], but publishes playback progress (the thread-per-arm
@@ -1566,7 +1595,25 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
     progress: &PipelineProgress,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
-    run_graph_threaded_inner(graph, clock, link_capacity, None, None, Some(progress), spawner).await
+    run_graph_threaded_inner(graph, clock, link_capacity, None, None, Some(progress), None, spawner)
+        .await
+}
+
+/// As [`run_graph_threaded`], but taps live telemetry into `observer` (the
+/// thread-per-arm analog of [`run_graph_observed`]): a concurrent task reads
+/// per-element `process()` latency / input-link fill mid-run via
+/// [`Observer::snapshot`](crate::runtime::Observer::snapshot) while the arms run
+/// on their own OS threads.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(graph, clock, link_capacity, None, None, None, Some(observer), spawner)
+        .await
 }
 
 /// Zero-dependency [`GraphSpawner`]: each arm runs on its own `std` thread driven
@@ -2338,6 +2385,7 @@ async fn demux_arm<'a>(
     mut demux: Box<dyn DynMultiOutputElement + 'a>,
     in_rx: LinkReceiver,
     out_txs: Vec<LinkSender>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
@@ -2352,7 +2400,21 @@ async fn demux_arm<'a>(
                 return Ok(0);
             }
             Some(packet) => {
+                // M694: time the data-frame `process()` and sample input fill;
+                // control packets are excluded so the histogram reflects real work.
+                let timed =
+                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                if let Some(p) = timed {
+                    p.record_fill(in_rx.fill_percent());
+                    if let Some(t) = in_rx.pop_transit_ns() {
+                        p.record_transit(t);
+                    }
+                }
+                let t0 = ElementProbe::mark();
                 demux.process(packet, &mut multi).await?;
+                if let Some(p) = timed {
+                    p.record_proc_since(t0);
+                }
             }
             None => return Ok(0),
         }
@@ -2443,6 +2505,7 @@ async fn muxer_arm<'a>(
     coord: GraphCoordHandle,
     node: NodeId,
     pad_upstream: Vec<Option<NodeId>>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -2512,7 +2575,19 @@ async fn muxer_arm<'a>(
                 }
             }
             packet => {
+                // M694: time the data-frame `process()` and sample this pad's
+                // input fill; the per-pad channel is a plain `Receiver`, so it has
+                // no transit ring (transit stays empty for muxer pads).
+                let timed =
+                    probe.as_deref().filter(|_| matches!(&packet, PipelinePacket::DataFrame(_)));
+                if let Some(p) = timed {
+                    p.record_fill(pad_rxs[slot].1.fill_percent());
+                }
+                let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
+                if let Some(p) = timed {
+                    p.record_proc_since(t0);
+                }
             }
         }
     }
@@ -2537,6 +2612,7 @@ async fn muxer_arm_pts<'a>(
     coord: GraphCoordHandle,
     node: NodeId,
     pad_upstream: Vec<Option<NodeId>>,
+    probe: Probe,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
     let mut open = alloc::vec![true; input_count];
@@ -2549,7 +2625,16 @@ async fn muxer_arm_pts<'a>(
         // has a head, so no later input can still deliver something earlier.
         while let Some((slot, frame)) = agg.take_earliest_by(|f| f.timing.pts_ns) {
             let pad = pad_rxs[slot].0;
+            // M694: released frames are all DataFrames; time each `process()` and
+            // sample this pad's input fill (plain `Receiver`, so no transit).
+            if let Some(p) = probe.as_deref() {
+                p.record_fill(pad_rxs[slot].1.fill_percent());
+            }
+            let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter).await?;
+            if let Some(p) = probe.as_deref() {
+                p.record_proc_since(t0);
+            }
         }
         // Once every input has ended, the loop above has drained the aggregator
         // (ended+empty inputs drop out of the round); emit the single merged Eos.
