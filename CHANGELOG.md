@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M693: `filesrc` content-sniffs raw Annex-B H.264/H.265 elementary streams, so an unknown or mis-named extension (e.g. a `.jsv` conformance vector) types by content instead of the MPEG-TS default.
 - M692: builder palette adds a dynamic group for `uridecodebin` / `decodebin` (gst-launch export only).
 - M687: `decodebin` auto-plugs `ffmpegdec` as `output-format=auto`, so a 4:2:2 / 4:4:4 source decodes to its native chroma when a downstream caps pins it (the launch path, not just the element API); the decoder's source pad template advertises I422 / I444.
 - M691: builder property panel shows every property with enum dropdowns, defaults, ranges, and descriptions.

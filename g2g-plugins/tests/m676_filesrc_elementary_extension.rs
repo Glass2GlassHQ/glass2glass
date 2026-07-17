@@ -3,6 +3,10 @@
 //! calliope differential harness: the extension map and the sniffer both
 //! missed them, so the MPEG-TS default made
 //! `filesrc location=x.h264 ! h264parse` fail negotiation with CapsMismatch.
+//!
+//! Follow-up: an unknown extension (e.g. a `.jsv` JVT conformance vector) now
+//! content-sniffs the Annex-B start codes instead of falling back to MPEG-TS,
+//! also surfaced by calliope (`conformance` decoded empty output for `.jsv`).
 
 #![cfg(feature = "std")]
 
@@ -75,6 +79,26 @@ async fn filesrc_types_h265_by_extension_into_h265parse() {
     }
 }
 
+/// An unknown extension content-sniffs the Annex-B start codes rather than
+/// defaulting to MPEG-TS: `filesrc location=x.jsv` types as `CompressedVideo`
+/// so `h264parse` negotiates and access units flow.
+#[tokio::test]
+async fn filesrc_types_unknown_extension_by_content_sniff() {
+    // `.jsv` (JVT H.264) and a bare `.bin` both exercise the sniff fallback.
+    for ext in ["jsv", "bin"] {
+        let path = temp("sniff", ext, &h264_stream());
+        let line = format!("filesrc location={} ! h264parse ! fakesink", path.display());
+        let reg = default_registry();
+        let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+        let consumed = run_graph(graph, &ZeroClock, 4)
+            .await
+            .unwrap_or_else(|e| panic!(".{ext} content-sniffs and runs: {e:?}"))
+            .frames_consumed;
+        std::fs::remove_file(&path).ok();
+        assert!(consumed >= 1, ".{ext}: an access unit reached the sink: {consumed}");
+    }
+}
+
 /// `decodebin` auto-plugs from the extension-typed caps: an `.h264` source
 /// expands to an H.264 decode chain, not the MPEG-TS demux default. Needs a
 /// compiled-in H.264 decoder, so gated like the `ffmpeg` registry entries.
@@ -91,4 +115,18 @@ fn decodebin_expands_h264_extension_to_decode_chain() {
     // is spliced ahead of the decoder in the name-based expansion too (it fed
     // whole file chunks to the decoder before, decoding only frame 0).
     assert_eq!(node_count, 4, "parser + decoder expanded from extension caps");
+}
+
+/// `decodebin` auto-plugs a content-sniffed unknown extension into the same
+/// decode chain (the `.jsv` conformance-vector case).
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
+#[test]
+fn decodebin_expands_sniffed_unknown_extension_to_decode_chain() {
+    let path = temp("db", "jsv", &h264_stream());
+    let line = format!("filesrc location={} ! decodebin ! fakesink", path.display());
+    let reg = default_registry();
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    let node_count = graph.finish().expect("valid graph").topo().len();
+    std::fs::remove_file(&path).ok();
+    assert_eq!(node_count, 4, "parser + decoder expanded from sniffed caps");
 }

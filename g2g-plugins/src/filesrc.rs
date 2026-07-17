@@ -28,9 +28,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
     FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, VideoCodec,
+    PropertySpec, VideoCodec,
 };
 
 use crate::filesink::io_err;
@@ -284,10 +284,16 @@ impl SourceLoop for FileSrc {
             "location" => {
                 self.path = PathBuf::from(value.as_str().ok_or(PropError::Type)?);
                 // Derive the type from the extension unless it was pinned
-                // explicitly (M478); an unknown extension keeps the default.
+                // explicitly (M478); an unknown extension arms content sniffing at
+                // negotiation, so a mis-named / extensionless elementary stream
+                // (e.g. a `.jsv` JVT conformance vector) still types by content.
                 if !self.format_explicit {
-                    if let Some(caps) = caps_from_extension(&self.path) {
-                        self.caps = caps;
+                    match caps_from_extension(&self.path) {
+                        Some(caps) => {
+                            self.caps = caps;
+                            self.auto_detect = false;
+                        }
+                        None => self.auto_detect = true,
                     }
                 }
                 Ok(())
@@ -342,19 +348,10 @@ static FILESRC_PROPS: &[PropertySpec] = &[
 /// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`, raw Annex-B
 /// elementary streams to `Caps::CompressedVideo` at a fixable `Range`
 /// placeholder geometry (never `Any`, which cannot fixate; the parser refines
-/// via SPS, M676); an unknown extension returns `None` (the caller keeps the
-/// MPEG-TS default). String-only, so it costs no filesystem read at parse
-/// time. Content sniffing (`bytestream-format=auto`) covers a mis-named or
-/// extensionless file.
+/// via SPS, M676); an unknown extension returns `None`, and the caller then
+/// content-sniffs the header. String-only, so it costs no filesystem read at
+/// parse time.
 fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
-    let elementary = |codec| {
-        Some(Caps::CompressedVideo {
-            codec,
-            width: Dim::Range { min: 16, max: 65535 },
-            height: Dim::Range { min: 16, max: 65535 },
-            framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
-        })
-    };
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let encoding = match ext.as_str() {
         "ts" | "m2ts" | "mts" => ByteStreamEncoding::MpegTs,
@@ -362,8 +359,8 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "ogg" | "oga" | "opus" => ByteStreamEncoding::Ogg,
         "flv" => ByteStreamEncoding::Flv,
         "mp4" | "m4v" | "m4a" | "mov" | "qt" => ByteStreamEncoding::Mp4,
-        "h264" | "264" | "avc" => return elementary(VideoCodec::H264),
-        "h265" | "265" | "hevc" => return elementary(VideoCodec::H265),
+        "h264" | "264" | "avc" => return Some(crate::typefind::elementary_video_caps(VideoCodec::H264)),
+        "h265" | "265" | "hevc" => return Some(crate::typefind::elementary_video_caps(VideoCodec::H265)),
         "vtt" => return Some(Caps::Text { format: g2g_core::TextFormat::WebVtt }),
         "srt" => return Some(Caps::Text { format: g2g_core::TextFormat::Srt }),
         "ass" | "ssa" => return Some(Caps::Text { format: g2g_core::TextFormat::Ssa }),
