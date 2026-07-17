@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M687: `decodebin` auto-plugs `ffmpegdec` as `output-format=auto`, so a 4:2:2 / 4:4:4 source decodes to its native chroma when a downstream caps pins it (the launch path, not just the element API); the decoder's source pad template advertises I422 / I444.
+- M691: builder property panel shows every property with enum dropdowns, defaults, ranges, and descriptions.
 - M690: live dashboard shows each edge's negotiated caps and gains zoom / pan / fit for large graphs.
 - M689: visual pipeline builder rebuilt on React Flow (Vite + pnpm, `tools/builder/`): pan/zoom, either-direction linking, typed property panels, exports gst-launch / declarative JSON.
 - M688: visual builder fixes: links to far nodes no longer clip (SVG sized to the canvas), ports connect from either drag direction, and edges attach at the true port center.

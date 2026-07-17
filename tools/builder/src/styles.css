@@ -44,13 +44,18 @@ html, body, #root { margin: 0; height: 100%; background: var(--bg); color: var(-
 .side { width: 300px; border-left: 1px solid var(--line); display: flex; flex-direction: column; }
 .side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
   margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); }
-.props { padding: 8px 12px; overflow: auto; max-height: 50%; }
+.side h2 .pcount { float: right; color: var(--dim); font-size: 10px; text-transform: none;
+  letter-spacing: 0; }
+.props { padding: 8px 12px; overflow: auto; max-height: 55%; }
 .hint { color: var(--muted); }
-.prow { margin-bottom: 7px; }
-.prow label { display: block; color: var(--muted); font-size: 11px; }
-.prow .ptype { color: var(--dim); }
-.prow input { width: 100%; padding: 4px 6px; background: var(--bg); border: 1px solid var(--line);
-  color: var(--text); border-radius: 4px; font: inherit; }
+.prow { margin-bottom: 10px; }
+.prow label { display: block; color: var(--text); font-size: 12px; margin-bottom: 2px; }
+.prow .ptype { color: var(--dim); font-size: 10px; }
+.prow .ro { float: right; color: var(--mux); font-size: 10px; }
+.prow input, .prow select { width: 100%; padding: 4px 6px; background: var(--bg);
+  border: 1px solid var(--line); color: var(--text); border-radius: 4px; font: inherit; }
+.prow input:disabled, .prow select:disabled { opacity: .5; }
+.prow .pblurb { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
 .export { flex: 1; display: flex; flex-direction: column; border-top: 1px solid var(--line);
   min-height: 0; }
 .exhdr { display: flex; gap: 8px; padding: 6px 12px; align-items: center; }

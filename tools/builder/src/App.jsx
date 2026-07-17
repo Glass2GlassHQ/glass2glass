@@ -162,27 +162,26 @@ export default function App() {
       </div>
 
       <aside className="side">
-        <h2>{selected ? selected.data.name : "properties"}</h2>
+        <h2>
+          {selected ? selected.data.name : "properties"}
+          {selected ? (
+            <span className="pcount">{selected.data.doc.properties.length} props</span>
+          ) : null}
+        </h2>
         <div className="props">
           {!selected && <span className="hint">select a node</span>}
           {selected && !selected.data.doc.properties.length && (
-            <span className="hint">no properties</span>
+            <span className="hint">this element exposes no properties</span>
           )}
           {selected &&
-            selected.data.doc.properties
-              .filter((p) => p.writable)
-              .map((p) => (
-                <div className="prow" key={p.name}>
-                  <label title={p.blurb}>
-                    {p.name} <span className="ptype">{p.type}</span>
-                  </label>
-                  <input
-                    value={selected.data.props[p.name] ?? ""}
-                    placeholder={p.default != null ? `default ${p.default}` : p.type}
-                    onChange={(e) => setProp(selected.id, p.name, e.target.value.trim())}
-                  />
-                </div>
-              ))}
+            selected.data.doc.properties.map((p) => (
+              <PropRow
+                key={p.name}
+                prop={p}
+                value={selected.data.props[p.name] ?? ""}
+                onChange={(v) => setProp(selected.id, p.name, v)}
+              />
+            ))}
         </div>
 
         <div className="export">
@@ -204,6 +203,45 @@ export default function App() {
           <pre className="exout">{exportText}</pre>
         </div>
       </aside>
+    </div>
+  );
+}
+
+// One property row: an enum dropdown when the property has named choices, else a
+// typed text input. Shows the type, default, accepted range, and description so
+// every knob is discoverable and settable. Read-only properties are disabled.
+function PropRow({ prop, value, onChange }) {
+  const choices = prop.enum_values ? prop.enum_values.split("|").map((s) => s.trim()) : null;
+  const placeholder =
+    prop.default != null
+      ? `default ${prop.default}`
+      : prop.range
+        ? `${prop.range[0]} .. ${prop.range[1]}`
+        : prop.type;
+  return (
+    <div className="prow">
+      <label>
+        {prop.name} <span className="ptype">{prop.type}</span>
+        {!prop.writable && <span className="ro">read-only</span>}
+      </label>
+      {choices ? (
+        <select value={value} disabled={!prop.writable} onChange={(e) => onChange(e.target.value)}>
+          <option value="">{prop.default != null ? `default (${prop.default})` : "(default)"}</option>
+          {choices.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          value={value}
+          disabled={!prop.writable}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value.trim())}
+        />
+      )}
+      {prop.blurb && <div className="pblurb">{prop.blurb}</div>}
     </div>
   );
 }
