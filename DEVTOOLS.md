@@ -193,6 +193,11 @@ graph left-to-right, colors each node by input-link fill, shows per-element
 `process()` p50 / p99 and frame counts, and logs bus events (state changes, QoS,
 buffering, negotiation failures, EOS, errors) as they arrive.
 
+Click any edge to tap its content: the dashboard streams a live preview of the
+packets crossing it, a downscaled thumbnail for packed RGBA/BGRA video, a min/max
+waveform for PCM audio, or a bounded hexdump otherwise. Sampling runs a few times
+a second on a copy and never blocks the data path; click again to stop.
+
 Underneath, a `g2g_core::runtime::Observer` shares the running graph's topology
 and per-element probes; `run_graph_observed` registers them, so a snapshot is a
 handful of relaxed atomic loads off the same probes the end-of-run report reads

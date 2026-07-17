@@ -275,6 +275,11 @@ pub struct LinkSender {
     /// runner so the drop total surfaces in `RunStats`. `None` until the
     /// runner installs one (leaky links only).
     pub(crate) dropped: Option<Arc<Mutex<u64>>>,
+    /// Per-edge content-inspection slot (dev tooling). The `SenderSink` wrapping
+    /// this link shares it, so a tool can install a [`LinkInterceptor`] to sample
+    /// packets crossing this edge without touching the arms. Empty (pass-through,
+    /// zero cost) unless a subscriber installs one.
+    pub(crate) probe: ProbeSlot,
 }
 
 impl LinkSender {
@@ -372,6 +377,7 @@ pub fn link(capacity: usize) -> (LinkSender, LinkReceiver) {
             bitrate: bitrate.clone(),
             policy: LinkPolicy::Block,
             dropped: None,
+            probe: ProbeSlot::default(),
         },
         LinkReceiver { data: data_rx, reconfigure: slot, qos, bitrate },
     )
@@ -462,7 +468,11 @@ pub struct SenderSink {
 
 impl SenderSink {
     pub fn new(link: LinkSender) -> Self {
-        Self { link, probe: ProbeSlot::default(), upstream_qos: None }
+        // Share the link's per-edge probe slot, so a tool that installed an
+        // interceptor on the edge (via the runner/observer) sees this adapter's
+        // packets. A bare link has an empty slot: pass-through, no cost.
+        let probe = link.probe.clone();
+        Self { link, probe, upstream_qos: None }
     }
 
     /// A handle to this link's probe slot, for installing/removing a

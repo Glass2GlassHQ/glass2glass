@@ -2144,6 +2144,17 @@ downstream element's input fill. Still open: per-*link* transit (queue-residency
 time, which needs a wall-clock stamp carried with each packet rather than the
 element-side timing collected here.
 
+Every link also carries a per-edge content-inspection slot (`LinkSender::probe`,
+a `ProbeSlot` the wrapping `SenderSink` shares), so a tool can install a
+`LinkInterceptor` to sample the packets crossing any edge without touching the
+arms; empty (pass-through, zero cost) unless a subscriber installs one. The
+dashboard uses it for edge previews: clicking an edge sends a `subscribe` over
+the WebSocket, the server installs a rate-limited `PreviewTap` on that edge's
+slot (via `Observer::edge_probe` / `edge_caps`), and streams back a `preview`
+message: a downscaled RGBA/BGRA thumbnail, PCM S16 waveform buckets, or a bounded
+hexdump (`g2g-plugins::preview`), sampled a few times a second on a copy, never
+blocking the data path.
+
 The same probes drive a *live* view, not just the end-of-run table. An
 `Observer` (`runtime/observe.rs`) captures the graph topology and holds clones of
 the arms' probe `Arc`s; `run_graph_observed` registers them during the prepare

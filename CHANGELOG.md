@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M683: dashboard edge tap: click an edge to stream a live content preview (RGBA/BGRA thumbnail, PCM waveform, or hexdump) over the WebSocket, via a per-edge `LinkInterceptor` slot on every link.
 - M682: `negotiate_graph_explained` preserves the structured `NegotiationFailure`, so `validate` reports per-edge negotiated caps and names the conflicting link.
 - M681: `g2g-mcp` MCP server (JSON-RPC over stdio) exposes list_elements / inspect / validate / launch for agent-driven dev, over shared `toolingjson` internals.
 - M680: `recordsink` / `replaysrc` capture a pipeline's packet stream to a file and play it back byte-identically, for deterministic repro.

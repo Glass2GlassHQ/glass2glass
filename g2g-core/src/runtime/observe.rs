@@ -21,7 +21,9 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 
+use crate::caps::Caps;
 use crate::graph::NodeKind;
+use crate::runtime::channel::ProbeSlot;
 use crate::runtime::instrument::Probe;
 use crate::runtime::ElementLatency;
 
@@ -74,6 +76,11 @@ struct State {
     /// muxer) or one the runner did not instrument.
     probes: Vec<Probe>,
     edges: Vec<EdgeInfo>,
+    /// Per edge id (aligned with `edges`): the link's content-inspection slot and
+    /// its negotiated caps, for the edge-content preview tap. Empty until the
+    /// runner registers them (after channels are built).
+    edge_probes: Vec<ProbeSlot>,
+    edge_caps: Vec<Caps>,
 }
 
 impl Observer {
@@ -102,6 +109,34 @@ impl Observer {
         s.roles = roles;
         s.probes = probes;
         s.edges = edges;
+    }
+
+    /// Install the per-edge content-inspection slots + negotiated caps, aligned
+    /// with the edges registered above. Called by the runner after the channels
+    /// are built; separate from [`register`](Self::register) because the slots
+    /// live on the links, which are created after negotiation.
+    pub(crate) fn register_edges(&self, edge_probes: Vec<ProbeSlot>, edge_caps: Vec<Caps>) {
+        let mut s = self.inner.state.lock();
+        s.edge_probes = edge_probes;
+        s.edge_caps = edge_caps;
+    }
+
+    /// The content-inspection slot for edge `idx`, for installing a
+    /// [`LinkInterceptor`](crate::runtime::LinkInterceptor) that samples packets
+    /// crossing that edge. `None` if the index is out of range.
+    pub fn edge_probe(&self, idx: usize) -> Option<ProbeSlot> {
+        self.inner.state.lock().edge_probes.get(idx).cloned()
+    }
+
+    /// The negotiated caps on edge `idx` (so a preview tap knows how to interpret
+    /// the bytes). `None` if the index is out of range.
+    pub fn edge_caps(&self, idx: usize) -> Option<Caps> {
+        self.inner.state.lock().edge_caps.get(idx).cloned()
+    }
+
+    /// Number of edges registered (0 before the runner registers them).
+    pub fn edge_count(&self) -> usize {
+        self.inner.state.lock().edges.len()
     }
 
     /// A read of the current telemetry. Cheap: relaxed atomic loads off the

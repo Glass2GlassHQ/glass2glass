@@ -1075,6 +1075,17 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     let GraphChannels { mut txs, mut rxs, dropped, mut arm_ctrl_rx, coord_handle, coordinator } =
         build_channels(&vg, &topo, link_capacity);
 
+    // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
+    // (shared with the arm's `SenderSink`) + its negotiated caps, so a preview
+    // subscriber can sample packets crossing any edge. No arm changes needed; the
+    // slot is empty (pass-through) until a subscriber installs an interceptor.
+    if let Some(obs) = observer {
+        let edge_probes: Vec<crate::runtime::channel::ProbeSlot> = (0..vg.edge_count())
+            .map(|e| txs.get(e).and_then(|o| o.as_ref()).map(|s| s.probe.clone()).unwrap_or_default())
+            .collect();
+        obs.register_edges(edge_probes, solution.clone());
+    }
+
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
 

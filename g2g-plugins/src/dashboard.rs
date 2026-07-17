@@ -14,6 +14,9 @@
 //!   p99_ns,max_ns}|null,"fill_mean_pct","fill_max_pct"}`.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloc::format;
@@ -28,8 +31,45 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 
-use g2g_core::runtime::{NodeRole, Observer, TelemetrySnapshot};
-use g2g_core::BusMessage;
+use g2g_core::runtime::{LinkInterceptor, NodeRole, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot};
+use g2g_core::{BusMessage, Caps, PipelinePacket};
+
+use crate::preview::packet_preview;
+
+/// Per-connection edge subscriptions: edge index -> (the edge's probe slot with
+/// our interceptor installed, the shared latest preview it writes).
+type EdgeSubs = HashMap<u64, (ProbeSlot, Arc<Mutex<Option<Value>>>)>;
+
+/// Minimum spacing between preview samples on a tapped edge, so the hot path
+/// pays a preview conversion at most a few times a second.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A [`LinkInterceptor`] that samples an edge's packets into a shared latest
+/// preview, rate-limited. Installed on a subscribe, removed on unsubscribe;
+/// always passes the packet through (never drops).
+struct PreviewTap {
+    caps: Caps,
+    latest: Arc<Mutex<Option<Value>>>,
+    last_ns: AtomicU64,
+    interval_ns: u64,
+}
+
+impl LinkInterceptor for PreviewTap {
+    fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction {
+        let now = g2g_core::metrics::monotonic_ns();
+        let last = self.last_ns.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= self.interval_ns
+            && self.last_ns.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            if let Some(v) = packet_preview(packet, &self.caps) {
+                if let Ok(mut slot) = self.latest.lock() {
+                    *slot = Some(v);
+                }
+            }
+        }
+        ProbeAction::Pass
+    }
+}
 
 /// The self-contained dashboard page, served on `GET /`.
 pub const INDEX_HTML: &str = include_str!("../../tools/dashboard/index.html");
@@ -193,11 +233,29 @@ async fn stream_telemetry(
 ) {
     let (mut tx, mut rx) = ws.split();
     let mut ticker = tokio::time::interval(TICK);
+    // Per-connection edge subscriptions: edge index -> (slot with our interceptor
+    // installed, shared latest preview).
+    let mut subs: EdgeSubs = HashMap::new();
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 let json = snapshot_json(&observer.snapshot());
                 if tx.send(Message::Text(json)).await.is_err() {
+                    break;
+                }
+                // Flush any fresh edge previews sampled since the last tick.
+                let mut failed = false;
+                for (edge, (_slot, latest)) in subs.iter() {
+                    let taken = latest.lock().ok().and_then(|mut l| l.take());
+                    if let Some(preview) = taken {
+                        let msg = json!({ "type": "preview", "edge": edge, "preview": preview });
+                        if tx.send(Message::Text(msg.to_string())).await.is_err() {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                if failed {
                     break;
                 }
             }
@@ -216,14 +274,60 @@ async fn stream_telemetry(
                     Err(broadcast::error::RecvError::Closed) => {}
                 }
             }
-            // Drain inbound frames so tungstenite answers pings and notices close.
+            // Inbound frames: subscribe / unsubscribe control, plus close.
             inbound = rx.next() => {
                 match inbound {
+                    Some(Ok(Message::Text(t))) => handle_client_msg(&t, &observer, &mut subs),
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }
             }
         }
+    }
+    // Remove our interceptors so a disconnect leaves no taps sampling the graph.
+    for (_edge, (slot, _)) in subs {
+        slot.remove();
+    }
+}
+
+/// Handle a `{type:"subscribe"|"unsubscribe","edge":N}` control message from the
+/// dashboard, installing or removing an edge preview tap.
+fn handle_client_msg(
+    text: &str,
+    observer: &Observer,
+    subs: &mut EdgeSubs,
+) {
+    let Ok(msg) = serde_json::from_str::<Value>(text) else { return };
+    let edge = match msg.get("edge").and_then(|e| e.as_u64()) {
+        Some(e) => e,
+        None => return,
+    };
+    match msg.get("type").and_then(|t| t.as_str()) {
+        Some("subscribe") => {
+            if subs.contains_key(&edge) {
+                return;
+            }
+            let (Some(slot), Some(caps)) =
+                (observer.edge_probe(edge as usize), observer.edge_caps(edge as usize))
+            else {
+                return;
+            };
+            let latest = Arc::new(Mutex::new(None));
+            let tap = PreviewTap {
+                caps,
+                latest: latest.clone(),
+                last_ns: AtomicU64::new(0),
+                interval_ns: PREVIEW_INTERVAL.as_nanos() as u64,
+            };
+            slot.install(Arc::new(tap));
+            subs.insert(edge, (slot, latest));
+        }
+        Some("unsubscribe") => {
+            if let Some((slot, _)) = subs.remove(&edge) {
+                slot.remove();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -340,5 +444,65 @@ mod tests {
             }
         };
         assert_eq!(event["kind"], "eos");
+    }
+
+    #[tokio::test]
+    async fn edge_subscribe_streams_a_video_preview() {
+        use crate::registry::default_registry;
+        use futures_util::StreamExt;
+        use g2g_core::runtime::{parse_launch, run_graph_observed};
+        use g2g_core::PipelineClock;
+
+        struct ZeroClock;
+        impl PipelineClock for ZeroClock {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+
+        let reg = default_registry();
+        // A forever source so the run keeps flowing while we tap an edge.
+        let graph = parse_launch(&reg, "videotestsrc ! videoscale width=32 height=24 ! fakesink")
+            .expect("parses");
+        let observer = Observer::new();
+        let (ev_tx, _) = broadcast::channel::<String>(16);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(listener, observer.clone(), ev_tx));
+
+        let clock = ZeroClock;
+        let client = async {
+            let (mut ws, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/")).await.unwrap();
+            let mut subscribed = false;
+            loop {
+                let Some(Ok(Message::Text(t))) = ws.next().await else { continue };
+                let v: Value = serde_json::from_str(&t).unwrap();
+                // Subscribe to edge 0 (videotestsrc -> videoscale) once the run
+                // has registered the graph's edges.
+                if !subscribed
+                    && v["type"] == "telemetry"
+                    && !v["edges"].as_array().unwrap().is_empty()
+                {
+                    ws.send(Message::Text(r#"{"type":"subscribe","edge":0}"#.into())).await.unwrap();
+                    subscribed = true;
+                }
+                if v["type"] == "preview" {
+                    return v;
+                }
+            }
+        };
+
+        let run = run_graph_observed(graph, &clock, 2, &observer, None);
+        tokio::select! {
+            _ = run => panic!("run ended before a preview arrived"),
+            preview = tokio::time::timeout(Duration::from_secs(15), client) => {
+                let preview = preview.expect("preview within deadline");
+                assert_eq!(preview["edge"], 0);
+                // videotestsrc emits packed RGBA, so the tap yields a thumbnail.
+                assert_eq!(preview["preview"]["kind"], "video");
+                assert!(preview["preview"]["rgba"].as_array().unwrap().len() >= 4);
+            }
+        }
     }
 }

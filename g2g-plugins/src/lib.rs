@@ -395,6 +395,11 @@ pub mod udpsrc;
 #[cfg(feature = "tooling-json")]
 pub mod toolingjson;
 
+// Edge content preview (observe feature): sampled packet -> JSON thumbnail /
+// waveform / hexdump for the dashboard edge tap.
+#[cfg(feature = "observe")]
+pub mod preview;
+
 // Live pipeline dashboard transport (observe feature): serves Observer telemetry
 // + bus events over one WS/HTTP port to the static dashboard page. Used by
 // `g2g-launch --observe`.

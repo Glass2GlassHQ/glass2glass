@@ -26,6 +26,12 @@
     flex-direction: column; }
   #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
     color: var(--muted); margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+  #preview { padding: 8px 12px; border-bottom: 1px solid var(--edge); min-height: 60px; }
+  #preview .hint { color: var(--muted); }
+  #preview canvas { image-rendering: pixelated; width: 100%; max-width: 260px;
+    border: 1px solid var(--edge); border-radius: 4px; background: #000; }
+  #preview .hex { color: var(--muted); word-break: break-all; font-size: 11px; }
+  .edge.tapped { stroke: var(--accent); }
   #events { flex: 1; overflow: auto; padding: 6px 12px; }
   .ev { padding: 3px 0; border-bottom: 1px solid #20242e; white-space: pre-wrap; }
   .ev .k { color: var(--accent); }
@@ -49,6 +55,8 @@
 <div id="wrap">
   <div id="graph"><svg id="svg" width="100%" height="100%"></svg></div>
   <div id="side">
+    <h2>edge preview</h2>
+    <div id="preview"><span class="hint">click an edge to tap its content</span></div>
     <h2>events</h2>
     <div id="events"></div>
     <footer id="legend">
@@ -64,6 +72,11 @@ const svg = document.getElementById("svg");
 const statusEl = document.getElementById("status");
 const uptimeEl = document.getElementById("uptime");
 const eventsEl = document.getElementById("events");
+const previewEl = document.getElementById("preview");
+
+let socket = null;             // live WebSocket, for edge subscribe/unsubscribe
+const tapped = new Set();      // edge indices currently subscribed
+let shownEdge = null;          // edge whose preview is displayed
 
 const COL_W = 220, ROW_H = 96, NODE_W = 168, NODE_H = 64, PAD = 30;
 const roleColor = { source: "var(--source)", sink: "var(--sink)",
@@ -117,16 +130,20 @@ function render(msg) {
   svg.setAttribute("width", Math.max(maxX, 400));
   svg.setAttribute("height", Math.max(maxY, 200));
 
-  // Edges first (under nodes).
-  edges.forEach(e => {
+  // Edges first (under nodes). Each is clickable to tap its content; the array
+  // index is the edge id the server keys previews on.
+  edges.forEach((e, i) => {
     const a = pos.get(e.from), b = pos.get(e.to);
     if (!a || !b) return;
     const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
     const x2 = b.x, y2 = b.y + NODE_H / 2;
     const mx = (x1 + x2) / 2;
     const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("class", "edge");
+    path.setAttribute("class", "edge" + (tapped.has(i) ? " tapped" : ""));
     path.setAttribute("d", `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`);
+    path.style.pointerEvents = "stroke";
+    path.style.cursor = "pointer";
+    path.onclick = () => toggleEdge(i);
     svg.appendChild(path);
   });
 
@@ -183,21 +200,84 @@ function addEvent(msg) {
   while (eventsEl.children.length > 200) eventsEl.lastChild.remove();
 }
 
+function toggleEdge(i) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (tapped.has(i)) {
+    tapped.delete(i);
+    socket.send(JSON.stringify({ type: "unsubscribe", edge: i }));
+    if (shownEdge === i) {
+      shownEdge = null;
+      previewEl.innerHTML = `<span class="hint">click an edge to tap its content</span>`;
+    }
+  } else {
+    tapped.add(i);
+    shownEdge = i;
+    socket.send(JSON.stringify({ type: "subscribe", edge: i }));
+    previewEl.innerHTML = `<span class="hint">tapping edge ${i}…</span>`;
+  }
+}
+
+function renderPreview(edge, p) {
+  if (edge !== shownEdge) return; // only the selected edge is shown
+  previewEl.innerHTML = "";
+  const label = document.createElement("div");
+  label.className = "hint";
+  label.textContent = `edge ${edge} · ${p.kind}`;
+  previewEl.appendChild(label);
+  if (p.kind === "video") {
+    const canvas = document.createElement("canvas");
+    canvas.width = p.w; canvas.height = p.h;
+    const ctx = canvas.getContext("2d");
+    const img = ctx.createImageData(p.w, p.h);
+    img.data.set(new Uint8ClampedArray(p.rgba));
+    ctx.putImageData(img, 0, 0);
+    previewEl.appendChild(canvas);
+  } else if (p.kind === "audio") {
+    const w = 260, h = 60, mid = h / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.strokeStyle = "#4da3ff";
+    const n = p.peaks.length;
+    p.peaks.forEach((pk, i) => {
+      const x = i * w / n;
+      ctx.beginPath();
+      ctx.moveTo(x, mid - pk[1] * mid);
+      ctx.lineTo(x, mid - pk[0] * mid);
+      ctx.stroke();
+    });
+    previewEl.appendChild(canvas);
+  } else if (p.kind === "hex") {
+    const pre = document.createElement("div");
+    pre.className = "hex";
+    pre.textContent = `${p.len} bytes\n` + (p.bytes.match(/.{1,2}/g) || []).join(" ");
+    previewEl.appendChild(pre);
+  } else {
+    const div = document.createElement("div");
+    div.className = "hint";
+    div.textContent = p.note || p.kind;
+    previewEl.appendChild(div);
+  }
+}
+
 function connect() {
   const url = "ws://" + (location.host || "127.0.0.1:8787");
-  const ws = new WebSocket(url);
-  ws.onopen = () => { statusEl.textContent = "live"; statusEl.className = "live"; };
-  ws.onclose = () => {
+  socket = new WebSocket(url);
+  socket.onopen = () => { statusEl.textContent = "live"; statusEl.className = "live"; };
+  socket.onclose = () => {
     statusEl.textContent = "disconnected"; statusEl.className = "down";
+    tapped.clear(); shownEdge = null;
     setTimeout(connect, 1500);
   };
-  ws.onmessage = ev => {
+  socket.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "telemetry") {
       render(msg);
       uptimeEl.textContent = "t=" + (msg.uptime_ns / 1e9).toFixed(1) + "s";
     } else if (msg.type === "event") {
       addEvent(msg);
+    } else if (msg.type === "preview") {
+      renderPreview(msg.edge, msg.preview);
     }
   };
 }

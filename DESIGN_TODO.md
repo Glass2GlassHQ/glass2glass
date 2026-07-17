@@ -1035,12 +1035,12 @@ Outstanding developer-tooling tasks, highest leverage first.
     pair links; a bad pair only fails on load / run).
   - Optional React Flow frontend + YAML export (the JSON export already covers
     the graph model; the schema is shared).
-- **Edge probes with content preview.** Tap any edge from the dashboard and
-  see what flows: video as a downscaled RGB thumbnail, audio as min/max
-  waveform buckets, anything else as a bounded hexdump. Subscribe /
-  unsubscribe per edge over the same WebSocket; conversion runs on a sampled
-  copy at a capped rate (e.g. 2/s), never in the hot path, zero cost when no
-  subscriber.
+- **Edge preview follow-ups.** The dashboard edge tap handles packed RGBA/BGRA
+  video, PCM S16 audio, and a hexdump fallback. Remaining: convert planar /
+  semi-planar raw video (NV12 / I420) to a thumbnail instead of falling back to
+  hex; decode a keyframe for a compressed-edge thumbnail; per-edge tap on the
+  fan-in / muxer / threaded runners (the slot is shared via `SenderSink`, so
+  those arms already carry it, but they are not exercised).
 - **Negotiation explainer follow-ups.** `validate` (MCP / `toolingjson`) returns
   per-edge negotiated caps and, on a solve conflict, the structured failure
   (kind + node indices). Remaining: carry the *both caps sets* at the point of
