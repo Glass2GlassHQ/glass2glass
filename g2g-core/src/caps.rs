@@ -463,6 +463,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Flv => "video/x-flv",
         ByteStreamEncoding::IsoBmff => "video/quicktime",
         ByteStreamEncoding::Mp4 => "video/quicktime",
+        ByteStreamEncoding::Ivf => "video/x-ivf",
     }
 }
 
@@ -850,6 +851,10 @@ pub enum ByteStreamEncoding {
     /// auto-plugger picks the whole-file demuxer for files and the incremental one
     /// for HLS / DASH.
     Mp4,
+    /// IVF: a 32-byte `DKIF` header (FourCC codec + geometry + timebase) then a
+    /// 12-byte size+timestamp header before each frame. The simple raw container
+    /// libvpx / libaom conformance vectors ship in (VP8 / VP9 / AV1).
+    Ivf,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

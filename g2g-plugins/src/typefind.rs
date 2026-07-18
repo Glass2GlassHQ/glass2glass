@@ -23,6 +23,8 @@ const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 const OGG_MAGIC: [u8; 4] = *b"OggS";
 /// FLV signature: the first three bytes of an FLV header.
 const FLV_MAGIC: [u8; 3] = *b"FLV";
+/// IVF file signature (the first 4 bytes of the 32-byte `DKIF` header).
+const IVF_MAGIC: [u8; 4] = *b"DKIF";
 
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
@@ -73,6 +75,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if header.starts_with(&FLV_MAGIC) {
         return Some(ByteStreamEncoding::Flv);
+    }
+    if header.starts_with(&IVF_MAGIC) {
+        return Some(ByteStreamEncoding::Ivf);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
     // (CMAF) map to the one `IsoBmff` encoding; the demuxer handles either.

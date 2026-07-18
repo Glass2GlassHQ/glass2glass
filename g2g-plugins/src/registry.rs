@@ -42,6 +42,7 @@ use crate::flvmux::FlvMux;
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::identity::IdentityTransform;
+use crate::ivfdemux::IvfDemux;
 use crate::mkvdemux::MkvDemux;
 use crate::mkvmux::MkvMux;
 #[cfg(feature = "std")]
@@ -423,6 +424,9 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<MkvDemux>("matroskademux", || {
         Box::new(MkvDemux::new())
     }));
+    reg.register_launch(LaunchFactory::of::<IvfDemux>("ivfdemux", || {
+        Box::new(IvfDemux::new())
+    }));
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || {
         Box::new(TsMux::new())
     }));
@@ -774,6 +778,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     reg.register(ElementFactory::of::<MkvDemux>("matroskademux", |_| {
         Box::new(MkvDemux::new())
+    }));
+    reg.register(ElementFactory::of::<IvfDemux>("ivfdemux", |_| {
+        Box::new(IvfDemux::new())
     }));
     reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| {
         Box::new(Fmp4Demux::new())

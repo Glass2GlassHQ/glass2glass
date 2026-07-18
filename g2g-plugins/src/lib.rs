@@ -249,6 +249,9 @@ pub mod matroska;
 // Matroska / WebM demuxer element (no_std): Caps::ByteStream{Matroska} -> one
 // selected elementary stream, wrapping the matroska parser.
 pub mod mkvdemux;
+// IVF demuxer element (no_std): Caps::ByteStream{Ivf} -> the VP8 / VP9 / AV1
+// video elementary stream, the raw libvpx / libaom conformance-vector container.
+pub mod ivfdemux;
 // Matroska / WebM muxer element (no_std): one elementary stream ->
 // Caps::ByteStream{Matroska}, the inverse of mkvdemux.
 pub mod mkvmux;
