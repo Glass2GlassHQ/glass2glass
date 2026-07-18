@@ -85,3 +85,10 @@ path = "fuzz_targets/st2110_dedup.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mpegts"
+path = "fuzz_targets/mpegts.rs"
+test = false
+doc = false
+bench = false
