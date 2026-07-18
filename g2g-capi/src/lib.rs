@@ -334,10 +334,10 @@ pub unsafe extern "C" fn g2g_appsrc_push(
     if data.is_null() && len != 0 {
         return 0;
     }
-    // SAFETY: caller contract: `data` covers `len` bytes (empty when null).
     let bytes = if len == 0 {
         &[][..]
     } else {
+        // SAFETY: caller contract: `data` covers `len` bytes (empty when null).
         unsafe { core::slice::from_raw_parts(data, len) }
     };
     c_int::from(p.feed.push(bytes, pts_ns))

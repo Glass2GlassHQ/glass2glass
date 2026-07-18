@@ -40,8 +40,8 @@ fn pull_receives_every_frame_then_eos() {
 
     for i in 0u8..3 {
         let buf = [i; 16];
-        // SAFETY: src live; buf covers its len (copied by push).
         assert_eq!(
+            // SAFETY: src live; buf covers its len (copied by push).
             unsafe { g2g_appsrc_push(src, buf.as_ptr(), 16, u64::from(i) * 1_000) },
             1
         );
@@ -67,8 +67,8 @@ fn pull_receives_every_frame_then_eos() {
 
     // The next pull observes end-of-stream.
     let mut smp: *mut Sample = ptr::null_mut();
-    // SAFETY: sink live; smp writable.
     assert_eq!(
+        // SAFETY: sink live; smp writable.
         unsafe { g2g_appsink_pull(sink, &mut smp) },
         0,
         "stream ended"
@@ -117,8 +117,8 @@ fn lend_survives_through_pull_zero_copy() {
     assert_eq!(unsafe { g2g_appsink_pull(sink, &mut smp) }, 1);
     assert!(!smp.is_null());
     // Zero-copy end to end: the pulled sample points at the lent buffer.
-    // SAFETY: smp live.
     assert_eq!(
+        // SAFETY: smp live.
         unsafe { g2g_sample_data(smp) } as usize,
         lent_ptr,
         "pull is zero-copy"
