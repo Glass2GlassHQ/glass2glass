@@ -101,10 +101,17 @@ impl SeamlessDedup {
 
         if ext > high {
             // Advance the window, clearing the sequence slots it now uncovers so a
-            // number from the previous wrap cannot masquerade as already-seen.
-            for s in (high + 1)..=ext {
-                let (w, b) = self.bit(s);
-                self.seen[w] &= !b;
+            // number from the previous wrap cannot masquerade as already-seen. A
+            // jump of a whole window or more uncovers every slot, so clear the
+            // bitset at once instead of looping over an attacker-controlled span
+            // (a wrap can resolve `ext` far above `high`).
+            if ext - high >= WINDOW {
+                self.seen = [0; WORDS];
+            } else {
+                for s in (high + 1)..=ext {
+                    let (w, b) = self.bit(s);
+                    self.seen[w] &= !b;
+                }
             }
             self.high = Some(ext);
         } else if high.saturating_sub(ext) >= WINDOW {
@@ -244,6 +251,19 @@ mod tests {
         assert!(!d.accept(&pkt(100, 1)), "second copy dropped");
         assert!(d.accept(&pkt(101, 2)), "next sequence forwarded");
         assert!(!d.accept(&pkt(101, 2)), "its duplicate dropped");
+    }
+
+    // regression: a sequence number that wraps backward (65535 right after 0)
+    // extends to a value far above `high`; the window-advance loop must not
+    // iterate that whole span (~2^64). Completing at all is the assertion, before
+    // the fix this hung. Found by fuzzing.
+    #[test]
+    fn backward_wrapping_sequence_does_not_hang() {
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(0, 1)));
+        d.accept(&pkt(65535, 2)); // must return, not loop ~2^64 times
+        // dedup state stays usable: an exact duplicate is still dropped
+        assert!(!d.accept(&pkt(65535, 2)), "duplicate after wrap is dropped");
     }
 
     #[test]
