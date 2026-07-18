@@ -16,8 +16,9 @@ libfuzzer-sys = "0.4"
 [dependencies.g2g-plugins]
 path = ".."
 default-features = false
-# std pulls in the mp4demuxn box parser; the other targets are no_std modules
-features = ["std"]
+# std pulls in the mp4demuxn box parser; rtmp pulls the handshake module; the
+# other targets are no_std modules
+features = ["std", "rtmp"]
 
 [profile.release]
 debug = 1
@@ -53,6 +54,34 @@ bench = false
 [[bin]]
 name = "cea_cdp"
 path = "fuzz_targets/cea_cdp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_depay"
+path = "fuzz_targets/rtp_depay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flexfec"
+path = "fuzz_targets/flexfec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtmp_handshake"
+path = "fuzz_targets/rtmp_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "st2110_dedup"
+path = "fuzz_targets/st2110_dedup.rs"
 test = false
 doc = false
 bench = false
