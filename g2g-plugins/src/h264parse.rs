@@ -328,12 +328,10 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     }
     let profile_idc = rbsp[0];
     let level_idc = rbsp[2];
-    // The Baseline profile has no B-frames and no picture reordering, so it never
-    // needs output buffering. (constraint_set1 means "also Main-conformant", not
-    // "baseline", so it is not a no-reorder signal.)
-    if profile_idc == 66 {
-        return Some(0);
-    }
+    // Baseline (profile 66) is not special-cased to zero: some JVT conformance
+    // vectors declare Baseline yet still carry pictures libavcodec reorders (it
+    // grows its reorder buffer at runtime and drops the GOP's leading pictures if
+    // we seed too low). Baseline takes the same level-derived DPB bound below.
     let mut br = BitReader::new(&rbsp[3..]);
 
     let _sps_id = br.read_ue()?;
@@ -501,10 +499,12 @@ mod tests {
 
     #[cfg(feature = "ffmpeg")]
     #[test]
-    fn sps_reorder_frames_zero_for_baseline() {
-        // Baseline (66) has no B-frames / reordering regardless of level or size.
+    fn sps_reorder_frames_uses_level_dpb_for_baseline_too() {
+        // Baseline (66) is not special-cased to zero: some JVT conformance vectors
+        // declare Baseline yet still reorder, so it takes the same level-derived
+        // DPB bound as a reordering profile (32768 / 8160 = 4 here).
         let au = annexb_sps(66, 40, &sps_body(1920, 1088));
-        assert_eq!(sps_reorder_frames(&au), Some(0));
+        assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
     #[cfg(feature = "ffmpeg")]
