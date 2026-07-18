@@ -1,0 +1,58 @@
+[package]
+name = "g2g-plugins-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# standalone: detach from the parent glass2glass workspace
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.g2g-plugins]
+path = ".."
+default-features = false
+# std pulls in the mp4demuxn box parser; the other targets are no_std modules
+features = ["std"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "mp4_streams"
+path = "fuzz_targets/mp4_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "matroska"
+path = "fuzz_targets/matroska.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flv"
+path = "fuzz_targets/flv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ogg"
+path = "fuzz_targets/ogg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cea_cdp"
+path = "fuzz_targets/cea_cdp.rs"
+test = false
+doc = false
+bench = false
