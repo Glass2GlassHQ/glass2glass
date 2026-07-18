@@ -261,7 +261,10 @@ mod tests {
         assert!(d.accept(&pkt(0, 1)));
         // seq 65535 arriving after the anchor 0 is one step *before* it, an old
         // packet: dropped, not forwarded, and (before the fix) must not loop.
-        assert!(!d.accept(&pkt(65535, 2)), "pre-anchor packet is old, dropped");
+        assert!(
+            !d.accept(&pkt(65535, 2)),
+            "pre-anchor packet is old, dropped"
+        );
     }
 
     #[test]
