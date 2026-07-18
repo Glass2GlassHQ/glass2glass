@@ -502,6 +502,14 @@ pub(crate) fn parse_h265_short_term_rps(
     Some(rps)
 }
 
+/// Fuzzing entry: walk an H.265 access unit for the SPS and parse its geometry
+/// (NAL scan, emulation-prevention strip, Exp-Golomb bit reader). Exposed only
+/// under `--cfg fuzzing` (cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = extract_sps_info(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

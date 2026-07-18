@@ -280,6 +280,15 @@ fn decode_config(config: u8) -> (OpusMode, OpusBandwidth, u32) {
     }
 }
 
+/// Fuzzing entry: parse both the Opus identification header (`OpusHead`) and a
+/// packet's TOC byte / frame-count structure. Exposed only under `--cfg fuzzing`
+/// (cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = parse_opus_head(data);
+    let _ = parse_toc(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

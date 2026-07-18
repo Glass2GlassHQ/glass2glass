@@ -298,6 +298,14 @@ fn read_uvlc(br: &mut BitReader) -> Option<u32> {
     Some(value + (1u32 << leading_zeros) - 1)
 }
 
+/// Fuzzing entry: walk an AV1 temporal unit's OBUs and parse the sequence
+/// header (the hand-written LEB128 / bit-reader path). Exposed only under
+/// `--cfg fuzzing` (set by cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = extract_seq_header(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -398,6 +398,14 @@ fn max_dpb_mbs(level_idc: u8) -> u32 {
     }
 }
 
+/// Fuzzing entry: walk an H.264 access unit for the SPS and parse its geometry
+/// (NAL scan, emulation-prevention strip, Exp-Golomb bit reader). Exposed only
+/// under `--cfg fuzzing` (cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = extract_sps_info(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

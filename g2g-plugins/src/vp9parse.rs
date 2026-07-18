@@ -218,6 +218,14 @@ fn parse_keyframe(packet: &[u8]) -> Option<Vp9KeyFrame> {
     })
 }
 
+/// Fuzzing entry: parse a VP9 keyframe's uncompressed header (frame-marker /
+/// profile / sync-code / hand-written dimension bit reads). Exposed only under
+/// `--cfg fuzzing` (cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = parse_keyframe(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

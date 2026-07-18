@@ -369,6 +369,14 @@ fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
     })
 }
 
+/// Fuzzing entry: parse an AAC access unit (ADTS / LOAS-LATM dispatch, then the
+/// AudioSpecificConfig bit reader). Exposed only under `--cfg fuzzing`
+/// (cargo-fuzz) so the normal public API is unchanged.
+#[cfg(fuzzing)]
+pub fn fuzz_parse(data: &[u8]) {
+    let _ = parse_aac(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -105,6 +105,9 @@ warnings = { level = "deny", priority = -1 }
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "deny"
 unreachable_pub = "deny"
+# `fuzzing` is set by cargo-fuzz; declare it so the parser fuzz shims gated on
+# it are not flagged as an unexpected cfg (still denied for any other unknown cfg).
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

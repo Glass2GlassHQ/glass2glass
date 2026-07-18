@@ -106,3 +106,52 @@ path = "fuzz_targets/sdp.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "av1parse"
+path = "fuzz_targets/av1parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h264parse"
+path = "fuzz_targets/h264parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h265parse"
+path = "fuzz_targets/h265parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp9parse"
+path = "fuzz_targets/vp9parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp8parse"
+path = "fuzz_targets/vp8parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "aacparse"
+path = "fuzz_targets/aacparse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opusparse"
+path = "fuzz_targets/opusparse.rs"
+test = false
+doc = false
+bench = false
