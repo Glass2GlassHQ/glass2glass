@@ -1167,13 +1167,25 @@ impl AsyncElement for FfmpegH264Dec {
                     // stale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input, self.output_format);
-                        debug_assert!(
-                            !expected
-                                .intersect(&CapsSet::one(new_caps.clone()))
-                                .is_empty(),
-                            "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                        // Skip on a mid-stream geometry change: a resolution change
+                        // decodes a picture that legitimately differs from the
+                        // recorded input caps (emitted afresh as new caps above).
+                        // This guard validates the output-*format* closure, so run
+                        // it only while the decoded geometry still matches.
+                        let geometry_matches = matches!(
+                            input,
+                            Caps::CompressedVideo { width, height, .. }
+                                if *width == Dim::Fixed(d.width) && *height == Dim::Fixed(d.height)
                         );
+                        if geometry_matches {
+                            let expected = derive_output_caps(input, self.output_format);
+                            debug_assert!(
+                                !expected
+                                    .intersect(&CapsSet::one(new_caps.clone()))
+                                    .is_empty(),
+                                "ffmpegdec decode-time output {new_caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                            );
+                        }
                     }
                     out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                         .await?;
