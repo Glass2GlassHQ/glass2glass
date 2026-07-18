@@ -61,16 +61,14 @@ impl SeamlessDedup {
         match self.high {
             None => u64::from(seq),
             Some(high) => {
-                let base = high & !0xFFFF;
-                let mut ext = base | u64::from(seq);
-                // Pick the candidate (previous / this / next 16-bit epoch) closest to
-                // `high`, so a wrap resolves to the intended absolute sequence.
-                let candidates = [ext.wrapping_sub(0x1_0000), ext, ext.wrapping_add(0x1_0000)];
-                ext = *candidates
-                    .iter()
-                    .min_by_key(|&&c| (c as i64).wrapping_sub(high as i64).unsigned_abs())
-                    .unwrap();
-                ext
+                // The signed 16-bit delta from the low bits of `high` is the
+                // nearest offset in either direction. Applying it keeps a
+                // backward step just below `high` instead of wrapping up to a
+                // huge absolute number (which the unsigned `ext > high` in
+                // `accept` would misread as a giant forward jump). Clamp at 0:
+                // a packet older than the anchor cannot have a negative sequence.
+                let delta = seq.wrapping_sub(high as u16) as i16 as i64;
+                (high as i64 + delta).max(0) as u64
             }
         }
     }
@@ -261,9 +259,23 @@ mod tests {
     fn backward_wrapping_sequence_does_not_hang() {
         let mut d = SeamlessDedup::new();
         assert!(d.accept(&pkt(0, 1)));
-        d.accept(&pkt(65535, 2)); // must return, not loop ~2^64 times
-        // dedup state stays usable: an exact duplicate is still dropped
-        assert!(!d.accept(&pkt(65535, 2)), "duplicate after wrap is dropped");
+        // seq 65535 arriving after the anchor 0 is one step *before* it, an old
+        // packet: dropped, not forwarded, and (before the fix) must not loop.
+        assert!(!d.accept(&pkt(65535, 2)), "pre-anchor packet is old, dropped");
+    }
+
+    #[test]
+    fn resolves_backward_and_forward_wrap_relative_to_high() {
+        // Within-window backward step is novel and forwarded.
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(100, 1)));
+        assert!(d.accept(&pkt(50, 2)), "50 is within the window below 100");
+        assert!(!d.accept(&pkt(50, 2)), "its duplicate dropped");
+        // Forward across the 16-bit wrap advances the window (65530 -> 5).
+        let mut d = SeamlessDedup::new();
+        assert!(d.accept(&pkt(65530, 1)));
+        assert!(d.accept(&pkt(5, 2)), "5 wraps forward past 65535");
+        assert!(!d.accept(&pkt(65530, 3)), "65530 already seen, dropped");
     }
 
     #[test]
